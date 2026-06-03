@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ops Platform v2</title>
+    <script>
+      // API base URL can be configured at deploy time:
+      // Option 1: Set window.__API_BASE_URL__ before this script runs
+      // Option 2: Add ?api_base=http://host:port/api/v2 to the URL
+      // Option 3: Set VITE_API_BASE_URL env var at build time
+      // Default: /api/v2 (same-origin, requires reverse proxy)
+      (function() {
+        if (window.__API_BASE_URL__) return;
+        var params = new URLSearchParams(window.location.search);
+        var apiBase = params.get('api_base');
+        if (apiBase) {
+          window.__API_BASE_URL__ = apiBase;
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

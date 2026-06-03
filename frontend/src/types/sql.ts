@@ -1,0 +1,4 @@
+export interface SqlConnectionItem { id: string; name: string; environment?: string; host?: string; port?: number; db_type?: string; database_name?: string; use_ssh_tunnel?: boolean }
+export interface SqlPreviewResult { query_type?: string; readonly?: boolean; limit?: number; timeout_seconds?: number; blockers?: string[]; warnings?: string[]; suggestions?: string[]; protections?: string[]; executable_sql?: string; risk?: { warnings?: string[]; suggestions?: string[] } }
+export interface SqlQueryResult extends SqlPreviewResult { columns?: string[]; rows?: Record<string, unknown>[]; row_count?: number; duration_ms?: number }
+export interface SqlHistoryItem { id: string; connection_name?: string; database_name?: string; sql_text?: string; status?: string; row_count?: number; duration_ms?: number }

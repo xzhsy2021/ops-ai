@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/ftrpiy/D:/code/ops-ai -type f -name \"*.py\" -o -name \"*.ts\" -o -name \"*.tsx\" | head -50)",
+      "Read(//Users/ftrpiy/D:/code/**)",
+      "Bash(xargs wc -l)",
+      "Bash(python -c \"import main\")"
+    ]
+  }
+}

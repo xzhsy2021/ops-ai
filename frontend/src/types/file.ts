@@ -1,0 +1,2 @@
+export interface DeployPackageItem { name?: string; package_name?: string; size?: number; size_mb?: number | string; sha256?: string; service_hint?: string; version_hint?: string; used_count?: number; last_used_at?: string; protected?: boolean; retention?: { reasons?: string[] } }
+export interface FileListItem { name: string; path?: string; size?: number; modified_at?: string; is_dir?: boolean; type?: string }

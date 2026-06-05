@@ -737,6 +737,13 @@ MIGRATIONS: List[Dict[str, str]] = [
         "column": "metadata_json",
         "sql": "ALTER TABLE servers ADD COLUMN metadata_json JSON",
     },
+    {
+        "version": "080_002_server_groups_metadata_json",
+        "name": "Add metadata_json column to server_groups for Phase 3b SSOT migration",
+        "table": "server_groups",
+        "column": "metadata_json",
+        "sql": "ALTER TABLE server_groups ADD COLUMN metadata_json JSON",
+    },
 
 ]
 

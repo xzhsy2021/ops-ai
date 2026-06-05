@@ -163,63 +163,187 @@ def get_variable_inheritance(system_name: str, service_name: str = None, environ
     return chain
 
 def get_all_groups(system_name: str, environment: str = None) -> Dict[str, Any]:
-    from app.config.repository import load_config
-    config = load_config()
-    system = config.get("systems", {}).get(system_name)
-    if not system:
-        return {}
+    """Phase 3b SSOT: 从 ServerGroup 表读取所有该 system 的分组。
+
+    命名约定:ServerGroup.name = '{system_name}-{group_code}'
+    返回 dict keyed by group_code,value 为兼容 legacy shape 的 dict
+    (含 display_name / server(single)/servers/ variables 等)。
+    """
     if environment:
-        env_data = system.get("environments", {}).get(environment, {})
-        return env_data.get("groups", {})
-    return system.get("groups") or system.get("regions") or {}
+        logger.debug("get_all_groups(%s) ignores environment=%r (Phase 3b flat model)",
+                     system_name, environment)
+    from app.db.base import SessionLocal
+    from app.db.repository import ServerGroupRepository
+    prefix = f"{system_name}-"
+    db = SessionLocal()
+    try:
+        repo = ServerGroupRepository(db)
+        result: Dict[str, Any] = {}
+        for g in repo.list_all():
+            if not g.name.startswith(prefix):
+                continue
+            code = g.name[len(prefix):]
+            result[code] = _server_group_to_legacy_dict(g)
+        return result
+    finally:
+        db.close()
+
 
 def get_group(system_name: str, group_code: str, environment: str = None) -> Optional[Dict[str, Any]]:
-    groups = get_all_groups(system_name, environment)
-    return groups.get(group_code)
+    """Phase 3b SSOT: 从 ServerGroup 表读取单个分组(按 system_name-group_code 命名)。"""
+    if environment:
+        logger.debug("get_group(%s,%s) ignores environment=%r (Phase 3b flat model)",
+                     system_name, group_code, environment)
+    from app.db.base import SessionLocal
+    from app.db.repository import ServerGroupRepository
+    db = SessionLocal()
+    try:
+        repo = ServerGroupRepository(db)
+        g = repo.get_by_name(f"{system_name}-{group_code}")
+        return _server_group_to_legacy_dict(g) if g else None
+    finally:
+        db.close()
+
 
 def save_group(system_name: str, group_code: str, group_cfg: Dict[str, Any], environment: str = None) -> bool:
-    from app.config.repository import load_config, save_config
-    config = load_config()
-    system = config.get("systems", {}).get(system_name)
-    if not system:
-        logger.error(f"System '{system_name}' not found")
+    """Phase 3b SSOT: 写入 ServerGroup 表(不再写 config_kv)。
+
+    入参 group_cfg 是 legacy dict 形态(display_name / server / servers / variables / ...)。
+    'servers' 列表映射到 ServerGroup.server_names;其他字段写入 metadata_json。
+    """
+    if environment:
+        logger.debug("save_group(%s,%s) ignores environment=%r (Phase 3b flat model)",
+                     system_name, group_code, environment)
+    from app.db.base import SessionLocal
+    from app.db.models import ServerGroup
+    from app.db.repository import ServerGroupRepository
+
+    if not system_name or not group_code:
+        logger.error("save_group: system_name=%r group_code=%r (both required)", system_name, group_code)
         return False
-    if environment and environment in system.get("environments", {}):
-        system["environments"][environment].setdefault("groups", {})[group_code] = group_cfg
-        logger.info(f"Saved group '{group_code}' for system '{system_name}' environment '{environment}'")
-    else:
-        system.setdefault("groups", {})[group_code] = group_cfg
-        logger.info(f"Saved group '{group_code}' for system '{system_name}'")
-    config["systems"][system_name] = system
-    return save_config(config)
+
+    name = f"{system_name}-{group_code}"
+    cfg = group_cfg or {}
+    server_names = list(cfg.get("servers") or [])
+    if cfg.get("server") and cfg.get("server") not in server_names:
+        server_names.append(cfg["server"])
+
+    # 其它字段入 metadata_json(包括 description / variables / tags / 单 server 等)
+    meta: Dict[str, Any] = {}
+    for k, v in cfg.items():
+        if k in ("servers", "display_name"):
+            continue
+        meta[k] = v
+
+    db = SessionLocal()
+    try:
+        repo = ServerGroupRepository(db)
+        existing = repo.get_by_name(name)
+        if existing is None:
+            repo.create(
+                name=name,
+                display_name=cfg.get("display_name") or group_code,
+                description=meta.pop("description", None),
+                server_names=server_names,
+                tags=meta.pop("tags", None) or [],
+            )
+            # `create` doesn't take metadata_json, set it post-hoc.
+            existing = repo.get_by_name(name)
+            existing.metadata_json = meta or None
+            db.commit()
+            db.refresh(existing)
+        else:
+            existing.display_name = cfg.get("display_name") or existing.display_name or group_code
+            existing.server_names = server_names
+            desc = meta.pop("description", None)
+            if desc is not None:
+                existing.description = desc
+            existing.tags = meta.pop("tags", None) or existing.tags or []
+            existing.metadata_json = meta or None
+            repo.update(existing)
+        logger.info("Saved group (DB SSOT): %s", name)
+        try:
+            from app.config.cache import invalidate_config_cache
+            invalidate_config_cache()
+        except Exception:
+            logger.debug("Failed to invalidate config cache after save_group", exc_info=True)
+        return True
+    except Exception:
+        logger.exception("save_group failed for %s", name)
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug("rollback failed in save_group", exc_info=True)
+        return False
+    finally:
+        db.close()
+
 
 def delete_group(system_name: str, group_code: str, environment: str = None) -> bool:
-    from app.config.repository import load_config, save_config
-    config = load_config()
-    system = config.get("systems", {}).get(system_name)
-    if not system:
+    """Phase 3b SSOT: 从 ServerGroup 表删除分组。"""
+    if environment:
+        logger.debug("delete_group(%s,%s) ignores environment=%r (Phase 3b flat model)",
+                     system_name, group_code, environment)
+    from app.db.base import SessionLocal
+    from app.db.repository import ServerGroupRepository
+    name = f"{system_name}-{group_code}"
+    db = SessionLocal()
+    try:
+        repo = ServerGroupRepository(db)
+        existing = repo.get_by_name(name)
+        if existing is None:
+            return False
+        db.delete(existing)
+        db.commit()
+        try:
+            from app.config.cache import invalidate_config_cache
+            invalidate_config_cache()
+        except Exception:
+            logger.debug("Failed to invalidate config cache after delete_group", exc_info=True)
+        logger.info("Deleted group (DB SSOT): %s", name)
+        return True
+    except Exception:
+        logger.exception("delete_group failed for %s", name)
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug("rollback failed in delete_group", exc_info=True)
         return False
-    if environment and environment in system.get("environments", {}):
-        env_groups = system["environments"][environment].get("groups", {})
-        if group_code in env_groups:
-            del env_groups[group_code]
-            logger.info(f"Deleted group '{group_code}' from system '{system_name}' environment '{environment}'")
-            return save_config(config)
-    groups = system.get("groups", {})
-    if group_code in groups:
-        del groups[group_code]
-        logger.info(f"Deleted group '{group_code}' from system '{system_name}'")
-        return save_config(config)
-    return False
+    finally:
+        db.close()
+
+
+def _server_group_to_legacy_dict(g) -> Dict[str, Any]:
+    """ORM ServerGroup row → legacy group cfg dict (兼容 deploy_v2.py 的访问形态)。"""
+    meta = g.metadata_json or {}
+    result: Dict[str, Any] = {
+        "display_name": g.display_name or g.name,
+        "server": meta.get("server", ""),
+        "servers": list(g.server_names or []),
+        "variables": meta.get("variables", {}) or {},
+        "tags": list(g.tags or []) + list(meta.get("tags", []) or []),
+        "description": g.description or meta.get("description", ""),
+    }
+    # 透传 metadata_json 中其它未知字段
+    for k, v in meta.items():
+        if k in result and not result[k]:
+            result[k] = v
+        elif k not in result:
+            result[k] = v
+    return result
+
 
 def get_all_dovo_regions() -> Dict[str, Any]:
     return get_all_groups("dovo")
 
+
 def get_dovo_region(region_code: str) -> Optional[Dict[str, Any]]:
     return get_group("dovo", region_code)
 
+
 def save_dovo_region(region_code: str, region_cfg: Dict[str, Any]) -> bool:
     return save_group("dovo", region_code, region_cfg)
+
 
 def delete_dovo_region(region_code: str) -> bool:
     return delete_group("dovo", region_code)

@@ -152,6 +152,10 @@ class ServerGroup(Base):
     description = Column(Text, nullable=True)
     server_names = Column(JSON, default=list)
     tags = Column(JSON, default=list)
+    # Extra dict (legacy `server` (single fallback), `variables`, etc.).
+    # Phase 3b SSOT migration: legacy save_group writes go through here; v2 API
+    # creates groups with all data in direct columns.
+    metadata_json = Column(JSON, nullable=True, default=dict)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

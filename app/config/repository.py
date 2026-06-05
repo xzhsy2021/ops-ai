@@ -149,6 +149,21 @@ def load_config() -> Dict[str, Any]:
     return result
 
 def save_config(config: Dict[str, Any]) -> bool:
+    # Phase 3d SSOT guard: 'systems' key is read-only legacy data after
+    # Phase 3a/3b/3c. Detect & warn when callers attempt to mutate it.
+    if "systems" in config:
+        try:
+            current_systems = _load_config_unsafe().get("systems", {})
+        except Exception:
+            current_systems = {}
+        if config.get("systems") != current_systems:
+            import traceback
+            logger.warning(
+                "Phase 3d: 'systems' key in config is read-only legacy. "
+                "Diff detected (callers should migrate to DB tables). "
+                "Stack trace:\n%s",
+                "".join(traceback.format_stack(limit=6)),
+            )
     with _save_lock:
         # Re-load latest version and merge to avoid lost-update from concurrent writes
         current = _load_config_unsafe()

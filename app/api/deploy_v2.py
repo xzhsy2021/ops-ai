@@ -633,85 +633,89 @@ async def list_services_v2(system: str = "", environment: str = "", db: Session 
 @resource_v2_router.get("/systems/{system_name}/services")
 async def list_system_services_v2(system_name: str, request: Request, db: Session = Depends(get_db)):
     require_auth(request, db)
-    from config_manager import load_config_cached
+    from app.db import ServiceRepository
 
-    config = load_config_cached()
-    sys_cfg = (config.get("systems", {}) or {}).get(system_name)
-    if not sys_cfg:
-        raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    services = sys_cfg.get("services", []) or []
+    repo = ServiceRepository(db)
+    services = repo.list_by_system(system_name)
     return api_response(data=[
-        _config_service_to_response(system_name, svc, idx)
-        for idx, svc in enumerate(services)
-        if isinstance(svc, dict)
+        _db_service_to_response(s)
+        for s in services
     ])
 
 
 @resource_v2_router.post("/systems/{system_name}/services")
 async def create_system_service_v2(system_name: str, payload: SystemServicePayload, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    from config_manager import load_config, save_config
+    from app.db import ServiceRepository
 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
-    config = load_config()
-    systems = config.setdefault("systems", {})
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
-        raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    services = sys_cfg.setdefault("services", [])
     new_service = _normalize_service_payload(payload)
-    if _find_service_index(services, new_service["name"]) >= 0:
+    repo = ServiceRepository(db)
+    if repo.get_by_name(new_service["name"], system_name):
         raise HTTPException(status_code=409, detail=f"Service already exists: {new_service['name']}")
-    services.append(new_service)
-    if not save_config(config):
-        raise HTTPException(status_code=500, detail="Failed to save service configuration")
-    audit("system.service.create", "service", f"{system_name}/{new_service['name']}", getattr(request.state, "username", ""))
-    return api_response(data=_config_service_to_response(system_name, new_service, len(services) - 1), message="Service created")
+    created = repo.create(
+        name=new_service["name"],
+        system_name=system_name,
+        display_name=new_service.get("display_name") or new_service["name"],
+        repo=new_service.get("repo") or "",
+        template=new_service.get("template") or "generic_backend_direct",
+        pipeline_id=new_service.get("pipeline_id") or "",
+        template_variables=new_service.get("template_variables") or {},
+        servers=new_service.get("servers") or [],
+    )
+    try:
+        from app.config.cache import invalidate_config_cache
+        invalidate_config_cache()
+    except Exception:
+        logger.debug("Failed to invalidate config cache after service create", exc_info=True)
+    audit("system.service.create", "service", f"{system_name}/{created.name}", getattr(request.state, "username", ""))
+    return api_response(data=_db_service_to_response(created), message="Service created")
 
 
 @resource_v2_router.put("/systems/{system_name}/services/{service_name}")
 async def update_system_service_v2(system_name: str, service_name: str, payload: SystemServicePayload, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    from config_manager import load_config, save_config
+    from app.db import ServiceRepository
 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
-    config = load_config()
-    systems = config.setdefault("systems", {})
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
-        raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    services = sys_cfg.setdefault("services", [])
-    idx = _find_service_index(services, service_name)
-    if idx < 0:
+    repo = ServiceRepository(db)
+    existing = repo.get_by_name(service_name, system_name)
+    if not existing:
         raise HTTPException(status_code=404, detail=f"Service not found: {service_name}")
-    updated = _normalize_service_payload(payload)
-    duplicate_idx = _find_service_index(services, updated["name"])
-    if duplicate_idx >= 0 and duplicate_idx != idx:
-        raise HTTPException(status_code=409, detail=f"Service already exists: {updated['name']}")
-    services[idx] = updated
-    if not save_config(config):
-        raise HTTPException(status_code=500, detail="Failed to save service configuration")
+    updated_payload = _normalize_service_payload(payload)
+    new_name = updated_payload["name"]
+    if new_name != service_name:
+        if repo.get_by_name(new_name, system_name):
+            raise HTTPException(status_code=409, detail=f"Service already exists: {new_name}")
+        existing.name = new_name
+    existing.display_name = updated_payload.get("display_name") or new_name
+    existing.template = updated_payload.get("template") or existing.template
+    existing.repo = updated_payload.get("repo") or existing.repo
+    existing.pipeline_id = updated_payload.get("pipeline_id") or existing.pipeline_id
+    existing.servers = updated_payload.get("servers") or existing.servers
+    existing.template_variables = updated_payload.get("template_variables") or existing.template_variables
+    repo.update(existing)
+    try:
+        from app.config.cache import invalidate_config_cache
+        invalidate_config_cache()
+    except Exception:
+        logger.debug("Failed to invalidate config cache after service update", exc_info=True)
     audit("system.service.update", "service", f"{system_name}/{service_name}", getattr(request.state, "username", ""))
-    return api_response(data=_config_service_to_response(system_name, updated, idx), message="Service updated")
+    return api_response(data=_db_service_to_response(existing), message="Service updated")
 
 
 @resource_v2_router.delete("/systems/{system_name}/services/{service_name}")
 async def delete_system_service_v2(system_name: str, service_name: str, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    from config_manager import load_config, save_config
+    from app.db import ServiceRepository
 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
-    config = load_config()
-    systems = config.setdefault("systems", {})
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
-        raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    services = sys_cfg.setdefault("services", [])
-    idx = _find_service_index(services, service_name)
-    if idx < 0:
+    repo = ServiceRepository(db)
+    existing = repo.get_by_name(service_name, system_name)
+    if not existing:
         raise HTTPException(status_code=404, detail=f"Service not found: {service_name}")
     try:
         from app.db.models import Deployment
@@ -729,11 +733,15 @@ async def delete_system_service_v2(system_name: str, service_name: str, request:
         raise
     except Exception as _e:
         logger.warning("Failed to check active deployments for service %s/%s: %s", system_name, service_name, _e)
-    removed = services.pop(idx)
-    if not save_config(config):
-        raise HTTPException(status_code=500, detail="Failed to save service configuration")
+    if not repo.delete(existing.id):
+        raise HTTPException(status_code=500, detail="Failed to delete service")
+    try:
+        from app.config.cache import invalidate_config_cache
+        invalidate_config_cache()
+    except Exception:
+        logger.debug("Failed to invalidate config cache after service delete", exc_info=True)
     audit("system.service.delete", "service", f"{system_name}/{service_name}", getattr(request.state, "username", ""))
-    return api_response(data={"name": removed.get("name")}, message="Service deleted")
+    return api_response(data={"name": existing.name}, message="Service deleted")
 
 
 def _normalize_env_name(name: str) -> str:

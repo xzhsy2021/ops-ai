@@ -30,6 +30,32 @@ class InventoryReadService:
     def get_service(self, system_name: str, service_name: str, environment: str = "") -> Optional[Dict[str, Any]]:
         if not service_name:
             return None
+        # Phase 3c SSOT: 优先查 DB;KV 仅作为过渡期回退(DB 与 KV 字段不同时以 DB 为准)。
+        try:
+            from app.db.base import SessionLocal
+            from app.db import ServiceRepository
+            db = SessionLocal()
+            try:
+                repo = ServiceRepository(db)
+                row = repo.get_by_name(service_name, system_name)
+                if row is not None:
+                    return {
+                        "id": row.id,
+                        "name": row.name,
+                        "display_name": row.display_name or row.name,
+                        "system_name": row.system_name,
+                        "repo": row.repo or "",
+                        "template": row.template or "",
+                        "pipeline_id": row.pipeline_id or "",
+                        "servers": row.servers or [],
+                        "template_variables": row.template_variables or {},
+                        "source": "db",
+                    }
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("DB service lookup failed for %s/%s; falling back to KV",
+                             system_name, service_name)
         try:
             from app.config.systems import resolve_system_config
             sys_cfg = resolve_system_config(system_name, environment=environment)

@@ -58,6 +58,7 @@ __all__ = [
     "_config_service_to_response",
     "_connect_ssh",
     "_db_pipeline_steps",
+    "_db_service_to_response",
     "_default_release_steps",
     "_deploy_confirm_text",
     "_DeployLogBuffer",
@@ -177,6 +178,28 @@ def _config_service_to_response(system_name: str, svc: Dict[str, Any], index: in
         "pm2_name": vars.get("pm2_name") or vars.get("service_name") or "",
         "server_keywords": svc.get("server_keywords", vars.get("server_keywords", [])) or [],
         "servers_by_env": svc.get("servers_by_env", vars.get("servers_by_env", {})) or {},
+    }
+
+
+def _db_service_to_response(svc) -> Dict[str, Any]:
+    """Phase 3c SSOT: 将 ORM Service row 转成与 _config_service_to_response 同形态的 dict。"""
+    vars = svc.template_variables or {}
+    return {
+        "id": svc.id,
+        "source": "db",
+        "name": svc.name,
+        "display_name": svc.display_name or svc.name,
+        "system_name": svc.system_name,
+        "repo": svc.repo or "",
+        "template": svc.template or "",
+        "pipeline_id": svc.pipeline_id or "",
+        "servers": svc.servers or [],
+        "template_variables": vars,
+        "service_dir": vars.get("service_dir") or vars.get("deploy_path") or "",
+        "update_script": vars.get("update_script") or "",
+        "pm2_name": vars.get("pm2_name") or vars.get("service_name") or "",
+        "server_keywords": vars.get("server_keywords", []) or [],
+        "servers_by_env": vars.get("servers_by_env", {}) or {},
     }
 
 

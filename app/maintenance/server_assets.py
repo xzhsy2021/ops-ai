@@ -147,7 +147,13 @@ def list_server_assets(db=None) -> List[Dict[str, Any]]:
             rows = db.query(Server).all()
             db_servers = []
             for row in rows:
-                db_servers.append({
+                # Phase 3a SSOT migration stores extra non-secret fields
+                # (group, description, tags, auth_type, sftp_allowed_roots,
+                # enabled, username) in the JSON `metadata_json` column. They
+                # must be merged into the API response so the UI sidebar /
+                # group dropdown / jump-host column render correctly.
+                meta = getattr(row, "metadata_json", None) or {}
+                item: Dict[str, Any] = {
                     "id": getattr(row, "id", None),
                     "name": getattr(row, "name", None),
                     "host": getattr(row, "host", None),
@@ -161,7 +167,22 @@ def list_server_assets(db=None) -> List[Dict[str, Any]]:
                     "has_password": bool(getattr(row, "password", None)),
                     "has_key_content": bool(getattr(row, "key_content", None)),
                     "source": "database",
-                })
+                }
+                # Overlay metadata_json fields. Only set when present to avoid
+                # clobbering column-derived defaults (e.g. status='online').
+                for meta_key in (
+                    "group",
+                    "description",
+                    "tags",
+                    "auth_type",
+                    "sftp_allowed_roots",
+                    "allowed_roots",
+                    "file_roots",
+                    "enabled",
+                ):
+                    if meta_key in meta and meta[meta_key] is not None:
+                        item[meta_key] = meta[meta_key]
+                db_servers.append(item)
             db_servers = [_normalize_server(s, "database") for s in db_servers]
             db_servers = [s for s in db_servers if s]
         except Exception:

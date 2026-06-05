@@ -730,6 +730,13 @@ MIGRATIONS: List[Dict[str, str]] = [
         "column": "parsed_facts",
         "sql": "ALTER TABLE inspection_item_results ADD COLUMN parsed_facts JSON",
     },
+    {
+        "version": "080_001_servers_metadata_json",
+        "name": "Add metadata_json column to servers for Phase 3a SSOT migration",
+        "table": "servers",
+        "column": "metadata_json",
+        "sql": "ALTER TABLE servers ADD COLUMN metadata_json JSON",
+    },
 
 ]
 

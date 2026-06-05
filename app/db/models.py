@@ -40,6 +40,10 @@ class Server(Base):
     password = Column(Text, nullable=True)
     jump_host = Column(String(64), nullable=True)
     status = Column(String(24), default="online", index=True)
+    # Extra dict (description, tags, group, sftp_allowed_roots, auth_type, enabled,
+    # inline_jump_host, etc.). Phase 3a SSOT migration: writers populate this column
+    # instead of config_kv["servers"]; readers should fall back to {} if NULL.
+    metadata_json = Column(JSON, nullable=True, default=dict)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

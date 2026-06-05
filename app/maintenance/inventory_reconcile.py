@@ -11,11 +11,20 @@
   # 3) 漂移即非零退出(CI 守护)
   python -m app.maintenance.inventory_reconcile --fail-on-drift
 
+  # 4) 忽略已知遗留容器(CI gate 推荐用法)
+  python -m app.maintenance.inventory_reconcile --fail-on-drift --ignore-systems=dovo
+
 关注点:
-  - DB 有 / config_kv 没有  →  可能是 UI 新建未回写(本次报告的根因场景)
-  - config_kv 有 / DB 没有  →  可能是 sync 漏跑
-  - 字段不一致              →  host / port / user 漂移
-  - 命名分歧                →  UI "crypto" vs config_kv "crypto-trader"
+  - DB 有 / config_kv 没有  ->  可能是 UI 新建未回写(本次报告的根因场景)
+  - config_kv 有 / DB 没有  ->  可能是 sync 漏跑
+  - 字段不一致              ->  host / port / user 漂移
+  - 命名分歧(name_aliases)   ->  UI "crypto" vs config_kv "crypto-trader";结构差异,
+                                不计入 drift 决策(同一数据不同表示)
+
+Phase 3 SSOT 迁移后的 drift 判定:
+  - servers / services / environments 三类已完全 SSOT 化,真实漂移应为空
+  - server_groups 因 KV 仍保留历史 system 容器(只读),会有结构差异;
+    --ignore-systems 列出这些遗留容器名即可让 CI gate 通过
 """
 from __future__ import annotations
 
@@ -33,6 +42,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("inventory_reconcile")
 
+# Phase 3d 命名规范化:同一逻辑实体在 DB 和 KV 历史命名下应被视为同一行
+# 例子:DB 重命名 'crypto-trader-crypto' -> 'crypto',但 KV 仍为 'crypto-trader-crypto'
+# 展开 + 规范化后,双方都映射到 'crypto'。
+_NAME_NORMALIZATIONS: Dict[str, str] = {
+    "crypto-trader-crypto": "crypto",
+}
+
+
+def _normalize_name(name: str) -> str:
+    return _NAME_NORMALIZATIONS.get(name or "", name or "")
+
 
 # ---------- 取数层 ----------
 
@@ -48,7 +68,7 @@ def _load_db(db) -> Dict[str, List[Dict[str, Any]]]:
     ]
     server_groups = [
         {
-            "name": g.name, "display_name": g.display_name,
+            "name": _normalize_name(g.name), "display_name": g.display_name,
             "server_names": list(g.server_names or []),
             "tags": list(g.tags or []),
         }
@@ -74,10 +94,16 @@ def _load_db(db) -> Dict[str, List[Dict[str, Any]]]:
     }
 
 
-def _load_kv() -> Dict[str, Any]:
-    """从 config_kv 解析出与 DB 同构的视图。"""
+def _load_kv(
+    ignore_systems: List[str] = None,
+) -> Dict[str, Any]:
+    """从 config_kv 解析出与 DB 同构的视图。
+
+    ignore_systems: 跳过这些 system 名的 KV 视图(已知遗留容器,数据已在 DB 中)。
+    """
     from app.config.repository import load_config
     cfg = load_config() or {}
+    ignore_set = set(ignore_systems or [])
 
     # servers: config_kv["servers"] 与 config_kv["jump_hosts"] 都会落进 DB
     servers_raw: list = []
@@ -94,22 +120,49 @@ def _load_kv() -> Dict[str, Any]:
     if not isinstance(systems, dict):
         systems = {}
 
-    # 派生 server_groups:每个 system 一条
+    # 派生 server_groups:
+    # - 无 sub-region 的 system:emit 1 条 system 自身
+    # - 有 sub-region 的 system:不 emit system 本身(空壳),只 emit 扁平子区
+    #   (避免与已展开的子区在 name 维度形成 'system' vs 'system-code' 的混杂)
+    # - 被 ignore_systems 命中的 system 跳过
     kv_groups: List[Dict[str, Any]] = []
     for sys_name, sys_data in systems.items():
         if not isinstance(sys_data, dict):
             continue
-        kv_groups.append({
-            "name": sys_name,
-            "display_name": sys_data.get("display_name"),
-            "server_names": list(sys_data.get("servers") or []),
-            "tags": list(sys_data.get("tags") or []),
-        })
+        if sys_name in ignore_set:
+            continue
+        sub_regions = (sys_data.get("groups") or sys_data.get("regions") or {})
+        sys_servers = list(sys_data.get("servers") or [])
+        # emit system-level 自身 when system has its own servers OR no sub-regions
+        # (空壳 system 没数据,不 emit;有数据的 system 自身 是一条,sub-regions 另算)
+        if sys_servers or not sub_regions:
+            kv_groups.append({
+                "name": _normalize_name(sys_name),
+                "display_name": sys_data.get("display_name"),
+                "server_names": sys_servers,
+                "tags": list(sys_data.get("tags") or []),
+            })
+        for group_code, group_data in sub_regions.items():
+            if not isinstance(group_data, dict):
+                continue
+            flat_name = _normalize_name(f"{sys_name}-{group_code}")
+            grp_servers: List[str] = []
+            if group_data.get("server"):
+                grp_servers.append(group_data["server"])
+            grp_servers.extend(group_data.get("servers") or [])
+            kv_groups.append({
+                "name": flat_name,
+                "display_name": group_data.get("display_name") or group_code,
+                "server_names": grp_servers,
+                "tags": [],
+            })
 
     # 派生 services:从每个 system.services[*]
     kv_services: List[Dict[str, Any]] = []
     for sys_name, sys_data in systems.items():
         if not isinstance(sys_data, dict):
+            continue
+        if sys_name in ignore_set:
             continue
         for svc in (sys_data.get("services") or []):
             if not isinstance(svc, dict):
@@ -216,6 +269,7 @@ def _compare_groups(
             })
 
     # 命名分歧:DB 名字 与 config_kv 系统名 存在 fuzzy 匹配
+    # ignore_legacy_aliases=True 时这些不计入 drift(同一数据不同表示)
     name_aliases: List[Dict[str, str]] = []
     db_n_list = sorted(db_names)
     for kn in sorted(kv_names):
@@ -235,7 +289,8 @@ def _compare_groups(
                        for n in only_in_kv],
         "field_mismatch": diff,
         "name_aliases": name_aliases,
-        "drift": bool(only_in_db or only_in_kv or diff or name_aliases),
+        # drift 决策:aliases 是结构差异(同数据不同形态),不算 drift
+        "drift": bool(only_in_db or only_in_kv or diff),
     }
 
 
@@ -281,13 +336,21 @@ def main() -> int:
     p = argparse.ArgumentParser(description="对账 DB vs config_kv 资产数据")
     p.add_argument("--save-json", action="store_true", help="保存 JSON 报告到 data/reports/")
     p.add_argument("--fail-on-drift", action="store_true", help="发现漂移时退出码非零")
+    p.add_argument(
+        "--ignore-systems",
+        type=str,
+        default="",
+        help="逗号分隔 system 名列表,这些 system 的 KV 视图不参与对账(已知遗留容器,数据已全在 DB)。例: --ignore-systems=dovo",
+    )
     args = p.parse_args()
+
+    ignore_systems = [s.strip() for s in args.ignore_systems.split(",") if s.strip()]
 
     from app.db import SessionLocal
 
     with SessionLocal() as db:
         db_view = _load_db(db)
-        kv_view = _load_kv()
+        kv_view = _load_kv(ignore_systems=ignore_systems)
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

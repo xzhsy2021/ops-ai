@@ -118,7 +118,9 @@ def get_package_checksum(args, ctx, db):
     risk="high",
     category="package_write",
     write=True,
-    requires_confirmation=False,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {
@@ -212,6 +214,8 @@ def get_package_retention_preview(args, ctx, db):
     category="package_cleanup",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {

@@ -57,6 +57,21 @@ class InventoryReadService:
         from app.config.systems import get_servers_for_system
         return get_servers_for_system(system_name, environment)
 
+    def list_pipelines(self, db, keyword: str = "", limit: int = 100):
+        from config_manager import load_config
+        config = load_config()
+        pipelines = config.get("pipelines", {})
+        items = list(pipelines.values())
+        if keyword:
+            kw = keyword.lower()
+            items = [x for x in items if kw in str(x.get("name", "")).lower() or kw in str(x.get("system", "")).lower()]
+        return items[:limit]
+
+    def get_pipeline(self, db, pipeline_id: str):
+        from config_manager import load_config
+        config = load_config()
+        return config.get("pipelines", {}).get(pipeline_id)
+
     def _load_system_raw(self, system_name: str) -> Dict[str, Any]:
         try:
             from app.config.cache import load_config_cached

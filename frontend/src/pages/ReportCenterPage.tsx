@@ -23,6 +23,7 @@ const TYPE_LABELS: Record<string, string> = {
   operation_chain: '操作链路',
   operation_chains_index: '链路索引',
   deployment: '发布报告',
+  inspection: '巡检报告',
 }
 
 export default function ReportCenterPage() {
@@ -225,7 +226,8 @@ export default function ReportCenterPage() {
                   <td><code style={{ fontSize: 11 }}>{String(item.sha256 || '').slice(0, 16)}...</code></td>
                   <td>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                      <a className="btn small" href={reports.downloadUrl(item.id)} target="_blank" rel="noreferrer">下载</a>
+                      {item.format === 'html' && <a className="btn small" href={reports.downloadUrl(item.id)} target="_blank" rel="noreferrer">在线查看</a>}
+                      <a className="btn small" href={reports.downloadUrl(item.id)} target="_blank" rel="noreferrer" download>{item.format === 'html' ? '下载' : '下载'}</a>
                       <button className="btn small" onClick={() => openEdit(item)}>编辑</button>
                       <button className="btn small btn-danger" onClick={() => setDeleteTarget(item)}>删除</button>
                     </div>

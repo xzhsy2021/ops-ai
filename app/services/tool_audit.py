@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -8,10 +9,28 @@ from typing import Any, Dict
 from app.db.models import ToolCallLog, ToolPlanEvent
 from app.api.helpers import audit
 
+# 敏感字段名模式，审计日志中自动脱敏
+_SENSITIVE_KEY_PATTERNS = re.compile(
+    r"\b(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|"
+    r"access[_-]?key|secret[_-]?key|ssh_key|credential|auth_header|cookie|session)\b",
+    re.IGNORECASE,
+)
+_MASK = "***MASKED***"
+
+
+def _mask_sensitive(value: Any) -> Any:
+    """递归脱敏字典中的敏感字段值"""
+    if isinstance(value, dict):
+        return {k: (_MASK if _SENSITIVE_KEY_PATTERNS.search(k) else _mask_sensitive(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_sensitive(item) for item in value]
+    return value
+
 
 def _preview(value: Any, limit: int = 4000) -> str:
     try:
-        text = json.dumps(value, ensure_ascii=False, default=str)
+        masked = _mask_sensitive(value)
+        text = json.dumps(masked, ensure_ascii=False, default=str)
     except Exception:
         text = str(value)
     if len(text) > limit:

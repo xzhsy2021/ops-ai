@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -51,10 +51,11 @@ def reports_summary(request: Request, db: Session = Depends(get_db)):
     return api_response(data=report_summary(db))
 
 
+@router.get("/")
 @router.get("")
-def reports_list(request: Request, response: Response, report_type: str = "", limit: int = 100, since_id: str = "", db: Session = Depends(get_db)):
+def reports_list(request: Request, response: Response, report_type: str = "", limit: int = 100, since_id: str = "", offset: int = 0, db: Session = Depends(get_db)):
     require_auth(request, db)
-    items = list_reports(db, report_type=report_type, limit=limit, since_id=since_id)
+    items = list_reports(db, report_type=report_type, limit=limit, since_id=since_id, offset=offset)
     from app.api.helpers import compute_list_etag, check_etag_not_modified
     etag = compute_list_etag(items if isinstance(items, list) else items.get("items", []) if isinstance(items, dict) else [], "reports")
     not_modified = check_etag_not_modified(request, etag)
@@ -141,6 +142,9 @@ def reports_download(report_id: str, request: Request, db: Session = Depends(get
     row = get_report(db, report_id)
     path = report_download_path(row)
     media_type = export_media_type(row.format)
+    # HTML files should be displayed inline in the browser, not downloaded
+    if row.format == "html":
+        return FileResponse(str(path), media_type=media_type)
     return FileResponse(str(path), media_type=media_type, filename=path.name)
 
 

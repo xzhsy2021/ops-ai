@@ -9,6 +9,311 @@ logger = logging.getLogger(__name__)
 
 MIGRATIONS: List[Dict[str, str]] = [
     {
+        "version": "071_001_ssh_keys",
+        "name": "Create SSH keys table",
+        "table": "ssh_keys",
+        "sql": """CREATE TABLE IF NOT EXISTS ssh_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name VARCHAR(255) UNIQUE NOT NULL,
+            private_key_encrypted TEXT NOT NULL,
+            passphrase_encrypted TEXT,
+            description TEXT,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "071_002_read_only_default",
+        "name": "Ensure read_only default is explicitly set for existing deployments",
+        "sql": "SELECT 1",
+        "note": "Migration applied via Python hook in migrate_read_only_default()",
+    },
+
+
+    {
+        "version": "060_001_project_server_relations",
+        "name": "Create project server relation table",
+        "table": "project_server_relations",
+        "sql": """CREATE TABLE IF NOT EXISTS project_server_relations (
+            id VARCHAR(32) PRIMARY KEY,
+            project_id VARCHAR(255) NOT NULL,
+            server_id VARCHAR(255) NOT NULL,
+            deploy_role VARCHAR(64),
+            deploy_path VARCHAR(1024),
+            config_path VARCHAR(1024),
+            log_path VARCHAR(1024),
+            backup_path VARCHAR(1024),
+            runtime_user VARCHAR(128),
+            main_port VARCHAR(32),
+            active BOOLEAN DEFAULT 1,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_002_inspection_tasks",
+        "name": "Create inspection task table",
+        "table": "inspection_tasks",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_tasks (
+            id VARCHAR(32) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            scope_type VARCHAR(24) NOT NULL,
+            server_id VARCHAR(255),
+            project_id VARCHAR(255),
+            frequency VARCHAR(24) DEFAULT 'MANUAL',
+            cron_expression VARCHAR(128),
+            rule_group_id VARCHAR(64),
+            enabled BOOLEAN DEFAULT 1,
+            created_by VARCHAR(128),
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_003_inspection_runs",
+        "name": "Create inspection run table",
+        "table": "inspection_runs",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_runs (
+            id VARCHAR(32) PRIMARY KEY,
+            task_id VARCHAR(32),
+            scope_kind VARCHAR(24) NOT NULL DEFAULT 'SERVER',
+            scope_type VARCHAR(24) NOT NULL,
+            server_id VARCHAR(255),
+            project_id VARCHAR(255),
+            agent_id VARCHAR(64),
+            trigger_type VARCHAR(24) DEFAULT 'MANUAL',
+            status VARCHAR(24) DEFAULT 'PENDING',
+            score INTEGER DEFAULT 100,
+            high_count INTEGER DEFAULT 0,
+            medium_count INTEGER DEFAULT 0,
+            low_count INTEGER DEFAULT 0,
+            normal_count INTEGER DEFAULT 0,
+            summary TEXT,
+            categories JSON,
+            metadata_json JSON,
+            report_id VARCHAR(32),
+            created_by VARCHAR(128),
+            started_at DATETIME,
+            finished_at DATETIME,
+            duration_ms INTEGER DEFAULT 0,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_004_inspection_evidence",
+        "name": "Create inspection evidence table",
+        "table": "inspection_evidence",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_evidence (
+            id VARCHAR(32) PRIMARY KEY,
+            run_id VARCHAR(32) NOT NULL,
+            source_type VARCHAR(32) DEFAULT 'COMMAND',
+            source_path VARCHAR(1024),
+            command TEXT,
+            content_snapshot TEXT,
+            content_hash VARCHAR(128),
+            masked BOOLEAN DEFAULT 1,
+            created_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_005_inspection_item_results",
+        "name": "Create inspection item result table",
+        "table": "inspection_item_results",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_item_results (
+            id VARCHAR(32) PRIMARY KEY,
+            run_id VARCHAR(32) NOT NULL,
+            scope_type VARCHAR(24) NOT NULL,
+            server_id VARCHAR(255),
+            project_id VARCHAR(255),
+            category VARCHAR(64) NOT NULL,
+            item_code VARCHAR(128) NOT NULL,
+            item_name VARCHAR(255) NOT NULL,
+            status VARCHAR(24) DEFAULT 'PASS',
+            risk_level VARCHAR(24) DEFAULT 'NONE',
+            message TEXT,
+            suggestion TEXT,
+            evidence_id VARCHAR(32),
+            raw_output TEXT,
+            started_at DATETIME,
+            finished_at DATETIME,
+            created_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_006_inspection_issues",
+        "name": "Create inspection issue table",
+        "table": "inspection_issues",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_issues (
+            id VARCHAR(32) PRIMARY KEY,
+            run_id VARCHAR(32) NOT NULL,
+            item_result_id VARCHAR(32),
+            scope_type VARCHAR(24) NOT NULL,
+            server_id VARCHAR(255),
+            project_id VARCHAR(255),
+            title VARCHAR(255) NOT NULL,
+            description TEXT,
+            risk_level VARCHAR(24) DEFAULT 'LOW',
+            status VARCHAR(24) DEFAULT 'OPEN',
+            owner_id VARCHAR(128),
+            deadline_at DATETIME,
+            fixed_at DATETIME,
+            verified_at DATETIME,
+            suggestion TEXT,
+            evidence_id VARCHAR(32),
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_007_inspection_rules",
+        "name": "Create inspection rule table",
+        "table": "inspection_rules",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_rules (
+            id VARCHAR(32) PRIMARY KEY,
+            rule_code VARCHAR(128) NOT NULL UNIQUE,
+            rule_name VARCHAR(255) NOT NULL,
+            category VARCHAR(64) NOT NULL,
+            scope_type VARCHAR(24) NOT NULL,
+            risk_level VARCHAR(24) DEFAULT 'LOW',
+            enabled BOOLEAN DEFAULT 1,
+            deleted BOOLEAN DEFAULT 0,
+            config_json JSON,
+            rule_content TEXT,
+            description TEXT,
+            suggestion TEXT,
+            version VARCHAR(64) DEFAULT 'inspection.v1',
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_008_inspection_baselines",
+        "name": "Create inspection baseline table",
+        "table": "inspection_baselines",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_baselines (
+            id VARCHAR(32) PRIMARY KEY,
+            scope_type VARCHAR(24) NOT NULL,
+            server_id VARCHAR(255),
+            project_id VARCHAR(255),
+            baseline_type VARCHAR(64) NOT NULL,
+            version VARCHAR(64) DEFAULT 'v1',
+            content_json JSON,
+            content_hash VARCHAR(128),
+            active BOOLEAN DEFAULT 1,
+            created_by VARCHAR(128),
+            created_at DATETIME
+        )""",
+    },
+    {
+        "version": "060_009_inspection_runs_task_id",
+        "name": "Add task id to inspection runs",
+        "table": "inspection_runs",
+        "column": "task_id",
+        "sql": "ALTER TABLE inspection_runs ADD COLUMN task_id VARCHAR(32)",
+    },
+    {
+        "version": "060_010_inspection_runs_agent_id",
+        "name": "Add agent id to inspection runs",
+        "table": "inspection_runs",
+        "column": "agent_id",
+        "sql": "ALTER TABLE inspection_runs ADD COLUMN agent_id VARCHAR(64)",
+    },
+    {
+        "version": "060_011_inspection_runs_duration_ms",
+        "name": "Add duration ms to inspection runs",
+        "table": "inspection_runs",
+        "column": "duration_ms",
+        "sql": "ALTER TABLE inspection_runs ADD COLUMN duration_ms INTEGER DEFAULT 0",
+    },
+    {
+        "version": "060_012_inspection_runs_scope_kind",
+        "name": "Add legacy-compatible scope kind to inspection runs",
+        "table": "inspection_runs",
+        "column": "scope_kind",
+        "sql": "ALTER TABLE inspection_runs ADD COLUMN scope_kind VARCHAR(24) NOT NULL DEFAULT 'SERVER'",
+    },
+    {
+        "version": "060_013_inspection_runs_scope_kind_backfill",
+        "name": "Backfill inspection run scope kind from scope type",
+        "table": "inspection_runs",
+        "sql": "UPDATE inspection_runs SET scope_kind = COALESCE(scope_type, scope_kind, 'SERVER') WHERE scope_kind IS NULL OR scope_kind = ''",
+    },
+
+    {
+        "version": "060_014_inspection_rules_rule_content",
+        "name": "Add editable rule content to inspection rules",
+        "table": "inspection_rules",
+        "column": "rule_content",
+        "sql": "ALTER TABLE inspection_rules ADD COLUMN rule_content TEXT",
+    },
+    {
+        "version": "060_015_inspection_rules_deleted",
+        "name": "Add soft delete flag to inspection rules",
+        "table": "inspection_rules",
+        "column": "deleted",
+        "sql": "ALTER TABLE inspection_rules ADD COLUMN deleted BOOLEAN DEFAULT 0",
+    },
+
+    {
+        "version": "059_001_ai_analysis_runs",
+        "name": "Create AI analysis run table",
+        "table": "ai_analysis_runs",
+        "sql": """CREATE TABLE IF NOT EXISTS ai_analysis_runs (
+            id VARCHAR(32) PRIMARY KEY,
+            analysis_type VARCHAR(64) NOT NULL,
+            target_type VARCHAR(64),
+            target_id VARCHAR(255),
+            source_type VARCHAR(64),
+            source_id VARCHAR(255),
+            prompt_name VARCHAR(128),
+            input_refs TEXT,
+            output_json JSON,
+            summary TEXT,
+            confidence VARCHAR(32),
+            created_by VARCHAR(128),
+            created_at DATETIME
+        )""",
+    },
+    {
+        "version": "059_002_ai_analysis_findings",
+        "name": "Create AI analysis finding table",
+        "table": "ai_analysis_findings",
+        "sql": """CREATE TABLE IF NOT EXISTS ai_analysis_findings (
+            id VARCHAR(32) PRIMARY KEY,
+            analysis_run_id VARCHAR(32) NOT NULL,
+            title VARCHAR(255),
+            finding_type VARCHAR(64),
+            severity VARCHAR(32),
+            claim TEXT,
+            evidence_json JSON,
+            suggestion TEXT,
+            confidence VARCHAR(32),
+            created_at DATETIME
+        )""",
+    },
+    {
+        "version": "059_003_ai_action_approvals",
+        "name": "Create AI action approval table",
+        "table": "ai_action_approvals",
+        "sql": """CREATE TABLE IF NOT EXISTS ai_action_approvals (
+            id VARCHAR(32) PRIMARY KEY,
+            action_type VARCHAR(64) NOT NULL,
+            tool_name VARCHAR(128) NOT NULL,
+            target_type VARCHAR(64),
+            target_id VARCHAR(255),
+            request_payload JSON,
+            risk_level VARCHAR(32),
+            ai_reason TEXT,
+            status VARCHAR(32) DEFAULT 'PENDING',
+            requested_by VARCHAR(128),
+            approved_by VARCHAR(128),
+            created_at DATETIME,
+            approved_at DATETIME,
+            executed_at DATETIME
+        )""",
+    },
+    {
         "version": "058_001_services_pipeline_id",
         "name": "Add pipeline id to services",
         "table": "services",
@@ -411,6 +716,21 @@ MIGRATIONS: List[Dict[str, str]] = [
         "column": "cancel_requested",
         "sql": "ALTER TABLE deploy_tasks ADD COLUMN cancel_requested BOOLEAN DEFAULT 0",
     },
+    {
+        "version": "070_001_servers_status",
+        "name": "Add status to servers",
+        "table": "servers",
+        "column": "status",
+        "sql": "ALTER TABLE servers ADD COLUMN status VARCHAR(24) DEFAULT 'online'",
+    },
+    {
+        "version": "070_002_inspection_item_results_parsed_facts",
+        "name": "Add parsed_facts JSON column to inspection_item_results",
+        "table": "inspection_item_results",
+        "column": "parsed_facts",
+        "sql": "ALTER TABLE inspection_item_results ADD COLUMN parsed_facts JSON",
+    },
+
 ]
 
 
@@ -478,3 +798,19 @@ def run_schema_migrations(engine) -> List[str]:
                 _mark_applied(conn, mig)
                 applied.append(version)
     return applied
+
+
+def migrate_read_only_default():
+    """确保 read_only 默认值变更后存量部署不受影响"""
+    try:
+        from config_manager import load_config, save_config
+        config = load_config()
+        if "capability_server" not in config:
+            return
+        caps = config["capability_server"]
+        if isinstance(caps, dict) and "read_only" not in caps:
+            caps["read_only"] = False
+            save_config(config)
+            logger.info("Applied read_only default migration: set read_only=False for existing deployment")
+    except Exception:
+        logger.exception("Failed to apply read_only default migration")

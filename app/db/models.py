@@ -39,6 +39,7 @@ class Server(Base):
     key_content = Column(Text, nullable=True)
     password = Column(Text, nullable=True)
     jump_host = Column(String(64), nullable=True)
+    status = Column(String(24), default="online", index=True)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -226,6 +227,7 @@ class DeploymentServerTask(Base):
     message = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, default=0)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -247,6 +249,7 @@ class DeploymentStepTask(Base):
     captured_config = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, default=0)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -437,6 +440,63 @@ class ToolPlanEvent(Base):
 
 
 
+
+
+class AiAnalysisRun(Base):
+    """AI analysis result persisted from MCP/workflow outputs."""
+    __tablename__ = "ai_analysis_runs"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    analysis_type = Column(String(64), nullable=False, index=True)
+    target_type = Column(String(64), nullable=True, index=True)
+    target_id = Column(String(255), nullable=True, index=True)
+    source_type = Column(String(64), nullable=True, index=True)
+    source_id = Column(String(255), nullable=True, index=True)
+    prompt_name = Column(String(128), nullable=True)
+    input_refs = Column(Text, nullable=True)
+    output_json = Column(JSON, default=dict)
+    summary = Column(Text, nullable=True)
+    confidence = Column(String(32), nullable=True)
+    created_by = Column(String(128), nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class AiAnalysisFinding(Base):
+    """Individual AI finding with evidence and recommendation."""
+    __tablename__ = "ai_analysis_findings"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    analysis_run_id = Column(String(32), ForeignKey("ai_analysis_runs.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=True)
+    finding_type = Column(String(64), nullable=True, index=True)
+    severity = Column(String(32), nullable=True, index=True)
+    claim = Column(Text, nullable=True)
+    evidence_json = Column(JSON, default=list)
+    suggestion = Column(Text, nullable=True)
+    confidence = Column(String(32), nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class AiActionApproval(Base):
+    """Human approval request for high-risk AI/MCP suggested actions."""
+    __tablename__ = "ai_action_approvals"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    action_type = Column(String(64), nullable=False, index=True)
+    tool_name = Column(String(128), nullable=False, index=True)
+    target_type = Column(String(64), nullable=True, index=True)
+    target_id = Column(String(255), nullable=True, index=True)
+    request_payload = Column(JSON, default=dict)
+    risk_level = Column(String(32), nullable=True, index=True)
+    ai_reason = Column(Text, nullable=True)
+    status = Column(String(32), default="PENDING", index=True)
+    requested_by = Column(String(128), nullable=True, index=True)
+    approved_by = Column(String(128), nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    approved_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+
+
 class DeployPackage(Base):
     """Local deploy package metadata managed by File Center."""
     __tablename__ = "deploy_packages"
@@ -474,6 +534,18 @@ class DeployPackageRef(Base):
     server_name = Column(String(128), nullable=True, index=True)
     usage_type = Column(String(32), default="deploy", index=True)
     created_at = Column(DateTime, default=_utcnow, index=True)
+
+class SshKey(Base):
+    __tablename__ = "ssh_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)
+    private_key_encrypted = Column(Text, nullable=False)
+    passphrase_encrypted = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
 
 class ConfigKV(Base):
     __tablename__ = "config_kv"
@@ -643,3 +715,209 @@ class SavedSql(Base):
     updated_by = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=_utcnow, index=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+
+
+class ProjectServerRelation(Base):
+    """项目与服务器部署关系，供项目巡检和综合巡检定位执行环境。"""
+    __tablename__ = "project_server_relations"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    project_id = Column(String(255), nullable=False, index=True)
+    server_id = Column(String(255), nullable=False, index=True)
+    deploy_role = Column(String(64), nullable=True, index=True)
+    deploy_path = Column(String(1024), nullable=True)
+    config_path = Column(String(1024), nullable=True)
+    log_path = Column(String(1024), nullable=True)
+    backup_path = Column(String(1024), nullable=True)
+    runtime_user = Column(String(128), nullable=True)
+    main_port = Column(String(32), nullable=True)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionTask(Base):
+    """巡检任务配置，支持手动、每日、每周、每月和后续定时任务。"""
+    __tablename__ = "inspection_tasks"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    name = Column(String(255), nullable=False)
+    scope_type = Column(String(24), nullable=False, index=True)
+    server_id = Column(String(255), nullable=True, index=True)
+    project_id = Column(String(255), nullable=True, index=True)
+    frequency = Column(String(24), default="MANUAL", index=True)
+    cron_expression = Column(String(128), nullable=True)
+    rule_group_id = Column(String(64), nullable=True)
+    enabled = Column(Boolean, default=True, index=True)
+    created_by = Column(String(128), nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionRun(Base):
+    """服务器/项目巡检执行记录。"""
+    __tablename__ = "inspection_runs"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    task_id = Column(String(32), nullable=True, index=True)
+    # scope_kind is a legacy-compatible column used by earlier inspection builds.
+    # Keep it populated together with scope_type so existing SQLite databases with
+    # NOT NULL inspection_runs.scope_kind continue to accept inserts.
+    scope_kind = Column(String(24), nullable=False, default="SERVER", index=True)
+    scope_type = Column(String(24), nullable=False, index=True)  # SERVER / PROJECT / PROJECT_COMBINED
+    server_id = Column(String(255), nullable=True, index=True)
+    project_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(64), nullable=True, index=True)
+    trigger_type = Column(String(24), default="MANUAL", index=True)
+    status = Column(String(24), default="PENDING", index=True)
+    score = Column(Integer, default=100)
+    high_count = Column(Integer, default=0)
+    medium_count = Column(Integer, default=0)
+    low_count = Column(Integer, default=0)
+    normal_count = Column(Integer, default=0)
+    summary = Column(Text, nullable=True)
+    categories = Column(JSON, default=list)
+    metadata_json = Column(JSON, default=dict)
+    item_config_snapshot = Column(JSON, default=dict)  # 巡检项配置快照
+    report_id = Column(String(32), nullable=True, index=True)
+    created_by = Column(String(128), nullable=True, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionEvidence(Base):
+    """巡检证据快照。敏感信息应在入库前完成脱敏。"""
+    __tablename__ = "inspection_evidence"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    run_id = Column(String(32), ForeignKey("inspection_runs.id"), nullable=False, index=True)
+    source_type = Column(String(32), default="COMMAND", index=True)
+    source_path = Column(String(1024), nullable=True)
+    command = Column(Text, nullable=True)
+    content_snapshot = Column(Text, nullable=True)
+    content_hash = Column(String(128), nullable=True)
+    masked = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class InspectionItemResult(Base):
+    """巡检项执行结果。"""
+    __tablename__ = "inspection_item_results"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    run_id = Column(String(32), ForeignKey("inspection_runs.id"), nullable=False, index=True)
+    scope_type = Column(String(24), nullable=False, index=True)
+    server_id = Column(String(255), nullable=True, index=True)
+    project_id = Column(String(255), nullable=True, index=True)
+    category = Column(String(64), nullable=False, index=True)
+    item_code = Column(String(128), nullable=False, index=True)
+    item_name = Column(String(255), nullable=False)
+    status = Column(String(24), default="PASS", index=True)  # PASS / WARNING / RISK / ERROR / SKIPPED
+    risk_level = Column(String(24), default="NONE", index=True)  # HIGH / MEDIUM / LOW / NONE
+    message = Column(Text, nullable=True)
+    suggestion = Column(Text, nullable=True)
+    evidence_id = Column(String(32), nullable=True, index=True)
+    raw_output = Column(Text, nullable=True)
+    parsed_facts = Column(JSON, nullable=True, default=dict)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class InspectionIssue(Base):
+    """巡检风险问题闭环。"""
+    __tablename__ = "inspection_issues"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    run_id = Column(String(32), ForeignKey("inspection_runs.id"), nullable=False, index=True)
+    item_result_id = Column(String(32), ForeignKey("inspection_item_results.id"), nullable=True, index=True)
+    scope_type = Column(String(24), nullable=False, index=True)
+    server_id = Column(String(255), nullable=True, index=True)
+    project_id = Column(String(255), nullable=True, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    risk_level = Column(String(24), default="LOW", index=True)
+    status = Column(String(24), default="OPEN", index=True)  # OPEN / PROCESSING / FIXED / VERIFIED / IGNORED
+    owner_id = Column(String(128), nullable=True, index=True)
+    deadline_at = Column(DateTime, nullable=True)
+    fixed_at = Column(DateTime, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    suggestion = Column(Text, nullable=True)
+    evidence_id = Column(String(32), nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionRule(Base):
+    """巡检规则配置。当前版本以内置规则为主，表结构预留可视化规则管理。"""
+    __tablename__ = "inspection_rules"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    rule_code = Column(String(128), nullable=False, unique=True, index=True)
+    rule_name = Column(String(255), nullable=False)
+    category = Column(String(64), nullable=False, index=True)
+    scope_type = Column(String(24), nullable=False, index=True)
+    risk_level = Column(String(24), default="LOW", index=True)
+    enabled = Column(Boolean, default=True, index=True)
+    deleted = Column(Boolean, default=False, index=True)
+    config_json = Column(JSON, default=dict)
+    rule_content = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)
+    suggestion = Column(Text, nullable=True)
+    version = Column(String(64), default="inspection.v1")
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionItemConfig(Base):
+    """巡检项目配置 - 可选/可编辑/可调整的巡检项。"""
+    __tablename__ = "inspection_item_configs"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    item_code = Column(String(128), nullable=False, unique=True, index=True)
+    item_name = Column(String(255), nullable=False)
+    category = Column(String(64), nullable=False, index=True)
+    scope_type = Column(String(24), nullable=False, index=True)  # SERVER / PROJECT
+    description = Column(Text, nullable=True)
+    enabled = Column(Boolean, default=True, index=True)
+    sort_order = Column(Integer, default=0)
+    config_json = Column(JSON, default=dict)
+    is_builtin = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionItemRule(Base):
+    """巡检项目与规则的多对多关联表。"""
+    __tablename__ = "inspection_item_rules"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    item_config_id = Column(String(32), ForeignKey("inspection_item_configs.id"), nullable=False, index=True)
+    rule_code = Column(String(128), nullable=False, index=True)
+    enabled = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)
+    config_override = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionBaseline(Base):
+    """项目文件/配置/白名单等巡检基线。"""
+    __tablename__ = "inspection_baselines"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    scope_type = Column(String(24), nullable=False, index=True)
+    server_id = Column(String(255), nullable=True, index=True)
+    project_id = Column(String(255), nullable=True, index=True)
+    baseline_type = Column(String(64), nullable=False, index=True)
+    version = Column(String(64), default="v1", index=True)
+    content_json = Column(JSON, default=dict)
+    content_hash = Column(String(128), nullable=True)
+    active = Column(Boolean, default=True, index=True)
+    created_by = Column(String(128), nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)

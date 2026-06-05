@@ -229,7 +229,9 @@ def overview(request: Request, db: Session = Depends(get_db)):
 @router.get("/categories")
 def categories(request: Request, db: Session = Depends(get_db)):
     require_auth(request, db)
-    return api_response(data={"server": svc.SERVER_CATEGORIES, "project": svc.PROJECT_CATEGORIES})
+    server_cats = svc.list_categories(db, scope="server")
+    project_cats = svc.list_categories(db, scope="project")
+    return api_response(data={"server": server_cats, "project": project_cats})
 
 
 @router.get("/servers")
@@ -521,9 +523,9 @@ def evidence_detail(evidence_id: str, request: Request, db: Session = Depends(ge
 
 
 @router.get("/rules")
-def rules(request: Request, scope_type: str = "", category: str = "", enabled: Optional[bool] = None, include_deleted: bool = False, db: Session = Depends(get_db)):
+def rules(request: Request, scope_type: str = "", category: str = "", enabled: Optional[bool] = None, include_deleted: bool = False, keyword: str = "", risk_level: str = "", limit: int = 0, offset: int = 0, db: Session = Depends(get_db)):
     require_auth(request, db)
-    return api_response(data=svc.list_rules(db, scope_type=scope_type, category=category, enabled=enabled, include_deleted=include_deleted))
+    return api_response(data=svc.list_rules(db, scope_type=scope_type, category=category, enabled=enabled, include_deleted=include_deleted, keyword=keyword, risk_level=risk_level, limit=limit, offset=offset))
 
 
 @router.get("/rules/{rule_code}")
@@ -646,3 +648,39 @@ def runs_get_raw_output(run_id: str, request: Request, db: Session = Depends(get
 def baselines(request: Request, scope_type: str = "", server_id: str = "", project_id: str = "", baseline_type: str = "", db: Session = Depends(get_db)):
     require_auth(request, db)
     return api_response(data=svc.list_baselines(db, scope_type=scope_type, server_id=server_id, project_id=project_id, baseline_type=baseline_type))
+
+
+# ============ 巡检阈值（可配置） ============
+
+@router.get("/thresholds")
+def thresholds_get(request: Request, db: Session = Depends(get_db)):
+    """获取所有巡检分类的阈值（默认值 + 已配置覆盖）。"""
+    require_auth(request, db)
+    return api_response(data=svc._load_thresholds(db))
+
+
+@router.post("/thresholds")
+def thresholds_save(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """保存指定分类的阈值到对应 InspectionItemConfig.config_json.thresholds。"""
+    user = require_auth(request, db)
+    category = (payload or {}).get("category")
+    thresholds = (payload or {}).get("thresholds") or {}
+    if not category or category not in svc.DEFAULT_THRESHOLDS:
+        raise HTTPException(status_code=400, detail=f"不支持的分类: {category}")
+    if not isinstance(thresholds, dict):
+        raise HTTPException(status_code=400, detail="thresholds 必须是字典")
+    # 找到该 category 的第一个启用的项目配置；如没有则记录日志后跳过
+    from app.db.models import InspectionItemConfig
+    cfg = db.query(InspectionItemConfig).filter(
+        InspectionItemConfig.scope_type == "SERVER",
+        InspectionItemConfig.category == category,
+    ).order_by(InspectionItemConfig.sort_order).first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail=f"未找到 {category} 分类的巡检项目配置")
+    current = dict(cfg.config_json or {})
+    current["thresholds"] = dict(thresholds)
+    cfg.config_json = current
+    db.commit()
+    db.refresh(cfg)
+    audit("inspection.threshold.update", "inspection_item_config", cfg.id, f"user={user.get('username')} category={category}")
+    return api_response(data={"category": category, "thresholds": current["thresholds"]}, message="阈值已更新")

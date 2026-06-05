@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, File, Form
@@ -51,6 +51,17 @@ def _mcp_resource_items() -> List[Dict[str, str]]:
         {"uri": "ops://operation-chains", "name": "Recent Operation Chains", "description": "Read-only audit replay index for OPS/MCP/AI actions", "mimeType": "application/json"},
         {"uri": "ops://reports", "name": "Report Center", "description": "Generated OPS diagnostic/release/audit reports", "mimeType": "application/json"},
         {"uri": "ops://db/exports", "name": "Database Exports", "description": "Read-only database query export artifacts", "mimeType": "application/json"},
+        {"uri": "ops://servers", "name": "Servers", "description": "服务器资产摘要", "mimeType": "application/json"},
+        {"uri": "ops://projects", "name": "Projects", "description": "项目/系统资产摘要", "mimeType": "application/json"},
+        {"uri": "ops://status/overview", "name": "Status Overview", "description": "状态中心总览", "mimeType": "application/json"},
+        {"uri": "ops://risks/open", "name": "Open Risks", "description": "未闭环风险", "mimeType": "application/json"},
+        {"uri": "ops://inspection/recent", "name": "Recent Inspection Runs", "description": "最近巡检记录", "mimeType": "application/json"},
+        {"uri": "ops://diagnosis/recent", "name": "Recent Diagnosis Runs", "description": "最近诊断记录", "mimeType": "application/json"},
+        {"uri": "ops://reports/recent", "name": "Recent Reports", "description": "最近报告", "mimeType": "application/json"},
+        {"uri": "ops://backups/status", "name": "Backup Status", "description": "备份状态摘要", "mimeType": "application/json"},
+        {"uri": "ops://deployments/failed", "name": "Failed Deployments", "description": "最近失败发布", "mimeType": "application/json"},
+        {"uri": "ops://tool-risk-policy", "name": "Tool Risk Policy", "description": "工具风险策略", "mimeType": "application/json"},
+        {"uri": "ops://ai-workflows", "name": "AI Workflows", "description": "AI 工作流目录", "mimeType": "application/json"},
     ]
 
 
@@ -64,6 +75,9 @@ def _mcp_prompt_items() -> List[Dict[str, Any]]:
         {"name": "ops_db_export_request", "description": "Plan a safe database workflow: query, export, or maintain tables. Trigger: user says 导出CSV/查数据/查询表/列出表/查看表结构/导出Excel. IMPORTANT: use this prompt BEFORE writing any Python scripts for database access.", "arguments": [{"name": "request", "description": "Natural language query/export request", "required": True}]},
         {"name": "ops_server_management", "description": "Manage OPS server assets. Trigger: user asks to add/edit/configure/list servers/服务器管理/配置服务器.", "arguments": [{"name": "request", "description": "Natural language server management request", "required": True}]},
         {"name": "ops_backup_workflow", "description": "Safe OPS database backup workflow (list, create, verify, restore). Trigger: user asks for backup/restore/备份/恢复.", "arguments": [{"name": "request", "description": "Natural language backup request", "required": True}]},
+        {"name": "ops_project_health_brief", "description": "Generate a lightweight single-project health brief with facts/inferences/recommendations/evidence. Trigger: 项目健康/项目状态/最近是否正常. 不依赖服务器侧 Agent。", "arguments": [{"name": "project_id", "description": "Project/system identifier", "required": True}]},
+        {"name": "ops_risk_triage", "description": "Triage open risks without executing remediation. Trigger: 风险分流/优先处理/整改计划.", "arguments": [{"name": "request", "description": "Natural language risk triage request", "required": False}]},
+        {"name": "ops_monthly_ops_report", "description": "Generate a monthly OPS report using status, diagnosis, inspection, backup, risk and report context.", "arguments": [{"name": "month", "description": "YYYY-MM", "required": False}]},
     ]
 
 
@@ -78,6 +92,17 @@ class CreateToolTokenPayload(BaseModel):
     allow_write: bool = False
     allow_prod: bool = False
     expires_in_days: int = 90
+
+
+
+
+class UpdateToolTokenPayload(BaseModel):
+    name: Optional[str] = None
+    scopes: Optional[List[str]] = None
+    allow_write: Optional[bool] = None
+    allow_prod: Optional[bool] = None
+    expires_in_days: Optional[int] = None
+    revoke: Optional[bool] = None
 
 
 class UpdateSettingsPayload(BaseModel):
@@ -404,7 +429,7 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
     allow_write = bool(payload.allow_write)
     allow_prod = bool(payload.allow_prod)
     if not user.get("is_admin"):
-        dangerous = {"deploy:execute", "config:write", "server:write", "package:write", "package:cleanup", "*"}
+        dangerous = {"deploy:execute", "config:write", "server:write", "package:write", "package:cleanup", "db:write", "*"}
         if allow_write or allow_prod or any(s in dangerous or s.endswith(":*") for s in scopes):
             raise HTTPException(status_code=403, detail="Only admin can create write/prod tool tokens")
     created = create_tool_token(
@@ -420,6 +445,54 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
     _bump_capability_version(db)
     return api_response(data={"token": created["token"], "record": token_to_dict(created["record"])}, message="Token created; copy it now, it will not be shown again")
 
+
+
+
+@tools_router.patch("/tokens/{token_id}")
+def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    token = db.query(ToolToken).filter(ToolToken.id == token_id).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    is_admin = bool(user.get("is_admin"))
+    if not is_admin and token.owner != user.get("username"):
+        raise HTTPException(status_code=403, detail="Cannot edit another user's token")
+
+    old_scopes = list(token.scopes or [])
+    new_scopes = payload.scopes if payload.scopes is not None else old_scopes
+    new_allow_write = bool(payload.allow_write) if payload.allow_write is not None else bool(token.allow_write)
+    new_allow_prod = bool(payload.allow_prod) if payload.allow_prod is not None else bool(token.allow_prod)
+
+    if not is_admin:
+        dangerous = {"deploy:execute", "config:write", "server:write", "package:write", "package:cleanup", "db:write", "*"}
+        if new_allow_write or new_allow_prod or any(s in dangerous or str(s).endswith(":*") for s in new_scopes):
+            raise HTTPException(status_code=403, detail="Only admin can grant write/prod or dangerous tool token scopes")
+
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Token name cannot be empty")
+        token.name = name[:128]
+    if payload.scopes is not None:
+        token.scopes = [str(x).strip() for x in (payload.scopes or []) if str(x).strip()] or ["ops:read"]
+    if payload.allow_write is not None:
+        token.allow_write = new_allow_write
+    if payload.allow_prod is not None:
+        token.allow_prod = new_allow_prod
+    if payload.expires_in_days is not None:
+        days = int(payload.expires_in_days or 0)
+        if days <= 0:
+            token.expires_at = None
+        else:
+            token.expires_at = _utcnow() + timedelta(days=min(max(days, 1), 3650))
+    if payload.revoke is not None:
+        token.revoked_at = _utcnow() if payload.revoke else None
+
+    db.commit()
+    db.refresh(token)
+    audit("tool.token.update", "tool_token", token.name, f"user={user.get('username')} scopes={','.join(token.scopes or [])} allow_write={token.allow_write} allow_prod={token.allow_prod}")
+    _bump_capability_version(db)
+    return api_response(data=token_to_dict(token), message="Token updated")
 
 @tools_router.delete("/tokens/{token_id}")
 def revoke_token(token_id: str, request: Request, db: Session = Depends(get_db)):
@@ -636,6 +709,7 @@ def _mcp_http_resource_read(request: Request, db: Session, params: Dict[str, Any
     ctx = get_tool_context(request, db)
     register_builtin_tools()
     uri = (params or {}).get("uri") or ""
+    generated_at = _utcnow().isoformat()
     if uri == "ops://capabilities":
         data = registry.describe_capabilities(db, ctx, include_schema=True, include_disabled=False)
     elif uri == "ops://systems":
@@ -656,14 +730,48 @@ def _mcp_http_resource_read(request: Request, db: Session, params: Dict[str, Any
     elif uri == "ops://db/exports":
         from app.services.db_query_export import DbQueryExportService
         data = DbQueryExportService(db).list_exports(limit=50)
+    elif uri == "ops://servers":
+        data = registry.call(db, "ops.list_servers", {"limit": 50}, ctx).get("result")
+    elif uri == "ops://projects":
+        data = registry.call(db, "ops.list_systems", {}, ctx).get("result")
+    elif uri == "ops://status/overview":
+        data = registry.call(db, "ops.get_system_status", {}, ctx).get("result")
+    elif uri == "ops://risks/open":
+        data = registry.call(db, "ops.risk.list", {"status": "OPEN", "limit": 50}, ctx).get("result")
+    elif uri == "ops://inspection/recent":
+        data = registry.call(db, "ops.inspection.list_runs", {"limit": 20}, ctx).get("result")
+    elif uri == "ops://diagnosis/recent":
+        try:
+            data = registry.call(db, "ops.run_diagnostics", {"mode": "summary"}, ctx).get("result")
+        except Exception as exc:
+            data = {"summary": f"诊断摘要暂不可用：{exc}", "items": []}
+    elif uri == "ops://reports/recent":
+        data = registry.call(db, "ops.list_reports", {"limit": 20}, ctx).get("result")
+    elif uri == "ops://backups/status":
+        data = registry.call(db, "ops.list_backups", {"limit": 20}, ctx).get("result")
+    elif uri == "ops://deployments/failed":
+        data = registry.call(db, "ops.list_deployments", {"limit": 50, "status": "failed"}, ctx).get("result")
+    elif uri == "ops://tool-risk-policy":
+        data = {"settings": get_capability_settings(db), "risk_policy": risk_policy_manifest()}
+    elif uri == "ops://ai-workflows":
+        data = {
+            "items": [
+                {"tool": "ops.workflow.generate_project_health_brief", "description": "项目健康分析"},
+                {"tool": "ops.workflow.analyze_failed_deploy", "description": "发布失败分析"},
+                {"tool": "ops.workflow.inspect_project_security", "description": "项目安全巡检分析"},
+                {"tool": "ops.workflow.triage_open_risks", "description": "未闭环风险分流"},
+                {"tool": "ops.workflow.generate_monthly_ops_report", "description": "月度运维报告"},
+            ]
+        }
     else:
         raise ValueError("Resource not found")
+    wrapped = {"generated_at": generated_at, "source": "ops-platform", "uri": uri, "data": data}
     return {
         "contents": [
             {
                 "uri": uri,
                 "mimeType": "application/json",
-                "text": json.dumps(data, ensure_ascii=False, default=str, indent=2),
+                "text": json.dumps(wrapped, ensure_ascii=False, default=str, indent=2),
             }
         ]
     }
@@ -750,6 +858,25 @@ def _mcp_http_prompt_get(request: Request, db: Session, params: Dict[str, Any]) 
             "- ops.delete_backup: delete a backup (HIGH risk - requires confirm_text)\n"
             "Always verify before restore. Always create a safety backup before restore.\n"
             "User request=" + str(args.get("request") or "")
+        )
+    elif name == "ops_project_health_brief":
+        text = (
+            "Use MCP resources first: ops://projects, ops://status/overview, ops://risks/open, ops://inspection/recent. 当前为单项目轻量模式，不依赖 ops://agents。 "
+            "Then call ops.workflow.generate_project_health_brief. Output facts, inferences, recommendations and evidence separately. "
+            "Do not execute deploy, rollback, DML, restore, delete, shell, or remediation actions. project_id="
+            + str(args.get("project_id") or "")
+        )
+    elif name == "ops_risk_triage":
+        text = (
+            "Use ops.risk.list and ops.workflow.triage_open_risks to prioritize open risks. "
+            "Only generate a plan; do not update risk status, verify, ignore, deploy, rollback, or run shell. request="
+            + str(args.get("request") or "")
+        )
+    elif name == "ops_monthly_ops_report":
+        text = (
+            "Use ops.workflow.generate_monthly_ops_report. The output must separate facts, inferences, recommendations and evidence. "
+            "Generate reports only from saved evidence and do not execute high-risk actions. month="
+            + str(args.get("month") or "")
         )
     else:
         raise ValueError("Prompt not found")
@@ -878,6 +1005,35 @@ def mcp_tools(
     return list_tools(request, response, category=category, limit=limit, cursor=cursor, output_format="mcp", db=db)
 
 
+
+
+@mcp_router.get("/tools/recommend")
+def mcp_tool_recommend(request: Request, scenario: str = "", db: Session = Depends(get_db)):
+    get_tool_context(request, db)
+    register_builtin_tools()
+    scenario_key = (scenario or "").lower()
+    mapping = {
+        "project_health": ["ops.workflow.generate_project_health_brief", "ops.get_system_status", "ops.inspection.list_runs", "ops.risk.list"],
+        "risk_triage": ["ops.workflow.triage_open_risks", "ops.risk.list", "ops.risk.generate_fix_plan"],
+        "inspection": ["ops.inspection.list_runs", "ops.inspection.get_run", "ops.inspection.summarize_run", "ops.inspection.generate_report"],
+        "failed_deploy": ["ops.workflow.analyze_failed_deploy", "ops.get_deployment_report", "ops.get_deployment_tasks", "ops.get_deployment_logs"],
+        "monthly_report": ["ops.workflow.generate_monthly_ops_report", "ops.list_reports", "ops.risk.list", "ops.inspection.list_runs"],
+    }
+    tools = mapping.get(scenario_key) or [t.name for t in registry._tools.values() if scenario_key and scenario_key in f"{t.name} {t.description} {t.category}".lower()][:20]
+    return api_response(data={"scenario": scenario, "tools": tools})
+
+
+
+
+@mcp_router.get("/tools/{tool_name:path}")
+def mcp_tool_detail(tool_name: str, request: Request, db: Session = Depends(get_db)):
+    ctx = get_tool_context(request, db)
+    register_builtin_tools()
+    tool = registry.get(tool_name)
+    policy = registry.evaluate_policy(tool, ctx, db)
+    return api_response(data=tool.to_public_dict(include_schema=True, policy=policy))
+
+
 @mcp_router.post("/call")
 def mcp_call(payload: ToolCallPayload, request: Request, db: Session = Depends(get_db)):
     return call_tool(payload, request, db)
@@ -891,32 +1047,9 @@ def mcp_resources(request: Request, db: Session = Depends(get_db)):
 
 @mcp_router.post("/resources/read")
 def mcp_resource_read(payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)):
-    ctx = get_tool_context(request, db)
-    register_builtin_tools()
-    uri = payload.get("uri") or ""
-    if uri == "ops://capabilities":
-        data = registry.describe_capabilities(db, ctx, include_schema=True, include_disabled=False)
-    elif uri == "ops://systems":
-        data = registry.call(db, "ops.list_systems", {}, ctx)["result"]
-    elif uri == "ops://deployments/recent":
-        data = registry.call(db, "ops.list_deployments", {"limit": 20}, ctx)["result"]
-    elif uri == "ops://tools":
-        data = registry.list_tools(db, ctx, include_schema=True).get("tools", [])
-    elif uri == "ops://ai-diagnostics":
-        from app.services.ai_diagnostics import build_ai_diagnostic_analysis
-        data = build_ai_diagnostic_analysis(db, mode="summary", focus="mcp")
-    elif uri == "ops://operation-chains":
-        from app.services.audit_chain import list_operation_chains
-        data = list_operation_chains(db, limit=50)
-    elif uri == "ops://reports":
-        from app.services.report_center import list_reports, report_summary
-        data = {"summary": report_summary(db), "reports": list_reports(db, limit=50)}
-    elif uri == "ops://db/exports":
-        from app.services.db_query_export import DbQueryExportService
-        data = DbQueryExportService(db).list_exports(limit=50)
-    else:
-        raise HTTPException(status_code=404, detail="Resource not found")
-    return api_response(data={"uri": uri, "mimeType": "application/json", "text": json.dumps(data, ensure_ascii=False, default=str, indent=2)})
+    result = _mcp_http_resource_read(request, db, {"uri": payload.get("uri") or ""})
+    content = (result.get("contents") or [{}])[0]
+    return api_response(data={"uri": content.get("uri"), "mimeType": content.get("mimeType"), "text": content.get("text")})
 
 
 @mcp_router.get("/prompts")
@@ -998,6 +1131,25 @@ def mcp_prompt_get(payload: Dict[str, Any], request: Request, db: Session = Depe
             "- ops.delete_backup: 删除备份（高风险 - 需要 confirm_text）\n"
             "恢复前务必先校验。恢复前务必先创建安全备份。\n"
             "用户请求=" + str(args.get("request") or "")
+        )
+    elif name == "ops_project_health_brief":
+        text = (
+            "先读取 ops://projects、ops://status/overview、ops://risks/open、ops://inspection/recent；当前为单项目轻量模式，不依赖 Agent 资源，"
+            "再调用 ops.workflow.generate_project_health_brief。输出必须区分事实、推断、建议、证据。"
+            "不要执行发布、回滚、DML、恢复、删除、Shell 或整改动作。project_id="
+            + str(args.get("project_id") or "")
+        )
+    elif name == "ops_risk_triage":
+        text = (
+            "使用 ops.risk.list 和 ops.workflow.triage_open_risks 进行未闭环风险分流。"
+            "只生成计划，不更新风险状态、不验证、不忽略、不执行发布/回滚/命令。用户请求="
+            + str(args.get("request") or "")
+        )
+    elif name == "ops_monthly_ops_report":
+        text = (
+            "调用 ops.workflow.generate_monthly_ops_report 生成月度运维复盘。"
+            "输出必须区分 facts、inferences、recommendations、evidence。month="
+            + str(args.get("month") or "")
         )
     else:
         raise HTTPException(status_code=404, detail="Prompt not found")

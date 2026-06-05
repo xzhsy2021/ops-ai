@@ -156,6 +156,12 @@ def init_db():
         import logging
         logging.getLogger(__name__).exception("Failed to run schema migrations")
         raise
+    try:
+        from app.db.migrations.runner import migrate_read_only_default
+        migrate_read_only_default()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Failed to apply read_only default migration")
     _ensure_indexes()
 
 

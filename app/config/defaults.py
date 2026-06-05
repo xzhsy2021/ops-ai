@@ -1,18 +1,20 @@
-import json
+import copy
 import logging
-import os
+
+from app.config.default_seed import DEFAULT_CONFIG_SEED
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config", "default_config.json")
 
 def _load_default_config() -> dict:
-    try:
-        with open(_DEFAULT_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logger.warning("无法加载默认配置文件 %s: %s，使用空配置", _DEFAULT_CONFIG_PATH, e)
-        return {"jump_hosts": [], "servers": [], "systems": {}}
+    """Return the bootstrap default configuration from code seed.
+
+    Runtime configuration is stored in the database table ``config_kv``.
+    The legacy ``config/default_config.json`` file is no longer read as the
+    default source. If that file exists on an upgraded installation, startup
+    migration imports it into the database once and moves it out of ``config/``.
+    """
+    return copy.deepcopy(DEFAULT_CONFIG_SEED)
+
 
 DEFAULT_CONFIG = _load_default_config()

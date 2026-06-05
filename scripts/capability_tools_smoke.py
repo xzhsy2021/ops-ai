@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,9 +60,12 @@ def main() -> int:
     not_found = [name for name in REQUIRED_TOOL_NAMES if name not in combined]
     if not_found:
         raise SystemExit(f"Missing tool names: {not_found}")
-    cfg = json.loads((ROOT / "config/default_config.json").read_text(encoding='utf-8'))
-    if "capability_server" not in cfg:
-        raise SystemExit("Missing capability_server config")
+    defaults_text = (ROOT / "app/config/default_seed.py").read_text(encoding='utf-8')
+    if "capability_server" not in defaults_text:
+        raise SystemExit("Missing capability_server bootstrap seed")
+    defaults_loader = (ROOT / "app/config/defaults.py").read_text(encoding='utf-8')
+    if "default_config.json" in defaults_loader and "no longer read" not in defaults_loader:
+        raise SystemExit("defaults.py must not load config/default_config.json")
     api_text = (ROOT / "app/api/tools.py").read_text(encoding='utf-8')
     for token in ["/capabilities", "capability_version", "include_disabled", "format"]:
         if token not in api_text:

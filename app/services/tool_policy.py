@@ -8,9 +8,11 @@ from app.services.tool_context import ToolContext
 
 DEFAULT_CAPABILITY_SETTINGS = {
     "enabled": True,
+    "ops_mode": "lightweight_single_project",
+    "agent_runtime_enabled": False,
     "http_tools_enabled": True,
     "mcp_enabled": False,
-    "read_only": False,
+    "read_only": True,
     "allow_deploy_plan": True,
     "allow_deploy_execute": False,
     "allow_prod_deploy": False,
@@ -33,6 +35,39 @@ DEFAULT_CAPABILITY_SETTINGS = {
     "strict_prod_confirmation": True,
     "token_expire_days": 90,
 }
+
+
+def ai_tool_level(tool_def) -> str:
+    """Classify a tool for AI/MCP usage governance.
+
+    L1: read-only, low sensitivity; AI may call automatically.
+    L2: read-only but sensitive/secret output; AI may call with masking/limits.
+    L3: planning or non-critical write; AI may prepare plan, not execute automatically.
+    L4: destructive/high-risk/critical write; human approval is required.
+    """
+    risk = str(getattr(tool_def, "risk", "low") or "low").lower()
+    sensitivity = str(getattr(tool_def, "data_sensitivity", "internal") or "internal").lower()
+    write = bool(getattr(tool_def, "write", False))
+    requires_approval = bool(getattr(tool_def, "requires_human_approval", False) or getattr(tool_def, "requires_confirmation", False))
+    if write and (risk in {"high", "critical"} or requires_approval):
+        return "L4"
+    if write or requires_approval:
+        return "L3"
+    if sensitivity in {"sensitive", "secret"}:
+        return "L2"
+    return "L1"
+
+
+def ai_tool_policy_metadata(tool_def) -> Dict[str, Any]:
+    level = ai_tool_level(tool_def)
+    return {
+        "ai_level": level,
+        "ai_callable": bool(getattr(tool_def, "ai_callable", True)),
+        "ai_auto_callable": bool(getattr(tool_def, "ai_auto_callable", False)) and level in {"L1", "L2"},
+        "requires_human_approval": bool(getattr(tool_def, "requires_human_approval", False) or getattr(tool_def, "requires_confirmation", False) or level == "L4"),
+        "data_sensitivity": getattr(tool_def, "data_sensitivity", "internal"),
+        "output_masking": bool(getattr(tool_def, "output_masking", True)),
+    }
 
 
 def get_capability_settings(db) -> Dict[str, Any]:
@@ -72,6 +107,14 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
             raise HTTPException(status_code=403, detail="Capability Server is in read-only mode")
         if not ctx.allow_write and not ctx.is_admin:
             raise HTTPException(status_code=403, detail="Tool token does not allow write operations")
+
+    # AI/MCP tool-token calls must not directly execute tools that require human approval.
+    # They may call dedicated plan/preview/approval-request tools instead.
+    if getattr(ctx, "auth_type", "") == "tool_token" and (
+        getattr(tool_def, "requires_human_approval", False)
+        or (getattr(tool_def, "write", False) and str(getattr(tool_def, "risk", "low")).lower() in {"high", "critical"})
+    ):
+        raise HTTPException(status_code=403, detail="This tool requires human approval and cannot be executed directly by AI/MCP token")
 
     if tool_def.category == "deploy_plan" and not settings.get("allow_deploy_plan", True):
         raise HTTPException(status_code=403, detail="Deploy plan tools are disabled")

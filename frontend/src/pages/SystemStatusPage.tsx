@@ -162,6 +162,7 @@ export default function SystemStatusPage() {
               {loading ? '刷新中...' : '刷新'}
             </button>
             <Link className="btn" to={ROUTES.diagnostics}>安装诊断</Link>
+            <Link className="btn btn-primary" to={ROUTES.inspection}>进入巡检中心</Link>
             <button className="btn" onClick={copySystemReport} disabled={!health}>复制诊断信息</button>
             <button className="btn btn-primary" onClick={createBackup} disabled={loading}>立即备份数据库</button>
           </>

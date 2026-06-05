@@ -28,6 +28,7 @@ export type EnhancedDataTableProps<T> = {
   currentPage?: number
   totalCount?: number
   onPageChange?: (page: number) => void
+  onPageSizeChange?: (size: number) => void
   selectedKeys?: string[]
   onSelectionChange?: (keys: string[]) => void
   expandRow?: (row: T) => ReactNode
@@ -51,6 +52,7 @@ export function EnhancedDataTable<T>({
   currentPage = 1,
   totalCount,
   onPageChange,
+  onPageSizeChange,
   selectedKeys,
   onSelectionChange,
   expandRow,
@@ -227,6 +229,23 @@ export function EnhancedDataTable<T>({
             共 {totalCount} 条，第 {currentPage}/{totalPages} 页
           </span>
           <div className="table-pagination-actions">
+            <label className="table-pagination-size">
+              每页
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  const newSize = Number(e.target.value)
+                  // 调整页码确保不超出范围
+                  const newTotalPages = Math.ceil(totalCount / newSize)
+                  const newPage = Math.min(currentPage, newTotalPages)
+                  onPageChange?.(newPage)
+                  onPageSizeChange?.(newSize)
+                }}
+              >
+                {[10, 20, 50, 100, 200].map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              条
+            </label>
             <button
               className="btn btn-subtle"
               disabled={currentPage <= 1}

@@ -52,6 +52,7 @@ def get_storage_usage_tool(args: Dict[str, Any], ctx, db):
     category="runtime_cleanup",
     write=True,
     requires_confirmation=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {

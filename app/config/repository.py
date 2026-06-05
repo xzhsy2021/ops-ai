@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_FILE = os.path.join(_PROJECT_ROOT, "config_data.json")
 
+_save_lock = threading.RLock()
 _db_local = threading.local()
 
 def get_db_file() -> str:
@@ -119,8 +120,10 @@ def _init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC)")
     conn.commit()
     logger.info("Database tables ensured")
-    from app.config.migration import _migrate_json_to_db
-    _migrate_json_to_db()
+    from app.config.migration import _migrate_legacy_default_config_to_db, _migrate_json_to_db
+    if os.getenv("OPS_SKIP_CONFIG_AUTO_MIGRATION") != "1":
+        _migrate_legacy_default_config_to_db(remove_source=True)
+        _migrate_json_to_db()
 
 def load_config() -> Dict[str, Any]:
     conn = get_db_connection()
@@ -146,6 +149,38 @@ def load_config() -> Dict[str, Any]:
     return result
 
 def save_config(config: Dict[str, Any]) -> bool:
+    with _save_lock:
+        # Re-load latest version and merge to avoid lost-update from concurrent writes
+        current = _load_config_unsafe()
+        merged = {**current, **config}
+        return _save_config_unsafe(merged)
+
+
+def _load_config_unsafe() -> Dict[str, Any]:
+    conn = get_db_connection()
+    result = {}
+    try:
+        rows = conn.execute("SELECT key, value FROM config_kv").fetchall()
+    except sqlite3.OperationalError:
+        logger.exception("Failed to load config from config_kv")
+        raise
+    for row in rows:
+        try:
+            result[row["key"]] = json.loads(row["value"])
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Invalid config json for key=%s: %s", row["key"], e)
+            from app.config.defaults import DEFAULT_CONFIG
+            result[row["key"]] = copy.deepcopy(DEFAULT_CONFIG.get(row["key"], {}))
+    from app.config.defaults import DEFAULT_CONFIG
+    for key in DEFAULT_CONFIG:
+        if key not in result:
+            result[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+    from app.config.migration import _migrate_dovo_regions
+    result = _migrate_dovo_regions(result)
+    return result
+
+
+def _save_config_unsafe(config: Dict[str, Any]) -> bool:
     conn = get_db_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")

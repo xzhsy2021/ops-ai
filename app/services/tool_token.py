@@ -68,13 +68,21 @@ def validate_tool_token(db: Session, raw_token: str) -> ToolToken:
 
 
 def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any]:
+    now = _utcnow()
+    if token.revoked_at:
+        status = "revoked"
+    elif token.expires_at and token.expires_at < now:
+        status = "expired"
+    else:
+        status = "active"
     data = {
         "id": token.id,
         "name": token.name,
         "owner": token.owner,
         "scopes": token.scopes or [],
-        "allow_write": token.allow_write,
-        "allow_prod": token.allow_prod,
+        "allow_write": bool(token.allow_write),
+        "allow_prod": bool(token.allow_prod),
+        "status": status,
         "token_prefix": token.token_prefix,
         "created_at": token.created_at.isoformat() if token.created_at else None,
         "expires_at": token.expires_at.isoformat() if token.expires_at else None,

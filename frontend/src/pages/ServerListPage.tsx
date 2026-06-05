@@ -42,6 +42,8 @@ interface ServerRow {
   group?: string
   jump_host?: string | { name: string }
   description?: string
+  status?: string
+  enabled?: boolean
   config_status?: { status?: string; complete?: boolean; missing?: string[]; suggestions?: string[] }
   health_probe?: { status?: string; disk?: { available_kb: number } }
 }
@@ -60,6 +62,7 @@ interface ServerForm {
   tags: string
   group: string
   sftp_allowed_roots: string
+  status: string
 }
 
 interface BatchForm {
@@ -70,16 +73,38 @@ interface BatchForm {
   auth_type: string
   port: string
   group: string
+  status: string
+}
+
+
+function normalizeServerStatus(s: any): 'online' | 'disabled' | 'offline' {
+  const raw = String(s?.status || '').toLowerCase()
+  if (s?.enabled === false || ['disabled', 'inactive', 'off', '停用'].includes(raw)) return 'disabled'
+  if (['offline', '离线'].includes(raw)) return 'offline'
+  return 'online'
+}
+
+function serverStatusLabel(status: string) {
+  if (status === 'disabled') return '停用'
+  if (status === 'offline') return '离线'
+  return '在线'
+}
+
+function serverStatusStyle(status: string) {
+  if (status === 'disabled') return { color: 'var(--text-muted)', background: 'var(--bg-page)' }
+  if (status === 'offline') return { color: 'var(--danger)', background: 'var(--danger-surface)' }
+  return { color: 'var(--success)', background: 'var(--success-surface)' }
 }
 
 const emptyForm: ServerForm = {
   name: '', host: '', port: 22, username: 'root', auth_type: 'password',
   password: '', key: '', key_content: '', jump_host: '', description: '', tags: '', group: '',
   sftp_allowed_roots: '/data, /opt, /var/log, /tmp',
+  status: 'online',
 }
 
 const emptyBatchForm: BatchForm = {
-  description: '', tags: '', jump_host: '', username: '', auth_type: '', port: '', group: '',
+  description: '', tags: '', jump_host: '', username: '', auth_type: '', port: '', group: '', status: '',
 }
 
 export default function ServerListPage() {
@@ -88,6 +113,10 @@ export default function ServerListPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+
+  // 分页状态
+  const [serverPage, setServerPage] = useState(1)
+  const [serverPageSize, setServerPageSize] = useState(20)
 
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
@@ -124,6 +153,7 @@ export default function ServerListPage() {
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null)
   const [groupActionsOpen, setGroupActionsOpen] = useState<string | null>(null)
   const [configFilter, setConfigFilter] = useState<'all' | 'passed' | 'warning' | 'blocked'>('all')
+  const [serverStatusFilter, setServerStatusFilter] = useState<'all' | 'online' | 'disabled' | 'offline'>('all')
   const [healthChecking, setHealthChecking] = useState<Record<string, boolean>>({})
   const [riskAction, setRiskAction] = useState<{
     title: string
@@ -166,6 +196,9 @@ export default function ServerListPage() {
 
   useEffect(() => { load(); loadKeys() }, [])
 
+  // 筛选变化时重置到第一页
+  useEffect(() => { setServerPage(1) }, [selectedGroup, configFilter, serverStatusFilter])
+
   const groupNames = groups
     .filter((g) => !g.is_default)
     .map((g) => g.name)
@@ -176,9 +209,19 @@ export default function ServerListPage() {
       ? servers.filter((s) => !s.group)
       : servers.filter((s) => s.group === selectedGroup)
 
-  const filteredServers = configFilter === 'all'
+  const byStatusServers = serverStatusFilter === 'all'
     ? groupedServers
-    : groupedServers.filter((s) => (s.config_status?.status || (s.config_status?.complete ? 'passed' : 'blocked')) === configFilter)
+    : groupedServers.filter((s) => normalizeServerStatus(s) === serverStatusFilter)
+
+  const filteredServers = configFilter === 'all'
+    ? byStatusServers
+    : byStatusServers.filter((s) => (s.config_status?.status || (s.config_status?.complete ? 'passed' : 'blocked')) === configFilter)
+
+  const statusCounts = servers.reduce((acc: Record<string, number>, s: any) => {
+    const status = normalizeServerStatus(s)
+    acc[status] = (acc[status] || 0) + 1
+    return acc
+  }, { online: 0, disabled: 0, offline: 0 })
 
   const configCounts = servers.reduce((acc: Record<string, number>, s: any) => {
     const status = s.config_status?.status || (s.config_status?.complete ? 'passed' : 'blocked')
@@ -216,6 +259,7 @@ export default function ServerListPage() {
       tags: Array.isArray(s.tags) ? s.tags.join(', ') : (s.tags || ''),
       group: s.group || '',
       sftp_allowed_roots: rootsText || '/data, /opt, /var/log, /tmp',
+      status: normalizeServerStatus(s),
     })
     setUploadedKeyName(keyPath ? keyPath.split('/').pop() || keyPath : '')
     setFormError('')
@@ -290,6 +334,7 @@ export default function ServerListPage() {
         description: form.description,
         tags: form.tags ? form.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [],
         group: form.group || '',
+        status: form.status || 'online',
         sftp_allowed_roots: form.sftp_allowed_roots
           ? form.sftp_allowed_roots.split(/[,\n]/).map((r: string) => r.trim()).filter(Boolean)
           : [],
@@ -370,6 +415,7 @@ export default function ServerListPage() {
     if (batchForm.username.trim()) updates.username = batchForm.username.trim()
     if (batchForm.auth_type) updates.auth_type = batchForm.auth_type
     if (batchForm.port) updates.port = parseInt(batchForm.port, 10)
+    if (batchForm.status) updates.status = batchForm.status
     if (batchForm.group === '__clear__') {
       updates.group = ''
     } else if (batchForm.group) {
@@ -589,6 +635,18 @@ export default function ServerListPage() {
 
   const ungroupedCount = servers.filter((s) => !s.group).length
 
+  const quickToggleServerStatus = async (s: ServerRow) => {
+    const next = normalizeServerStatus(s) === 'disabled' ? 'online' : 'disabled'
+    try {
+      await serverManagement.update(s.name, { ...s, username: s.username || s.user || 'root', status: next })
+      flash(`${s.name} 已${next === 'disabled' ? '停用' : '启用'}`)
+      load()
+    } catch (err: any) {
+      flash(typeof err === 'string' ? err : '状态更新失败', true)
+    }
+  }
+
+
   const serverColumns: EnhancedColumn<ServerRow>[] = [
     {
       key: 'name', title: '名称',
@@ -637,6 +695,14 @@ export default function ServerListPage() {
       render: (s: ServerRow) => <span style={{ color: 'var(--text-muted)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{s.description || '-'}</span>,
     },
     {
+      key: 'status', title: '状态',
+      render: (s: ServerRow) => {
+        const status = normalizeServerStatus(s)
+        const style = serverStatusStyle(status)
+        return <span style={{ ...style, display: 'inline-block', padding: '1px 8px', borderRadius: '4px', fontSize: '12px' }}>{serverStatusLabel(status)}</span>
+      },
+    },
+    {
       key: 'config', title: '配置/健康',
       render: (s: ServerRow) => {
         const cfg = s.config_status || {}
@@ -661,6 +727,10 @@ export default function ServerListPage() {
       key: 'actions', title: '操作', align: 'right',
       render: (s: ServerRow) => (
         <div style={{ whiteSpace: 'nowrap' }}>
+          <button className="btn" onClick={() => quickToggleServerStatus(s)}
+            style={{ padding: '4px 12px', fontSize: '12px', background: normalizeServerStatus(s) === 'disabled' ? 'var(--success-surface)' : 'var(--warning-surface)', color: normalizeServerStatus(s) === 'disabled' ? 'var(--success)' : 'var(--warning)', marginRight: '6px' }}>
+            {normalizeServerStatus(s) === 'disabled' ? '启用' : '停用'}
+          </button>
           <button className="btn" onClick={() => handleHealthProbe(s.name)} disabled={healthChecking[s.name]}
             style={{ padding: '4px 12px', fontSize: '12px', background: 'var(--border-strong)', color: 'var(--action-text)', marginRight: '6px' }}>
             {healthChecking[s.name] ? '检查中' : '健康'}
@@ -843,6 +913,13 @@ export default function ServerListPage() {
             )}
           </h2>
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <select value={serverStatusFilter} onChange={(e) => setServerStatusFilter(e.target.value as any)}
+              style={{ padding: '7px 10px', borderRadius: '8px', background: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)' }}>
+              <option value="all">全部状态</option>
+              <option value="online">在线 ({statusCounts.online || 0})</option>
+              <option value="disabled">停用 ({statusCounts.disabled || 0})</option>
+              <option value="offline">离线 ({statusCounts.offline || 0})</option>
+            </select>
             <select value={configFilter} onChange={(e) => setConfigFilter(e.target.value as any)}
               style={{ padding: '7px 10px', borderRadius: '8px', background: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)' }}>
               <option value="all">全部配置</option>
@@ -896,6 +973,11 @@ export default function ServerListPage() {
               const newSet = new Set<string>(keys)
               setSelected(newSet)
             }}
+            pageSize={serverPageSize}
+            currentPage={serverPage}
+            totalCount={filteredServers.length}
+            onPageChange={setServerPage}
+            onPageSizeChange={setServerPageSize}
           />
         </div>
       </div>
@@ -942,6 +1024,19 @@ export default function ServerListPage() {
                   {groupNames.map((name: string) => (
                     <option key={name} value={name}>{name}</option>
                   ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '6px' }}>服务器状态</label>
+                <select value={form.status} onChange={(e) => updateField('status', e.target.value)}
+                  style={{
+                    width: '100%', padding: '8px 12px', background: 'var(--bg-surface)', color: 'var(--text-primary)',
+                    border: '1px solid var(--border-strong)', borderRadius: '6px', fontSize: '13px',
+                  }}>
+                  <option value="online">在线 / 启用</option>
+                  <option value="disabled">停用</option>
+                  <option value="offline">离线</option>
                 </select>
               </div>
 
@@ -1211,6 +1306,20 @@ export default function ServerListPage() {
                   </select>
                 </div>
               </div>
+              <div>
+                <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '6px' }}>服务器状态</label>
+                <select value={batchForm.status} onChange={(e) => updateBatchField('status', e.target.value)}
+                  style={{
+                    width: '100%', padding: '8px 12px', background: 'var(--bg-surface)', color: 'var(--text-primary)',
+                    border: '1px solid var(--border-strong)', borderRadius: '6px', fontSize: '13px',
+                  }}>
+                  <option value="">保持不变</option>
+                  <option value="online">在线 / 启用</option>
+                  <option value="disabled">停用</option>
+                  <option value="offline">离线</option>
+                </select>
+              </div>
+
               <div>
                 <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '6px' }}>跳板机</label>
                 <select value={batchForm.jump_host} onChange={(e) => updateBatchField('jump_host', e.target.value)}

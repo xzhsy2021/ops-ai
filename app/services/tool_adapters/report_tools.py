@@ -83,7 +83,7 @@ def list_report_types_tool(args, ctx, db):
     input_schema={
         "type": "object",
         "properties": {
-            "report_type": {"type": "string", "enum": ["diagnostics", "ai_diagnostics", "operation_chain", "operation_chains_index", "deployment"]},
+            "report_type": {"type": "string", "enum": ["diagnostics", "ai_diagnostics", "ai_analysis", "operation_chain", "operation_chains_index", "deployment", "inspection"]},
             "target_id": {"type": "string"},
             "format": {"type": "string", "enum": ["json", "md"]},
             "title": {"type": "string"},

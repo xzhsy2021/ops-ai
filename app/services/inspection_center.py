@@ -45,7 +45,8 @@ SERVER_CATEGORIES = [
     {"code": "COMMAND_HISTORY", "name": "命令日志", "description": "history、bash_history 与高危命令痕迹"},
     {"code": "PROCESS_PORT", "name": "进程端口", "description": "进程、端口、高占用与异常监听"},
     {"code": "FIREWALL", "name": "防火墙", "description": "防火墙状态与开放策略"},
-    {"code": "DISK", "name": "磁盘空间", "description": "系统、日志、备份目录空间"},
+    {"code": "DISK", "name": "磁盘空间", "description": "系统、日志、备份目录空间与 inode"},
+    {"code": "MEMORY", "name": "内存状况", "description": "内存使用率、Swap 使用率与 OOM 风险"},
     {"code": "SERVICE_STATUS", "name": "服务状态", "description": "systemd、nginx、数据库、Redis 等基础服务"},
     {"code": "BACKUP", "name": "备份任务", "description": "cron、备份文件与任务日志"},
 ]
@@ -67,7 +68,8 @@ SERVER_RULE_COMMANDS: Dict[str, str] = {
     "COMMAND_HISTORY": """# 命令日志巡检（只读）\nls -la /root/.bash_history /home/*/.bash_history 2>/dev/null || true\nfind /root /home -maxdepth 2 -name '.bash_history' -type f -print -exec tail -n 120 {} \\; 2>/dev/null || true\n# 高危命令关键词：rm -rf、chmod 777、chown、wget、curl、scp、ftp、history -c、mysql、redis-cli、kill。""",
     "PROCESS_PORT": """# 进程端口巡检（只读）\nps -eo pid,ppid,user,pcpu,pmem,etime,cmd --sort=-pcpu | head -n 60\nss -ntulp 2>/dev/null || netstat -ntulp 2>/dev/null || netstat -an | grep LISTEN\n# 判定要点：未知进程、高占用、挖矿特征、未知监听端口、高危端口外网暴露。""",
     "FIREWALL": """# 防火墙巡检（只读）\nsystemctl is-active firewalld 2>/dev/null || true\nfirewall-cmd --list-all 2>/dev/null || true\niptables -S 2>/dev/null || true\nufw status verbose 2>/dev/null || true\n# 判定要点：防火墙关闭、全局放行、高危端口放行、黑白名单冲突。""",
-    "DISK": """# 磁盘空间巡检（只读）\ndf -h\ndu -sh /var/log 2>/dev/null || true\ndu -sh /data /backup /opt 2>/dev/null || true\n# 判定要点：磁盘使用率超过阈值、日志目录异常膨胀、备份目录空间不足。""",
+    "MEMORY": "free -h && echo '---' && cat /proc/meminfo | grep -E '^(MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree|Cached|Buffers)' && echo '---' && dmesg | grep -i 'oom\\|killed process' | tail -20",
+    "DISK": """# 磁盘空间巡检（只读）\ndf -hT\ndu -sh /var/log 2>/dev/null || true\ndu -sh /data /backup /opt 2>/dev/null || true\n# 判定要点：磁盘使用率超过阈值、日志目录异常膨胀、备份目录空间不足。""",
     "SERVICE_STATUS": """# 服务状态巡检（只读）\nsystemctl --failed 2>/dev/null || true\nsystemctl is-active nginx 2>/dev/null || true\nsystemctl is-active redis 2>/dev/null || true\nsystemctl is-active mysql mysqld mariadb postgresql 2>/dev/null || true\nps -ef | egrep 'nginx|redis|mysql|postgres|java|node|python|gunicorn|uvicorn' | grep -v grep || true\n# 判定要点：基础服务异常、项目进程缺失、异常重启或失败单元。""",
     "BACKUP": """# 备份任务巡检（只读）\ncrontab -l 2>/dev/null || true\nls -lah /backup /data/backups 2>/dev/null || true\nfind /backup /data/backups -maxdepth 2 -type f -mtime -2 -printf '%TY-%Tm-%Td %TH:%TM %s %p\\n' 2>/dev/null | tail -n 80 || true\n# 判定要点：当日备份缺失、0KB 文件、备份脚本失败、备份堆积、异地同步异常。""",
 }
@@ -82,7 +84,9 @@ PROJECT_RULE_COMMANDS: Dict[str, str] = {
     "RUNTIME_ENVIRONMENT": """# 项目运行环境巡检（只读，需替换 <main_port>/<runtime_user>/<deploy_path>）\nps -ef | grep -v grep | grep -E '<runtime_user>|<deploy_path>|java|node|python|gunicorn|uvicorn' || true\nss -ntulp 2>/dev/null | grep -E ':<main_port>\\b' || true\ndu -sh <deploy_path> <log_path> <backup_path> 2>/dev/null || true\n# 判定要点：项目进程缺失、端口未监听、运行用户不合规、日志/备份目录异常、关联服务器高危风险。""",
 }
 
-RISK_WEIGHT = {"HIGH": 20, "MEDIUM": 8, "LOW": 2, "NONE": 0}
+RISK_WEIGHT = {"HIGH": 15, "MEDIUM": 8, "LOW": 2, "NONE": 0}
+# B7: 风险等级顺序权重（用于聚合时取最大等级），与 RISK_WEIGHT 解耦以避免互相干扰
+RISK_ORDER = {"HIGH": 4, "MEDIUM": 3, "LOW": 2, "NONE": 1}
 ISSUE_STATUSES = {"OPEN", "PROCESSING", "FIXED", "VERIFIED", "IGNORED"}
 
 DEFAULT_BATCH_CONCURRENCY = int(os.getenv("INSPECTION_BATCH_CONCURRENCY", "3") or "3")
@@ -200,6 +204,7 @@ class CheckResult:
     evidence: str = ""
     command: str = ""
     source_type: str = "COMMAND"
+    parsed_facts: Optional[Dict[str, Any]] = None
 
 
 def _save_result(db: Session, run: InspectionRun, result: CheckResult) -> InspectionItemResult:
@@ -234,6 +239,7 @@ def _save_result(db: Session, run: InspectionRun, result: CheckResult) -> Inspec
         suggestion=result.suggestion,
         evidence_id=evidence_id,
         raw_output=evidence_text[:4000],
+        parsed_facts=result.parsed_facts,
         started_at=_now(),
         finished_at=_now(),
         created_at=_now(),
@@ -281,6 +287,16 @@ def _run_remote(server_name: str, command: str, timeout: int = DEFAULT_COMMAND_T
     started = time.time()
     try:
         code, out, err = ssh.exec(command, timeout=timeout)
+        # F5 修复：SSH 返回空 stdout 时记录 warning，避免数据采集中断被静默吞掉
+        if not (out or "").strip() and not (err or "").strip():
+            try:
+                import logging
+                logging.getLogger("ops_ai.inspection").warning(
+                    "[inspection] empty output: server=%s command_prefix=%r duration_ms=%d",
+                    server_name, command[:120], int((time.time() - started) * 1000),
+                )
+            except Exception:
+                pass
         return {"exit_code": code, "stdout": out or "", "stderr": err or "", "duration_ms": int((time.time() - started) * 1000)}
     finally:
         try:
@@ -289,12 +305,27 @@ def _run_remote(server_name: str, command: str, timeout: int = DEFAULT_COMMAND_T
             pass
 
 
-def _remote_check(server_name: str, category: str, item_code: str, item_name: str, command: str, analyze, timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> CheckResult:
+def _remote_check(server_name: str, category: str, item_code: str, item_name: str, command: str, analyze, timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS, thresholds: Optional[Dict[str, Any]] = None) -> CheckResult:
     try:
         result = _run_remote(server_name, command, timeout=timeout_seconds)
         output = f"$ {command}\nexit={result.get('exit_code')} duration_ms={result.get('duration_ms')}\n{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-        risk_level, status, message, suggestion = analyze(result.get("stdout") or "", result.get("stderr") or "", result.get("exit_code"))
-        return CheckResult(category, item_code, item_name, status, risk_level, message, suggestion, output, command)
+        try:
+            import inspect
+            sig = inspect.signature(analyze)
+            if "thresholds" in sig.parameters:
+                analyze_result = analyze(result.get("stdout") or "", result.get("stderr") or "", result.get("exit_code"), thresholds)
+            else:
+                analyze_result = analyze(result.get("stdout") or "", result.get("stderr") or "", result.get("exit_code"))
+        except TypeError:
+            # Backward compatibility: analyzer without thresholds param
+            analyze_result = analyze(result.get("stdout") or "", result.get("stderr") or "", result.get("exit_code"))
+        # Support both 4-tuple (old) and 5-tuple (new with parsed_facts)
+        if len(analyze_result) == 5:
+            risk_level, status, message, suggestion, parsed_facts = analyze_result
+        else:
+            risk_level, status, message, suggestion = analyze_result
+            parsed_facts = None
+        return CheckResult(category, item_code, item_name, status, risk_level, message, suggestion, output, command, "COMMAND", parsed_facts)
     except TimeoutError as exc:
         return CheckResult(category, item_code, item_name, "ERROR", "MEDIUM", f"巡检项执行超时：{exc}", "缩小巡检范围或提高命令超时时间；确认服务器响应和 SSH 连接稳定。", str(exc), command)
     except Exception as exc:
@@ -383,6 +414,7 @@ def _analyzer_for_category(category: str):
         "DISK": _analyze_disk,
         "SERVICE_STATUS": _analyze_service,
         "BACKUP": _analyze_backup,
+        "MEMORY": _analyze_memory,
         "FILE_SECURITY": _analyze_project_files,
         "CONFIG_SECURITY": _analyze_project_api,
         "API_SECURITY": _analyze_project_api,
@@ -390,8 +422,9 @@ def _analyzer_for_category(category: str):
         "CUSTOMER_SECURITY": _analyze_project_api,
         "BACKUP_SECURITY": _analyze_project_backup,
         "RUNTIME_ENVIRONMENT": _analyze_project_runtime,
+        "CUSTOM": _analyze_custom_command,
     }
-    return mapping.get(cat, lambda out, err, code: ("NONE", "PASS", "规则命令已执行，未配置专用判定器。", "请结合命令输出人工复核。"))
+    return mapping.get(cat, _analyze_custom_command)
 
 
 def _rule_execution_specs(db: Session, *, scope_type: str, categories: Iterable[str], project: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -478,6 +511,7 @@ def _finish_progress_item(db: Session, run: InspectionRun, row: InspectionItemRe
     row.message = result.message
     row.suggestion = result.suggestion
     row.raw_output = output
+    row.parsed_facts = result.parsed_facts
     row.finished_at = _now()
     if row.evidence_id:
         ev = db.query(InspectionEvidence).filter(InspectionEvidence.id == row.evidence_id).first()
@@ -529,115 +563,2710 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
 
     The executor uses these specs one by one so item results are committed after
     every check and the front-end can poll the run detail as real-time progress.
+
+    内置 9 大类有 hardcoded command + analyze；用户通过 InspectionRule 自定义的
+    category 会通过 DB 中 InspectionItemConfig 关联的 InspectionRule.rule_content
+    动态构建 spec，确保新增规则立即可在巡检项中选用并执行。
     """
+    builtin_codes = {c["code"] for c in SERVER_CATEGORIES}
     selected = set(categories or [c["code"] for c in SERVER_CATEGORIES])
     specs: List[Dict[str, Any]] = []
+    for code in selected:
+        if code in builtin_codes:
+            continue  # 由下面的 hardcoded 分支处理
+        # 动态从 DB 中查找自定义规则的命令
+        spec = _build_custom_rule_spec(code, scope=SERVER_SCOPE)
+        if spec:
+            specs.append(spec)
     if "LOGIN_SECURITY" in selected:
-        specs.append({"category": "LOGIN_SECURITY", "item_code": "SERVER_LOGIN_RECENT", "item_name": "近期登录与失败登录检查", "command": "(last -n 20 2>/dev/null || true); echo '---FAILED---'; (lastb -n 20 2>/dev/null || true)", "analyze": _analyze_login})
+        specs.append({
+            "category": "LOGIN_SECURITY",
+            "item_code": "SERVER_LOGIN_RECENT",
+            "item_name": "近期登录与失败登录检查",
+            "execution": "收集 last 近期成功登录（最多 80 条）+ lastb 过去 24 小时失败登录（最多 20 条，兼容降级为 lastb -n 20）",
+            "criteria": "判定标准：24小时内失败登录 ≥10 触发 HIGH；≥3 触发 LOW；root 远程登录触发 MEDIUM（可配置）；其它情况通过。",
+            "command": "(last -n 80 2>/dev/null || true); echo '---FAILED---'; (lastb --since \"24 hours ago\" 2>/dev/null | head -20 || lastb -n 20 2>/dev/null || true)",
+            "analyze": _analyze_login,
+        })
     if "ACCOUNT_SECURITY" in selected:
-        specs.append({"category": "ACCOUNT_SECURITY", "item_code": "SERVER_ACCOUNT_PRIVILEGE", "item_name": "系统账号与特权账号检查", "command": "echo '---PASSWD---'; cat /etc/passwd 2>/dev/null | head -200; echo '---UID0---'; grep 'x:0:' /etc/passwd 2>/dev/null || true", "analyze": _analyze_accounts})
+        specs.append({
+            "category": "ACCOUNT_SECURITY",
+            "item_code": "SERVER_ACCOUNT_PRIVILEGE",
+            "item_name": "系统账号与特权账号检查",
+            "execution": "解析 /etc/passwd 提取 UID=0 账号与可登录 shell 账号；解析 /etc/shadow 检测空密码账号",
+            "criteria": "判定标准：UID=0 账号 >1 触发 HIGH；空密码账号触发 HIGH；可登录账号 >20 触发 MEDIUM；>10 触发 LOW；其它情况通过。",
+            "command": "echo '---PASSWD---'; cat /etc/passwd 2>/dev/null | head -200; echo '---UID0---'; grep 'x:0:' /etc/passwd 2>/dev/null || true; echo '---SHADOW---'; (cat /etc/shadow 2>/dev/null | head -200 || echo 'PERMISSION_DENIED'); echo '---SHADOW_ERR---'; (cat /etc/shadow 2>/dev/null >/dev/null 2>&1 && echo 'OK' || echo 'ERR')",
+            "analyze": _analyze_accounts,
+        })
     if "COMMAND_HISTORY" in selected:
-        specs.append({"category": "COMMAND_HISTORY", "item_code": "SERVER_HISTORY_DANGEROUS", "item_name": "高危命令历史检查", "command": "(tail -n 200 ~/.bash_history 2>/dev/null || true); echo '---ROOT---'; (tail -n 200 /root/.bash_history 2>/dev/null || true)", "analyze": _analyze_history})
+        specs.append({
+            "category": "COMMAND_HISTORY",
+            "item_code": "SERVER_HISTORY_DANGEROUS",
+            "item_name": "高危命令历史检查",
+            "execution": "扫描 ~/.bash_history 与 /root/.bash_history 中是否存在高危命令关键词（精确匹配）与管道攻击组合（curl/wget + |bash/|sh）；cat/less/tail /etc/shadow 视为 HIGH",
+            "criteria": "判定标准：发现 history -c 触发 HIGH；rm -rf / / chmod 777 / > /dev/sd 触发 HIGH；curl/wget 管道到 shell 触发 HIGH；cat/less/tail /etc/shadow 触发 HIGH；其它危险命令触发 MEDIUM；其它情况通过。",
+            "command": "echo '---HISTORY---'; (cat ~/.bash_history 2>/dev/null || true); echo '---ROOT---'; (cat /root/.bash_history 2>/dev/null || true); echo '---HISTORY---'",
+            "analyze": _analyze_history,
+        })
     if "PROCESS_PORT" in selected:
-        specs.append({"category": "PROCESS_PORT", "item_code": "SERVER_PROCESS_PORT", "item_name": "进程与监听端口检查", "command": "echo '---TOP---'; ps -eo pid,ppid,user,comm,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -30; echo '---PORTS---'; (ss -ntulp 2>/dev/null || netstat -ntulp 2>/dev/null || true)", "analyze": _analyze_process_ports})
+        specs.append({
+            "category": "PROCESS_PORT",
+            "item_code": "SERVER_PROCESS_PORT",
+            "item_name": "进程与监听端口检查",
+            "execution": "ps 取 CPU TOP 30 进程；ss/netstat 取全部监听端口；解析协议、绑定地址、进程名、PID；支持 cpu_sample_count>1 时的连续 2 次采样",
+            "criteria": "判定标准：发现 xmrig/kinsing/minerd/kdevtmpfsi 等挖矿特征触发 HIGH；高危端口（3306/6379/27017/9200/11211/5432）对 0.0.0.0/::/* 暴露触发 MEDIUM；中危端口（22/23/445/3389/5900/8080 等）暴露触发 LOW；单进程 CPU≥80% 触发 MEDIUM（连续 2 次采样）。",
+            "command": "echo '---TOP---'; ps -eo pid,ppid,user,comm,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -30; sleep 2; echo '---TOP---'; ps -eo pid,ppid,user,comm,%cpu,%mem,args --sort=-%cpu 2>/dev/null | head -30; echo '---PORTS---'; (ss -ntulp 2>/dev/null || netstat -ntulp 2>/dev/null || true)",
+            "analyze": _analyze_process_ports,
+        })
     if "FIREWALL" in selected:
-        specs.append({"category": "FIREWALL", "item_code": "SERVER_FIREWALL_STATUS", "item_name": "防火墙状态检查", "command": "(systemctl is-active firewalld 2>/dev/null || true); (ufw status 2>/dev/null || true); (iptables -S 2>/dev/null | head -100 || true)", "analyze": _analyze_firewall})
+        specs.append({
+            "category": "FIREWALL",
+            "item_code": "SERVER_FIREWALL_STATUS",
+            "item_name": "防火墙状态检查",
+            "execution": "检测 firewalld/ufw 状态与 iptables 规则（前 100 条），按行解析全局放行规则",
+            "criteria": "判定标准：单条规则 -p all 且 0.0.0.0/0 触发 HIGH；防火墙 inactive 触发可配置等级（默认 MEDIUM，云环境可设为 LOW）；默认 INPUT 策略 ACCEPT 触发 LOW。",
+            "command": "(systemctl is-active firewalld 2>/dev/null || true); (ufw status 2>/dev/null || true); (iptables -S 2>/dev/null | head -100 || true)",
+            "analyze": _analyze_firewall,
+        })
     if "DISK" in selected:
-        specs.append({"category": "DISK", "item_code": "SERVER_DISK_USAGE", "item_name": "磁盘空间检查", "command": "df -PTh 2>/dev/null | head -100", "analyze": _analyze_disk})
+        specs.append({
+            "category": "DISK",
+            "item_code": "SERVER_DISK_USAGE",
+            "item_name": "磁盘空间与 inode 使用率检查",
+            "execution": "df -PTh 与 df -iPTh 两段式采集：空间按 fstype 过滤（跳过 overlay/squashfs/tmpfs），NFS ≥99% 单独识别为 stale",
+            "criteria": "判定标准：空间 ≥90% → HIGH；≥75% → MEDIUM；inode ≥90% → HIGH；≥80% → MEDIUM；NFS≥99% → MEDIUM 单独提示。",
+            "command": "echo '---SPACE---'; (df -PTh 2>/dev/null || df -hT 2>/dev/null || true) | head -100; echo '---INODE---'; (df -iPTh 2>/dev/null || df -ihT 2>/dev/null || true) | head -100",
+            "analyze": _analyze_disk,
+        })
+    if "MEMORY" in selected:
+        specs.append({
+            "category": "MEMORY",
+            "item_code": "SERVER_MEMORY_USAGE",
+            "item_name": "内存与 Swap 使用率检查",
+            "execution": "free 命令取内存与 Swap；同时输出 /proc/meminfo 用于 MemAvailable 算法（排除 buff/cache）",
+            "criteria": "判定标准：内存 ≥95% → HIGH；≥85% → MEDIUM；Swap ≥80% → HIGH；≥50% → MEDIUM；其它情况通过。",
+            "command": "(free 2>/dev/null || free -h 2>/dev/null || true); echo '---MEMINFO---'; (cat /proc/meminfo 2>/dev/null | head -10 || true)",
+            "analyze": _analyze_memory,
+        })
     if "SERVICE_STATUS" in selected:
-        specs.append({"category": "SERVICE_STATUS", "item_code": "SERVER_SERVICE_STATUS", "item_name": "基础服务状态检查", "command": "(systemctl --failed --no-pager 2>/dev/null || true); echo '---COMMON---'; (systemctl is-active nginx docker redis redis-server mysql mysqld postgresql 2>/dev/null || true)", "analyze": _analyze_service})
+        specs.append({
+            "category": "SERVICE_STATUS",
+            "item_code": "SERVER_SERVICE_STATUS",
+            "item_name": "基础服务与 PM2 进程检查",
+            "execution": "systemctl --failed + watch_services systemctl is-active + PM2 (jlist/ping) 状态 + etcd 集群健康 + ps 关键字扫描（非 systemd 进程）",
+            "criteria": "判定标准：PM2 自身 ping 失败 → HIGH；PM2 进程 errored → HIGH；PM2 进程 stopped（含 watch_services 期望）→ MEDIUM；etcd 集群 unhealthy → HIGH；systemd 失败单元 ≥ 阈值 → HIGH，< 阈值 → MEDIUM；watch_services 中任一非 active → LOW（信息性）；caddy/非 systemd 关键字 ps 中缺失 → MEDIUM。",
+            "command": (
+                "echo '---SYSTEMD_FAILED---'; "
+                "(systemctl --failed --no-pager 2>/dev/null || true); "
+                "echo '---SYSTEMD_ACTIVE---'; "
+                "(for s in nginx caddy docker redis redis-server mysql mysqld postgresql pm2-node etcd; do "
+                "  printf '%s: %s\\n' \"$s\" \"$(systemctl is-active $s 2>/dev/null || echo 'unknown')\"; "
+                "done); "
+                "echo '---PM2_JLIST---'; "
+                "(pm2 jlist 2>/dev/null || echo 'PM2_NOT_FOUND'); "
+                "echo '---PM2_PING---'; "
+                "(pm2 ping 2>/dev/null && echo 'PM2_PING_OK' || echo 'PM2_PING_FAIL'); "
+                "echo '---ETCD_HEALTH---'; "
+                "(etcdctl endpoint health --cluster 2>/dev/null || etcdctl endpoint health 2>/dev/null || echo 'ETCD_NOT_FOUND'); "
+                "echo '---PROCESS_KEYWORDS---'; "
+                "(ps -eo pid,user,comm --no-headers 2>/dev/null | egrep -i 'nginx|caddy|mysql|postgres|redis|etcd|pm2' | head -50 || true)"
+            ),
+            "analyze": _analyze_service,
+        })
     if "BACKUP" in selected:
-        specs.append({"category": "BACKUP", "item_code": "SERVER_BACKUP_STATUS", "item_name": "备份任务与备份文件检查", "command": "echo '---CRON---'; (crontab -l 2>/dev/null | grep -Ei 'backup|dump|tar|rsync|mysqldump' || true); echo '---BACKUPS---'; (find /data/backups /backup /var/backups -maxdepth 2 -type f -mtime -2 -printf '%p %s\\n' 2>/dev/null | head -50 || true)", "analyze": _analyze_backup})
+        specs.append({
+            "category": "BACKUP",
+            "item_code": "SERVER_BACKUP_STATUS",
+            "item_name": "备份任务与备份文件检查",
+            "execution": "crontab -l + /etc/cron.*/ + /etc/cron.d/ + systemctl list-timers 中过滤 backup/dump/tar/rsync/mysqldump 任务；find 备份路径近 N 天文件",
+            "criteria": "判定标准：无 cron/timer 且无文件触发 HIGH；无 cron 有文件触发 MEDIUM；有 cron 无文件触发 MEDIUM；0字节文件触发 MEDIUM；都有触发通过。",
+            "command": "echo '---CRON---'; (crontab -l 2>/dev/null | grep -Ei 'backup|dump|tar|rsync|mysqldump' || true); echo '---CRON_D---'; (ls /etc/cron.d/ 2>/dev/null | head -30; grep -RhE 'backup|dump|tar|rsync|mysqldump' /etc/cron.d/ /etc/cron.daily/ /etc/cron.weekly/ /etc/cron.monthly/ 2>/dev/null | head -30 || true); echo '---TIMER---'; (systemctl list-timers --no-pager 2>/dev/null | head -20 || true); echo '---BACKUPS---'; (find /data/backups /backup /var/backups /data/db_backup /home/backup /srv/backup /var/lib/mysql/backup -maxdepth 3 -type f -mtime -40 -printf '%p %s %TY-%Tm-%TdT%TH:%TM\\n' 2>/dev/null | head -200 || true); echo '---NOW---'; (date -u +%s)",
+            "analyze": _analyze_backup,
+        })
     return specs
 
-def _server_checkers(server_name: str, categories: Iterable[str]) -> List[CheckResult]:
+
+def _build_custom_rule_spec(category_code: str, scope: str = SERVER_SCOPE) -> Optional[Dict[str, Any]]:
+    """从 DB 中根据 category 构造自定义规则的 check spec。
+
+    优先查找 InspectionItemConfig.item_code 关联的 InspectionItemRule.rule_code，
+    再在 InspectionRule 中取 rule_content 作为执行命令。
+    若都不存在，返回 None。
+    """
+    from app.db.models import InspectionItemConfig, InspectionItemRule, InspectionRule as RuleModel
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        rule_code: Optional[str] = None
+        try:
+            cfg = db.query(InspectionItemConfig).filter(
+                InspectionItemConfig.item_code == category_code,
+                InspectionItemConfig.scope_type == scope,
+            ).first()
+            if cfg:
+                link = db.query(InspectionItemRule).filter(
+                    InspectionItemRule.item_config_id == cfg.id,
+                ).order_by(InspectionItemRule.sort_order).first()
+                if link and link.rule_code:
+                    rule_code = link.rule_code
+        except Exception:
+            rule_code = None
+
+        # 兜底：直接在 InspectionRule 中按 category 找
+        if not rule_code:
+            try:
+                rule = db.query(RuleModel).filter(
+                    RuleModel.category == category_code,
+                    RuleModel.scope_type == scope,
+                    RuleModel.deleted == False,  # noqa: E712
+                    RuleModel.enabled == True,  # noqa: E712
+                ).first()
+                if rule:
+                    rule_code = rule.rule_code
+            except Exception:
+                rule_code = None
+
+        if not rule_code:
+            return None
+        return _spec_from_rule_code(category_code, rule_code)
+    except Exception:
+        return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _spec_from_rule_code(category_code: str, rule_code: str) -> Optional[Dict[str, Any]]:
+    """根据 rule_code 在 DB 中查找 InspectionRule 并构建 spec。"""
+    from app.db.models import InspectionRule as RuleModel
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        try:
+            rule = db.query(RuleModel).filter(
+                RuleModel.rule_code == rule_code,
+                RuleModel.deleted == False,  # noqa: E712
+                RuleModel.enabled == True,  # noqa: E712
+            ).first()
+        except Exception:
+            return None
+        if not rule:
+            return None
+        command = _extract_command_from_content(rule.rule_content or "")
+        if not command:
+            return None
+        rule_config = rule.config_json if isinstance(rule.config_json, dict) else {}
+        return {
+            "category": category_code,
+            "item_code": f"SERVER_CUSTOM_{rule_code}",
+            "item_name": rule.rule_name or category_code,
+            "execution": rule.description or "执行 InspectionRule 中保存的 shell 命令",
+            "criteria": rule.suggestion or "退出码/关键字由通用 analyzer 判定",
+            "command": command,
+            "analyze": make_custom_rule_analyzer(rule_config, rule.risk_level or "MEDIUM"),
+            "rule_config": rule_config,
+        }
+    except Exception:
+        return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _server_checkers(server_name: str, categories: Iterable[str], thresholds: Optional[Dict[str, Any]] = None) -> List[CheckResult]:
     checks: List[CheckResult] = []
     for spec in _server_check_specs(server_name, categories):
-        checks.append(_remote_check(server_name, spec["category"], spec["item_code"], spec["item_name"], spec["command"], spec["analyze"]))
+        checks.append(_remote_check(server_name, spec["category"], spec["item_code"], spec["item_name"], spec["command"], spec["analyze"], thresholds=thresholds))
     return checks
 
-def _analyze_login(out: str, err: str, code: int):
-    failed_lines = [l for l in out.splitlines() if l and "FAILED" not in l and ("invalid" in l.lower() or "ssh" in l.lower() or "pts" in l.lower())]
-    if "---FAILED---" in out:
-        failed_part = out.split("---FAILED---", 1)[1]
-        failed_count = len([l for l in failed_part.splitlines() if l.strip()])
-        if failed_count >= 10:
-            return "MEDIUM", "WARNING", f"近期失败登录记录较多（约 {failed_count} 条），存在暴力破解风险。", "核查来源 IP，必要时加入黑名单并收紧 SSH 白名单。"
-    if "root" in out.lower() and ("pts" in out.lower() or "ssh" in out.lower()):
-        return "LOW", "WARNING", "检测到 root 或远程登录记录，请确认是否符合运维规范。", "建议禁止 root 直接登录，使用个人账号 + sudo 审计。"
-    return "NONE", "PASS", "未发现明显登录异常。", "保持登录日志留存不少于 90 天。"
+# ============================================================
+# 阈值配置：5 个 analyzer 的可量化阈值
+# ============================================================
+
+DEFAULT_THRESHOLDS: Dict[str, Any] = {
+    "DISK": {
+        "high_pct": 90,            # 空间使用率达到/超过 90% 视为 HIGH
+        "medium_pct": 75,          # 空间使用率达到/超过 75% 视为 MEDIUM
+        "inode_high_pct": 90,      # inode 使用率达到/超过 90% 视为 HIGH
+        "inode_medium_pct": 80,    # inode 使用率达到/超过 80% 视为 MEDIUM
+        "system_mounts": ["/", "/boot", "/boot/efi", "/root"],
+        "system_pct_offset": 5,
+        # P0-4: 容器/伪文件系统跳过，避免 overlay/squashfs 100% 误报
+        "skip_fstypes": [
+            "overlay", "overlayfs", "squashfs", "tmpfs", "devtmpfs",
+            "proc", "sysfs", "cgroup", "cgroup2", "ramfs", "autofs",
+            "fuse.gvfsd-fuse", "fuse.snapfuse",
+        ],
+        # NFS ≥99% 大概率是 stale mount，单独识别（不参与 max_pct 评分）
+        "nfs_stale_threshold_pct": 99,
+    },
+    "BACKUP": {
+        "backup_paths": [
+            "/data/backups", "/backup", "/var/backups",
+            "/data/db_backup", "/home/backup", "/srv/backup",
+            "/var/lib/mysql/backup",
+        ],
+        "min_age_days": 1,         # 兼容旧字段；P2-3 引入按粒度版本
+        "min_age_days_daily": 1,
+        "min_age_days_weekly": 8,
+        "min_age_days_monthly": 32,
+        "scan_system_cron": True,
+        "scan_systemd_timer": True,
+    },
+    "LOGIN_SECURITY": {
+        # P1-3: 双指标 - 单 IP 失败 / 总数失败
+        "failed_high_per_ip": 50,  # 单 IP 失败 ≥50 触发 HIGH
+        "failed_high_total": 200,  # 总失败 ≥200 触发 HIGH（兜底）
+        "failed_low_total": 30,    # 总失败 ≥30 触发 LOW
+        "failed_window_hours": 24,
+        "root_remote_warn": True,  # 默认仅 LOW
+        "root_remote_ip_whitelist": [],  # 在白名单内的 root 登录不告警
+        "degraded_command_note": True,  # lastb --since 失败时在 facts 标记降级
+        # 兼容老字段（保留但不再使用，新代码用 per_ip/total）
+        "failed_high": 10,
+        "failed_low": 3,
+        "root_remote_medium": True,
+    },
+    "PROCESS_PORT": {
+        # P1-2: 端口风险分级
+        "high_risk_ports_high":   [27017, 6379, 11211, 9200, 5432, 3306],
+        "high_risk_ports_medium": [22, 23, 445, 3389, 5900, 8080, 8000, 8888, 9000],
+        "suspicious_keywords":    ["xmrig", "kinsing", "minerd", "kdevtmpfsi", "perfctl", "c3pool", "tsm", "masscan"],
+        "top_cpu_n": 10,
+        "cpu_threshold": 80,
+        "cpu_sample_count": 2,    # P2-2: 连续 N 次采样均 ≥阈值才计入
+        # 兼容老字段
+        "high_risk_ports": [3306, 6379, 27017, 9200, 11211, 5432, 23, 445, 3389, 5900],
+    },
+    "ACCOUNT_SECURITY": {
+        "max_uid0": 1,             # UID=0 账号超过 N 触发 HIGH
+        "max_login_users": 10,     # 可登录账号超过 N 触发 LOW
+        "max_login_users_medium": 20, # 可登录账号超过 N 触发 MEDIUM
+        "check_empty_password": True,  # 检查空密码账号
+        "idle_days": 90,           # 超过 N 天未登录视为闲置账号
+        "uid0_whitelist": ["root"],  # P3-3: 兼容白名单
+    },
+    "COMMAND_HISTORY": {
+        # P2-1: 移除 "/etc/passwd", "/etc/shadow" 等自伤关键字
+        "danger_keywords": [
+            "rm -rf /", "history -c", "chmod 777", "chown root",
+            "> /dev/sd", "dd if=", "iptables -F", "kill -9",
+            "reboot", "shutdown",
+        ],
+        "pipe_combos": [["curl", "| bash"], ["curl", "| sh"], ["wget", "| bash"], ["wget", "| sh"]],
+        "high_keywords": ["rm -rf /", "chmod 777", "history -c", "> /dev/sd"],
+        # B8: 死字段清理——sensitive_read_re 改为 shadow_read_re，语义更准确且被实际使用
+        "shadow_read_re": r"\b(cat|less|tail|head|more)\s+/etc/shadow\b",
+    },
+    "FIREWALL": {
+        "inactive_level": "MEDIUM",  # 防火墙未启用时的风险等级（云环境可设为 LOW）
+        "no_local_firewall_level": "LOW",  # P1-4: 云环境默认 LOW
+    },
+    "MEMORY": {
+        "mem_high_pct": 95,        # 内存使用率达到/超过 95% 视为 HIGH
+        "mem_medium_pct": 85,      # 内存使用率达到/超过 85% 视为 MEDIUM
+        "swap_high_pct": 50,       # Swap 使用率达到/超过 50% 视为 MEDIUM
+        "swap_critical_pct": 80,   # Swap 使用率达到/超过 80% 视为 HIGH
+        "use_meminfo": True,       # P0-1: 优先 /proc/meminfo 的 MemAvailable
+    },
+    "SERVICE_STATUS": {
+        # P0-2: core_services 重命名为 watch_services，不再作判定基准
+        "watch_services": [
+            "nginx", "caddy", "mysql", "mysqld", "mariadb",
+            "postgresql", "redis", "redis-server", "pm2", "etcd", "docker",
+        ],
+        "failed_unit_medium_count": 3,  # 失败单元 <3 → MEDIUM；≥3 → HIGH
+        # E2/E3 新增：PM2 进程管理与 etcd 健康
+        "pm2_stopped_level": "MEDIUM",      # PM2 进程 stopped 时的等级（期望进程升 HIGH）
+        "pm2_errored_level": "HIGH",        # PM2 进程 errored 时的等级
+        "pm2_expected_processes": [
+            # 默认期望由 PM2 管理的业务进程；用户可在 DB 中按需追加
+            "etcd", "exchange", "exchange-02", "monitor", "promtail",
+            "puller", "risk", "risk-02", "sender", "strategy", "strategy-02",
+            "supplier", "system", "trader", "transaction", "transaction-02",
+        ],
+        "etcd_unhealthy_level": "HIGH",     # etcd 集群不健康时的等级
+        "process_keywords": [                # ps 输出中需检测的关键字
+            "nginx", "caddy", "mysql", "postgres", "redis", "etcd", "pm2",
+        ],
+        # 兼容老字段
+        "core_services": [
+            "nginx", "caddy", "mysql", "mysqld", "mariadb",
+            "postgresql", "redis", "redis-server", "pm2", "etcd",
+        ],
+    },
+}
+
+# ============================================================
+# 阈值类型容错：避免前端误传字符串等导致整次巡检崩溃
+# ============================================================
+
+def _coerce_int(v, default):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
 
 
-def _analyze_accounts(out: str, err: str, code: int):
-    uid0 = [l for l in out.splitlines() if ":x:0:" in l]
-    login_users = [l for l in out.splitlines() if re.search(r":/(bin/)?(bash|sh|zsh)$", l)]
-    if len(uid0) > 1:
-        return "HIGH", "RISK", f"发现多个 UID=0 特权账号：{len(uid0)} 个。", "立即核查陌生特权账号，冻结并排查入侵痕迹。"
-    if len(login_users) > 10:
-        return "LOW", "WARNING", f"可登录用户较多（{len(login_users)} 个），建议复核闲置账号。", "清理离职、闲置、非必要登录账号。"
-    return "NONE", "PASS", "系统账号与特权账号检查未发现明显异常。", "保持最小权限与账号定期复盘。"
+def _coerce_bool(v, default):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(v, (int, float)):
+        return bool(v)
+    return default
 
 
-def _analyze_history(out: str, err: str, code: int):
-    patterns = ["rm -rf", "history -c", "chmod 777", "chown root", "curl ", "wget ", "scp ", "ftp ", "mysql ", "redis-cli", "kill -9", "reboot", "shutdown"]
-    hit = [p for p in patterns if p.lower() in out.lower()]
-    if "history -c" in hit:
-        return "HIGH", "RISK", "发现 history 清空命令痕迹。", "立即核查操作人和时间窗口，结合登录日志排查入侵。"
-    if hit:
-        level = "HIGH" if any(x in hit for x in ["rm -rf", "chmod 777"]) else "MEDIUM"
-        return level, "WARNING", f"发现高危命令特征：{', '.join(hit[:8])}。", "核查命令执行上下文，保留证据并确认是否为授权操作。"
-    return "NONE", "PASS", "未发现明显高危命令痕迹。", "禁止手动清理 history，建议集中留存命令审计。"
+def _coerce_list(v, default):
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        return [x.strip() for x in v.split(",") if x.strip()]
+    return default
 
 
-def _analyze_process_ports(out: str, err: str, code: int):
-    risky_ports = [" 22 ", ":22 ", ":3306", ":6379", ":27017", ":9200", ":11211"]
-    hits = [p.strip() for p in risky_ports if p in out]
-    suspicious = ["xmrig", "kinsing", "minerd", "kdevtmpfsi"]
-    bad = [p for p in suspicious if p in out.lower()]
-    if bad:
-        return "HIGH", "RISK", f"发现疑似恶意/挖矿进程特征：{', '.join(bad)}。", "立即隔离服务器，保留进程与网络证据后排查入侵。"
-    if hits:
-        return "MEDIUM", "WARNING", f"检测到高风险端口监听：{', '.join(sorted(set(hits))) }。", "确认端口是否仅对白名单开放，避免数据库/缓存端口暴露外网。"
-    return "NONE", "PASS", "进程和监听端口未发现明显异常。", "保持端口最小暴露。"
-
-
-def _analyze_firewall(out: str, err: str, code: int):
-    text = out.lower()
-    if "inactive" in text or "not running" in text:
-        return "MEDIUM", "WARNING", "防火墙可能未启用或未运行。", "确认安全组/防火墙策略，生产环境避免全局放行。"
-    if "-p all" in text and "0.0.0.0/0" in text:
-        return "HIGH", "RISK", "发现疑似全局放行规则。", "立即核查规则来源，收紧到必要端口和白名单 IP。"
-    return "NONE", "PASS", "防火墙状态未发现明显异常。", "定期复核开放策略与黑白名单冲突。"
-
-
-def _analyze_disk(out: str, err: str, code: int):
-    high = []
-    for line in out.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 6 and parts[-2].endswith('%'):
+def _coerce_thresholds(category: str, raw: Dict[str, Any]) -> Dict[str, Any]:
+    """对单一类目的阈值做类型容错。"""
+    if not isinstance(raw, dict):
+        return dict(DEFAULT_THRESHOLDS.get(category, {}))
+    out = dict(DEFAULT_THRESHOLDS.get(category, {}))
+    cat = category.upper()
+    if cat == "DISK":
+        for k in ("high_pct", "medium_pct", "inode_high_pct", "inode_medium_pct", "system_pct_offset", "nfs_stale_threshold_pct"):
+            if k in raw:
+                out[k] = _coerce_int(raw.get(k), out.get(k, 0))
+        if "system_mounts" in raw:
+            out["system_mounts"] = _coerce_list(raw.get("system_mounts"), out.get("system_mounts", []))
+        if "skip_fstypes" in raw:
+            out["skip_fstypes"] = _coerce_list(raw.get("skip_fstypes"), out.get("skip_fstypes", []))
+    elif cat == "BACKUP":
+        for k in ("min_age_days", "min_age_days_daily", "min_age_days_weekly", "min_age_days_monthly"):
+            if k in raw:
+                out[k] = _coerce_int(raw.get(k), out.get(k, 1))
+        if "backup_paths" in raw:
+            out["backup_paths"] = _coerce_list(raw.get("backup_paths"), out.get("backup_paths", []))
+        for k in ("scan_system_cron", "scan_systemd_timer"):
+            if k in raw:
+                out[k] = _coerce_bool(raw.get(k), out.get(k, True))
+    elif cat == "LOGIN_SECURITY":
+        for k in ("failed_high", "failed_low", "failed_window_hours",
+                  "failed_high_per_ip", "failed_high_total", "failed_low_total"):
+            if k in raw:
+                out[k] = _coerce_int(raw.get(k), out.get(k, 0))
+        for k in ("root_remote_medium", "root_remote_warn", "degraded_command_note"):
+            if k in raw:
+                out[k] = _coerce_bool(raw.get(k), out.get(k, True))
+        if "root_remote_ip_whitelist" in raw:
+            out["root_remote_ip_whitelist"] = _coerce_list(raw.get("root_remote_ip_whitelist"), [])
+    elif cat == "PROCESS_PORT":
+        for k in ("top_cpu_n", "cpu_sample_count"):
+            if k in raw:
+                out[k] = _coerce_int(raw.get(k), out.get(k, 0))
+        if "cpu_threshold" in raw:
             try:
-                pct = int(parts[-2].rstrip('%'))
-                if pct >= 90:
-                    high.append(f"{parts[-1]} {pct}%")
-            except Exception:
+                out["cpu_threshold"] = float(raw.get("cpu_threshold"))
+            except (TypeError, ValueError):
                 pass
+        for k in ("high_risk_ports", "high_risk_ports_high", "high_risk_ports_medium", "suspicious_keywords"):
+            if k in raw:
+                out[k] = _coerce_list(raw.get(k), out.get(k, []))
+    elif cat == "ACCOUNT_SECURITY":
+        for k in ("max_uid0", "max_login_users", "max_login_users_medium", "idle_days"):
+            if k in raw:
+                out[k] = _coerce_int(raw.get(k), out.get(k, 0))
+        if "check_empty_password" in raw:
+            out["check_empty_password"] = _coerce_bool(raw.get("check_empty_password"), True)
+        if "uid0_whitelist" in raw:
+            out["uid0_whitelist"] = _coerce_list(raw.get("uid0_whitelist"), ["root"])
+    elif cat == "COMMAND_HISTORY":
+        for k in ("danger_keywords", "high_keywords", "pipe_combos"):
+            if k in raw:
+                out[k] = _coerce_list(raw.get(k), out.get(k, []))
+        # B8: shadow_read_re 可由 DB 覆盖，必须为字符串
+        if "shadow_read_re" in raw and isinstance(raw.get("shadow_read_re"), str):
+            out["shadow_read_re"] = raw["shadow_read_re"]
+    elif cat == "FIREWALL":
+        for k in ("inactive_level", "no_local_firewall_level"):
+            if k in raw and isinstance(raw.get(k), str):
+                out[k] = raw[k].upper()
+    elif cat == "MEMORY":
+        for k in ("mem_high_pct", "mem_medium_pct", "swap_high_pct", "swap_critical_pct"):
+            if k in raw:
+                out[k] = _coerce_int(raw.get(k), out.get(k, 0))
+        if "use_meminfo" in raw:
+            out["use_meminfo"] = _coerce_bool(raw.get("use_meminfo"), True)
+    elif cat == "SERVICE_STATUS":
+        for k in ("watch_services", "core_services", "pm2_expected_processes", "process_keywords"):
+            if k in raw:
+                out[k] = _coerce_list(raw.get(k), out.get(k, []))
+        if "failed_unit_medium_count" in raw:
+            out["failed_unit_medium_count"] = _coerce_int(raw.get("failed_unit_medium_count"), 3)
+        for k in ("pm2_stopped_level", "pm2_errored_level", "etcd_unhealthy_level"):
+            if k in raw and isinstance(raw.get(k), str):
+                v = raw[k].strip().upper()
+                if v in {"HIGH", "MEDIUM", "LOW", "NONE"}:
+                    out[k] = v
+    return out
+
+
+def _load_thresholds(db: Optional[Session] = None) -> Dict[str, Any]:
+    """从 InspectionItemConfig.config_json 加载阈值；如果 db 为空则用默认值。
+
+    合并策略（B5 修复）：
+    - 以 DEFAULT_THRESHOLDS 为基线
+    - 对每个 InspectionItemConfig.config_json.thresholds 做类型容错
+    - 多个 cfg 共享同一 category 时，按 `(category, id)` 升序遍历（确定性）
+    - 后到的 cfg 覆盖早到的 cfg（DB 顺序稳定即可重现）
+    """
+    thresholds: Dict[str, Any] = {k: dict(v) for k, v in DEFAULT_THRESHOLDS.items()}
+    if db is None:
+        return thresholds
+    try:
+        # B5: 显式按 (category, id) 排序，避免依赖 SQLAlchemy 返回顺序
+        rows = (
+            db.query(InspectionItemConfig)
+            .filter(InspectionItemConfig.enabled == True)  # noqa: E712
+            .order_by(InspectionItemConfig.category.asc(), InspectionItemConfig.id.asc())
+            .all()
+        )
+        for r in rows:
+            cfg = r.config_json or {}
+            t = cfg.get("thresholds") if isinstance(cfg, dict) else None
+            if not t or not isinstance(t, dict):
+                continue
+            cat = r.category
+            if not cat:
+                continue
+            # 对类目做容错
+            coerced = _coerce_thresholds(cat, t)
+            if cat not in thresholds:
+                thresholds[cat] = coerced
+            else:
+                for k, v in coerced.items():
+                    thresholds[cat][k] = v
+    except Exception:
+        pass
+    return thresholds
+
+
+def _analyze_login(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P1-3 修复：失败登录双指标 - 单 IP 高 + 总数兜底；root 远程登录支持白名单。"""
+    success_logins: List[Dict[str, Any]] = []
+    attacker_map: Dict[str, Dict[str, Any]] = {}
+    failed_total = 0
+    in_failed = False
+    degraded = False  # lastb 失败时降级标记
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "---FAILED---":
+            in_failed = True
+            continue
+        if s.startswith("---"):
+            in_failed = False
+            continue
+        if not s:
+            continue
+
+        if in_failed:
+            failed_total += 1
+            parts = s.split()
+            if len(parts) >= 3:
+                user = parts[0]
+                ip_raw = parts[2]
+                ip = ip_raw.strip("()")
+                if not re.match(r'\d+\.\d+\.\d+\.\d+', ip):
+                    continue
+                if ip not in attacker_map:
+                    attacker_map[ip] = {"ip": ip, "count": 0, "attempted_users": []}
+                attacker_map[ip]["count"] += 1
+                if user not in attacker_map[ip]["attempted_users"] and len(attacker_map[ip]["attempted_users"]) < 10:
+                    attacker_map[ip]["attempted_users"].append(user)
+        else:
+            m = re.match(
+                r'(\S+)\s+(\S+)\s+(\S+)\s+(.+?)\s+\((\d+:\d+|\d+\+?\d*:\d+)?\)',
+                s,
+            )
+            if m:
+                success_logins.append({
+                    "user": m.group(1),
+                    "tty": m.group(2),
+                    "ip": m.group(3).strip("()"),
+                    "start": m.group(4).strip(),
+                    "duration": m.group(5) or "-",
+                    "active": "still logged in" in s.lower(),
+                })
+
+    # lastb 失败时（如 /var/log/btmp 不可读）降级标记
+    if (err or "").lower().startswith("lastb"):
+        degraded = True
+
+    top_attackers = sorted(attacker_map.values(), key=lambda x: x["count"], reverse=True)[:10]
+    cfg = (thresholds or {}).get("LOGIN_SECURITY", {}) or {}
+    # P1-3: 双指标 - 单 IP 高 + 总数兜底
+    failed_high_per_ip = int(cfg.get("failed_high_per_ip", 50))
+    failed_high_total = int(cfg.get("failed_high_total", 200))
+    failed_low_total = int(cfg.get("failed_low_total", 30))
+    failed_window_hours = int(cfg.get("failed_window_hours", 24))
+    root_remote_warn = bool(cfg.get("root_remote_warn", True))
+    root_remote_ip_whitelist = set(str(x).strip() for x in (cfg.get("root_remote_ip_whitelist") or []))
+    # 兼容老字段（已废弃）。`failed_high`/`failed_low` 不再回退——用户必须显式给出新字段
+    # （per_ip=50 / total=200 / low=30 安全默认值）才生效。
+    failed_high_per_ip = int(cfg.get("failed_high_per_ip", 50))
+    failed_high_total = int(cfg.get("failed_high_total", 200))
+    failed_low_total = int(cfg.get("failed_low_total", 30))
+    facts = {
+        "success_logins": success_logins[:20],
+        "top_attackers": top_attackers,
+        "failed_total": failed_total,
+        "degraded": degraded,
+        "thresholds": {
+            "failed_high_per_ip": failed_high_per_ip,
+            "failed_high_total": failed_high_total,
+            "failed_low_total": failed_low_total,
+            "failed_window_hours": failed_window_hours,
+            "root_remote_warn": root_remote_warn,
+            "root_remote_ip_whitelist": sorted(root_remote_ip_whitelist),
+        },
+        "criteria": f"单 IP 失败 ≥{failed_high_per_ip} → HIGH；总失败 ≥{failed_high_total} → HIGH；≥{failed_low_total} → LOW（{failed_window_hours}h窗口）；root 远程登录（白名单外） → {'LOW' if root_remote_warn else 'INFO'}",
+        "summary": f"成功登录 {len(success_logins)} 次，失败登录 {failed_total} 次（{failed_window_hours}h 窗口）{', 攻击源 ' + str(len(top_attackers)) + ' 个IP' if top_attackers else ''}{'（lastb 降级）' if degraded else ''}",
+    }
+
+    # A3 修复：root 远程登录（白名单外）作为附加事实，确保在爆破 HIGH 命中时仍能上报
+    root_remote_extra = None
+    if root_remote_warn and any(l["user"] == "root" for l in success_logins):
+        non_whitelisted = [l for l in success_logins if l["user"] == "root" and l.get("ip") not in root_remote_ip_whitelist]
+        if non_whitelisted:
+            root_remote_extra = {
+                "kind": "root_remote_login",
+                "count": len(non_whitelisted),
+                "ips": sorted({l.get("ip") for l in non_whitelisted if l.get("ip")})[:5],
+            }
+            facts["root_remote_login"] = root_remote_extra
+            facts["criteria"] = (facts.get("criteria", "") +
+                "；root 远程登录（白名单外）作为附加事实纳入 facts.root_remote_login").strip("；")
+
+    # P1-3 优先级 1: 单 IP 失败 ≥阈值 → HIGH（把 root 远程作为附加事实带入）
+    high_per_ip = [a for a in top_attackers if a["count"] >= failed_high_per_ip]
+    if high_per_ip:
+        top = high_per_ip[0]
+        msg = f"单 IP 暴力破解 {top['ip']} 失败 {top['count']} 次（阈值 {failed_high_per_ip}）。"
+        if root_remote_extra:
+            msg += f" 同时存在 root 远程登录 {root_remote_extra['count']} 次（白名单外）。"
+        sug = "立即封禁该 IP，启用 fail2ban；一并核查 root 远程登录合规性。"
+        return ("HIGH", "RISK", msg, sug, facts)
+    # P1-3 优先级 2: 总数兜底
+    if failed_total >= failed_high_total:
+        top_ip = top_attackers[0]["ip"] if top_attackers else "unknown"
+        msg = f"近期 {failed_window_hours} 小时内失败登录 {failed_total} 条（阈值 {failed_high_total}），最高攻击源 {top_ip}。"
+        if root_remote_extra:
+            msg += f" 同时存在 root 远程登录 {root_remote_extra['count']} 次（白名单外）。"
+        sug = "核查来源 IP，加入黑名单并收紧 SSH 白名单；启用 fail2ban；一并核查 root 远程登录合规性。"
+        return ("HIGH", "RISK", msg, sug, facts)
+    # P1-3 优先级 3: root 远程登录（白名单外）→ LOW
+    if root_remote_extra:
+        return ("LOW", "WARNING",
+                f"检测到 root 远程登录（{root_remote_extra['count']} 次），不在白名单内。",
+                "建议禁止 root 直接登录，使用个人账号 + sudo 审计。",
+                facts)
+    if failed_total >= failed_low_total:
+        return ("LOW", "WARNING",
+                f"近期 {failed_window_hours} 小时内有 {failed_total} 条失败登录（阈值 {failed_low_total}），存在暴力破解风险。",
+                "核查来源 IP，必要时加入黑名单并收紧 SSH 白名单。",
+                facts)
+    return ("NONE", "PASS",
+            "未发现明显登录异常。",
+            "保持登录日志留存不少于 90 天。",
+            facts)
+
+
+def _analyze_accounts(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P1-1 修复：shadow 不可读时返回 WARNING + fact flag，不静默 PASS。"""
+    uid0_accounts: List[Dict[str, Any]] = []
+    login_users: List[Dict[str, Any]] = []
+    empty_password_users: List[str] = []
+    total_users = 0
+    in_passwd = False
+    in_shadow = False
+    in_shadow_err = False
+    shadow_denied = False
+    shadow_sections = 0
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "---PASSWD---":
+            in_passwd = True
+            in_shadow = False
+            in_shadow_err = False
+            continue
+        if s == "---UID0---":
+            in_passwd = False
+            in_shadow = False
+            in_shadow_err = False
+            continue
+        if s == "---SHADOW---":
+            in_passwd = False
+            in_shadow = True
+            in_shadow_err = False
+            shadow_sections += 1
+            continue
+        if s == "---SHADOW_ERR---":
+            in_passwd = False
+            in_shadow = False
+            in_shadow_err = True
+            continue
+        if s.startswith("---"):
+            in_passwd = False
+            in_shadow = False
+            in_shadow_err = False
+            continue
+
+        if in_shadow and ":" in s:
+            parts = s.split(":")
+            if len(parts) >= 2:
+                user = parts[0]
+                pw_hash = parts[1]
+                if pw_hash == "PERMISSION_DENIED":
+                    shadow_denied = True
+                    continue
+                # 空密码：hash 字段为空字符串（如 user::19000:0:...）
+                if pw_hash == "":
+                    empty_password_users.append(user)
+            continue
+
+        if in_shadow_err and s == "ERR":
+            shadow_denied = True
+            continue
+
+        if not (in_passwd and ":" in s):
+            continue
+        parts = s.split(":")
+        if len(parts) < 7:
+            continue
+        user, _, uid, _, _, home, shell = parts[:7]
+        total_users += 1
+        if uid == "0":
+            uid0_accounts.append({"user": user, "uid": 0, "shell": shell, "home": home})
+        if shell.rstrip().endswith(("bash", "sh", "zsh", "dash", "fish", "csh", "tcsh")):
+            login_users.append({"user": user, "shell": shell})
+
+    cfg = (thresholds or {}).get("ACCOUNT_SECURITY", {}) or {}
+    max_uid0 = int(cfg.get("max_uid0", 1))
+    max_login_users = int(cfg.get("max_login_users", 10))
+    max_login_users_medium = int(cfg.get("max_login_users_medium", 20))
+    uid0_whitelist = set(cfg.get("uid0_whitelist") or ["root"])
+    uid0_violations = [a for a in uid0_accounts if a["user"] not in uid0_whitelist]
+    facts = {
+        "uid0_accounts": uid0_accounts,
+        "login_users": login_users[:20],
+        "login_user_count": len(login_users),
+        "total_users": total_users,
+        "empty_password_users": empty_password_users,
+        "shadow_denied": shadow_denied,
+        "uid0_whitelist": sorted(uid0_whitelist),
+        "uid0_violations": uid0_violations,
+        "thresholds": {"max_uid0": max_uid0, "max_login_users": max_login_users, "max_login_users_medium": max_login_users_medium},
+        "criteria": f"UID=0 账号 >{max_uid0} → HIGH；空密码账号 → HIGH；可登录账号 >{max_login_users_medium} → MEDIUM；>{max_login_users} → LOW；shadow 不可读 → WARNING",
+        "summary": f"{total_users} 个系统账号，{len(login_users)} 个可登录，{len(uid0_accounts)} 个 UID=0{', ' + str(len(empty_password_users)) + ' 个空密码' if empty_password_users else ''}{', shadow 不可读' if shadow_denied else ''}",
+    }
+
+    # H3 修复：数据采集失败兜底
+    if total_users == 0 and not shadow_denied and len(login_users) == 0:
+        return ("MEDIUM", "WARNING",
+                "未获取到任何账号数据（/etc/passwd 解析为空，可能是 SSH 通道异常、命令被沙箱拦截或权限不足）。",
+                "检查 SSH 连接、`cat /etc/passwd` 在该服务器是否可执行；确认非交互式 SSH PATH 包含 cat；非 root 用户可能无读权限。",
+                facts)
+    if len(uid0_violations) > max_uid0:
+        names = ", ".join(a["user"] for a in uid0_violations)
+        return ("HIGH", "RISK",
+                f"发现 {len(uid0_violations)} 个非白名单 UID=0 特权账号（阈值 {max_uid0}）：{names}",
+                "核查非 root 的 UID=0 账号，去除或停用，并排查入侵痕迹",
+                facts)
+    if empty_password_users:
+        return ("HIGH", "RISK",
+                f"发现空密码账号：{', '.join(empty_password_users[:10])}",
+                "立即为空密码账号设置强密码或锁定账号",
+                facts)
+    if shadow_denied:
+        return ("LOW", "WARNING",
+                "/etc/shadow 不可读（无 root 权限或权限不足），无法检测空密码账号。",
+                "以 root 用户执行巡检或授予读取 /etc/shadow 的权限。",
+                facts)
+    if len(login_users) > max_login_users_medium:
+        return ("MEDIUM", "WARNING",
+                f"可登录账号过多（{len(login_users)}，阈值 {max_login_users_medium}），存在权限蔓延风险",
+                "梳理闲置账号，关闭非必要 shell",
+                facts)
+    if len(login_users) > max_login_users:
+        return ("LOW", "WARNING",
+                f"可登录账号偏多（{len(login_users)}，阈值 {max_login_users}），存在权限蔓延风险",
+                "梳理闲置账号，关闭非必要 shell",
+                facts)
+    return ("NONE", "PASS",
+            f"账号清单正常（{total_users} 个系统账号，{len(login_users)} 个可登录，{len(uid0_accounts)} 个 UID=0）",
+            "保持定期审计",
+            facts)
+
+
+def _analyze_history(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P2-1 修复：移除 /etc/passwd、/etc/shadow 等自伤关键字；新增 0 字节 history 检查。"""
+    cfg = (thresholds or {}).get("COMMAND_HISTORY", {}) or {}
+    # P2-1: 移除自伤关键字（cat /etc/passwd 在运维中是常见合法操作）
+    danger_patterns = list(cfg.get("danger_keywords") or [
+        "rm -rf /", "history -c", "chmod 777", "chown root",
+        "> /dev/sd", "dd if=", "iptables -F", "kill -9",
+        "reboot", "shutdown",
+    ])
+    pipe_combos = list(cfg.get("pipe_combos") or [("curl", "| bash"), ("curl", "| sh"), ("wget", "| bash"), ("wget", "| sh")])
+    high_keywords = list(cfg.get("high_keywords") or ["rm -rf /", "chmod 777", "history -c", "> /dev/sd"])
+    # B8 修复：shadow_read_re 替代原死字段；语义清晰且被实际使用
+    shadow_read_re_pattern = cfg.get("shadow_read_re") or r"\b(cat|less|tail|head|more)\s+/etc/shadow\b"
+    hit = [p for p in danger_patterns if p.lower() in out.lower()]
+    out_lower = out.lower()
+    for kw1, kw2 in pipe_combos:
+        if kw1 in out_lower and kw2 in out_lower:
+            hit.append(f"{kw1} + {kw2}")
+    # P2-1: 检 0 字节 history（history -c 副作用：history 文件清空，但 ls 显示非 0 字节）
+    history_empty = False
+    history_total = 0
+    in_history = False
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "---HISTORY---":
+            in_history = True
+            continue
+        if s.startswith("---"):
+            in_history = False
+            continue
+        if in_history and s:
+            history_total += 1
+    # B8: 使用可配置的 shadow_read_re 检测 /etc/shadow 读取
+    if re.search(shadow_read_re_pattern, out):
+        hit.append("sensitive_read_etc_shadow")
+    passwd_read_re = r"\b(cat|less|tail|head|more)\s+/etc/passwd\b"
+    passwd_read_detected = bool(re.search(passwd_read_re, out))
+    facts = {
+        "hit_keywords": hit[:10],
+        "history_total": history_total,
+        "history_empty": history_total == 0,
+        "passwd_read_detected": passwd_read_detected,
+        "thresholds": {"danger_keywords": danger_patterns, "pipe_combos": [f"{k1}+{k2}" for k1,k2 in pipe_combos], "high_keywords": high_keywords, "shadow_read_re": shadow_read_re_pattern},
+        "criteria": f"history -c → HIGH；高危命令({high_keywords}) → HIGH；curl/wget 管道到 shell → HIGH；cat/less/tail /etc/shadow → HIGH；/etc/passwd 读取为常规操作不告警；其他危险命令 → MEDIUM",
+        "summary": f"命中 {len(hit)} 个危险特征：{', '.join(hit[:5])}" if hit else f"未命中危险特征（history 共 {history_total} 条）",
+    }
+    if "history -c" in hit:
+        return ("HIGH", "RISK", "发现 history 清空命令痕迹。", "立即核查操作人和时间窗口，结合登录日志排查入侵。", facts)
+    if "sensitive_read_etc_shadow" in hit:
+        return ("HIGH", "RISK", "发现读取 /etc/shadow 的命令。", "核查操作人，确认是否合规，必要时排查提权痕迹。", facts)
+    if hit:
+        level = "HIGH" if any(x in hit for x in high_keywords) or any("+" in x for x in hit) else "MEDIUM"
+        return (level, "WARNING", f"发现高危命令特征：{', '.join(hit[:8])}。", "核查命令执行上下文，保留证据并确认是否为授权操作。", facts)
+    return ("NONE", "PASS", "未发现明显高危命令痕迹。", "禁止手动清理 history，建议集中留存命令审计。", facts)
+
+
+def _looks_like_port_line(s: str) -> bool:
+    """J2 修复：检测一行是否像 ss/netstat 端口行（与 `---PORTS---` 标记解耦）。
+
+    当 `---PORTS---` 标记在真实 SSH 输出中丢失（被 strip、head 截断、
+    echo 失败等情况）时，状态机的 `in_ports` 标志无法正确置位，
+    导致整个 ss 段被忽略、listening_count=0。本辅助函数在状态机
+    `not in_top and not in_ports` 状态下，对每一行做特征检测。
+
+    兼容两种格式：
+    - ss 格式：Netid State Recv-Q Send-Q Local:Port Peer:Port users:(("svc",pid=N,fd=N))
+      状态字在第 2 列（LISTEN/UNCONN/ESTAB 等）
+    - netstat 格式：Proto Recv-Q Send-Q Local Foreign State PID/Program
+      状态字在第 6 列（LISTEN/UNCONN/LISTENING）
+    两者第一列都是 tcp/udp/raw/unix。
+
+    ps top 行第一列是 PID 数字，第二列是 PPID 数字，第四列是 %CPU 浮点——不会误判。
+    """
+    if not s or s.startswith("---"):
+        return False
+    if s.startswith(("PID", "USER", "Proto", "Netid")):
+        return False
+    parts = s.split()
+    if len(parts) < 5:
+        return False
+    proto = parts[0].lower()
+    if proto not in ("tcp", "udp", "raw", "tcp6", "unix"):
+        return False
+    # 行内必须含 IP:Port 形式（`:数字`）
+    if not re.search(r":\d+\b", s):
+        return False
+    # 行内必须含状态字（ss 在第 2 列、netstat 在第 6 列，统一行内匹配）
+    valid_states = (
+        "LISTEN", "LISTENING", "UNCONN", "ESTAB", "ESTABLISHED",
+        "TIME-WAIT", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT",
+        "LAST-ACK", "CLOSING", "SYN-RECV", "SYN-SENT", "NEW",
+        "CLOSE",
+    )
+    upper = s.upper()
+    if not any(st in upper for st in valid_states):
+        return False
+    return True
+
+
+def _analyze_process_ports(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P1-2 修复：端口高/中风险分级，IPv6 通配符 ([::]) 正确识别。"""
+    high_risk_ports: List[Dict[str, Any]] = []
+    medium_risk_ports: List[Dict[str, Any]] = []
+    all_listening: List[Dict[str, Any]] = []
+    top_cpu_procs: List[Dict[str, Any]] = []
+    suspicious: List[str] = []
+    in_top = False
+    in_ports = False
+    cfg = (thresholds or {}).get("PROCESS_PORT", {}) or {}
+    # P1-2: 端口风险分级
+    if "high_risk_ports_high" in cfg or "high_risk_ports_medium" in cfg:
+        high_risk_set = set(int(x) for x in (cfg.get("high_risk_ports_high") or []))
+        medium_risk_set = set(int(x) for x in (cfg.get("high_risk_ports_medium") or []))
+    else:
+        # 兼容老字段：把原 high_risk_ports 全部视为 high，medium 默认为空
+        high_risk_set = set(int(x) for x in (cfg.get("high_risk_ports") or DEFAULT_THRESHOLDS["PROCESS_PORT"].get("high_risk_ports", [])))
+        medium_risk_set = set()
+    suspicious_kw = [str(x).lower() for x in (cfg.get("suspicious_keywords") or DEFAULT_THRESHOLDS["PROCESS_PORT"]["suspicious_keywords"])]
+    top_cpu_n = int(cfg.get("top_cpu_n", 10))
+    cpu_threshold = float(cfg.get("cpu_threshold", 80))
+    cpu_sample_count = int(cfg.get("cpu_sample_count", 1))  # P2-2: 连续 N 次 ≥阈值
+
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "---TOP---":
+            in_top = True
+            in_ports = False
+            continue
+        if s == "---PORTS---":
+            in_top = False
+            in_ports = True
+            continue
+        if s.startswith("---"):
+            in_top = False
+            in_ports = False
+            continue
+
+        if in_top:
+            # ps header: PID PPID USER COMM %CPU %MEM ARGS
+            parts = s.split(None, 6)
+            if len(parts) >= 7 and parts[0] != "PID":
+                try:
+                    top_cpu_procs.append({
+                        "pid": int(parts[0]),
+                        "user": parts[2],
+                        "cpu": parts[4],
+                        "mem": parts[5],
+                        "cmd": parts[6][:120],
+                    })
+                except (ValueError, IndexError):
+                    pass
+
+        if in_ports or _looks_like_port_line(s):
+            # ss output: Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port  process
+            # or netstat: Proto Recv-Q Send-Q Local Address Foreign Address State PID/Program
+            if not s or s.startswith("Netid") or s.startswith("Proto"):
+                continue
+            # H1 修复 1：ss 完整格式（含 users 进程段，UDP UNCONN 也识别）
+            m_ss = re.match(
+                r'(\w+)\s+(\w+)\s+\d+\s+\d+\s+(\S+?):(\d+)\s+(\S+)\s+users:\(\("(\S+?)",[^)]*pid=(\d+)[^)]*\)\)',
+                s,
+            )
+            entry: Optional[Dict[str, Any]] = None
+            if m_ss:
+                proto = m_ss.group(1).lower()
+                state = m_ss.group(2).lower()
+                bind = m_ss.group(3)
+                port = int(m_ss.group(4))
+                service = m_ss.group(6)
+                pid = m_ss.group(7)
+                entry = {
+                    "port": port, "proto": proto, "state": state, "service": service,
+                    "bind": f"{bind}:{port}", "pid": pid, "user": "",
+                }
+            # H1 修复 2：ss 半格式（无 users 段，UDP UNCONN/TCP LISTEN 都识别）
+            elif (m_ss2 := re.match(
+                r'(\w+)\s+(\w+)\s+\d+\s+\d+\s+(\S+?):(\d+)\s+\S+',
+                s,
+            )):
+                proto = m_ss2.group(1).lower()
+                state = m_ss2.group(2).lower()
+                bind = m_ss2.group(3)
+                port = int(m_ss2.group(4))
+                if state in ("listening", "listen", "unconn", "established", "time-wait", "fin-wait-1", "fin-wait-2", "close-wait", "last-ack", "closing", "syn-recv", "syn-sent"):
+                    entry = {
+                        "port": port, "proto": proto, "state": state, "service": "",
+                        "bind": f"{bind}:{port}", "pid": "", "user": "",
+                    }
+            # H1 修复 3：netstat 格式
+            elif (m_ns := re.match(
+                r'(\w+)\s+\d+\s+\d+\s+([\d.:\[\]]+):(\d+)\s+[\d.:\[\]*]+\s+(LISTEN|UNCONN|LISTENING)\s+(?:(\d+)/(\S+))?',
+                s,
+            )):
+                proto = m_ns.group(1).lower()
+                bind = m_ns.group(2)
+                port = int(m_ns.group(3))
+                pid = m_ns.group(5) or ""
+                service = m_ns.group(6) or ""
+                entry = {
+                    "port": port, "proto": proto, "state": m_ns.group(4).lower(),
+                    "service": service, "bind": f"{bind}:{port}", "pid": pid, "user": "",
+                }
+
+            if entry:
+                # H1 修复 4：兼容 bind 中带 %interface 后缀（如 127.0.53%lo:53）
+                bind_for_check = entry["bind"]
+                if "%" in bind_for_check:
+                    bind_for_check = bind_for_check.split("%")[0]
+                bind_norm = bind_for_check.rstrip(":]").strip("[]")
+                is_world = (
+                    bind_norm in ("0.0.0.0", "::", "*", "")
+                    or bind_for_check.startswith("0.0.0.0:")
+                    or bind_for_check.startswith("[::]:")
+                    or bind_for_check.startswith("*:")
+                )
+                entry["is_world"] = is_world
+                all_listening.append(entry)
+                service_lower = (entry.get("service") or "").lower()
+                if service_lower in suspicious_kw:
+                    suspicious.append(service_lower)
+                if is_world and port in high_risk_set:
+                    high_risk_ports.append(entry)
+                elif is_world and port in medium_risk_set:
+                    medium_risk_ports.append(entry)
+
+    # P2-2 修复：连续 N 次采样均 ≥ 阈值才计入（计划文档 §2.3 P2-2：两次都 ≥80%）。
+    # 解析策略：把 top_cpu_procs 按 sample_id 分组（每段 ---TOP--- 之间的列表是一次采样），
+    # 用 (pid) 关联，每个 pid 收集所有样本的 cpu 值；只有连续样本全部 ≥ 阈值才记入。
+    high_cpu_procs = []
+    if cpu_sample_count > 1:
+        # 重新按 ---TOP--- 分段采样
+        samples: List[List[Dict[str, Any]]] = []
+        current_sample: List[Dict[str, Any]] = []
+        for line in out.splitlines():
+            sl = line.strip()
+            if sl == "---TOP---":
+                if current_sample:
+                    samples.append(current_sample)
+                current_sample = []
+                continue
+            if sl.startswith("---"):
+                continue
+            parts = sl.split(None, 6)
+            if len(parts) >= 7 and parts[0] != "PID":
+                try:
+                    current_sample.append({
+                        "pid": int(parts[0]),
+                        "user": parts[2],
+                        "cpu": float(parts[4]),
+                        "mem": float(parts[5]),
+                        "cmd": parts[6][:120],
+                    })
+                except (ValueError, IndexError):
+                    pass
+        if current_sample:
+            samples.append(current_sample)
+
+        if samples:
+            # 按 pid 聚合：每 pid 的 cpu 序列按样本顺序
+            by_pid: Dict[int, List[float]] = {}
+            for sample in samples[:cpu_sample_count]:  # 只取前 N 次采样
+                for p in sample:
+                    pid = int(p["pid"])
+                    by_pid.setdefault(pid, []).append(float(p.get("cpu", 0)))
+            # 取 top_cpu_n 个稳定高 CPU pid
+            stable_pids = [
+                pid for pid, cpus in by_pid.items()
+                if len(cpus) >= cpu_sample_count
+                and all(c >= cpu_threshold for c in cpus[:cpu_sample_count])
+            ]
+            # 从 top_cpu_procs 找匹配的完整记录
+            stable_set = set(stable_pids)
+            seen_cmds: set = set()
+            for p in top_cpu_procs:
+                pid = int(p.get("pid", 0))
+                if pid in stable_set:
+                    key = (pid, p.get("cmd", ""))
+                    if key not in seen_cmds:
+                        seen_cmds.add(key)
+                        high_cpu_procs.append(p)
+                        if len(high_cpu_procs) >= 5:
+                            break
+    else:
+        for p in top_cpu_procs:
+            try:
+                if float(p.get("cpu", 0)) >= cpu_threshold:
+                    high_cpu_procs.append(p)
+            except (ValueError, TypeError):
+                pass
+
+    facts = {
+        "high_risk_ports": high_risk_ports[:20],
+        "medium_risk_ports": medium_risk_ports[:20],
+        "all_listening": all_listening[:50],
+        "top_cpu_procs": top_cpu_procs[:top_cpu_n],
+        "high_cpu_procs": high_cpu_procs[:5],
+        "listening_count": len(all_listening),
+        "thresholds": {
+            "high_risk_ports_high": sorted(high_risk_set),
+            "high_risk_ports_medium": sorted(medium_risk_set),
+            "suspicious_keywords": suspicious_kw,
+            "top_cpu_n": top_cpu_n,
+            "cpu_threshold": cpu_threshold,
+            "cpu_sample_count": cpu_sample_count,
+        },
+        "criteria": f"公网暴露 high 端口 {sorted(high_risk_set)} → MEDIUM；公网暴露 medium 端口 {sorted(medium_risk_set)} → LOW；可疑进程 {suspicious_kw} → HIGH；CPU≥{cpu_threshold}% 连续 {cpu_sample_count} 次 → MEDIUM",
+        "summary": f"监听 {len(all_listening)} 个端口，{len(high_risk_ports)} 个高危暴露，{len(medium_risk_ports)} 个中危暴露，{len(high_cpu_procs)} 个高CPU进程" + (f"，{len(suspicious)} 个可疑进程" if suspicious else ""),
+    }
+
+    if suspicious:
+        return ("HIGH", "RISK",
+                f"发现疑似恶意/挖矿进程特征：{', '.join(suspicious)}。",
+                "立即隔离服务器，保留进程与网络证据后排查入侵。",
+                facts)
+    # D1 修复：high_risk_ports_high 中敏感端口（数据库/缓存）暴露公网 → HIGH
+    # high_risk_ports_medium 暴露 → MEDIUM（保持原口径）
+    # 暴露等级可通过 exposed_high_risk_level 配置（默认 HIGH，兼容性保留）
+    exposed_high_level = str(cfg.get("exposed_high_risk_level", "HIGH")).upper()
+    if exposed_high_level not in {"HIGH", "MEDIUM", "LOW"}:
+        exposed_high_level = "HIGH"
+    if high_risk_ports:
+        port_list = ", ".join(f":{p['port']}" for p in high_risk_ports)
+        if exposed_high_level == "HIGH":
+            return (exposed_high_level, "RISK",
+                    f"检测到敏感服务端口（数据库/缓存）公网暴露：{port_list}",
+                    "立即将数据库/缓存端口限制为内网或白名单 IP 访问；启用安全组/防火墙策略。",
+                    facts)
+        return (exposed_high_level, "WARNING",
+                f"检测到高风险端口公网暴露：{port_list}",
+                "确认端口是否仅对白名单开放，避免数据库/缓存端口暴露外网。",
+                facts)
+    if medium_risk_ports:
+        port_list = ", ".join(f":{p['port']}" for p in medium_risk_ports)
+        return ("MEDIUM", "WARNING",
+                f"检测到中风险端口监听：{port_list}",
+                "建议通过防火墙/安全组限制为内网或白名单 IP 访问。",
+                facts)
+    if high_cpu_procs:
+        proc_list = ", ".join(f"{p.get('cmd', '?')[:30]}({p.get('cpu', '?')}%)" for p in high_cpu_procs[:5])
+        return ("MEDIUM", "WARNING",
+                f"检测到高 CPU 占用进程（阈值 {cpu_threshold}%，连续 {cpu_sample_count} 次采样）：{proc_list}",
+                "核查进程是否为正常业务，排查异常占用或挖矿可能。",
+                facts)
+    # F2 修复：空数据兜底 — 未获取到任何进程/端口时明确提示
+    if not all_listening and not top_cpu_procs and not suspicious and not out.strip():
+        return ("MEDIUM", "WARNING",
+                "未获取到进程与端口数据（命令执行无输出，可能是 SSH 通道异常、命令路径缺失或非交互式 shell）。",
+                "检查 SSH 连接、`ps`/`ss`/`netstat` 在该服务器是否可执行；确认非交互式 SSH PATH 包含相应命令。",
+                facts)
+    if not all_listening and not top_cpu_procs and not suspicious:
+        return ("MEDIUM", "WARNING",
+                f"未获取到任何进程或监听端口数据（已解析 0 个，原始输出 {len(out.splitlines())} 行），无法评估端口暴露与异常进程。",
+                "检查命令模板 `ps -eo ...` / `ss -ntulp` / `netstat -ntulp` 在该服务器是否可执行；确认非交互式 SSH PATH 包含 ps/ss/netstat。",
+                facts)
+    return ("NONE", "PASS",
+            "进程和监听端口未发现明显异常。",
+            "保持端口最小暴露。",
+            facts)
+
+
+def _analyze_memory(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P0-1 修复：优先 /proc/meminfo 的 MemAvailable，避免 buff/cache 误报。
+
+    解析顺序：
+    1) /proc/meminfo：MemTotal/MemAvailable/SwapTotal/SwapFree
+    2) `free` 命令读 available 列（fallback）
+    3) 兜底：输出 LOW + WARNING 提示指标缺失
+    """
+    mem_pct = 0
+    swap_pct = 0
+    mem_total_h = ""
+    swap_total_h = ""
+    source = "unknown"  # meminfo / free / none
+    meminfo: Dict[str, int] = {}
+
+    section = "free"
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "---MEMINFO---":
+            section = "meminfo"
+            continue
+        if s.startswith("---"):
+            section = "free"
+            continue
+        if section == "meminfo":
+            parts = s.split()
+            if len(parts) >= 2:
+                key = parts[0].rstrip(":")
+                try:
+                    meminfo[key] = int(parts[1])
+                except ValueError:
+                    pass
+        elif s.startswith("Mem:") or s.startswith("Swap:"):
+            # 记录 free 输出的 total 字符串（人类可读）
+            parts = s.split()
+            if len(parts) >= 2:
+                if s.startswith("Mem:"):
+                    mem_total_h = parts[1]
+                elif s.startswith("Swap:"):
+                    swap_total_h = parts[1]
+
+    mem_total_kb = meminfo.get("MemTotal", 0)
+    mem_avail_kb = meminfo.get("MemAvailable", 0)
+    swap_total_kb = meminfo.get("SwapTotal", 0)
+    swap_free_kb = meminfo.get("SwapFree", 0)
+    if mem_total_kb > 0 and mem_avail_kb > 0:
+        source = "meminfo"
+        mem_pct = int(round((mem_total_kb - mem_avail_kb) / mem_total_kb * 100))
+    else:
+        # 兜底：解析 free 输出的 available 列
+        # G4 修复：自动检测 free 输出的单位（默认 KB / -m 是 MB / -h 是带后缀）
+        free_unit = ""  # K / M / G / T / ""
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("Mem:") and not s.startswith("MemAvailable"):
+                parts = s.split()
+                if len(parts) >= 7:
+                    # 探测单位：
+                    # 1) `free -h` 输出：值带 K/M/G/T 后缀（e.g. "16G", "512M"）→ 用后缀
+                    # 2) `free -m` 输出：纯数字（e.g. "3562"）→ 启发式判断
+                    # 3) `free` 默认输出：纯数字但量级大（e.g. "16384000"）→ 视为 KB
+                    sample = parts[1]
+                    sample_u = sample.upper()
+                    # 探测单位（兼容 IEC 二进制前缀 Gi/Mi/Ki/Ti）：
+                    # 1) `free -h` 输出：值带 K/M/G/T 后缀（e.g. "16G", "512M", "16Gi"）→ 用后缀
+                    # 2) `free -m` 输出：纯数字（e.g. "3562"）→ 启发式判断
+                    # 3) `free` 默认输出：纯数字但量级大（e.g. "16384000"）→ 视为 KB
+                    sample_norm = sample_u
+                    if sample_norm.endswith("I") and len(sample_norm) > 1 and sample_norm[-2] in "KMGT":
+                        sample_norm = sample_norm[:-1]
+                    if sample_norm.endswith(("K", "M", "G", "T")) and len(sample) > 1:
+                        free_unit = sample_norm[-1].upper()
+                    else:
+                        try:
+                            n = float(sample)
+                            # 启发式：>= 1e5 视为 KB（free 默认），
+                            # 1e3 ~ 1e5 视为 MB（free -m），
+                            # < 1e3 视为 GB（free -g）
+                            if n >= 100000:
+                                free_unit = "K"
+                            elif n >= 1000:
+                                free_unit = "M"
+                            else:
+                                free_unit = "G"
+                        except ValueError:
+                            free_unit = "K"
+                    try:
+                        mem_total_kb = _parse_mem_value_with_unit(parts[1], free_unit)
+                        mem_avail_kb = _parse_mem_value_with_unit(parts[6], free_unit)
+                        if mem_total_kb > 0 and mem_avail_kb > 0:
+                            source = "free"
+                            mem_pct = int(round((mem_total_kb - mem_avail_kb) / mem_total_kb * 100))
+                    except (ValueError, IndexError):
+                        pass
+                    break
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("Swap:") and not s.startswith("SwapTotal"):
+                parts = s.split()
+                if len(parts) >= 4:
+                    try:
+                        swap_total_kb = _parse_mem_value_with_unit(parts[1], free_unit)
+                        swap_free_kb = _parse_mem_value_with_unit(parts[3], free_unit)
+                    except (ValueError, IndexError):
+                        pass
+
+    if swap_total_kb > 0:
+        swap_used_kb = max(swap_total_kb - swap_free_kb, 0)
+        swap_pct = int(round(swap_used_kb / swap_total_kb * 100))
+    elif source == "free":
+        # free 命令的 swap used 在第 2 列
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("Swap:") and not s.startswith("SwapTotal"):
+                parts = s.split()
+                if len(parts) >= 3:
+                    try:
+                        used = _parse_mem_value_with_unit(parts[2], free_unit)
+                        if swap_total_kb > 0:
+                            swap_pct = int(round(used / swap_total_kb * 100))
+                    except (ValueError, IndexError):
+                        pass
+
+    cfg = (thresholds or {}).get("MEMORY", {}) or {}
+    mem_high_pct = int(cfg.get("mem_high_pct", 95))
+    mem_medium_pct = int(cfg.get("mem_medium_pct", 85))
+    swap_high_pct = int(cfg.get("swap_high_pct", 50))
+    swap_critical_pct = int(cfg.get("swap_critical_pct", 80))
+    facts = {
+        "mem_pct": mem_pct,
+        "swap_pct": swap_pct,
+        "mem_total": mem_total_h,
+        "swap_total": swap_total_h,
+        "source": source,
+        "thresholds": {"mem_high_pct": mem_high_pct, "mem_medium_pct": mem_medium_pct, "swap_high_pct": swap_high_pct, "swap_critical_pct": swap_critical_pct},
+        "criteria": f"内存 ≥{mem_high_pct}% → HIGH；≥{mem_medium_pct}% → MEDIUM；Swap ≥{swap_critical_pct}% → HIGH；≥{swap_high_pct}% → MEDIUM；优先用 MemAvailable",
+        "summary": f"内存 {mem_pct}%{', Swap ' + str(swap_pct) + '%' if swap_pct > 0 else ''}（来源 {source}）",
+    }
+
+    # 兜底：指标完全缺失时返回 MEDIUM + WARNING（F4 修复：升级为 MEDIUM）
+    # 数据采集中断是巡检的严重问题——可能错过内存爆涨/OOM 等致命事件
+    if mem_total_kb <= 0 and source == "unknown":
+        return ("MEDIUM", "WARNING",
+                "未获取到内存使用率数据（meminfo/available 都未读到，命令可能失败或 /proc 不可读）。",
+                "检查 SSH 连接、`free` / `cat /proc/meminfo` 在该服务器是否可执行；确认非交互式 SSH PATH 包含 free；Docker 容器需挂载 /proc。",
+                facts)
+
+    if mem_pct >= mem_high_pct:
+        return ("HIGH", "RISK",
+                f"内存使用率过高（{mem_pct}%，阈值 {mem_high_pct}%），可能触发 OOM。",
+                "排查内存泄漏进程，考虑扩容或优化应用内存占用。",
+                facts)
+    if swap_pct >= swap_critical_pct:
+        return ("HIGH", "RISK",
+                f"Swap 使用率异常（{swap_pct}%，阈值 {swap_critical_pct}%），内存严重不足。",
+                "立即检查 OOM 日志，增加物理内存或排查内存泄漏。",
+                facts)
+    if mem_pct >= mem_medium_pct:
+        return ("MEDIUM", "WARNING",
+                f"内存使用率偏高（{mem_pct}%，阈值 {mem_medium_pct}%）。",
+                "关注内存增长趋势，确认是否存在未释放的缓存或泄漏。",
+                facts)
+    if swap_pct >= swap_high_pct:
+        return ("MEDIUM", "WARNING",
+                f"Swap 使用率偏高（{swap_pct}%，阈值 {swap_high_pct}%），可能存在内存压力。",
+                "排查高内存消耗进程，检查 Swap 趋势。",
+                facts)
+    return ("NONE", "PASS",
+            f"内存 {mem_pct}%{', Swap ' + str(swap_pct) + '%' if swap_pct > 0 else ''} 未发现明显异常。",
+            "保持内存监控告警，定期核查进程资源占用。",
+            facts)
+
+
+def _parse_mem_value(val: str) -> int:
+    """Parse memory value to KB.
+
+    支持格式：
+    - "16384000" → 16384000 (无后缀视为 KB，符合 `free` 默认输出)
+    - "3562M" / "3562" (来自 `free -m`) → 3562 * 1024 = 3,646,208 KB
+      实际通过 unit 参数显式指定，避免歧义
+    - "1.5G" → 1572864
+    - "1841924 kB" → 1841924 (meminfo 自动去掉单位)
+    """
+    val = val.strip().upper().rstrip("KMGTB")
+    val = val.replace(",", "").strip()
+    try:
+        return int(float(val))
+    except ValueError:
+        return 0
+
+
+def _parse_mem_value_with_unit(val: str, unit: str) -> int:
+    """Parse memory value to KB, with explicit unit hint.
+
+    unit: "K" / "M" / "G" / "T" / "" (auto)
+    兼容 IEC 二进制前缀 Ki/Mi/Gi/Ti（B/KiB=1024）。
+    """
+    s = val.strip().upper().replace(",", "")
+    # 去掉 IEC 后缀 i（如 Gi/Mi/Ki/Ti）
+    if s.endswith("I") and len(s) > 1 and s[-2] in "KMGT":
+        s = s[:-1]
+    val_clean = s.rstrip("KMGTB")
+    try:
+        num = float(val_clean)
+    except ValueError:
+        return 0
+    unit = (unit or "").upper().strip()
+    if unit == "M":
+        return int(num * 1024)
+    if unit == "G":
+        return int(num * 1024 * 1024)
+    if unit == "T":
+        return int(num * 1024 * 1024 * 1024)
+    # 默认视为 KB（free 默认输出）
+    return int(num)
+
+
+def _analyze_firewall(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P1-4 修复：云环境探测 firewalld/ufw/nft/iptables 都未启用时仅 LOW 提示。
+    B3 修复：no_local_firewall 检测放宽——多发行版/容器均覆盖。
+    """
+    cfg = (thresholds or {}).get("FIREWALL", {}) or {}
+    inactive_level = str(cfg.get("inactive_level", "MEDIUM")).upper()
+    no_local_level = str(cfg.get("no_local_firewall_level", "LOW")).upper()
+    text = out.lower()
+    err_text = (err or "").lower()
+
+    # 按行解析 iptables 规则
+    global_pass_lines: List[str] = []
+    default_policy_accept = False
+    for line in out.splitlines():
+        sl = line.strip().lower()
+        if sl.startswith("-p input accept"):
+            default_policy_accept = True
+        if sl.startswith("-a") and "0.0.0.0/0" in sl and ("-p all" in sl or "-p ip" in sl):
+            global_pass_lines.append(line.strip())
+
+    # P1-4: 探测各类防火墙工具的活跃情况
+    detected_tools: List[str] = []
+    if "active (running)" in text or "active(running)" in text:
+        if "firewalld" in text:
+            detected_tools.append("firewalld")
+        if "ufw" in text:
+            detected_tools.append("ufw")
+    if "firewalld is not running" in text or "inactive" in text and "firewalld" in text:
+        pass  # firewalld 显式未运行
+    if "ufw is inactive" in text or "status: inactive" in text:
+        pass  # ufw 显式未启用
+
+    # B3: 放宽"无本地防火墙"判定——多关键字覆盖 firewalld/ufw/nft/iptables/ip6tables
+    # 注意：仅当工具是"运行中"或"有规则"才算存在；只在 systemctl 描述里出现 firewalld 名称不算
+    fw_active_signatures = (
+        "active (running)", "active(running)",  # 通用 active
+        "ufw status", "status: active",  # ufw
+        "nft list ruleset", "table inet",  # nftables
+    )
+    fw_command_outputs = (
+        "firewall-cmd",  # firewall-cmd 命令输出
+        "iptables -s", "iptables -l",  # iptables -S/-L
+        "ip6tables",  # ip6tables
+        "chain input", "policy accept", "policy drop",  # iptables 链/策略输出
+        "-p tcp", "-p udp",  # iptables 规则
+    )
+    has_fw_active = any(sig in text for sig in fw_active_signatures)
+    has_fw_output = any(sig in text for sig in fw_command_outputs)
+    # firewalld 显式 inactive 时不算"有防火墙"
+    firewalld_active = ("firewalld" in text and "active (running)" in text) or (
+        "firewalld" in text and "inactive" not in text and "loaded" in text and "firewall-cmd" in text
+    )
+    ufw_active = "ufw" in text and ("status: active" in text or "active (running)" in text)
+    has_fw_signature = has_fw_active or has_fw_output or firewalld_active or ufw_active
+    no_local_firewall = not has_fw_signature and not detected_tools
+
+    facts = {
+        "raw_snippet": (out[:500] if out else ""),
+        "global_pass_lines": global_pass_lines[:5],
+        "default_policy_accept": default_policy_accept,
+        "detected_tools": detected_tools,
+        "no_local_firewall": no_local_firewall,
+        "thresholds": {"inactive_level": inactive_level, "no_local_firewall_level": no_local_level},
+        "criteria": f"全局放行规则 → HIGH；INPUT 策略 ACCEPT → LOW；本机防火墙全未启用 → {no_local_level}（云环境常见）",
+        "summary": (
+            f"{len(global_pass_lines)} 条全局放行规则" + ("，INPUT 策略 ACCEPT" if default_policy_accept else "")
+            + (f"，本机防火墙全未启用（{no_local_level}）" if no_local_firewall else "")
+            + (f"，已探测到 {','.join(detected_tools)}" if detected_tools else "")
+        ),
+    }
+
+    if global_pass_lines:
+        return ("HIGH", "RISK",
+                f"发现 {len(global_pass_lines)} 条疑似全局放行规则：{global_pass_lines[0][:80]}...",
+                "立即核查规则来源，收紧到必要端口和白名单 IP。",
+                facts)
+    # I1 修复：探测 iptables 实际规则数（除策略行外还有 -N/-A/-I 等行）
+    iptables_rule_count = 0
+    for sl_full in out.splitlines():
+        sl_low = sl_full.strip().lower()
+        if sl_low.startswith(("-n ", "-n\t", "-a ", "-a\t", "-i ", "-i\t", "-r ", "-d ")):
+            iptables_rule_count += 1
+    # I1 修复 1：firewalld/ufw 显式 inactive + iptables INPUT ACCEPT（高风险复合场景）
+    if default_policy_accept and iptables_rule_count > 0 and (
+        "inactive" in text or "not running" in text or "status: inactive" in text
+    ):
+        return ("MEDIUM", "WARNING",
+                f"firewalld/ufw 未运行；iptables 已加载 {iptables_rule_count} 条规则但 INPUT 默认策略为 ACCEPT，等同于全量放行。",
+                "建议：1) 启用 firewalld/ufw 接管；或 2) 执行 iptables -P INPUT DROP 并显式 ACCEPT 必要端口。",
+                facts)
+    # I1 修复 2：firewalld/ufw 显式 inactive + iptables INPUT DROP（有专用管理）
+    if (not default_policy_accept) and iptables_rule_count > 0 and (
+        "inactive" in text or "not running" in text or "status: inactive" in text
+    ):
+        return ("LOW", "INFO",
+                f"firewalld/ufw 未运行；iptables 已配置 {iptables_rule_count} 条规则（默认策略非 ACCEPT）。",
+                "若有专用 iptables 管理脚本，可保持现状；否则建议启用 firewalld 标准化管理。",
+                facts)
+    if no_local_firewall:
+        level = no_local_level if no_local_level in {"LOW", "MEDIUM", "HIGH", "NONE"} else "LOW"
+        return (level, "INFO" if level == "LOW" else "WARNING",
+                "本机未探测到任何活跃的防火墙进程（firewalld/ufw/nft/iptables/ip6tables）。",
+                "云服务器请确认安全组策略已正确配置；自建机房建议启用 firewalld/ufw/nftables。",
+                facts)
+    if "inactive" in text or "not running" in text or "status: inactive" in text:
+        if inactive_level == "LOW":
+            return ("LOW", "WARNING", "防火墙可能未启用或未运行（云环境可能使用安全组替代）。", "确认安全组策略是否覆盖防火墙功能。", facts)
+        return (inactive_level, "WARNING", "防火墙可能未启用或未运行。", "确认安全组/防火墙策略，生产环境避免全局放行。", facts)
+    if default_policy_accept:
+        return ("LOW", "WARNING",
+                "iptables 默认 INPUT 策略为 ACCEPT，建议改为 DROP 并显式放行必要端口。",
+                "将默认策略改为 DROP：iptables -P INPUT DROP，然后添加必要的 ACCEPT 规则。",
+                facts)
+    return ("NONE", "PASS", "防火墙状态未发现明显异常。", "定期复核开放策略与黑白名单冲突。", facts)
+
+
+def _worst_mount(filesystems: List[Dict[str, Any]]) -> str:
+    """Return the mount point with the highest usage percentage."""
+    if not filesystems:
+        return "N/A"
+    worst = max(filesystems, key=lambda x: x.get("pct", 0))
+    return worst.get("mount", "?")
+
+
+def _analyze_disk(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P0-4 修复：跳过 overlay/squashfs/tmpfs 等容器/伪文件系统；NFS stale 单独识别。
+    G1 修复：兼容 6 列（df -h，无 Type）和 7 列（df -PTh / df -hT，含 Type）输出格式。
+    """
+    filesystems: List[Dict[str, Any]] = []
+    inodes: List[Dict[str, Any]] = []
+    stale_mounts: List[Dict[str, Any]] = []
+    skipped_fstypes: List[str] = []
+    max_pct = 0
+    max_inode_pct = 0
+    section = "SPACE"
+    for line in out.splitlines():
+        if line.strip() == "---SPACE---":
+            section = "SPACE"
+            continue
+        if line.strip() == "---INODE---":
+            section = "INODE"
+            continue
+        parts = line.split()
+        # G1 修复：6 列（df -h 无 Type）或 7 列（df -PTh / df -hT 含 Type）都接受
+        if len(parts) < 6:
+            continue
+        if parts[0] == "Filesystem":
+            continue
+        # 倒数第二列是 Use% (e.g. "22%")；最后一列是 Mounted on
+        pct_str = parts[-2]
+        if not pct_str.endswith('%'):
+            continue
+        try:
+            pct = int(pct_str.rstrip('%'))
+        except ValueError:
+            continue
+        # G1 修复：根据列数判断 fstype 列位置
+        # 6 列格式: Filesystem Size Used Avail Use% Mounted on → parts[1] 是 Size（不是 fstype）
+        # 7 列格式: Filesystem Type Size Used Avail Use% Mounted on → parts[1] 是 fstype
+        if len(parts) == 7 and section == "SPACE":
+            fstype = parts[1].lower()
+        else:
+            # 6 列或 INODE 段：没有显式 fstype 列，留空（通过大小写推断）
+            fstype = ""
+        entry_mount = parts[-1]
+        if section == "SPACE":
+            # P0-4: 跳过容器/伪文件系统
+            if fstype and fstype in _SKIP_FSTYPES:
+                skipped_fstypes.append(fstype)
+                continue
+            # P0-4: NFS ≥99% 单独识别为 stale
+            nfs_threshold = int(((thresholds or {}).get("DISK") or {}).get("nfs_stale_threshold_pct", 99))
+            if fstype.startswith("nfs") and pct >= nfs_threshold:
+                stale_mounts.append({"mount": entry_mount, "type": fstype, "pct": pct})
+                continue
+            max_pct = max(max_pct, pct)
+            filesystems.append({
+                "mount": entry_mount,
+                "type": fstype or "unknown",
+                "total": parts[2] if len(parts) == 7 else parts[1],
+                "used": parts[3] if len(parts) == 7 else parts[2],
+                "avail": parts[4] if len(parts) == 7 else parts[3],
+                "pct": pct,
+            })
+        else:
+            max_inode_pct = max(max_inode_pct, pct)
+            inodes.append({
+                "mount": entry_mount,
+                "inodes_total": parts[2] if len(parts) == 7 else parts[1],
+                "inodes_used": parts[3] if len(parts) == 7 else parts[2],
+                "inodes_free": parts[4] if len(parts) == 7 else parts[3],
+                "inode_pct": pct,
+            })
+
+    cfg = (thresholds or {}).get("DISK", {}) or {}
+    high_pct = int(cfg.get("high_pct", 90))
+    medium_pct = int(cfg.get("medium_pct", 75))
+    inode_high_pct = int(cfg.get("inode_high_pct", 90))
+    inode_medium_pct = int(cfg.get("inode_medium_pct", 80))
+    system_mounts = set(cfg.get("system_mounts") or ["/", "/boot", "/boot/efi", "/root"])
+    system_offset = int(cfg.get("system_pct_offset", 5))
+    skip_fstypes = set(cfg.get("skip_fstypes") or _SKIP_FSTYPES)
+    facts = {
+        "filesystems": filesystems[:30],
+        "max_pct": max_pct,
+        "inodes": inodes[:30],
+        "max_inode_pct": max_inode_pct,
+        "stale_mounts": stale_mounts,
+        "skipped_fstypes": sorted(set(skipped_fstypes)),
+        "thresholds": {"high_pct": high_pct, "medium_pct": medium_pct, "inode_high_pct": inode_high_pct, "inode_medium_pct": inode_medium_pct, "system_mounts": sorted(system_mounts), "system_pct_offset": system_offset, "skip_fstypes": sorted(skip_fstypes)},
+        "criteria": f"空间 ≥{high_pct}% → HIGH；≥{medium_pct}% → MEDIUM；inode ≥{inode_high_pct}% → HIGH；≥{inode_medium_pct}% → MEDIUM；NFS≥99% 单独识别为 stale；overlay/squashfs/tmpfs 已跳过",
+        "summary": f"{len(filesystems)} 个挂载点，最高 {max_pct}% ({_worst_mount(filesystems)})" + (f"，inode 最高 {max_inode_pct}%" if max_inode_pct > 0 else "") + (f"，跳过 {len(skipped_fstypes)} 个 {','.join(sorted(set(skipped_fstypes)))} 挂载" if skipped_fstypes else ""),
+    }
+
+    # P0-4: NFS stale 独立判定（不参与 max_pct 评分）
+    if stale_mounts:
+        return ("MEDIUM", "WARNING",
+                f"检测到疑似 stale NFS 挂载：{', '.join(m['mount'] for m in stale_mounts)}",
+                "umount -f 后重新挂载，确认 NFS server 状态。",
+                facts)
+
+    # 先检查 inode 耗尽（最致命）
+    # B2: 与磁盘块口径一致，系统分区按 system_pct_offset 提前告警
+    def _inode_effective_threshold(mount: str, base_pct: int) -> int:
+        return base_pct - (system_offset if mount in system_mounts else 0)
+
+    high_inode = [
+        (io["mount"], io["inode_pct"])
+        for io in inodes
+        if io["inode_pct"] >= _inode_effective_threshold(io["mount"], inode_high_pct)
+    ]
+    if high_inode:
+        # B2 修复：仅当有系统分区被命中时才在 msg 中说明"系统分区"阈值
+        has_system = any(m in system_mounts for m, _ in high_inode)
+        high_strs = [f"{m} {p}%" for m, p in high_inode[:8]]
+        if has_system:
+            msg = f"inode 使用率过高（阈值 {inode_high_pct}%，系统分区 {inode_high_pct - system_offset}%）：{', '.join(high_strs)}。"
+        else:
+            msg = f"inode 使用率过高（阈值 {inode_high_pct}%）：{', '.join(high_strs)}。"
+        return ("HIGH", "RISK", msg,
+                "inode 耗尽将导致无法创建文件。清理大量小文件（如 session、缓存、日志）。",
+                facts)
+    medium_inode = [
+        (io["mount"], io["inode_pct"])
+        for io in inodes
+        if io["inode_pct"] >= _inode_effective_threshold(io["mount"], inode_medium_pct)
+    ]
+    if medium_inode:
+        has_system = any(m in system_mounts for m, _ in medium_inode)
+        med_strs = [f"{m} {p}%" for m, p in medium_inode[:8]]
+        if has_system:
+            msg = f"inode 使用率偏高（阈值 {inode_medium_pct}%，系统分区 {inode_medium_pct - system_offset}%）：{', '.join(med_strs)}"
+        else:
+            msg = f"inode 使用率偏高（阈值 {inode_medium_pct}%）：{', '.join(med_strs)}"
+        return ("MEDIUM", "WARNING", msg,
+                "关注 inode 增长趋势，排查大量小文件来源。",
+                facts)
+
+    # 检查空间
+    high = [(fs["mount"], fs["pct"]) for fs in filesystems
+            if fs["pct"] >= (high_pct - (system_offset if fs["mount"] in system_mounts else 0))]
     if high:
-        return "MEDIUM", "WARNING", f"磁盘使用率过高：{', '.join(high[:8])}。", "清理过期日志/备份，确认备份目录和日志目录不会撑满磁盘。"
-    return "NONE", "PASS", "磁盘空间未发现明显异常。", "建议日志和备份目录纳入容量预警。"
+        # D7 修复：与 INODE 路径一致——仅当有系统分区被命中时才在 msg 中说明"系统分区"阈值
+        has_system = any(m in system_mounts for m, _ in high)
+        high_strs = [f"{m} {p}%" for m, p in high[:8]]
+        if has_system:
+            msg = f"磁盘使用率过高（阈值 {high_pct}%，系统分区 {high_pct - system_offset}%）：{', '.join(high_strs)}。"
+        else:
+            msg = f"磁盘使用率过高（阈值 {high_pct}%）：{', '.join(high_strs)}。"
+        return ("HIGH", "RISK", msg,
+                "磁盘即将满可能导致系统崩溃或数据库损坏，立即清理过期日志/备份，确认备份目录和日志目录不会撑满磁盘。",
+                facts)
+    medium = [(fs["mount"], fs["pct"]) for fs in filesystems
+              if fs["pct"] >= (medium_pct - (system_offset if fs["mount"] in system_mounts else 0))]
+    if medium:
+        has_system = any(m in system_mounts for m, _ in medium)
+        med_strs = [f"{m} {p}%" for m, p in medium[:8]]
+        if has_system:
+            msg = f"部分挂载点使用率偏高（阈值 {medium_pct}%，系统分区 {medium_pct - system_offset}%）：{', '.join(med_strs)}。"
+        else:
+            msg = f"部分挂载点使用率偏高（阈值 {medium_pct}%）：{', '.join(med_strs)}。"
+        return ("MEDIUM", "WARNING", msg,
+                "关注磁盘增长趋势，提前规划扩容或清理。",
+                facts)
+    # F1 修复：空数据兜底 — 当 SSH 命令未返回任何挂载点/inode 时，
+    # 不应误判为 "磁盘空间未发现明显异常"，而应明确提示"未获取到数据"
+    if not filesystems and not inodes and not stale_mounts and not out.strip():
+        return ("MEDIUM", "WARNING",
+                "未获取到磁盘使用率数据（命令执行无输出，可能是 SSH 通道异常、命令路径缺失或非交互式 shell）。",
+                "检查 SSH 连接、命令兼容性（`df -PTh` / `df -iPTh`），以及服务器 PATH 是否包含 df/awk。",
+                facts)
+    if not filesystems and not inodes and not stale_mounts:
+        return ("MEDIUM", "WARNING",
+                f"未获取到任何挂载点数据（已解析 0 个，原始输出 {len(out.splitlines())} 行），无法评估磁盘风险。",
+                "检查命令模板 `df -PTh` / `df -iPTh` 在该服务器是否可执行；确认非交互式 SSH PATH 包含 df/awk。",
+                facts)
+
+    return ("NONE", "PASS",
+            f"磁盘空间正常（最高使用率 {max_pct}%，低于阈值 {medium_pct}%）" if filesystems else "磁盘空间未发现明显异常。",
+            "建议日志和备份目录纳入容量预警。",
+            facts)
 
 
-def _analyze_service(out: str, err: str, code: int):
-    if "failed" in out.lower() and "0 loaded units" not in out.lower():
-        return "MEDIUM", "WARNING", "存在失败的 systemd 单元或基础服务异常。", "查看失败服务日志，确认是否影响项目运行。"
-    return "NONE", "PASS", "基础服务状态未发现明显异常。", "持续关注 Nginx、数据库、Redis、Docker 等依赖服务。"
+# P0-4: 容器/伪文件系统黑名单（兜底，DB 配置可覆盖）
+_SKIP_FSTYPES = {
+    "overlay", "overlayfs", "squashfs", "tmpfs", "devtmpfs",
+    "proc", "sysfs", "cgroup", "cgroup2", "ramfs", "autofs",
+    "fuse.gvfsd-fuse", "fuse.snapfuse",
+}
 
 
-def _analyze_backup(out: str, err: str, code: int):
-    if "---BACKUPS---" in out and not out.split("---BACKUPS---", 1)[1].strip():
-        return "LOW", "WARNING", "未发现最近 2 天常见备份目录中的备份文件。", "确认备份路径是否已配置；生产项目需每日核查备份任务和文件有效性。"
-    if "---CRON---" in out and not out.split("---CRON---", 1)[0].strip() and not out.split("---CRON---", 1)[1].strip():
-        return "LOW", "WARNING", "未发现当前用户 crontab 备份任务。", "确认备份任务是否由其他调度系统执行。"
-    return "NONE", "PASS", "备份任务和近期备份文件未发现明显异常。", "建议每周抽检备份文件可恢复性。"
+def _parse_pm2_uptime_seconds(uptime: str) -> int:
+    """J4 修复：解析 PM2 `pm2 l` 表格的 uptime 列为秒数。
+
+    PM2 uptime 格式：
+    - s = 秒（如 "5s"）
+    - m = 分钟（如 "30m"）
+    - h = 小时（如 "2h"）
+    - D = 天（如 "3D"）
+    - M = 月（如 "6M"）
+    - Y = 年（如 "1Y"）
+    - 纯数字 = 毫秒（如 "0"）
+
+    返回秒数，无法解析返回 -1。
+    """
+    if not uptime or not isinstance(uptime, str):
+        return -1
+    u = uptime.strip()
+    if not u:
+        return -1
+    # 纯数字（毫秒）
+    if u.isdigit():
+        return max(0, int(u) // 1000)
+    suffix = u[-1]
+    num_str = u[:-1]
+    try:
+        num = float(num_str)
+    except (ValueError, TypeError):
+        return -1
+    if suffix == "s":
+        return int(num)
+    elif suffix == "m":
+        return int(num * 60)
+    elif suffix == "h":
+        return int(num * 3600)
+    elif suffix == "D":
+        return int(num * 86400)
+    elif suffix == "M":
+        return int(num * 2592000)  # 30 天
+    elif suffix == "Y":
+        return int(num * 31536000)
+    return -1
+
+
+def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """E2 修复：扩展支持 PM2 进程管理 + etcd 集群健康 + 非 systemd 进程关键字扫描。
+
+    解析段（按 marker 切分）：
+    - ---SYSTEMD_FAILED---: `systemctl --failed` 输出
+    - ---SYSTEMD_ACTIVE---: `systemctl is-active <svc>` 行（key: value 格式）
+    - ---PM2_JLIST---: `pm2 jlist` JSON 数组 或 `pm2 l` 表格
+    - ---PM2_PING---: PM2_PING_OK / PM2_PING_FAIL
+    - ---ETCD_HEALTH---: etcd endpoint health JSON 行（含 "is healthy"/"is unhealthy"）
+    - ---PROCESS_KEYWORDS---: ps -eo pid,user,comm 输出（caddy 等非 systemd 进程）
+
+    判定优先级（取最高等级）：
+    1. PM2 ping 失败 + 有 PM2 守护 → HIGH（PM2 自身故障）
+    2. PM2 进程 errored → HIGH
+    3. PM2 进程 stopped 且（name ∈ watch_services 或 expected_processes）→ HIGH；否则 MEDIUM
+    4. etcd 集群存在 unhealthy 端点 → HIGH
+    5. systemd 失败单元 ≥ failed_unit_medium_count → HIGH，< → MEDIUM
+    6. caddy/非 systemd 关键字 ps 中缺失 → MEDIUM
+    7. watch_services 中任一非 active → LOW
+    8. 全 OK → PASS
+    """
+    import json as _json
+
+    cfg = (thresholds or {}).get("SERVICE_STATUS", {}) or {}
+    watch_services = list(cfg.get("watch_services") or cfg.get("core_services") or [
+        "nginx", "caddy", "mysql", "mysqld", "mariadb",
+        "postgresql", "redis", "redis-server", "pm2", "etcd", "docker",
+    ])
+    failed_unit_medium_count = int(cfg.get("failed_unit_medium_count", 3))
+    pm2_stopped_level = str(cfg.get("pm2_stopped_level", "MEDIUM")).upper()
+    pm2_errored_level = str(cfg.get("pm2_errored_level", "HIGH")).upper()
+    pm2_expected = set(cfg.get("pm2_expected_processes") or [
+        "etcd", "exchange", "exchange-02", "monitor", "promtail",
+        "puller", "risk", "risk-02", "sender", "strategy", "strategy-02",
+        "supplier", "system", "trader", "transaction", "transaction-02",
+    ])
+    etcd_unhealthy_level = str(cfg.get("etcd_unhealthy_level", "HIGH")).upper()
+    process_keywords = list(cfg.get("process_keywords") or [
+        "nginx", "caddy", "mysql", "postgres", "redis", "etcd", "pm2",
+    ])
+
+    # ===== 按段切分 =====
+    section = ""
+    sections: Dict[str, List[str]] = {}
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("---") and s.endswith("---"):
+            section = s.strip("-")
+            sections.setdefault(section, [])
+            continue
+        if section:
+            sections[section].append(line)
+
+    # ===== J3 修复：段丢失时 auto-detect 兜底 =====
+    # 当 SSH 输出因 echo 失败/截断丢失 ---XXX--- marker 时，sections 字典中
+    # 对应 key 缺失或为空，pm2_present/systemd_active/etcd_health 等全部空。
+    # 解决：把整个 out 作为兜底输入重新解析（按 set 去重），不破坏已有段切分。
+    def _autodetect_fallback(key: str) -> List[str]:
+        if sections.get(key):
+            return sections[key]
+        return list(out.splitlines())
+
+    # ===== 1. 解析 systemd 失败单元 =====
+    failed_units: List[str] = []
+    for line in sections.get("SYSTEMD_FAILED", []):
+        s = line.strip()
+        if not s or "UNIT" in s or "LOAD" in s:
+            continue
+        if s.startswith("0 loaded") or s.startswith("0 failed"):
+            continue
+        parts = s.split()
+        unit_name = ""
+        if parts:
+            if parts[0].startswith("●") and len(parts) > 1:
+                unit_name = parts[1]
+            else:
+                unit_name = parts[0].lstrip("● ").strip()
+        if unit_name and "." in unit_name and unit_name not in failed_units:
+            failed_units.append(unit_name)
+
+    # ===== 2. 解析 SYSTEMD_ACTIVE（key: value） =====
+    systemd_active: Dict[str, str] = {}
+    for line in sections.get("SYSTEMD_ACTIVE", []):
+        s = line.strip()
+        if ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        systemd_active[k.strip()] = v.strip()
+
+    # ===== 3. 解析 PM2 jlist / pm2 l =====
+    pm2_present = False
+    pm2_procs: List[Dict[str, Any]] = []
+    pm2_ping_ok = False
+    pm2_ping_fail = False
+    pm2_ping_lines = sections.get("PM2_PING", [])
+    if any("PM2_PING_OK" in l for l in pm2_ping_lines):
+        pm2_ping_ok = True
+    if any("PM2_PING_FAIL" in l for l in pm2_ping_lines):
+        pm2_ping_fail = True
+
+    pm2_jlist_lines = sections.get("PM2_JLIST", [])
+    pm2_jlist_text = "\n".join(pm2_jlist_lines).strip()
+    # J3 修复：当 PM2_JLIST 段为空时，从整个 out 找 pm2 l 表格行（auto-detect 兜底）
+    if not pm2_jlist_text or pm2_jlist_text == "PM2_NOT_FOUND":
+        autodetect_lines: List[str] = []
+        for line in out.splitlines():
+            s = line.strip()
+            # pm2 l 表格特征：以 │ 开头（数据/表头）、┌/├/└ 开头（边框）、Module 关键字（表格分隔）
+            if s.startswith(("│", "┌", "├", "└")) or s == "Module":
+                autodetect_lines.append(line)
+        if autodetect_lines:
+            pm2_jlist_lines = autodetect_lines
+            pm2_jlist_text = "\n".join(pm2_jlist_lines).strip()
+
+    if pm2_jlist_text and pm2_jlist_text != "PM2_NOT_FOUND":
+        pm2_present = True
+        # 尝试 JSON 解析
+        parsed_ok = False
+        if pm2_jlist_text.startswith("["):
+            try:
+                data = _json.loads(pm2_jlist_text)
+                if isinstance(data, list):
+                    for p in data:
+                        if not isinstance(p, dict):
+                            continue
+                        # pm2 jlist 的 status/restart_time 嵌套在 pm2_env 下
+                        env = p.get("pm2_env") or {}
+                        pm2_procs.append({
+                            "name": str(p.get("name", "")),
+                            "status": str(env.get("status", "")).lower() or str(p.get("status", "")).lower(),
+                            "pid": p.get("pid", 0) or 0,
+                            "restarts": env.get("restart_time", 0) or p.get("restart_time", 0) or 0,
+                        })
+                    parsed_ok = True
+            except (ValueError, TypeError):
+                parsed_ok = False
+        # 兜底：解析 pm2 l 表格行（以 │ 或 ┌ 开头）
+        if not parsed_ok:
+            for line in pm2_jlist_lines:
+                s = line.strip()
+                if not s or s.startswith("┌") or s.startswith("├") or s.startswith("└"):
+                    continue
+                if s.startswith("│") and "id" not in s and "Module" not in s and "────" not in s:
+                    # 解析行：│ 1 │ etcd │ default │ N/A │ fork │ 52549 │ 4M │ 0 │ online │ 0% │ 3.3mb │ root │ disabled │
+                    cells = [c.strip() for c in s.split("│") if c.strip()]
+                    if len(cells) >= 5 and cells[0].isdigit():
+                        # 标准 pm2 l 列序：id, name, namespace, version, mode, pid, uptime, ↺, status, cpu, mem, user, watching
+                        # 兼容 5-13 列多种变体
+                        status_idx = next((i for i, c in enumerate(cells) if c.lower() in ("online", "stopped", "errored", "error", "launching", "waiting")), -1)
+                        # J4 修复：解析 uptime（第 6 列，索引 6）和 restarts（第 7 列，索引 7）
+                        uptime_str = cells[6] if len(cells) > 6 else ""
+                        restarts_str = cells[7] if len(cells) > 7 else "0"
+                        try:
+                            restarts = int(restarts_str) if restarts_str.isdigit() else 0
+                        except (ValueError, TypeError):
+                            restarts = 0
+                        uptime_sec = _parse_pm2_uptime_seconds(uptime_str)
+                        pm2_procs.append({
+                            "name": cells[1] if len(cells) > 1 else "",
+                            "status": cells[status_idx].lower() if status_idx >= 0 else "",
+                            "pid": int(cells[status_idx - 1]) if status_idx > 0 and cells[status_idx - 1].isdigit() else 0,
+                            "restarts": restarts,
+                            "uptime": uptime_str,
+                            "uptime_sec": uptime_sec,
+                        })
+    elif any("PM2_NOT_FOUND" in l for l in pm2_jlist_lines):
+        pm2_present = False
+    else:
+        # 没有 PM2_JLIST 段，看 PM2_PING 段有无输出
+        pm2_present = bool(pm2_ping_lines) and (pm2_ping_ok or pm2_ping_fail)
+
+    pm2_online: List[Dict[str, Any]] = []
+    pm2_stopped: List[Dict[str, Any]] = []
+    pm2_errored: List[Dict[str, Any]] = []
+    pm2_other: List[Dict[str, Any]] = []
+    for p in pm2_procs:
+        st = p.get("status", "")
+        if st == "online":
+            pm2_online.append(p)
+        elif st == "stopped":
+            pm2_stopped.append(p)
+        elif st in ("errored", "error"):
+            pm2_errored.append(p)
+        else:
+            pm2_other.append(p)
+
+    # ===== 3b. J4 修复：统计一天内重启的 PM2 进程 =====
+    recent_restart_hours = int(cfg.get("recent_restart_hours", 24))
+    recent_restart_seconds = recent_restart_hours * 3600
+    recent_restart_level = str(cfg.get("recent_restart_level", "MEDIUM")).upper()
+    pm2_recent_restarts: List[Dict[str, Any]] = []
+    pm2_total_recent_restarts = 0
+    for p in pm2_procs:
+        uptime_sec = p.get("uptime_sec", -1)
+        restarts = p.get("restarts", 0)
+        # uptime < 最近 N 小时且 restarts > 0 → 最近刚发生过重启
+        if 0 <= uptime_sec < recent_restart_seconds and restarts > 0:
+            pm2_recent_restarts.append({
+                "name": p["name"],
+                "restarts": restarts,
+                "uptime": p.get("uptime", ""),
+                "status": p.get("status", ""),
+            })
+            pm2_total_recent_restarts += restarts
+
+    # ===== 4. 解析 ETCD_HEALTH =====
+    etcd_healthy: List[str] = []
+    etcd_unhealthy: List[str] = []
+    etcd_present = False
+    for line in sections.get("ETCD_HEALTH", []):
+        s = line.strip()
+        if not s or s == "ETCD_NOT_FOUND":
+            continue
+        etcd_present = True
+        # 两种格式：
+        # 1) JSON: {"ID":123,"endpoint":"...","status":{"health":"true"/"false","reason":...}}
+        # 2) 纯文本: "http://localhost:2379 is healthy: successfully committed proposal"
+        if s.startswith("{"):
+            try:
+                data = _json.loads(s)
+                ep = data.get("endpoint", "?")
+                health = data.get("status", {}).get("health", "true")
+                if str(health).lower() in ("true", "1"):
+                    etcd_healthy.append(ep)
+                else:
+                    etcd_unhealthy.append(ep)
+                continue
+            except (ValueError, TypeError):
+                pass
+        m = re.search(r"(\S+)\s+is\s+(healthy|unhealthy)", s, re.IGNORECASE)
+        if m:
+            ep = m.group(1)
+            if m.group(2).lower() == "healthy":
+                etcd_healthy.append(ep)
+            else:
+                etcd_unhealthy.append(ep)
+
+    # ===== 5. 解析 PROCESS_KEYWORDS（ps -eo pid,user,comm） =====
+    ps_seen_keywords: set = set()
+    for line in sections.get("PROCESS_KEYWORDS", []):
+        s = line.strip()
+        if not s:
+            continue
+        # 取最后一列 comm（或第二列 user 也算），简单按空白切
+        parts = s.split()
+        if len(parts) < 3:
+            continue
+        comm = parts[2].lower()
+        for kw in process_keywords:
+            if kw.lower() in comm:
+                ps_seen_keywords.add(kw.lower())
+    # 排除由 PM2 管理的服务（PM2 进程通常以 node 启动，comm 中不显示原始服务名）
+    pm2_managed_names = {p["name"].lower() for p in pm2_procs}
+    # watch_services 中的关键字在 ps 中是否存在
+    missing_keywords = [
+        kw for kw in watch_services
+        if kw.lower() not in ps_seen_keywords
+        and kw.lower() not in pm2_managed_names  # PM2 管理的不算缺失
+        and not any(s.lower() == kw.lower() and systemd_active.get(s, "active") == "active" for s in watch_services)
+    ]
+    # 排除 unknown 状态（systemctl 没装）
+    missing_keywords = [
+        kw for kw in missing_keywords
+        if systemd_active.get(kw, "unknown") not in ("active",)
+    ]
+
+    # ===== 6. 判定（优先级从高到低） =====
+    facts: Dict[str, Any] = {
+        "failed_units": failed_units[:10],
+        "systemd_active": systemd_active,
+        "pm2_present": pm2_present,
+        "pm2_online_count": len(pm2_online),
+        "pm2_stopped": [{"name": p["name"], "pid": p["pid"]} for p in pm2_stopped[:10]],
+        "pm2_errored": [{"name": p["name"], "pid": p["pid"]} for p in pm2_errored[:10]],
+        "pm2_ping_ok": pm2_ping_ok,
+        "pm2_ping_fail": pm2_ping_fail,
+        "etcd_present": etcd_present,
+        "etcd_healthy": etcd_healthy,
+        "etcd_unhealthy": etcd_unhealthy,
+        "missing_keywords": missing_keywords,
+        "watch_services": watch_services,
+        # J4 新增：最近 N 小时内重启统计
+        "pm2_recent_restarts": pm2_recent_restarts,
+        "pm2_total_recent_restarts": pm2_total_recent_restarts,
+        "recent_restart_hours": recent_restart_hours,
+        "thresholds": {
+            "failed_unit_medium_count": failed_unit_medium_count,
+            "pm2_stopped_level": pm2_stopped_level,
+            "pm2_errored_level": pm2_errored_level,
+            "etcd_unhealthy_level": etcd_unhealthy_level,
+            "pm2_expected_processes": sorted(pm2_expected),
+            "recent_restart_hours": recent_restart_hours,
+            "recent_restart_level": recent_restart_level,
+        },
+        "criteria": (
+            f"PM2 ping 失败 + 守护存活 → HIGH；PM2 进程 errored → {pm2_errored_level}；"
+            f"PM2 进程 stopped（{pm2_stopped_level}，期望进程升 HIGH）；"
+            f"PM2 最近 {recent_restart_hours}h 内重启 ≥1 次 → {recent_restart_level}；"
+            f"etcd 集群 unhealthy → {etcd_unhealthy_level}；"
+            f"systemd 失败单元 ≥{failed_unit_medium_count} → HIGH；"
+            f"非 systemd 关键字 ps 中缺失 → MEDIUM"
+        ),
+        "summary": "",  # 后填
+    }
+
+    # 候选风险（按等级排序，最终取最高）
+    candidates: List[tuple] = []  # (level, status, msg, sug, facts_patch)
+
+    # 1) PM2 守护自身故障
+    if pm2_present and pm2_ping_fail:
+        candidates.append(("HIGH", "RISK",
+                           "PM2 守护进程 ping 失败（PM2 God Daemon 不响应）。",
+                           "执行 `pm2 kill && pm2 resurrect` 恢复 PM2 守护；检查 /root/.pm2 日志。",
+                           {"pm2_ping_fail_facts": True}))
+
+    # 2) PM2 进程 errored
+    if pm2_errored:
+        names = ", ".join(p["name"] for p in pm2_errored[:5])
+        candidates.append((pm2_errored_level if pm2_errored_level in {"HIGH", "MEDIUM", "LOW"} else "HIGH",
+                           "RISK" if pm2_errored_level == "HIGH" else "WARNING",
+                           f"PM2 进程 errored（{len(pm2_errored)} 个）：{names}",
+                           f"执行 `pm2 logs {pm2_errored[0]['name']}` 查看错误；`pm2 restart <name>` 重启。",
+                           {"pm2_errored_count": len(pm2_errored)}))
+
+    # 3) PM2 进程 stopped
+    if pm2_stopped:
+        # 期望进程（来自 cfg 或默认列表）若在 stopped 中 → 升 HIGH
+        expected_stopped = [p for p in pm2_stopped if p["name"] in pm2_expected]
+        if expected_stopped:
+            names = ", ".join(p["name"] for p in expected_stopped[:5])
+            candidates.append(("HIGH", "RISK",
+                               f"PM2 期望进程 stopped（{len(expected_stopped)} 个）：{names}",
+                               f"`pm2 start {expected_stopped[0]['name']}` 或 `pm2 resurrect` 恢复；检查进程依赖。",
+                               {"expected_stopped_count": len(expected_stopped)}))
+        else:
+            names = ", ".join(p["name"] for p in pm2_stopped[:5])
+            candidates.append((pm2_stopped_level if pm2_stopped_level in {"HIGH", "MEDIUM", "LOW"} else "MEDIUM",
+                               "WARNING",
+                               f"PM2 进程 stopped（{len(pm2_stopped)} 个）：{names}",
+                               "确认进程是否有意停止；非预期 stopped 应 `pm2 start <name>` 恢复。",
+                               {"pm2_stopped_count": len(pm2_stopped)}))
+
+    # 3b) J4 修复：PM2 最近 N 小时内重启的进程
+    if pm2_recent_restarts:
+        names_with_counts = [f"{p['name']}(x{p['restarts']})" for p in pm2_recent_restarts[:5]]
+        level = recent_restart_level if recent_restart_level in {"HIGH", "MEDIUM", "LOW"} else "MEDIUM"
+        # HIGH 等级对应 RISK，MEDIUM/LOW 等级对应 WARNING
+        status = "RISK" if level == "HIGH" else "WARNING"
+        candidates.append((level, status,
+                           f"PM2 最近 {recent_restart_hours}h 内有 {len(pm2_recent_restarts)} 个进程重启（累计 {pm2_total_recent_restarts} 次）：{', '.join(names_with_counts)}",
+                           "执行 `pm2 logs <name>` 查看错误日志，`pm2 monit` 实时监控；如频繁重启可能为代码 bug、内存不足或依赖服务异常。",
+                           {"pm2_recent_restart_count": len(pm2_recent_restarts), "pm2_total_recent_restarts": pm2_total_recent_restarts}))
+
+    # 4) etcd 健康
+    if etcd_unhealthy:
+        candidates.append((etcd_unhealthy_level if etcd_unhealthy_level in {"HIGH", "MEDIUM", "LOW"} else "HIGH",
+                           "RISK" if etcd_unhealthy_level == "HIGH" else "WARNING",
+                           f"etcd 集群 {len(etcd_unhealthy)}/{len(etcd_unhealthy) + len(etcd_healthy)} 端点 unhealthy：{', '.join(etcd_unhealthy[:3])}",
+                           "检查 etcd 进程状态、leader 选举、磁盘空间；`etcdctl member list` 查看成员。",
+                           {"etcd_unhealthy_count": len(etcd_unhealthy)}))
+
+    # 5) systemd 失败单元
+    if failed_units:
+        if len(failed_units) >= failed_unit_medium_count:
+            candidates.append(("HIGH", "RISK",
+                               f"systemd 失败单元 {len(failed_units)} 个（≥{failed_unit_medium_count}）：{', '.join(failed_units[:5])}",
+                               "查看 journalctl -u <unit> 排查根因，重点关注依赖关系与启动顺序。",
+                               {"failed_unit_count": len(failed_units)}))
+        else:
+            candidates.append(("MEDIUM", "WARNING",
+                               f"systemd 失败单元 {len(failed_units)} 个：{', '.join(failed_units[:5])}",
+                               "查看 journalctl -u <unit> 排查根因。",
+                               {"failed_unit_count": len(failed_units)}))
+
+    # 6) 非 systemd 关键字 ps 中缺失（caddy/etcd 二进制部署）
+    if missing_keywords:
+        candidates.append(("MEDIUM", "WARNING",
+                           f"关键进程 ps 中未发现：{', '.join(missing_keywords[:5])}",
+                           "确认进程是否用其他方式部署（容器、二进制），或已迁移到 PM2。",
+                           {"missing_keywords": missing_keywords[:5]}))
+
+    # 7) watch_services 中非 active（信息性）
+    # 但 PM2 管理的服务不算 inactive（etcd 等由 PM2 进程托管，systemd 状态无关）
+    # ps 关键字已扫到的服务（如 nginx 二进制部署）也不算 inactive
+    inactive_watches = [
+        s for s in watch_services
+        if systemd_active.get(s) in ("inactive", "failed", "unknown")
+        and s.lower() not in pm2_managed_names
+        and s.lower() not in ps_seen_keywords
+    ]
+    if inactive_watches and not candidates:
+        candidates.append(("LOW", "WARNING",
+                           f"watch_services 状态非 active：{', '.join(inactive_watches[:5])}",
+                           "若进程由 PM2/容器管理可忽略；否则启动对应服务。",
+                           {"inactive_watches": inactive_watches[:5]}))
+
+    # ===== 汇总 =====
+    risk_order = {"HIGH": 4, "MEDIUM": 3, "LOW": 2, "NONE": 1}
+    candidates.sort(key=lambda c: -risk_order.get(c[0], 0))
+    if not candidates:
+        # F3 修复：空数据兜底 — 未获取到任何服务/PM2 数据时明确提示
+        if not pm2_procs and not failed_units and not systemd_active and not etcd_healthy and not etcd_unhealthy and not missing_keywords and not out.strip():
+            return ("MEDIUM", "WARNING",
+                    "未获取到服务状态数据（命令执行无输出，可能是 SSH 通道异常、命令路径缺失或非交互式 shell）。",
+                    "检查 SSH 连接、`systemctl`/`pm2`/`etcdctl`/`ps` 在该服务器是否可执行；确认非交互式 SSH PATH 包含相应命令。",
+                    facts)
+        if not pm2_procs and not failed_units and not systemd_active and not etcd_healthy and not etcd_unhealthy and not missing_keywords:
+            return ("MEDIUM", "WARNING",
+                    f"未获取到任何服务/PM2 数据（已解析 0 个，原始输出 {len(out.splitlines())} 行），无法评估服务运行状态。",
+                    "检查命令模板 `systemctl --failed` / `pm2 jlist` / `etcdctl endpoint health` / `ps -eo ...` 在该服务器是否可执行。",
+                    facts)
+        return ("NONE", "PASS",
+                f"服务与 PM2 状态正常（watch={len(watch_services)}，PM2 online={len(pm2_online)}{', etcd OK' if etcd_healthy else ''}{f'，{recent_restart_hours}h 重启 {pm2_total_recent_restarts} 次' if pm2_total_recent_restarts else ''}）。",
+                "持续关注关键服务日志。",
+                facts)
+
+    top = candidates[0]
+    # 合并所有 candidates 的 facts 补丁（包括 top）
+    for c in candidates:
+        if len(c) >= 5 and isinstance(c[4], dict):
+            facts.update(c[4])
+    # summary
+    summary_parts = []
+    if pm2_present:
+        summary_parts.append(f"PM2 online={len(pm2_online)} stopped={len(pm2_stopped)} errored={len(pm2_errored)}")
+        if pm2_total_recent_restarts:
+            summary_parts.append(f"{recent_restart_hours}h 重启 {pm2_total_recent_restarts} 次")
+    if failed_units:
+        summary_parts.append(f"systemd 失败 {len(failed_units)}")
+    if etcd_unhealthy:
+        summary_parts.append(f"etcd unhealthy {len(etcd_unhealthy)}")
+    if missing_keywords:
+        summary_parts.append(f"ps 缺 {','.join(missing_keywords[:3])}")
+    facts["summary"] = "；".join(summary_parts) if summary_parts else f"watch={len(watch_services)}"
+    return (top[0], top[1], top[2], top[3], facts)
+
+
+def _analyze_backup(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P2-3 增强：支持 cron.d / cron.daily/weekly/monthly / systemd timer；按粒度选择 min_age。"""
+    cron_lines: List[str] = []
+    cron_d_lines: List[str] = []
+    timer_lines: List[str] = []
+    backup_dirs: List[Dict[str, Any]] = []
+    in_cron = False
+    in_cron_d = False
+    in_timer = False
+    in_backups = False
+    in_now = False
+    current_dir = ""
+    now_ts: Optional[int] = None
+
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "---CRON---":
+            in_cron = True
+            in_cron_d = False
+            in_timer = False
+            in_backups = False
+            in_now = False
+            continue
+        if s == "---CRON_D---":
+            in_cron = False
+            in_cron_d = True
+            in_timer = False
+            in_backups = False
+            in_now = False
+            continue
+        if s == "---TIMER---":
+            in_cron = False
+            in_cron_d = False
+            in_timer = True
+            in_backups = False
+            in_now = False
+            continue
+        if s == "---BACKUPS---":
+            in_cron = False
+            in_cron_d = False
+            in_timer = False
+            in_backups = True
+            in_now = False
+            continue
+        if s == "---NOW---":
+            in_cron = False
+            in_cron_d = False
+            in_timer = False
+            in_backups = False
+            in_now = True
+            continue
+        if s.startswith("---"):
+            in_cron = False
+            in_cron_d = False
+            in_timer = False
+            in_backups = False
+            in_now = False
+            continue
+
+        if in_now and s:
+            try:
+                now_ts = int(s.strip())
+            except ValueError:
+                now_ts = None
+            continue
+
+        if in_cron and s:
+            cron_lines.append(s)
+        if in_cron_d and s:
+            cron_d_lines.append(s)
+        if in_timer and s and "NEXT" not in s.upper() and "PASSED" not in s.upper() and "ACTIVATES" not in s.upper() and "UNIT" not in s.upper():
+            timer_lines.append(s)
+        if in_backups and s:
+            # 新格式：path size mtime(YYYY-MM-DDTHH:MM)；老格式：path size
+            parts = s.rsplit(None, 2)
+            size = 0
+            mtime_str = ""
+            path = s
+            if len(parts) == 3:
+                p, sz, mt = parts
+                path = p
+                try:
+                    size = int(sz)
+                except ValueError:
+                    size = 0
+                mtime_str = mt
+            elif len(parts) == 2:
+                p, sz = parts
+                path = p
+                try:
+                    size = int(sz)
+                except ValueError:
+                    size = 0
+            dir_path = "/".join(path.split("/")[:3]) or path
+            if not current_dir or dir_path != current_dir:
+                current_dir = dir_path
+                backup_dirs.append({"path": dir_path, "exists": True, "files": []})
+            if backup_dirs:
+                backup_dirs[-1]["files"].append({"name": path, "size": size, "mtime": mtime_str})
+
+    cfg = (thresholds or {}).get("BACKUP", {}) or {}
+    backup_paths = list(cfg.get("backup_paths") or DEFAULT_THRESHOLDS["BACKUP"]["backup_paths"])
+    min_age_days_daily = int(cfg.get("min_age_days_daily", 1))
+    min_age_days_weekly = int(cfg.get("min_age_days_weekly", 8))
+    min_age_days_monthly = int(cfg.get("min_age_days_monthly", 32))
+    # 兼容老字段
+    if "min_age_days" in cfg and "min_age_days_daily" not in cfg:
+        min_age_days_daily = int(cfg.get("min_age_days", 1))
+
+    # 检测0字节备份文件
+    zero_byte_files = []
+    for d in backup_dirs:
+        for f in (d.get("files") or []):
+            if f.get("size", -1) == 0:
+                zero_byte_files.append(f.get("name", "unknown"))
+
+    # A4 修复：按粒度选择 min_age 判定"最近一次备份是否过期"
+    # 粒度检测：
+    #  - 出现 cron.daily 或 systemd timer 频次 < 2 天  → daily
+    #  - 出现 cron.weekly 或 timer OnCalendar=weekly  → weekly
+    #  - 出现 cron.monthly 或 timer OnCalendar=monthly → monthly
+    #  - 兜底：按 cron_lines 中关键字（day/week/month）推断，否则 daily
+    granularity = "daily"
+    cron_d_blob = "\n".join(cron_d_lines).lower()
+    timer_blob = "\n".join(timer_lines).lower()
+    if "cron.monthly" in cron_d_blob or "monthly" in timer_blob or "monthly" in cron_d_blob:
+        granularity = "monthly"
+    elif "cron.weekly" in cron_d_blob or "weekly" in timer_blob or "weekly" in cron_d_blob:
+        granularity = "weekly"
+    elif "cron.daily" in cron_d_blob or "daily" in timer_blob or "daily" in cron_d_blob:
+        granularity = "daily"
+
+    min_age_days = {
+        "daily": min_age_days_daily,
+        "weekly": min_age_days_weekly,
+        "monthly": min_age_days_monthly,
+    }[granularity]
+
+    # 找最近一次备份的 mtime
+    latest_mtime_ts: Optional[int] = None
+    latest_file: Optional[str] = None
+    for d in backup_dirs:
+        for f in (d.get("files") or []):
+            mt = f.get("mtime", "")
+            if not mt:
+                continue
+            try:
+                ts = int(datetime.strptime(mt, "%Y-%m-%dT%H:%M").timestamp())
+            except (ValueError, TypeError):
+                continue
+            if latest_mtime_ts is None or ts > latest_mtime_ts:
+                latest_mtime_ts = ts
+                latest_file = f.get("name")
+    if now_ts is None:
+        now_ts = int(time.time())
+    if latest_mtime_ts is None:
+        age_days = None
+        age_stale = False
+    else:
+        age_days = (now_ts - latest_mtime_ts) / 86400.0
+        age_stale = age_days > min_age_days
+
+    facts = {
+        "backup_dirs": backup_dirs[:10],
+        "cron_lines": cron_lines[:20],
+        "cron_d_lines": cron_d_lines[:20],
+        "timer_lines": timer_lines[:10],
+        "zero_byte_files": zero_byte_files[:10],
+        "granularity": granularity,
+        "min_age_days": min_age_days,
+        "latest_backup": latest_file,
+        "latest_age_days": round(age_days, 1) if age_days is not None else None,
+        "thresholds": {"backup_paths": backup_paths, "min_age_days_daily": min_age_days_daily, "min_age_days_weekly": min_age_days_weekly, "min_age_days_monthly": min_age_days_monthly},
+        "criteria": f"按粒度({granularity})选 min_age={min_age_days} 天；最近一次备份 > {min_age_days} 天 → MEDIUM；无 cron + 无文件 → HIGH",
+        "summary": f"{len(cron_lines)} crontab + {len(cron_d_lines)} cron.d + {len(timer_lines)} timer；{sum(len(d.get('files', [])) for d in backup_dirs)} 个备份文件" + (f"；最近 {age_days:.1f} 天前" if age_days is not None else "") + (f"；{len(zero_byte_files)} 个空文件" if zero_byte_files else ""),
+    }
+
+    has_cron = bool(cron_lines or cron_d_lines or timer_lines)
+    has_backups = any(d.get("files") for d in backup_dirs)
+
+    # B6: 应用服务器（无 cron + 无备份）对偏严场景降级为 MEDIUM
+    # 应用服务器的特征：watch_services 中存在业务服务，或显式 cfg 标记
+    is_application_server = bool(cfg.get("is_application_server", False))
+
+    if not has_cron and not has_backups:
+        if is_application_server:
+            return ("MEDIUM", "WARNING",
+                    f"应用服务器未发现备份任务或近期备份文件（检查路径：{backup_paths}）。",
+                    "应用服务器建议至少配置每日应用数据快照与异地同步；非数据库服务器可适度放宽。",
+                    facts)
+        return ("HIGH", "RISK",
+                f"未发现备份任务或近期备份文件（检查路径：{backup_paths}），生产环境无备份是严重风险。",
+                "立即配置备份任务和备份路径；生产项目需每日核查备份任务和文件有效性。",
+                facts)
+    if not has_cron:
+        return ("MEDIUM", "WARNING",
+                "未发现当前用户 crontab 备份任务（但存在备份文件）。",
+                "确认备份任务是否由其他调度系统执行，否则需配置定时备份。",
+                facts)
+    if not has_backups:
+        return ("MEDIUM", "WARNING",
+                "发现备份 cron 任务，但未找到近期备份文件，备份可能未正常执行。",
+                "核查备份任务是否正常执行，检查备份目标路径和执行日志。",
+                facts)
+    if zero_byte_files:
+        return ("MEDIUM", "WARNING",
+                f"发现 {len(zero_byte_files)} 个 0 字节备份文件（可能损坏）：{', '.join(zero_byte_files[:5])}",
+                "核查0字节文件原因，确认备份任务输出是否正常，检查磁盘空间是否已满。",
+                facts)
+    if age_stale:
+        return ("MEDIUM", "WARNING",
+                f"最近一次备份 {age_days:.1f} 天前（粒度 {granularity}，阈值 {min_age_days} 天）：{latest_file}",
+                f"核查备份任务调度（应为 {granularity} 频次），检查执行日志和目标路径写入权限。",
+                facts)
+    age_str = f"{age_days:.1f} 天前" if age_days is not None else "时间未知"
+    return ("NONE", "PASS",
+            f"备份任务正常，最近一次备份 {age_str}（粒度 {granularity}，阈值 {min_age_days} 天）。",
+            "建议每周抽检备份文件可恢复性。",
+            facts)
+
+
+# ============================================================
+# 自定义规则（来自 InspectionRule）的通用 analyzer
+# ============================================================
+
+def _extract_command_from_content(rule_content: Optional[str]) -> str:
+    """从 InspectionRule.rule_content 中提取可执行的 shell 命令。
+
+    rule_content 通常包含说明/注释（# 开头）和命令。
+    解析逻辑：忽略空行、纯注释行（#），拼接剩余行；保留 `echo`/`cat` 等。
+    """
+    if not rule_content:
+        return ""
+    lines = []
+    for raw in str(rule_content).splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+# 自定义命令：常用关键字与路径的噪点过滤 + 词边界正则
+_NOISY_PATH_RE = re.compile(
+    r"/(var/log|error[._-]?log|access[._-]?log|error\.log|nginx[._-]?error)\b",
+    re.IGNORECASE,
+)
+_ERROR_WORD_RE = re.compile(
+    r"\b(error|fail|critical|panic|fatal|denied|exception|traceback)\b",
+    re.IGNORECASE,
+)
+_COUNT_ZERO_RE = re.compile(
+    r"\b(error|fail|err|fatal|panic)[_\-]?(count|num|n|total)?\s*[:=]\s*0\b",
+    re.IGNORECASE,
+)
+# B1: 脚本/命令不存在类硬错误 → 强制 HIGH
+_MISSING_CMD_RE = re.compile(
+    r"(command not found|No such file or directory|not found in|无法找到命令|命令未找到|没有那个文件或目录|:\s*command\s+not\s+found)",
+    re.IGNORECASE,
+)
+
+
+def _analyze_custom_command(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """P0-3 修复：容忍 grep exit=1、词边界匹配、过滤噪点路径。
+    B1 修复：脚本/命令不存在（command not found / No such file）→ 强制 HIGH。
+
+    判定逻辑（优先级从高到低）：
+    - stderr 命中 command not found / No such file → HIGH（脚本不存在，不应静默）
+    - exit ≥ 2 → HIGH
+    - 命中 error/fail 词边界 → MEDIUM
+    - 仅 stderr 非空 → LOW/INFO
+    - exit ∈ {0, 1} → PASS
+    """
+    # 退出码：0 与 1 都视为业务正常（grep 习惯），≥2 才视为执行失败
+    exit_ok = code in (None, 0, 1)
+
+    # 清洗输出：剥离日志路径与 count=0 类"虚假告警"
+    out_clean = _NOISY_PATH_RE.sub(" ", out or "")
+    out_clean = _COUNT_ZERO_RE.sub(" ", out_clean)
+    err_clean = _NOISY_PATH_RE.sub(" ", err or "")
+    err_clean = _COUNT_ZERO_RE.sub(" ", err_clean)
+
+    matched_out = sorted({m.group(0).lower() for m in _ERROR_WORD_RE.finditer(out_clean)})
+    matched_err = sorted({m.group(0).lower() for m in _ERROR_WORD_RE.finditer(err_clean)})
+    matched = list(dict.fromkeys(matched_out + matched_err))[:10]  # 去重保序
+
+    # B1: 命令/脚本不存在硬错误（覆盖 exit_ok 也强制 HIGH）
+    missing_cmd = bool(_MISSING_CMD_RE.search(err or "") or _MISSING_CMD_RE.search(out or ""))
+
+    out_lines = [l for l in (out or "").splitlines() if l.strip()]
+    facts: Dict[str, Any] = {
+        "exit_code": int(code) if code is not None else -1,
+        "output_lines": len(out_lines),
+        "output_bytes": len((out or "").encode("utf-8", errors="ignore")),
+        "err_lines": len([l for l in (err or "").splitlines() if l.strip()]),
+        "matched_keywords": matched,
+        "missing_command": missing_cmd,
+        "thresholds": {},
+        "criteria": "stderr 命中 'command not found'/'No such file' → HIGH；exit ≥2 → HIGH；exit ∈ {0,1} 且无 error 词边界命中 → PASS；命中 error/fatal 词边界 → MEDIUM；仅 stderr 非空 → INFO",
+        "summary": f"执行命令返回 {int(code) if code is not None else '未知'}，输出 {len(out_lines)} 行"
+            + (f"，命中 {len(matched)} 个关键字" if matched else "")
+            + ("，脚本/命令不存在" if missing_cmd else ""),
+    }
+
+    if missing_cmd:
+        return ("HIGH", "RISK",
+                "自定义命令对应的脚本/二进制不存在（command not found / No such file）。",
+                "确认规则中引用的命令/路径在目标环境存在，修正 InspectionRule.rule_content 后重试。",
+                facts)
+    if not exit_ok:
+        return ("HIGH", "RISK",
+                f"自定义命令执行失败（exit={code}）。",
+                "确认目标环境兼容性与必要变量替换。",
+                facts)
+    if matched:
+        return ("MEDIUM", "WARNING",
+                f"自定义命令输出命中错误关键字（词边界）：{', '.join(matched[:5])}",
+                "核查输出内容，确认是否为预期告警。",
+                facts)
+    if (err or "").strip():
+        return ("LOW", "INFO",
+                f"自定义命令执行有 stderr 输出（{facts['err_lines']} 行）。",
+                "查看 stderr 内容，确认是否存在隐性错误。",
+                facts)
+    return ("NONE", "PASS",
+            f"自定义命令执行成功（{len(out_lines)} 行输出）。",
+            "保持定期运行并复核输出。",
+            facts)
+
+
+# ============================================================
+# 自定义规则：提取器 + 阈值判定引擎
+# ============================================================
+
+_RISK_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+
+
+def _max_risk(*levels: str) -> str:
+    """在多个风险等级中取最大值。"""
+    best = "NONE"
+    for lv in levels:
+        if _RISK_RANK.get(lv, 0) > _RISK_RANK.get(best, 0):
+            best = lv
+    return best
+
+
+def _apply_comparator(value: float, threshold: float, comparator: str) -> bool:
+    """应用比较符判断 value 是否触发阈值。"""
+    if value is None:
+        return False
+    if comparator == ">":
+        return value > threshold
+    if comparator == ">=":
+        return value >= threshold
+    if comparator == "<":
+        return value < threshold
+    if comparator == "<=":
+        return value <= threshold
+    if comparator == "==":
+        return value == threshold
+    if comparator == "contains":
+        return str(threshold) in str(value)
+    return value > threshold
+
+
+def _extract_value(out: str, err: str, extractor: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 extractor 配置从命令输出中提取数值。
+
+    返回 {"value": float|None, "matched": str|None, "method": str}
+    """
+    if not extractor:
+        return {"value": None, "matched": None, "method": "none"}
+    mode = (extractor.get("mode") or "regex").lower()
+    pattern = extractor.get("pattern") or ""
+    text = (out or "") + "\n" + (err or "")
+
+    if mode == "regex":
+        if not pattern:
+            return {"value": None, "matched": None, "method": "regex-no-pattern"}
+        try:
+            m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            return {"value": None, "matched": None, "method": "regex-invalid"}
+        if not m:
+            return {"value": None, "matched": None, "method": "regex-no-match"}
+        # 优先用 group(1)（捕获组），否则用 group(0)
+        raw = m.group(1) if m.lastindex and m.group(1) else m.group(0)
+        # 从 raw 中抠出第一个数字
+        num_m = re.search(r"-?\d+(?:\.\d+)?", str(raw))
+        return {
+            "value": float(num_m.group(0)) if num_m else None,
+            "matched": m.group(0),
+            "method": "regex",
+        }
+
+    if mode == "numeric":
+        m = re.search(r"-?\d+(?:\.\d+)?", text)
+        return {
+            "value": float(m.group(0)) if m else None,
+            "matched": m.group(0) if m else None,
+            "method": "numeric",
+        }
+
+    if mode == "keyword":
+        keywords = extractor.get("keywords") or []
+        if isinstance(keywords, str):
+            keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+        count = 0
+        matched_words: List[str] = []
+        for kw in keywords:
+            if not kw:
+                continue
+            c = text.count(kw)
+            if c > 0:
+                count += c
+                matched_words.append(f"{kw}×{c}")
+        return {"value": float(count), "matched": ",".join(matched_words), "method": "keyword"}
+
+    if mode == "json":
+        field = extractor.get("value_field") or "value"
+        try:
+            data = json.loads(out or "{}")
+        except (ValueError, TypeError):
+            return {"value": None, "matched": None, "method": "json-parse-fail"}
+        # 简单路径提取：支持 a.b.c 或 $..key
+        cur: Any = data
+        if field.startswith("$"):
+            # 极简 JSONPath：$..key
+            key = field.lstrip("$.").split("..")[-1]
+            found: List[Any] = []
+            def _walk(node: Any) -> None:
+                if isinstance(node, dict):
+                    for k, v in node.items():
+                        if k == key:
+                            found.append(v)
+                        _walk(v)
+                elif isinstance(node, list):
+                    for x in node:
+                        _walk(x)
+            _walk(cur)
+            if not found:
+                return {"value": None, "matched": None, "method": "json-not-found"}
+            num_m = re.search(r"-?\d+(?:\.\d+)?", str(found[0]))
+            return {
+                "value": float(num_m.group(0)) if num_m else None,
+                "matched": str(found[0]),
+                "method": "json",
+            }
+        else:
+            for part in field.split("."):
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+                else:
+                    cur = None
+                if cur is None:
+                    break
+            if cur is None:
+                return {"value": None, "matched": None, "method": "json-not-found"}
+            num_m = re.search(r"-?\d+(?:\.\d+)?", str(cur))
+            return {
+                "value": float(num_m.group(0)) if num_m else None,
+                "matched": str(cur),
+                "method": "json",
+            }
+
+    return {"value": None, "matched": None, "method": f"unknown-{mode}"}
+
+
+def _evaluate_threshold(extracted: Optional[float], threshold: Dict[str, Any]) -> Optional[str]:
+    """根据 extracted 值与 threshold 配置判定风险等级（None=无结论，使用规则基线）。"""
+    if extracted is None or not threshold:
+        return None
+    comparator = threshold.get("comparator") or ">"
+    high = threshold.get("high")
+    medium = threshold.get("medium")
+    low = threshold.get("low")
+    # contains 比较符不强制 float
+    if comparator == "contains":
+        if high is not None and _apply_comparator(extracted, high, comparator):
+            return "HIGH"
+        if medium is not None and _apply_comparator(extracted, medium, comparator):
+            return "MEDIUM"
+        if low is not None and _apply_comparator(extracted, low, comparator):
+            return "LOW"
+        return "NONE"
+    if high is not None and _apply_comparator(extracted, float(high), comparator):
+        return "HIGH"
+    if medium is not None and _apply_comparator(extracted, float(medium), comparator):
+        return "MEDIUM"
+    if low is not None and _apply_comparator(extracted, float(low), comparator):
+        return "LOW"
+    return "NONE"
+
+
+def make_custom_rule_analyzer(rule_config: Dict[str, Any], base_risk_level: str = "MEDIUM"):
+    """根据规则配置生成一个 analyzer：先调用 _analyze_custom_command 拿到基础风险，
+    再用 extractor + threshold 推导 extracted_risk，最终风险 = max(base_risk, extracted_risk)。
+    """
+    extractor = rule_config.get("extractor") or {}
+    threshold = rule_config.get("threshold") or {}
+    unit = (threshold.get("unit") or "count") if threshold else "count"
+
+    def analyzer(out: str, err: str, code: int, thresholds=None):
+        base_result = _analyze_custom_command(out, err, code, thresholds)
+        # 旧式 analyzer 返回 5 元组 (level, status, message, suggestion, facts)
+        base_level, base_status, base_msg, base_sug, base_facts = base_result
+        ext_info = _extract_value(out, err, extractor) if extractor else {"value": None, "matched": None, "method": "none"}
+        extracted_risk = _evaluate_threshold(ext_info.get("value"), threshold) if threshold else None
+        final_level = _max_risk(base_level, extracted_risk or "NONE", base_risk_level or "NONE")
+
+        facts = dict(base_facts or {})
+        facts["extractor"] = ext_info
+        if threshold:
+            facts["threshold"] = {
+                **threshold,
+                "extracted_value": ext_info.get("value"),
+                "extracted_unit": unit,
+                "extracted_matched": ext_info.get("matched"),
+                "extracted_risk": extracted_risk,
+            }
+        facts["final_risk"] = final_level
+        facts["base_risk"] = base_level
+        facts["base_risk_level"] = base_risk_level
+        facts["criteria"] = (
+            f"基线风险={base_level}；规则基线={base_risk_level}"
+            + (f"；提取值={ext_info.get('value')}{unit}（{ext_info.get('method')}）" if extractor else "")
+            + (f"；阈值判定={extracted_risk}" if extracted_risk else "")
+        )
+        if extracted_risk and _RISK_RANK.get(extracted_risk, 0) > _RISK_RANK.get(base_level, 0):
+            new_msg = base_msg + f"；阈值命中 {extracted_risk}（{ext_info.get('value')}{unit}）"
+            return (final_level, base_status, new_msg, base_sug, facts)
+        return (final_level, base_status, base_msg, base_sug, facts)
+
+    return analyzer
+
+
+def list_categories(db: Session, *, scope: str = "server") -> List[Dict[str, Any]]:
+    """返回巡检项分类列表。
+
+    - 内置分类（9 大类）来自 SERVER_CATEGORIES / PROJECT_CATEGORIES
+    - 用户通过 InspectionRule 自定义的新分类（InspectionItemConfig 中）
+      也会合并进来，确保新规则在前端能勾选执行。
+    """
+    from app.db.models import InspectionItemConfig
+    import logging
+    logger = logging.getLogger(__name__)
+
+    builtin_map: Dict[str, List[Dict[str, Any]]] = {
+        "server": list(SERVER_CATEGORIES),
+        "project": list(PROJECT_CATEGORIES),
+    }
+    base = builtin_map.get(scope, list(SERVER_CATEGORIES))
+    builtin_codes = {c["code"] for c in base}
+    items: List[Dict[str, Any]] = list(base)
+
+    try:
+        scope_filter = "BOTH"
+        if scope == "server":
+            scope_filter = SERVER_SCOPE
+        elif scope == "project":
+            scope_filter = PROJECT_SCOPE
+        # item_code 全局唯一，所以只能按 scope_type 过滤
+        rows = db.query(InspectionItemConfig).filter(
+            InspectionItemConfig.enabled == True,  # noqa: E712
+            InspectionItemConfig.is_builtin == False,  # noqa: E712
+        ).all()
+        for row in rows:
+            code = (row.item_code or "").strip().upper()
+            if not code or code in builtin_codes:
+                continue
+            row_scope = (row.scope_type or "BOTH").strip().upper()
+            if row_scope != "BOTH" and scope_filter != "BOTH" and row_scope != scope_filter:
+                continue
+            items.append({
+                "code": code,
+                "name": row.item_name or code,
+                "description": row.description or "自定义巡检项",
+                "category": scope,
+                "custom": True,
+                "rule_id": row.id,
+            })
+    except Exception as e:
+        logger.warning("list_categories merge custom failed: %s", e)
+
+    return items
 
 
 def list_servers() -> List[Dict[str, Any]]:
@@ -990,63 +3619,199 @@ def _project_remote_checks(project: Dict[str, Any], selected: set[str]) -> List[
     return checks
 
 
-def _analyze_project_runtime(out: str, err: str, code: int):
+# 项目侧巡检项的执行内容与判断标准（供前端规则展示与审计）
+PROJECT_ITEM_META: Dict[str, Dict[str, str]] = {
+    "RUNTIME_ENVIRONMENT": {
+        "execution": "ss/netstat 验证主端口监听；ls 验证 deploy_path / log_path 存在；du 取目录大小",
+        "criteria": "判定标准：主端口未监听或端口配置不匹配触发 MEDIUM；目录不存在触发 MEDIUM；其它情况通过。",
+    },
+    "FILE_SECURITY": {
+        "execution": "find 扫描 0777/4000 权限文件 + *.sh/*.exe/.* 等可疑脚本",
+        "criteria": "判定标准：发现全局可写或 SUID 触发 MEDIUM；发现陌生脚本/可执行文件触发 LOW；其它情况通过。",
+    },
+    "API_SECURITY": {
+        "execution": "grep 接口错误日志中的 4xx/5xx、SQL 注入、目录遍历、XSS 等攻击特征",
+        "criteria": "判定标准：发现 union/select/<script>/../等攻击特征触发 HIGH；500 错误 ≥20 触发 MEDIUM；其它情况通过。",
+    },
+    "WHITELIST_SECURITY": {
+        "execution": "复用进程端口分析器，检查数据库/后台端口暴露情况与白名单配置",
+        "criteria": "判定标准：数据库/后台端口对全网监听触发 MEDIUM；其它情况通过。",
+    },
+    "CUSTOMER_SECURITY": {
+        "execution": "复用接口日志分析器，识别客户白名单超配与异常操作",
+        "criteria": "判定标准：发现异常高频/越权/批量操作触发 MEDIUM；其它情况通过。",
+    },
+    "CONFIG_SECURITY": {
+        "execution": "复用接口日志分析器，扫描配置中的明文密码、debug、匿名访问等",
+        "criteria": "判定标准：发现明文密钥/secret/token 触发 HIGH；debug=true 触发 MEDIUM；其它情况通过。",
+    },
+    "BACKUP_SECURITY": {
+        "execution": "find 扫描项目备份目录近 2 天文件，输出修改时间与大小",
+        "criteria": "判定标准：无近期备份触发 MEDIUM；0 字节文件触发 HIGH；其它情况通过。",
+    },
+}
+
+
+def _analyze_project_runtime(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """项目运行环境巡检（B4：返回 5-tuple 契约，与服务端 analyzer 一致）。"""
+    facts: Dict[str, Any] = {
+        "has_port_section": "---PORT---" in out,
+        "has_no_such_file": "No such file" in out,
+        "criteria": "主端口未监听或部署目录不存在 → MEDIUM",
+        "summary": "项目运行环境检查通过" if "---PORT---" in out and out.split("---PORT---", 1)[1].strip() and "No such file" not in out else "项目运行环境需要复核",
+    }
     if "---PORT---" in out and not out.split("---PORT---", 1)[1].strip():
-        return "MEDIUM", "WARNING", "项目主端口未检测到监听或端口配置不匹配。", "确认项目进程、端口配置和负载均衡转发规则。"
+        return "MEDIUM", "WARNING", "项目主端口未检测到监听或端口配置不匹配。", "确认项目进程、端口配置和负载均衡转发规则。", facts
     if "No such file" in out:
-        return "MEDIUM", "WARNING", "项目部署目录或日志目录不存在。", "核查项目部署路径、日志路径配置。"
-    return "NONE", "PASS", "项目运行环境检查未发现明显异常。", "建议项目巡检前先完成关联服务器巡检。"
+        return "MEDIUM", "WARNING", "项目部署目录或日志目录不存在。", "核查项目部署路径、日志路径配置。", facts
+    return "NONE", "PASS", "项目运行环境检查未发现明显异常。", "建议项目巡检前先完成关联服务器巡检。", facts
 
 
-def _analyze_project_files(out: str, err: str, code: int):
-    if " -rws" in out or " 777 " in out or "rwxrwxrwx" in out:
-        return "MEDIUM", "WARNING", "项目目录存在全局可写或 SUID 权限风险。", "禁止 777 权限，业务程序不应使用 root/SUID 权限运行。"
-    scripts = [l for l in out.splitlines() if l.strip().endswith(('.sh', '.exe'))]
+def _analyze_project_files(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """项目文件安全巡检（B4：返回 5-tuple 契约）。"""
+    lines = out.splitlines()
+    suid_or_world = [l for l in lines if " -rws" in l or " 777 " in l or "rwxrwxrwx" in l]
+    scripts = [l for l in lines if l.strip().endswith(('.sh', '.exe'))]
+    facts: Dict[str, Any] = {
+        "suid_or_world_writable_count": len(suid_or_world),
+        "script_count": len(scripts),
+        "criteria": "全局可写/SUID 风险 → MEDIUM；脚本/可执行文件 → LOW",
+        "summary": f"发现 {len(suid_or_world)} 个高危权限 / {len(scripts)} 个脚本",
+    }
+    if suid_or_world:
+        return "MEDIUM", "WARNING", "项目目录存在全局可写或 SUID 权限风险。", "禁止 777 权限，业务程序不应使用 root/SUID 权限运行。", facts
     if scripts:
-        return "LOW", "WARNING", f"项目目录存在脚本/可执行文件 {len(scripts)} 个，需要确认来源。", "对脚本文件建立基线，核查陌生脚本和隐藏文件。"
-    return "NONE", "PASS", "项目文件权限未发现明显异常。", "后续建议建立 SHA256 文件完整性基线。"
+        return "LOW", "WARNING", f"项目目录存在脚本/可执行文件 {len(scripts)} 个，需要确认来源。", "对脚本文件建立基线，核查陌生脚本和隐藏文件。", facts
+    return "NONE", "PASS", "项目文件权限未发现明显异常。", "后续建议建立 SHA256 文件完整性基线。", facts
 
 
-def _analyze_project_api(out: str, err: str, code: int):
+def _analyze_project_api(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """项目接口日志巡检（B4：返回 5-tuple 契约）。"""
     text = out.lower()
     attack = [x for x in ["union", "../", "/etc/passwd", "<script", "xss", "sql"] if x in text]
-    if attack:
-        return "HIGH", "RISK", f"接口日志出现疑似攻击特征：{', '.join(sorted(set(attack)))}。", "立即核查来源 IP、接口参数与 WAF/网关拦截策略。"
     error_count = len([l for l in out.splitlines() if "500" in l])
+    facts: Dict[str, Any] = {
+        "attack_features": sorted(set(attack)),
+        "error_500_count": error_count,
+        "criteria": "攻击特征（union/<script/xss/sql/路径遍历）→ HIGH；500 错误 ≥20 → MEDIUM",
+        "summary": f"命中 {len(attack)} 个攻击特征 / 500 错误 {error_count} 条",
+    }
+    if attack:
+        return "HIGH", "RISK", f"接口日志出现疑似攻击特征：{', '.join(sorted(set(attack)))}。", "立即核查来源 IP、接口参数与 WAF/网关拦截策略。", facts
     if error_count >= 20:
-        return "MEDIUM", "WARNING", f"接口 500 错误较多（采样 {error_count} 条）。", "定位高频报错接口并修复程序 BUG。"
-    return "NONE", "PASS", "接口日志采样未发现明显攻击或错误激增。", "持续保留接口访问日志和错误日志。"
+        return "MEDIUM", "WARNING", f"接口 500 错误较多（采样 {error_count} 条）。", "定位高频报错接口并修复程序 BUG。", facts
+    return "NONE", "PASS", "接口日志采样未发现明显攻击或错误激增。", "持续保留接口访问日志和错误日志。", facts
 
 
-def _analyze_project_backup(out: str, err: str, code: int):
+def _analyze_project_backup(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """项目备份巡检（B4：返回 5-tuple 契约）。"""
+    zero_byte = re.findall(r"\b0\s+/.+", out) if out else []
+    facts: Dict[str, Any] = {
+        "has_output": bool((out or "").strip()),
+        "zero_byte_files": zero_byte[:5],
+        "criteria": "未发现最近备份 → MEDIUM；0 字节文件 → HIGH",
+        "summary": "项目近期备份检查通过" if (out or "").strip() and not zero_byte else "项目备份需要核查",
+    }
     if not out.strip():
-        return "MEDIUM", "WARNING", "未发现最近 2 天项目备份文件。", "确认项目备份任务、备份路径与异地同步状态。"
-    if re.search(r"\b0\s+/.+", out):
-        return "HIGH", "RISK", "备份目录存在 0 字节文件，可能备份失败或损坏。", "立即手动触发备份并验证可恢复性。"
-    return "NONE", "PASS", "项目近期备份文件检查通过。", "建议每周抽检备份文件解压/恢复。"
+        return "MEDIUM", "WARNING", "未发现最近 2 天项目备份文件。", "确认项目备份任务、备份路径与异地同步状态。", facts
+    if zero_byte:
+        return "HIGH", "RISK", "备份目录存在 0 字节文件，可能备份失败或损坏。", "立即手动触发备份并验证可恢复性。", facts
+    return "NONE", "PASS", "项目近期备份文件检查通过。", "建议每周抽检备份文件解压/恢复。", facts
+
+
+def _auto_generate_report(db: Session, run: InspectionRun) -> None:
+    """巡检完成后自动生成 HTML 格式报告，失败不影响巡检结果。"""
+    try:
+        if not run.id or run.status in {"RUNNING", "PENDING"}:
+            return
+        item_count = db.query(InspectionItemResult).filter(InspectionItemResult.run_id == run.id).count()
+        if item_count == 0:
+            return
+        from app.services.report_center import generate_report as svc_generate_report
+        result = svc_generate_report(
+            db, report_type="inspection", target_id=run.id,
+            fmt="html", title="", created_by=run.created_by or "system",
+        )
+        report = result.get("report") or {}
+        if report.get("id"):
+            run.report_id = report.get("id")
+            run.updated_at = _now()
+            db.commit()
+    except Exception:
+        # 自动生成报告失败不影响巡检结果
+        pass
 
 
 def _finalize_run(db: Session, run: InspectionRun) -> InspectionRun:
+    """P1-5 重构：按 (server, category) 取最高 + 总和封顶 60。"""
     rows = db.query(InspectionItemResult).filter(InspectionItemResult.run_id == run.id).all()
-    high = sum(1 for r in rows if r.risk_level == "HIGH")
-    medium = sum(1 for r in rows if r.risk_level == "MEDIUM")
-    low = sum(1 for r in rows if r.risk_level == "LOW")
-    normal = sum(1 for r in rows if r.risk_level in {"NONE", ""} and r.status == "PASS")
-    score = max(0, 100 - high * RISK_WEIGHT["HIGH"] - medium * RISK_WEIGHT["MEDIUM"] - low * RISK_WEIGHT["LOW"])
+    high, medium, low, normal = _aggregate_risk_counts(rows)
+    # A5: 按 server 数平均
+    distinct_servers = {r.server_id for r in rows if r.server_id}
+    server_count = max(1, len(distinct_servers) or 1)
+    score = _compute_score(high, medium, low, server_count=server_count)
     run.high_count = high
     run.medium_count = medium
     run.low_count = low
     run.normal_count = normal
     run.score = score
     run.status = "SUCCESS" if not any(r.status == "ERROR" for r in rows) else "PARTIAL_SUCCESS"
-    run.summary = f"巡检完成：评分 {score}，高危 {high}，中危 {medium}，低危 {low}，通过 {normal}。"
+    run.summary = f"巡检完成：评分 {score}（最高风险制），高危 {high}，中危 {medium}，低危 {low}，通过 {normal}。"
     run.finished_at = _now()
     if run.started_at and run.finished_at:
         run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
     run.updated_at = _now()
     db.commit()
     db.refresh(run)
+
+    # 巡检完成时自动生成 HTML 报告
+    _auto_generate_report(db, run)
+
     return run
+
+
+def _aggregate_risk_counts(rows) -> tuple:
+    """P1-5: 按 (server_id, category) 取最高风险等级，再按 RISK_WEIGHT 计数。
+
+    - 同 server 同 category 有多条结果时，仅取风险等级最高的一条
+    - 失败一次就足以代表该类目的最大风险
+    """
+    # key -> max risk level
+    by_key: Dict[tuple, str] = {}
+    for r in rows:
+        key = (r.server_id or "", r.category or "")
+        cur = by_key.get(key)
+        new_level = (r.risk_level or "NONE").upper()
+        if not cur or RISK_ORDER.get(new_level, 0) > RISK_ORDER.get(cur, 0):
+            by_key[key] = new_level
+    high = sum(1 for lvl in by_key.values() if lvl == "HIGH")
+    medium = sum(1 for lvl in by_key.values() if lvl == "MEDIUM")
+    low = sum(1 for lvl in by_key.values() if lvl == "LOW")
+    normal = sum(1 for r in rows if (r.risk_level or "NONE").upper() in {"NONE", ""} and r.status == "PASS")
+    return high, medium, low, normal
+
+
+def _risk_weight(level: str) -> int:
+    """B7 修复：统一为 RISK_ORDER 单一来源，删除老的硬编码字典。
+    保留函数签名（向后兼容）；返回等级顺序权重。
+    """
+    return RISK_ORDER.get(level.upper(), 0)
+
+
+def _compute_score(high: int, medium: int, low: int, server_count: int = 1) -> int:
+    """A5 修复：按计划文档 §2.2 P1-5 公式。
+
+    score = max(0, 100 - min(60, avg_deduction))
+    其中 avg_deduction = (high*15 + medium*8 + low*2) / server_count
+    - 封顶 60 扣分：避免 0 分但保留风险提示
+    - 按机器数平均：避免集群规模导致分数坍塌
+    """
+    if server_count <= 0:
+        server_count = 1
+    total = high * RISK_WEIGHT["HIGH"] + medium * RISK_WEIGHT["MEDIUM"] + low * RISK_WEIGHT["LOW"]
+    avg = total / server_count
+    deduct = min(60.0, avg)
+    return max(0, int(round(100 - deduct)))
 
 
 
@@ -1055,15 +3820,15 @@ def _append_progress(db: Session, run: InspectionRun, result: CheckResult) -> In
     # Update lightweight progress summary after every item so polling users can
     # see the execution stream while the run is still RUNNING.
     rows = db.query(InspectionItemResult).filter(InspectionItemResult.run_id == run.id).all()
-    high = sum(1 for r in rows if r.risk_level == "HIGH")
-    medium = sum(1 for r in rows if r.risk_level == "MEDIUM")
-    low = sum(1 for r in rows if r.risk_level == "LOW")
-    normal = sum(1 for r in rows if r.risk_level in {"NONE", ""} and r.status == "PASS")
+    high, medium, low, normal = _aggregate_risk_counts(rows)
+    # A5: 按本次 run 涉及 server 数平均扣分（cluster 规模不敏感）
+    distinct_servers = {r.server_id for r in rows if r.server_id}
+    server_count = max(1, len(distinct_servers) or 1)
     run.high_count = high
     run.medium_count = medium
     run.low_count = low
     run.normal_count = normal
-    run.score = max(0, 100 - high * RISK_WEIGHT["HIGH"] - medium * RISK_WEIGHT["MEDIUM"] - low * RISK_WEIGHT["LOW"])
+    run.score = _compute_score(high, medium, low, server_count=server_count)
     run.summary = f"巡检执行中：已完成 {len(rows)} 项，高危 {high}，中危 {medium}，低危 {low}。"
     run.updated_at = _now()
     db.commit()
@@ -1111,6 +3876,7 @@ def execute_server_inspection_run(
     cmd_timeout = _clamp_int(command_timeout_seconds, DEFAULT_COMMAND_TIMEOUT_SECONDS, 5, MAX_COMMAND_TIMEOUT_SECONDS)
     run_timeout = _clamp_int(run_timeout_seconds, DEFAULT_RUN_TIMEOUT_SECONDS, 30, MAX_RUN_TIMEOUT_SECONDS)
     started_monotonic = time.monotonic()
+    thresholds = _load_thresholds(db)
     try:
         run.status = "RUNNING"
         run.summary = f"巡检执行中：开始服务器基础检查。命令超时 {cmd_timeout}s，单服务器总超时 {run_timeout}s。"
@@ -1131,7 +3897,7 @@ def execute_server_inspection_run(
             if spec.get("blocked_reason"):
                 result = _blocked_rule_result(spec)
             else:
-                result = _remote_check(sid, spec["category"], spec["item_code"], spec["item_name"], spec["command"], spec["analyze"], timeout_seconds=cmd_timeout)
+                result = _remote_check(sid, spec["category"], spec["item_code"], spec["item_name"], spec["command"], spec["analyze"], timeout_seconds=cmd_timeout, thresholds=thresholds)
             _finish_progress_item(db, run, step, result)
         run = _finalize_run(db, run)
     except Exception as exc:
@@ -1367,16 +4133,17 @@ def execute_project_inspection_run(db: Session, *, run_id: str, project_id: Opti
 
 def _append_progress_counts_only(db: Session, run: InspectionRun) -> None:
     rows = db.query(InspectionItemResult).filter(InspectionItemResult.run_id == run.id).all()
-    high = sum(1 for r in rows if r.risk_level == "HIGH")
-    medium = sum(1 for r in rows if r.risk_level == "MEDIUM")
-    low = sum(1 for r in rows if r.risk_level == "LOW")
-    normal = sum(1 for r in rows if r.risk_level in {"NONE", ""} and r.status == "PASS")
+    high, medium, low, normal = _aggregate_risk_counts(rows)
+    # D2 修复：progress 路径也按 server_count 平均，与 _finalize_run 对齐
+    # 避免长巡检中 score 在 1 server 与 N server 之前反复跳变
+    distinct_servers = {r.server_id for r in rows if r.server_id}
+    server_count = max(1, len(distinct_servers) or 1)
     run.high_count = high
     run.medium_count = medium
     run.low_count = low
     run.normal_count = normal
-    run.score = max(0, 100 - high * RISK_WEIGHT["HIGH"] - medium * RISK_WEIGHT["MEDIUM"] - low * RISK_WEIGHT["LOW"])
-    run.summary = f"巡检执行中：已完成 {len(rows)} 项，高危 {high}，中危 {medium}，低危 {low}。"
+    run.score = _compute_score(high, medium, low, server_count=server_count)
+    run.summary = f"巡检执行中：已完成 {len(rows)} 项，高危 {high}，中危 {medium}，低危 {low}（{server_count} 台机器）。"
     run.updated_at = _now()
     db.commit()
 
@@ -1449,7 +4216,7 @@ def _run_to_dict(r: InspectionRun) -> Dict[str, Any]:
 
 
 def _item_to_dict(r: InspectionItemResult) -> Dict[str, Any]:
-    return {"id": r.id, "run_id": r.run_id, "scope_type": r.scope_type, "server_id": r.server_id, "project_id": r.project_id, "category": r.category, "item_code": r.item_code, "item_name": r.item_name, "status": r.status, "risk_level": r.risk_level, "message": r.message, "suggestion": r.suggestion, "evidence_id": r.evidence_id, "raw_output": r.raw_output, "created_at": r.created_at.isoformat() if r.created_at else None}
+    return {"id": r.id, "run_id": r.run_id, "scope_type": r.scope_type, "server_id": r.server_id, "project_id": r.project_id, "category": r.category, "item_code": r.item_code, "item_name": r.item_name, "status": r.status, "risk_level": r.risk_level, "message": r.message, "suggestion": r.suggestion, "evidence_id": r.evidence_id, "raw_output": r.raw_output, "parsed_facts": r.parsed_facts, "created_at": r.created_at.isoformat() if r.created_at else None}
 
 
 
@@ -1820,8 +4587,9 @@ def run_project_combined_inspection(db: Session, *, project_id: str, categories:
     if not servers:
         _save_result(db, run, CheckResult("RUNTIME_ENVIRONMENT", "PROJECT_NO_SERVER", "项目部署服务器关联检查", "WARNING", "MEDIUM", "项目未配置部署服务器，无法执行服务器基础巡检。", "在系统/服务配置中维护项目部署服务器。", json.dumps(project, ensure_ascii=False), source_type="CONFIG"))
     else:
+        thresholds = _load_thresholds(db)
         for server_name in servers[:5]:
-            for result in _server_checkers(server_name, server_cats):
+            for result in _server_checkers(server_name, server_cats, thresholds=thresholds):
                 # Preserve server identity in message/category evidence for combined run.
                 result.category = f"SERVER_{result.category}"
                 result.item_name = f"{result.item_name}：{server_name}"
@@ -1943,6 +4711,26 @@ def _ensure_inspection_rule_schema(db: Session) -> None:
 
 
 def _rule_to_dict(r: InspectionRule, *, builtin: bool = False) -> Dict[str, Any]:
+    # Compute execution/criteria by looking up the spec in builtin specs (if any)
+    execution = ""
+    criteria = ""
+    cat = (r.category or "").upper()
+    code = (r.rule_code or "").upper()
+    for spec in _server_check_specs("", [cat]):
+        if spec["category"] == cat and code.endswith(spec["item_code"]):
+            execution = spec.get("execution", "")
+            criteria = spec.get("criteria", "")
+            break
+    if not execution:
+        meta = PROJECT_ITEM_META.get(cat) or {}
+        execution = meta.get("execution", "")
+        criteria = meta.get("criteria", "")
+    # Override with user-stored values from config_json (custom rules)
+    if isinstance(r.config_json, dict):
+        if r.config_json.get("execution"):
+            execution = r.config_json["execution"]
+        if r.config_json.get("criteria"):
+            criteria = r.config_json["criteria"]
     return {
         "id": r.id,
         "rule_code": r.rule_code,
@@ -1954,6 +4742,8 @@ def _rule_to_dict(r: InspectionRule, *, builtin: bool = False) -> Dict[str, Any]
         "deleted": bool(getattr(r, "deleted", False)),
         "config": r.config_json or {},
         "rule_content": getattr(r, "rule_content", None) or ((r.config_json or {}).get("content") if isinstance(r.config_json, dict) else None),
+        "execution": execution,
+        "criteria": criteria,
         "description": r.description,
         "suggestion": r.suggestion,
         "version": r.version,
@@ -1968,6 +4758,13 @@ def _rule_dict_from_payload(payload: Dict[str, Any], *, fallback_code: str = "")
     if not code:
         name = str(payload.get("rule_name") or "CUSTOM").strip().upper().replace(" ", "_")
         code = f"CUSTOM_{name[:32] or uuid4().hex[:8]}"
+    # Fold execution/criteria into config_json so the dict is safe for InspectionRule(**data)
+    cfg = payload.get("config") if isinstance(payload.get("config"), dict) else (payload.get("config_json") if isinstance(payload.get("config_json"), dict) else {})
+    cfg = dict(cfg or {})
+    if payload.get("execution") is not None:
+        cfg["execution"] = str(payload.get("execution"))
+    if payload.get("criteria") is not None:
+        cfg["criteria"] = str(payload.get("criteria"))
     return {
         "rule_code": code,
         "rule_name": str(payload.get("rule_name") or code).strip() or code,
@@ -1978,7 +4775,7 @@ def _rule_dict_from_payload(payload: Dict[str, Any], *, fallback_code: str = "")
         "description": str(payload.get("description") or "自定义巡检规则").strip(),
         "suggestion": str(payload.get("suggestion") or "请按巡检规范处理。").strip(),
         "rule_content": str(payload.get("rule_content") or payload.get("content") or "").strip(),
-        "config_json": payload.get("config") if isinstance(payload.get("config"), dict) else (payload.get("config_json") if isinstance(payload.get("config_json"), dict) else {}),
+        "config_json": cfg,
         "version": str(payload.get("version") or SCHEMA_VERSION),
     }
 
@@ -1988,6 +4785,7 @@ def _all_builtin_rules() -> List[Dict[str, Any]]:
     for cat in SERVER_CATEGORIES:
         code = f"SERVER_{cat['code']}"
         command = SERVER_RULE_COMMANDS.get(cat["code"], cat["description"])
+        spec_meta = next((s for s in _server_check_specs("", [cat["code"]]) if s["category"] == cat["code"]), {})
         builtin.append({
             "rule_code": code,
             "rule_name": cat["name"],
@@ -1998,13 +4796,16 @@ def _all_builtin_rules() -> List[Dict[str, Any]]:
             "description": cat["description"],
             "suggestion": "按服务器巡检规范核查并整改；如确认风险，登记风险问题并完成复查闭环。",
             "rule_content": command,
-            "config": {"commands": [line.strip() for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]},
+            "execution": spec_meta.get("execution", ""),
+            "criteria": spec_meta.get("criteria", ""),
+            "config_json": {"commands": [line.strip() for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]},
             "version": SCHEMA_VERSION,
             "builtin": True,
         })
     for cat in PROJECT_CATEGORIES:
         code = f"PROJECT_{cat['code']}"
         command = PROJECT_RULE_COMMANDS.get(cat["code"], cat["description"])
+        meta = PROJECT_ITEM_META.get(cat["code"]) or {}
         builtin.append({
             "rule_code": code,
             "rule_name": cat["name"],
@@ -2015,13 +4816,15 @@ def _all_builtin_rules() -> List[Dict[str, Any]]:
             "description": cat["description"],
             "suggestion": "按项目巡检规范核查并整改；涉及配置、接口、白名单、备份的问题需同步开发/运维/业务负责人。",
             "rule_content": command,
-            "config": {"commands": [line.strip() for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]},
+            "execution": meta.get("execution", ""),
+            "criteria": meta.get("criteria", ""),
+            "config_json": {"commands": [line.strip() for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]},
             "version": SCHEMA_VERSION,
             "builtin": True,
         })
     return builtin
 
-def list_rules(db: Session, *, scope_type: str = "", category: str = "", enabled: Optional[bool] = None, include_deleted: bool = False) -> Dict[str, Any]:
+def list_rules(db: Session, *, scope_type: str = "", category: str = "", enabled: Optional[bool] = None, include_deleted: bool = False, keyword: str = "", risk_level: str = "", limit: int = 0, offset: int = 0) -> Dict[str, Any]:
     """List inspection rules, merging built-in defaults with DB overrides.
 
     Older implementation only showed built-ins when DB had no rule rows. Once a
@@ -2072,16 +4875,26 @@ def list_rules(db: Session, *, scope_type: str = "", category: str = "", enabled
         items = [x for x in items if str(x.get("category") or "").upper() == cat]
     if enabled is not None:
         items = [x for x in items if bool(x.get("enabled")) == bool(enabled)]
+    if keyword:
+        kw = keyword.lower()
+        items = [x for x in items if kw in str(x.get("rule_name") or "").lower() or kw in str(x.get("rule_code") or "").lower()]
+    if risk_level:
+        rl = risk_level.upper()
+        items = [x for x in items if str(x.get("risk_level") or "").upper() == rl]
 
+    total = len(items)
     items.sort(key=lambda x: (str(x.get("scope_type") or ""), str(x.get("category") or ""), str(x.get("rule_code") or "")))
-    return {"items": items, "total": len(items)}
+    if limit > 0:
+        items = items[offset:offset + limit]
+    return {"items": items, "total": total}
 
 
 def _builtin_rule_by_code(rule_code: str) -> Optional[Dict[str, Any]]:
     code = str(rule_code or "").strip().upper()
     for item in _all_builtin_rules():
         if item["rule_code"] == code:
-            return {k: v for k, v in item.items() if k not in {"builtin"}}
+            # Strip non-model fields so the dict can be unpacked into InspectionRule(**base)
+            return {k: v for k, v in item.items() if k not in {"builtin", "execution", "criteria"}}
     return None
 
 
@@ -2095,7 +4908,17 @@ def get_rule(db: Session, rule_code: str) -> Dict[str, Any]:
         return _rule_to_dict(row, builtin=bool(_builtin_rule_by_code(code)))
     builtin = _builtin_rule_by_code(code)
     if builtin:
-        return {"id": code, "deleted": False, "config": {}, "builtin": True, **builtin}
+        # builtin is the model-only dict; pull execution/criteria from the full builtin entry
+        full = next((b for b in _all_builtin_rules() if b["rule_code"] == code), {})
+        return {
+            "id": code,
+            "deleted": False,
+            "config": {},
+            "execution": full.get("execution", ""),
+            "criteria": full.get("criteria", ""),
+            "builtin": True,
+            **builtin,
+        }
     raise HTTPException(status_code=404, detail="Inspection rule not found")
 
 
@@ -2170,12 +4993,108 @@ def update_rule(db: Session, rule_code: str, payload: Dict[str, Any]) -> Dict[st
         row.config_json = payload["config"] if isinstance(payload["config"], dict) else {}
     elif "config_json" in payload and payload["config_json"] is not None:
         row.config_json = payload["config_json"] if isinstance(payload["config_json"], dict) else {}
+    if "execution" in payload and payload["execution"] is not None:
+        # Stored under config_json for round-trip; top-level _rule_to_dict recomputes from specs
+        cfg = dict(row.config_json or {})
+        cfg["execution"] = str(payload["execution"])
+        row.config_json = cfg
+    if "criteria" in payload and payload["criteria"] is not None:
+        cfg = dict(row.config_json or {})
+        cfg["criteria"] = str(payload["criteria"])
+        row.config_json = cfg
     if "version" in payload and payload["version"] is not None:
         row.version = str(payload["version"])
     row.updated_at = _now()
     db.commit()
     db.refresh(row)
+    # 联动：若规则的 category 不在内置 SERVER_CATEGORIES / PROJECT_CATEGORIES 中，
+    # 自动创建一条 InspectionItemConfig + InspectionItemRule，让新规则立刻出现在
+    # 巡检项选择中并可被前端勾选执行。
+    _sync_item_config_for_rule(db, row)
     return _rule_to_dict(row, builtin=bool(_builtin_rule_by_code(row.rule_code)))
+
+
+def _sync_item_config_for_rule(db: Session, rule_row: InspectionRule) -> None:
+    """根据 InspectionRule 自动创建/更新 InspectionItemConfig + InspectionItemRule。
+
+    - 内置 9 大类（LOGIN_SECURITY, DISK 等）不处理：由硬编码的 SERVER_CATEGORIES
+      提供，并已有内置 InspectionItemConfig 记录。
+    - 对于 category 不在 SERVER_CATEGORIES / PROJECT_CATEGORIES 中的新规则：
+      - 若 InspectionItemConfig 中尚未有该 item_code 的条目，创建一条
+      - 在 InspectionItemRule 中建立关联（rule_code + 顺序）
+    """
+    from app.db.models import InspectionItemConfig, InspectionItemRule
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        category = (rule_row.category or "").strip().upper()
+        rule_code = (rule_row.rule_code or "").strip().upper()
+        if not category or not rule_code:
+            return
+        # 若是内置分类，不自动创建（避免污染）
+        if category in {c["code"] for c in SERVER_CATEGORIES} or category in {c["code"] for c in PROJECT_CATEGORIES}:
+            return
+        # 是否已存在 config（item_code 全局唯一）
+        cfg = db.query(InspectionItemConfig).filter(
+            InspectionItemConfig.item_code == category,
+        ).first()
+        if not cfg:
+            cfg = InspectionItemConfig(
+                id=uuid4().hex,
+                item_code=category,
+                item_name=rule_row.rule_name or category,
+                category=str(rule_row.scope_type or "BOTH").upper()[:64],
+                scope_type=rule_row.scope_type or "BOTH",
+                description=rule_row.description or "由自定义规则生成的巡检项",
+                enabled=bool(rule_row.enabled),
+                sort_order=900,
+                is_builtin=False,
+                config_json={},
+                created_at=_now(),
+                updated_at=_now(),
+            )
+            db.add(cfg)
+            try:
+                db.commit()
+                db.refresh(cfg)
+            except Exception as e:
+                logger.warning("sync_item_config commit failed: %s", e)
+                db.rollback()
+                cfg = db.query(InspectionItemConfig).filter(
+                    InspectionItemConfig.item_code == category,
+                ).first()
+                if not cfg:
+                    return
+        # 关联 InspectionItemRule
+        if cfg:
+            link = db.query(InspectionItemRule).filter(
+                InspectionItemRule.item_config_id == cfg.id,
+                InspectionItemRule.rule_code == rule_code,
+            ).first()
+            if not link:
+                link = InspectionItemRule(
+                    id=uuid4().hex,
+                    item_config_id=cfg.id,
+                    rule_code=rule_code,
+                    sort_order=0,
+                    enabled=bool(rule_row.enabled),
+                    config_override={},
+                    created_at=_now(),
+                )
+                db.add(link)
+                try:
+                    db.commit()
+                except Exception as e:
+                    logger.warning("sync_item_rule commit failed: %s", e)
+                    db.rollback()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("sync_item_config_for_rule error: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def create_rule(db: Session, payload: Dict[str, Any]) -> Dict[str, Any]:

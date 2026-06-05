@@ -40,7 +40,7 @@ from app.maintenance.sql_query import (
 SCHEMA_VERSION = "iter40.db-query-export.v1"
 DEFAULT_LIMIT = 100
 MAX_EXPORT_ROWS = 5000
-EXPORT_FORMATS = {"csv", "json", "md", "markdown", "sql_query", "xlsx"}
+EXPORT_FORMATS = {"csv", "json", "md", "markdown", "html", "sql_query", "xlsx"}
 SENSITIVE_FIELD_PATTERNS = re.compile(r"(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|key_content|credential)", re.IGNORECASE)
 DENIED_TABLES = {
     "config_kv",
@@ -219,7 +219,24 @@ def _write_export_file(path: Path, fmt: str, *, columns: List[str], rows: List[D
             meta.append([key, json.dumps(value, ensure_ascii=False, default=_json_default) if isinstance(value, (dict, list)) else value])
         wb.save(path)
         return
+    if fmt == "html":
+        html_content = _build_html_table(columns, rows, title=metadata.get("table_name") or "Query Result")
+        path.write_text(html_content, encoding="utf-8")
+        return
     raise HTTPException(status_code=400, detail=f"Unsupported export format: {fmt}")
+
+
+def _build_html_table(columns: List[str], rows: List[Dict[str, Any]], title: str = "") -> str:
+    """生成带样式的 HTML 表格"""
+    thead = "".join(f"<th>{c}</th>" for c in columns)
+    tbody = "".join(
+        "<tr>" + "".join(f"<td>{v}</td>" for v in row) + "</tr>"
+        for row in rows
+    )
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{title}</title>
+<style>table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px;text-align:left}}th{{background:#f2f2f2}}tr:nth-child(even){{background:#f9f9f9}}</style>
+</head><body><h2>{title}</h2><table><thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table></body></html>"""
 
 
 def _report_to_dict(row: ReportArtifact) -> Dict[str, Any]:
@@ -886,6 +903,8 @@ def export_media_type(fmt: str) -> str:
         return "application/json"
     if fmt in {"md"}:
         return "text/markdown; charset=utf-8"
+    if fmt == "html":
+        return "text/html; charset=utf-8"
     if fmt in {"sql_query"}:
         return "application/sql; charset=utf-8"
     if fmt == "xlsx":

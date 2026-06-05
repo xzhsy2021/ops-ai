@@ -48,7 +48,6 @@ copy_path .env.docker.example
 copy_path .env.windows.example
 copy_path dev_ops.md
 copy_path UPGRADE.md
-copy_path ARCHITECTURE.md
 
 find "$PKG_DIR" -type d \( \
   -name "__pycache__" -o \

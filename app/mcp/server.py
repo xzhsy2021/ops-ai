@@ -163,6 +163,114 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.db.get_export": "Get metadata and download URL for one database query export artifact. 中文: 查看导出详情/下载导出文件.",
     "ops.db.list_dml_history": "List controlled DML execution history with operator, connection, target table, affected rows and status. 中文: 查看DML执行历史/写入操作记录.",
     "ops.db.get_dml_execution": "Get one DML execution detail by execution_id including before-sample rows and audit fields. 中文: 查看DML执行详情.",
+
+    # ── Server Groups ──
+    "ops.list_server_groups": "List server groups with member counts. Use when user asks 'what groups exist' or 'list server groups'. 中文: 查看服务器分组/分组列表.",
+
+    # ── Inspection Tools ──
+    "ops.inspection.list_runs": "List inspection run records for servers or projects. Use when user asks 'recent inspections' or 'inspection history'. 中文: 查看巡检记录/巡检历史.",
+    "ops.inspection.get_run": "Get detailed inspection run results by run_id. 中文: 查看巡检详情/巡检结果.",
+    "ops.inspection.list_issues": "List inspection issues/risks with filters. Use when user asks 'what issues were found' or 'list risks'. 中文: 查看巡检问题/风险列表.",
+    "ops.inspection.get_issue": "Get one inspection issue detail by issue_id. 中文: 查看巡检问题详情/风险详情.",
+    "ops.inspection.generate_report": "Generate an inspection report from one or more runs. 中文: 生成巡检报告/巡检报告.",
+    "ops.inspection.summarize_run": "Summarize an inspection run in FIRE structure (Findings, Impact, Recommendations, Evidence). 中文: 巡检摘要/巡检总结.",
+    "ops.inspection.run_server": "Run an inspection on a single server. High risk; requires confirmation. 中文: 执行服务器巡检/巡检服务器.",
+    "ops.inspection.run_servers_batch": "Run inspections on multiple servers in batch. High risk; requires confirmation. 中文: 批量巡检服务器/批量巡检.",
+    "ops.inspection.run_project": "Run an inspection for a project. High risk; requires confirmation. 中文: 执行项目巡检/巡检项目.",
+    "ops.inspection.run_combined": "Run a combined project inspection. High risk; requires confirmation. 中文: 执行综合巡检/项目综合巡检.",
+    "ops.inspection.list_item_configs": "List inspection item configurations. 中文: 查看巡检项配置/巡检配置列表.",
+    "ops.inspection.get_item_config": "Get one inspection item configuration detail. 中文: 查看巡检项配置详情.",
+    "ops.inspection.update_item_config": "Update an inspection item configuration. Medium risk. 中文: 更新巡检项配置/修改巡检配置.",
+    "ops.inspection.toggle_item_config": "Enable or disable an inspection item. Medium risk; requires confirmation. 中文: 启用禁用巡检项/切换巡检项.",
+    "ops.inspection.update_item_rules": "Update rules associated with an inspection item. Medium risk. 中文: 更新巡检规则/修改巡检规则.",
+    "ops.inspection.get_run_raw_output": "Get raw output data from an inspection run. 中文: 查看巡检原始输出/巡检原始数据.",
+    "ops.inspection.delete_runs": "Delete inspection run records. High risk; requires confirmation. 中文: 删除巡检记录/清理巡检历史.",
+    "ops.inspection.delete_issue": "Delete an inspection issue. Medium risk; requires confirmation. 中文: 删除巡检问题/清理巡检问题.",
+
+    # ── Risk Management ──
+    "ops.risk.list": "List open risk issues with filters. Use when user asks 'what risks exist' or 'list open risks'. 中文: 查看风险列表/风险问题.",
+    "ops.risk.get": "Get one risk issue detail by risk_id. 中文: 查看风险详情/风险问题详情.",
+    "ops.risk.triage": "Triage open risks by severity and urgency. Read-only. 中文: 风险分流/风险优先级排序.",
+    "ops.risk.generate_fix_plan": "Generate a remediation plan for a risk issue. Read-only. 中文: 生成风险整改计划/修复方案.",
+    "ops.risk.update_status": "Update a risk issue status. High risk; requires human approval. 中文: 更新风险状态/修改风险状态.",
+    "ops.risk.verify": "Verify a risk issue resolution. High risk; requires human approval. 中文: 验证风险/复查风险.",
+    "ops.risk.ignore": "Ignore a risk issue. High risk; requires human approval. 中文: 忽略风险/标记忽略.",
+
+    # ── Log Tools ──
+    "ops.log.tail": "Read the tail of OPS application log files. Medium risk. 中文: 查看日志尾行/读取日志.",
+    "ops.log.search": "Search OPS application logs for keywords. Medium risk. 中文: 搜索日志/日志关键词搜索.",
+    "ops.log.summarize_errors": "Summarize error patterns in OPS application logs. Medium risk. 中文: 汇总错误日志/错误统计.",
+    "ops.log.find_patterns": "Find security and error patterns in OPS application logs. Medium risk. 中文: 识别日志模式/日志模式分析.",
+    "ops.log.get_recent_exceptions": "Get recent exception summaries from OPS application logs. Medium risk. 中文: 查看近期异常/异常摘要.",
+
+    # ── AI Analysis ──
+    "ops.ai.save_analysis": "Save an AI analysis result to the OPS database. Low risk. 中文: 保存AI分析结果/保存分析.",
+    "ops.ai.get_analysis": "Get one AI analysis result by analysis_id. Low risk. 中文: 查看AI分析详情/分析结果.",
+    "ops.ai.list_analysis": "List AI analysis records with filters. Low risk. 中文: 查看AI分析列表/分析记录.",
+    "ops.ai.generate_report_from_analysis": "Generate a report from an AI analysis result. Low risk. 中文: 从AI分析生成报告/分析报告.",
+    "ops.ai.find_similar_analysis": "Find similar AI analysis records. Low risk. 中文: 查找相似分析/相似分析记录.",
+
+    # ── Agent Tools ──
+    "ops.agent.list": "List registered agents and their online status. Currently disabled. 中文: 查看Agent列表/Agent状态.",
+    "ops.agent.get": "Get agent detail by id. Currently disabled. 中文: 查看Agent详情.",
+    "ops.agent.get_status": "Get agent online status summary. Currently disabled. 中文: 查看Agent在线状态.",
+    "ops.agent.list_tasks": "List agent tasks. Currently disabled. 中文: 查看Agent任务列表.",
+    "ops.agent.get_task": "Get one agent task detail. Currently disabled. 中文: 查看Agent任务详情.",
+    "ops.agent.get_logs": "Get agent log summary. Currently disabled. 中文: 查看Agent日志.",
+    "ops.agent.health_check": "Check if agent functionality is enabled. Currently disabled. 中文: Agent健康检查/Agent功能状态.",
+
+    # ── Workflow Tools ──
+    "ops.workflow.generate_project_health_brief": "Generate a lightweight project health brief using read-only tools. Low risk. 中文: 项目健康分析/项目状态简报.",
+    "ops.workflow.analyze_failed_deploy": "Analyze a failed deployment using logs, diagnostics, and risk data. Medium risk. 中文: 发布失败分析/部署失败分析.",
+    "ops.workflow.inspect_project_security": "Inspect project security posture using inspection and risk data. Medium risk. 中文: 项目安全巡检分析/安全评估.",
+    "ops.workflow.triage_open_risks": "Triage open risks by severity and generate prioritized action items. Low risk. 中文: 风险分流工作流/风险优先处理.",
+    "ops.workflow.generate_monthly_ops_report": "Generate a monthly OPS report covering deployments, inspections, risks, and system health. Low risk. 中文: 月度运维报告/月报.",
+
+    # ── Connection Management ──
+    "ops.list_connections": "List database connections with optional keyword and environment filters. 中文: 查看数据库连接列表/连接列表.",
+    "ops.get_connection": "Get database connection detail by ID. Password fields are masked. 中文: 查看数据库连接详情/连接详情.",
+    "ops.create_connection": "Create a new database connection. High risk; requires human approval. 中文: 创建数据库连接/新增连接.",
+    "ops.update_connection": "Update a database connection configuration. High risk; requires human approval. 中文: 更新数据库连接/修改连接.",
+    "ops.delete_connection": "Delete a database connection. High risk; requires human approval and confirm_text. 中文: 删除数据库连接/移除连接.",
+    "ops.test_connection": "Test database connection connectivity. Medium risk. 中文: 测试数据库连接/连接测试.",
+
+    # ── Server CRUD ──
+    "ops.get_server": "Get single server detail by name. 中文: 查看服务器详情/服务器配置.",
+    "ops.create_server": "Create a new server configuration. High risk; requires human approval. 中文: 创建服务器/新增服务器.",
+    "ops.update_server": "Update server configuration. High risk; requires human approval. 中文: 更新服务器/修改服务器配置.",
+    "ops.delete_server": "Delete a server configuration. Critical risk; requires human approval and confirm_text. 中文: 删除服务器/移除服务器.",
+    "ops.batch_update_servers": "Batch update server attributes. High risk; requires human approval. 中文: 批量更新服务器/批量修改.",
+
+    # ── System/Service/Environment CRUD ──
+    "ops.create_system": "Create a new system/project. High risk; requires human approval. 中文: 创建系统/新增项目.",
+    "ops.update_system": "Update system/project configuration. High risk; requires human approval. 中文: 更新系统/修改项目.",
+    "ops.delete_system": "Delete a system/project. Critical risk; requires human approval and confirm_text. 中文: 删除系统/移除项目.",
+    "ops.create_service": "Create a new service under a system. High risk; requires human approval. 中文: 创建服务/新增服务.",
+    "ops.update_service": "Update service configuration. High risk; requires human approval. 中文: 更新服务/修改服务.",
+    "ops.delete_service": "Delete a service. Critical risk; requires human approval and confirm_text. 中文: 删除服务/移除服务.",
+    "ops.create_environment": "Create a new environment under a system. High risk; requires human approval. 中文: 创建环境/新增环境.",
+    "ops.update_environment": "Update environment configuration. High risk; requires human approval. 中文: 更新环境/修改环境.",
+    "ops.delete_environment": "Delete an environment. Critical risk; requires human approval and confirm_text. 中文: 删除环境/移除环境.",
+
+    # ── Server Group Write ──
+    "ops.create_server_group": "Create a server group. Medium risk; requires confirmation. 中文: 创建服务器分组/新增分组.",
+    "ops.assign_server_group": "Assign servers to a group. Medium risk; requires confirmation. 中文: 分配服务器到分组/分组分配.",
+    "ops.rename_server_group": "Rename a server group. Medium risk; requires confirmation. 中文: 重命名服务器分组/分组重命名.",
+    "ops.delete_server_group": "Delete a server group. High risk; requires human approval and confirm_text. 中文: 删除服务器分组/移除分组.",
+
+    # ── SSH Key Management ──
+    "ops.list_ssh_keys": "List registered SSH keys. 中文: 查看SSH密钥列表/密钥列表.",
+    "ops.get_ssh_key": "Get SSH key metadata (no private key content). 中文: 查看SSH密钥详情/密钥信息.",
+    "ops.create_ssh_key": "Register a new SSH key. High risk; requires human approval. 中文: 创建SSH密钥/新增密钥.",
+    "ops.update_ssh_key": "Update an SSH key. High risk; requires human approval. 中文: 更新SSH密钥/修改密钥.",
+    "ops.delete_ssh_key": "Delete an SSH key. High risk; requires human approval and confirm_text. 中文: 删除SSH密钥/移除密钥.",
+
+    # ── Pipeline Management ──
+    "ops.list_pipelines": "List deployment pipeline configurations. 中文: 查看Pipeline列表/流程列表.",
+    "ops.get_pipeline": "Get single pipeline detail by ID. 中文: 查看Pipeline详情/流程详情.",
+    "ops.create_pipeline": "Create a new deployment pipeline. High risk; requires human approval. 中文: 创建Pipeline/新增流程.",
+    "ops.update_pipeline": "Update pipeline configuration. High risk; requires human approval. 中文: 更新Pipeline/修改流程.",
+    "ops.delete_pipeline": "Delete a pipeline. Critical risk; requires human approval and confirm_text. 中文: 删除Pipeline/移除流程.",
 }
 
 

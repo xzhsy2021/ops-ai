@@ -1,5 +1,7 @@
 """权限系统 API v2"""
 import os
+import time
+from collections import defaultdict
 from fastapi import APIRouter, Request, Response, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -15,6 +17,11 @@ from app.core.auth_v2 import (
     require_admin,
     init_default_user,
 )
+
+# Simple in-memory login rate limiter: max 5 failed attempts per minute per IP
+_LOGIN_RATE_LIMIT = 5
+_LOGIN_RATE_WINDOW = 60
+_login_attempts = defaultdict(list)
 
 auth_v2_router = APIRouter(prefix="/api/v2/auth", tags=["权限v2"])
 
@@ -43,10 +50,17 @@ def setup_auth(db: Session = Depends(get_db)):
 
 
 @auth_v2_router.post("/login")
-def login(payload: LoginPayload, response: Response, db: Session = Depends(get_db)):
+def login(payload: LoginPayload, response: Response, request: Request, db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    _login_attempts[client_ip] = [t for t in _login_attempts[client_ip] if now - t < _LOGIN_RATE_WINDOW]
+    if len(_login_attempts[client_ip]) >= _LOGIN_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many login attempts, please try again later")
+
     repo = UserRepository(db)
     user = repo.get_by_username(payload.username)
     if not user or not verify_password(payload.password, user.password_hash):
+        _login_attempts[client_ip].append(now)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_session_token(user.username, getattr(user, "session_version", 1) or 1)

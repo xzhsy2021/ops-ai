@@ -281,6 +281,7 @@ export default function SystemDiagnosticsPage() {
         </div>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
           <Link className="btn" to={ROUTES.system} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)' }}>返回系统状态</Link>
+          <Link className="btn btn-primary" to={ROUTES.inspection} style={{ textDecoration: 'none' }}>进入巡检中心</Link>
           <a className="btn" href={diagnosticsApi.reportExportUrl()} target="_blank" rel="noreferrer" style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>导出 JSON 报告</a>
           <a className="btn" href={diagnosticsApi.exportUrl()} target="_blank" rel="noreferrer" style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>导出诊断包</a>
           <button className="btn" onClick={copyReport} disabled={!data} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)' }}>复制诊断报告</button>
@@ -289,6 +290,13 @@ export default function SystemDiagnosticsPage() {
       </div>
 
       {error && <ErrorState title="诊断失败" description={error} />}
+
+      <SectionCard title="巡检入口" subtitle="安装诊断用于定位平台自身运行问题；巡检中心用于服务器安全、项目安全、风险闭环和巡检报告。">
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '12px', alignItems: 'center' }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>如果需要执行服务器巡检、项目巡检或综合巡检，请进入巡检中心。巡检结果会沉淀到风险问题和报告中心。</div>
+          <Link className="btn btn-primary" to={ROUTES.inspection} style={{ textDecoration: 'none' }}>打开巡检中心</Link>
+        </div>
+      </SectionCard>
 
       {data ? (
         <>

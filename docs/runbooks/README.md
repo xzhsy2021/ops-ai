@@ -6,11 +6,12 @@ The files kept in `docs/runbooks/` are current operational references that still
 
 - `AI_CAPABILITY_DISCOVERY.md`
 - `AI_TOOL_MCP_EXAMPLES.md`
+- `INSPECTION_TROUBLESHOOTING.md` — 巡检中心 oncall / 已知缺陷 / 修复记录
 - `MCP_PACKAGE_UPLOAD_AND_RETENTION.md`
 - `RELEASE_AUDIT_RETENTION_POLICY.md`
 - `SYSTEM_RELEASE_FLOW_ACTUAL.md`
 - `SYSTEM_SERVICE_MANAGEMENT.md`
-- `mcp-capability-matrix.md`
+- `mcp-capability-matrix.md` — 包含 2026-06-03 新增的 Server & Inspection 工具章节
 
 ## What Belongs Here
 

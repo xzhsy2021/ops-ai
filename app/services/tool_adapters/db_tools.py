@@ -55,9 +55,10 @@ def db_describe_table_tool(args, ctx, db):
     title="执行只读数据库查询",
     description="执行 SELECT/WITH 只读查询，自动限制行数、拦截危险语句、脱敏敏感字段并进入工具审计。",
     scopes=["ops:read"],
-    risk="low",
+    risk="medium",
     category="db_read",
     write=False,
+    data_sensitivity="sensitive",
     keywords=["查询数据", "SELECT", "select", "查数据", "query", "读数据", "查询"],
     input_schema={
         "type": "object",
@@ -93,6 +94,7 @@ def db_query_readonly_tool(args, ctx, db):
     category="db_export",
     write=False,
     requires_confirmation=False,
+    data_sensitivity="sensitive",
     keywords=["导出", "CSV", "Excel", "下载", "export", "xlsx", "json", "markdown", "导出数据", "下载数据", "导出CSV", "导出Excel"],
     input_schema={
         "type": "object",
@@ -129,7 +131,7 @@ def db_export_query_result_tool(args, ctx, db):
     name="ops.db.list_exports",
     title="查询数据库导出制品",
     description="查询报告中心中的数据库查询导出制品。只读。",
-    scopes=["ops:read", "audit:read"],
+    scopes=["ops:read"],
     risk="low",
     category="db_export_read",
     write=False,
@@ -147,7 +149,7 @@ def db_list_exports_tool(args, ctx, db):
     name="ops.db.get_export",
     title="查看数据库导出元数据",
     description="按导出 ID 查看数据库导出制品元数据、SHA256 和下载路径。只读。",
-    scopes=["ops:read", "audit:read"],
+    scopes=["ops:read"],
     risk="low",
     category="db_export_read",
     write=False,
@@ -171,6 +173,7 @@ def db_get_export_tool(args, ctx, db):
     category="db_write",
     write=True,
     requires_confirmation=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {
@@ -205,6 +208,8 @@ def db_preview_execute_sql_tool(args, ctx, db):
     category="db_write",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {
@@ -241,6 +246,7 @@ def db_execute_sql_tool(args, ctx, db):
     category="db_write",
     write=True,
     requires_confirmation=True,
+    data_sensitivity="sensitive",
     keywords=["预检", "preview", "DML", "写入预检", "修改预检", "删除预检", "precheck write"],
     input_schema={
         "type": "object",
@@ -276,6 +282,8 @@ def db_preview_dml_tool(args, ctx, db):
     category="db_write",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     keywords=["执行DML", "execute", "写入", "修改数据", "删除数据", "UPDATE", "DELETE", "INSERT"],
     input_schema={
         "type": "object",
@@ -308,7 +316,7 @@ def db_execute_dml_tool(args, ctx, db):
     name="ops.db.list_dml_history",
     title="查询 DML 执行历史",
     description="查询受控 DML 执行历史，包含操作者、连接、目标表、影响行数、状态和执行原因。只读。",
-    scopes=["ops:read", "audit:read"],
+    scopes=["ops:read"],
     risk="low",
     category="db_write_read",
     write=False,
@@ -338,7 +346,7 @@ def db_list_dml_history_tool(args, ctx, db):
     name="ops.db.get_dml_execution",
     title="查看 DML 执行详情",
     description="按 execution_id 查看受控 DML 执行详情、执行前样例和审计字段。只读。",
-    scopes=["ops:read", "audit:read"],
+    scopes=["ops:read"],
     risk="low",
     category="db_write_read",
     write=False,

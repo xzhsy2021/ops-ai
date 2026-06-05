@@ -25,6 +25,14 @@ const TAB_ITEMS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'audit', label: '审计与计划', hint: '调用记录、操作计划' },
 ]
 
+const CAPABILITY_DEFAULTS: Record<string, boolean> = {
+  allow_db_read_tools: true,
+  allow_db_export_tools: true,
+  allow_db_write_tools: true,
+  agent_runtime_enabled: false,
+  strict_prod_confirmation: true,
+}
+
 function getData(res: any) {
   return res?.data ?? res
 }
@@ -66,6 +74,7 @@ export default function ToolAccessPage() {
 }`)
   const [sampleResult, setSampleResult] = useState<any>(null)
   const [activeTab, setActiveTab] = useState<TabKey>('overview')
+  const [selectedMcpAccess, setSelectedMcpAccess] = useState('HTTP')
   const [riskConfirmOpen, setRiskConfirmOpen] = useState(false)
   const [riskConfirmValue, setRiskConfirmValue] = useState('')
   const [revokeCandidate, setRevokeCandidate] = useState<any>(null)
@@ -316,13 +325,28 @@ export default function ToolAccessPage() {
                       { key: 'allow_package_cleanup', label: '包清理', desc: '允许清理过期包' },
                     ],
                   },
+                  {
+                    title: '数据库',
+                    keys: [
+                      { key: 'allow_db_read_tools', label: '数据库只读工具', desc: '允许数据库只读工具' },
+                      { key: 'allow_db_export_tools', label: '数据库导出工具', desc: '允许数据库导出工具' },
+                      { key: 'allow_db_write_tools', label: '数据库写入工具', desc: '允许数据库写入工具' },
+                    ],
+                  },
+                  {
+                    title: '运行时与安全',
+                    keys: [
+                      { key: 'agent_runtime_enabled', label: 'Agent 运行时', desc: 'Agent 运行时' },
+                      { key: 'strict_prod_confirmation', label: '严格生产环境确认', desc: '严格生产环境确认' },
+                    ],
+                  },
                 ].map((group) => (
                   <div key={group.title} className="tool-switch-group">
                     <div className="tool-switch-group-title">{group.title}</div>
                     <div className="tool-switch-grid">
                       {group.keys.map(({ key, label, desc }) => (
                         <label key={key} className="tool-switch" title={desc}>
-                          <input type="checkbox" checked={!!settings[key]} onChange={(e) => updateSetting(key, e.target.checked)} />
+                          <input type="checkbox" checked={settings[key] !== undefined ? !!settings[key] : (CAPABILITY_DEFAULTS[key] ?? false)} onChange={(e) => updateSetting(key, e.target.checked)} />
                           <span>{label}</span>
                         </label>
                       ))}
@@ -337,7 +361,7 @@ export default function ToolAccessPage() {
               <div className="endpoint-list endpoint-list--canonical">
                 {[
                   { title: '正式 MCP 主入口', method: 'POST', path: '/api/v2/mcp', desc: 'Streamable HTTP JSON-RPC：initialize / tools/list / tools/call' },
-                  { title: 'HTTP Tool Catalog', method: 'GET', path: '/api/v2/tools?format=mcp', desc: '通用 Agent 或前端页面使用的工具目录' },
+                  { title: 'HTTP Tool Catalog', method: 'GET', path: '/api/v2/tools?format=mcp', desc: 'MCP / AI 客户端与前端页面使用的工具目录' },
                   { title: 'HTTP Tool Call', method: 'POST', path: '/api/v2/tools/call', desc: '用于非 MCP 客户端，仍走同一 Tool Registry' },
                   { title: 'Legacy Gateway', method: 'GET', path: '/api/v2/mcp/legacy/capabilities', desc: '仅兼容旧脚本，新接入不要使用' },
                 ].map((ep) => (
@@ -355,11 +379,14 @@ export default function ToolAccessPage() {
           </div>
 
           <McpAccessGuide
+            selectedServer={selectedMcpAccess}
+            onSelectServer={setSelectedMcpAccess}
             servers={[
-              { name: 'HTTP', transport: 'http', url: `${apiBaseUrl}/api/v2/mcp`, description: 'MCP Streamable HTTP 主入口' },
-              { name: 'MCP stdio', transport: 'stdio', command: 'scripts/mcp-server.sh', description: 'MCP stdio 本地命令行' },
-              { name: 'MCP HTTP', transport: 'http', url: `${apiBaseUrl}/api/v2/tools/call`, description: '直接 HTTP 工具调用' },
-              { name: 'JSON-RPC', transport: 'http', url: `${apiBaseUrl}/api/v2/mcp`, description: '标准 JSON-RPC 2.0 协议' },
+              { name: 'HTTP', transport: 'http', url: `${apiBaseUrl}/api/v2/tools/call`, description: 'HTTP Tool API：适合普通 HTTP 客户端，使用 tool + arguments 调用 OPS 工具。' },
+              { name: 'MCP stdio', transport: 'stdio', command: 'python', args: ['scripts/mcp_server_entry.py'], env: `OPS_BASE_URL=${apiBaseUrl}
+OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Desktop / Cursor 等本地 MCP 客户端。' },
+              { name: 'MCP HTTP', transport: 'streamable-http', url: `${apiBaseUrl}/api/v2/mcp`, description: 'MCP Streamable HTTP：适合支持远程 MCP HTTP 的客户端。' },
+              { name: 'JSON-RPC', transport: 'json-rpc', url: `${apiBaseUrl}/api/v2/mcp`, description: '标准 JSON-RPC 2.0：initialize / tools/list / tools/call。' },
             ]}
             baseUrl={apiBaseUrl}
             extra={
@@ -398,11 +425,14 @@ export default function ToolAccessPage() {
               id: t.id,
               name: t.name,
               description: t.owner,
-              status: t.allow_write ? 'active' : 'expired',
+              status: t.status || (t.revoked_at ? 'revoked' : 'active'),
               created_at: t.created_at,
               last_used_at: t.last_used_at,
               expires_at: t.expires_at,
+              revoked_at: t.revoked_at,
               scopes: t.scopes,
+              allow_write: t.allow_write,
+              allow_prod: t.allow_prod,
               key_prefix: t.token_prefix,
               masked_value: t.token_prefix ? `${t.token_prefix}...` : undefined,
             }))}
@@ -413,10 +443,18 @@ export default function ToolAccessPage() {
                 name: data.name,
                 description: data.description,
                 scopes: data.scopes,
+                allow_write: data.allow_write,
+                allow_prod: data.allow_prod,
+                expires_in_days: data.expires_in_days,
               })
               const d = getData(res)
               setCreatedToken(d.token || '')
               notify({ type: 'success', text: 'Token 已创建，请立即复制保存' })
+              await loadAll()
+            }}
+            onUpdate={async (tokenId, data) => {
+              await capabilityTools.updateToken(tokenId, data)
+              notify({ type: 'success', text: 'Token 权限已更新' })
               await loadAll()
             }}
             onRevoke={async (tokenId) => {
@@ -534,7 +572,7 @@ export default function ToolAccessPage() {
       <ConfirmDialog
         open={Boolean(revokeCandidate)}
         title="撤销 Tool Token"
-        description="撤销后，使用该 Token 的外部 Agent / MCP 客户端会立即失去访问能力。"
+        description="撤销后，使用该 Token 的 MCP / AI 客户端会立即失去访问能力。"
         danger
         confirmLabel="撤销"
         onCancel={() => setRevokeCandidate(null)}

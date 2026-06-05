@@ -45,6 +45,7 @@ SPA_ROUTES = [
     "/task-center",
     "/audit",
     "/reports",
+    "/inspection",
     "/database",
     "/tools",
 ]

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { inspection, reports } from '../api'
 import { ROUTES } from '../routes'
@@ -125,8 +125,14 @@ function categoryOptions(items: any[], selected: string[], onChange: (next: stri
         {items.map((item) => {
           const cfg = cfgMap.get(item.code)
           const enabled = cfg ? cfg.enabled !== false : true
+          const active = selected.includes(item.code)
           return (
-            <div key={item.code} className="mini-card" style={{ cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 8, opacity: enabled ? 1 : 0.5 }}>
+            <div
+              key={item.code}
+              className={`mini-card category-card${active ? ' category-card--active' : ''}${enabled ? '' : ' category-card--disabled'}`}
+              style={{ cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 8, opacity: enabled ? 1 : 0.5 }}
+              onClick={() => onChange(active ? selected.filter((x) => x !== item.code) : [...selected, item.code])}
+            >
               <input
                 type="checkbox"
                 checked={selected.includes(item.code)}
@@ -135,6 +141,7 @@ function categoryOptions(items: any[], selected: string[], onChange: (next: stri
               />
               <span style={{ flex: 1 }}>
                 <strong>{item.name}</strong>
+                {item.custom && <small className="muted" style={{ marginLeft: 6, color: '#3182ce', fontWeight: 600 }}>[自定义]</small>}
                 {cfg && !enabled && <small className="muted" style={{ marginLeft: 6, color: '#999' }}>(已禁用)</small>}
                 <br />
                 <small className="muted">{item.description}</small>
@@ -146,7 +153,7 @@ function categoryOptions(items: any[], selected: string[], onChange: (next: stri
                     <button
                       className="btn btn-subtle"
                       style={{ fontSize: 11, padding: '2px 6px' }}
-                      onClick={(e) => { e.preventDefault(); onConfigEdit(cfg) }}
+                      onClick={(e) => { e.stopPropagation(); e.preventDefault(); onConfigEdit(cfg) }}
                     >配置</button>
                   )}
                 </div>
@@ -182,6 +189,13 @@ export default function InspectionCenterPage() {
   const [ledgerPeriod, setLedgerPeriod] = useState('daily')
   const [issues, setIssues] = useState<any[]>([])
   const [rules, setRules] = useState<any[]>([])
+  const [rulesTotal, setRulesTotal] = useState(0)
+  const [ruleOffset, setRuleOffset] = useState(0)
+  const [rulePageSize, setRulePageSize] = useState(DEFAULT_PAGE_SIZE)
+  const [ruleFilter, setRuleFilter] = useState('')
+  const [ruleScopeFilter, setRuleScopeFilter] = useState('')
+  const [ruleRiskFilter, setRuleRiskFilter] = useState('')
+  const [serverFilter, setServerFilter] = useState('')
   const [serverId, setServerId] = useState('')
   const [selectedServerIds, setSelectedServerIds] = useState<string[]>([])
   const [projectId, setProjectId] = useState('')
@@ -226,7 +240,7 @@ export default function InspectionCenterPage() {
         inspection.runs({ limit: runPageSize, offset: runOffset }),
         inspection.ledger({ period: ledgerPeriod, limit: ledgerPageSize, offset: ledgerOffset }),
         inspection.issues({ status: issueFilter || undefined, limit: 50 }),
-        inspection.rules({}),
+        inspection.rules({ keyword: ruleFilter || undefined, scope_type: ruleScopeFilter || undefined, risk_level: ruleRiskFilter || undefined, limit: rulePageSize, offset: ruleOffset }),
         reports.list({ report_type: 'inspection', limit: reportPageSize, offset: reportOffset }),
         inspection.listItemConfigs('SERVER'),
       ])
@@ -243,6 +257,7 @@ export default function InspectionCenterPage() {
       setLedgerData(ledgerRes.data || { summary: {}, items: [] })
       setIssues(issueRes.data?.items || [])
       setRules(ruleRes.data?.items || [])
+      setRulesTotal(Number(ruleRes.data?.total || 0))
       setInspectionReports(reportRes.data?.items || [])
       setInspectionReportsTotal(Number(reportRes.data?.total || 0))
       setItemConfigs((prev: any) => ({ ...prev, server: itemCfgRes.data?.items || [] }))
@@ -287,6 +302,12 @@ export default function InspectionCenterPage() {
   async function reloadIssues() {
     const res: any = await inspection.issues({ status: issueFilter || undefined, limit: 100 })
     setIssues(res.data?.items || [])
+  }
+
+  async function reloadRules(nextOffset = ruleOffset) {
+    const res: any = await inspection.rules({ keyword: ruleFilter || undefined, scope_type: ruleScopeFilter || undefined, risk_level: ruleRiskFilter || undefined, limit: rulePageSize, offset: nextOffset })
+    setRules(res.data?.items || [])
+    setRulesTotal(Number(res.data?.total || 0))
   }
 
   async function reloadProjectRelations(pid = projectId) {
@@ -368,7 +389,8 @@ export default function InspectionCenterPage() {
       setMessage('服务器巡检已启动，正在实时输出执行过程')
       setTab('runs')
       await reloadRuns('SERVER')
-    } catch (e: any) { setError(e?.message || String(e)); setRunning(false) }
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setRunning(false) }
   }
 
   async function runServersBatch(groupsOverride?: string[]) {
@@ -391,11 +413,19 @@ export default function InspectionCenterPage() {
       setMessage((res.data?.summary || `已启动 ${targetLabel} 巡检，正在实时输出执行过程`) + skippedText)
       setTab('runs')
       await reloadRuns('SERVER')
-    } catch (e: any) { setError(e?.message || String(e)); setRunning(false) }
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally {
+      setRunning(false)
+      // 单击分组触发的巡检在成功后保留 selectedGroups 以便再次点击
+      // 但是 running 标志必须重置，否则按钮一直显示"巡检中..."
+    }
   }
 
   function buildRuleForm(rule?: any) {
     const config = rule?.config && typeof rule.config === 'object' ? rule.config : {}
+    // 解析阈值/提取器结构，缺失字段填默认值
+    const extractor = config.extractor || { mode: 'regex', pattern: '', value_field: 'value' }
+    const threshold = config.threshold || { high: null, medium: null, low: null, comparator: '>', unit: 'count' }
     return {
       rule_code: rule?.rule_code || '',
       rule_name: rule?.rule_name || '',
@@ -407,6 +437,17 @@ export default function InspectionCenterPage() {
       suggestion: rule?.suggestion || '',
       rule_content: rule?.rule_content || config.content || '',
       config_text: JSON.stringify(config, null, 2),
+      // 结构化提取器
+      extractor_mode: extractor.mode || 'regex',
+      extractor_pattern: extractor.pattern || '',
+      extractor_value_field: extractor.value_field || 'value',
+      // 结构化阈值
+      threshold_high: threshold.high ?? '',
+      threshold_medium: threshold.medium ?? '',
+      threshold_low: threshold.low ?? '',
+      threshold_comparator: threshold.comparator || '>',
+      threshold_unit: threshold.unit || 'count',
+      threshold_enabled: !!config.threshold,
     }
   }
 
@@ -466,6 +507,37 @@ export default function InspectionCenterPage() {
     } catch {
       return setError('规则配置 JSON 格式不正确')
     }
+    // 注入结构化提取器
+    if (form.extractor_pattern || form.extractor_keywords) {
+      config.extractor = {
+        mode: form.extractor_mode || 'regex',
+        pattern: form.extractor_pattern || '',
+        value_field: form.extractor_value_field || 'value',
+      }
+      if (form.extractor_keywords) {
+        config.extractor.keywords = form.extractor_keywords.split(',').map((s: string) => s.trim()).filter(Boolean)
+      }
+    } else if (config.extractor) {
+      delete config.extractor
+    }
+    // 注入结构化阈值
+    if (form.threshold_enabled) {
+      const high = form.threshold_high === '' ? null : Number(form.threshold_high)
+      const medium = form.threshold_medium === '' ? null : Number(form.threshold_medium)
+      const low = form.threshold_low === '' ? null : Number(form.threshold_low)
+      if (high === null && medium === null && low === null) {
+        return setError('已启用阈值判定，请至少填写 high / medium / low 之一')
+      }
+      config.threshold = {
+        high,
+        medium,
+        low,
+        comparator: form.threshold_comparator || '>',
+        unit: form.threshold_unit || 'count',
+      }
+    } else if (config.threshold) {
+      delete config.threshold
+    }
     const payload = {
       rule_code: code,
       rule_name: form.rule_name || code,
@@ -484,8 +556,7 @@ export default function InspectionCenterPage() {
         : await inspection.updateRule(ruleEditor.originalCode, payload)
       setRuleEditor({ open: false, mode: 'create', originalCode: '', form: {} })
       setMessage(`规则已${ruleEditor.mode === 'create' ? '新增' : '保存'}：${res.data?.rule_name || code}`)
-      const refreshed: any = await inspection.rules({})
-      setRules(refreshed.data?.items || [])
+      await reloadRules()
     } catch (e: any) { setError(e?.message || String(e)) }
   }
 
@@ -495,8 +566,7 @@ export default function InspectionCenterPage() {
     try {
       const res: any = await inspection.updateRule(code, { enabled: rule.enabled === false })
       setMessage(`规则已${res.data?.enabled ? '启用' : '停用'}：${res.data?.rule_name || code}`)
-      const refreshed: any = await inspection.rules({})
-      setRules(refreshed.data?.items || [])
+      await reloadRules()
     } catch (e: any) { setError(e?.message || String(e)) }
   }
 
@@ -523,7 +593,8 @@ export default function InspectionCenterPage() {
       setMessage('项目巡检已启动，正在实时输出执行过程')
       setTab('runs')
       await reloadRuns('PROJECT')
-    } catch (e: any) { setError(e?.message || String(e)); setRunning(false) }
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setRunning(false) }
   }
 
   async function runCombined() {
@@ -536,22 +607,6 @@ export default function InspectionCenterPage() {
       await loadBase()
       setTab('runs')
     } catch (e: any) { setError(e?.message || String(e)) } finally { setRunning(false) }
-  }
-
-  async function generateReport(runId: string) {
-    setError(''); setMessage('')
-    try {
-      const detail: any = await inspection.runDetail(runId)
-      const status = detail.data?.run?.status
-      if (status === 'RUNNING' || status === 'PENDING') {
-        setCurrentResult(detail.data)
-        setActiveRunIds((prev) => Array.from(new Set([...prev, runId])))
-        return setError('巡检仍在执行中，请等待完成后再生成报告。')
-      }
-      const res: any = await inspection.generateReport(runId, { format: 'md' })
-      setMessage(`巡检报告已生成：${res.data?.report?.title || res.data?.report?.id}`)
-      await loadBase()
-    } catch (e: any) { setError(e?.message || String(e)) }
   }
 
   async function generateSelectedReports() {
@@ -573,7 +628,7 @@ export default function InspectionCenterPage() {
           return setError(`巡检 ${id} 结果为空，请重新执行后再生成合并报告。`)
         }
       }
-      const res: any = await inspection.generateReports({ run_ids: ids, format: 'md', title: `巡检合并报告（${ids.length} 条记录）` })
+      const res: any = await inspection.generateReports({ run_ids: ids, format: 'html', title: `巡检合并报告（${ids.length} 条记录）` })
       setMessage(`巡检合并报告已生成：${res.data?.report?.title || res.data?.report?.id}`)
       await loadBase()
     } catch (e: any) { setError(e?.message || String(e)) }
@@ -676,6 +731,7 @@ export default function InspectionCenterPage() {
 
   useEffect(() => { loadBase() }, [])
   useEffect(() => { reloadIssues().catch(() => undefined) }, [issueFilter])
+  useEffect(() => { reloadRules().catch(() => undefined) }, [ruleFilter, ruleScopeFilter, ruleRiskFilter, ruleOffset, rulePageSize])
   useEffect(() => { reloadRuns().catch(() => undefined) }, [runFilter, runOffset, runPageSize])
   useEffect(() => { reloadProjectRelations().catch(() => undefined) }, [projectId])
   useEffect(() => { reloadLedger().catch(() => undefined) }, [ledgerPeriod, ledgerOffset, ledgerPageSize])
@@ -697,7 +753,7 @@ export default function InspectionCenterPage() {
         if (completed) {
           setActiveRunIds([])
           setRunning(false)
-          setMessage('巡检执行完成，可查看详情或生成报告。')
+          setMessage('巡检执行完成，报告已自动生成，可查看详情或报告。')
           await reloadIssues()
         } else {
           setActiveRunIds(stillRunning)
@@ -729,16 +785,46 @@ export default function InspectionCenterPage() {
   const selectedProjectPathMissing = Boolean(selectedProject && (!selectedProject.deploy_path || !selectedProject.log_path || !selectedProject.backup_path))
   const groupedServers = useMemo(() => {
     const groups: Record<string, any[]> = {}
+    const kw = serverFilter.toLowerCase()
     for (const s of servers) {
+      if (kw) {
+        const name = String(s.name || s.id || '').toLowerCase()
+        const host = String(s.host || s.ip || '').toLowerCase()
+        if (!name.includes(kw) && !host.includes(kw)) continue
+      }
       const group = s.group || s.env || '未分组'
       if (!groups[group]) groups[group] = []
       groups[group].push(s)
     }
     return groups
-  }, [servers])
+  }, [servers, serverFilter])
 
   const activeServerIds = useMemo(() => servers.filter(isServerInspectable).map((s) => s.id || s.name).filter(Boolean), [servers])
   const disabledServerCount = useMemo(() => servers.filter((s) => !isServerInspectable(s)).length, [servers])
+  const filteredServers = useMemo(() => {
+    const kw = (serverFilter || '').trim().toLowerCase()
+    if (!kw) return servers
+    return servers.filter((s: any) => {
+      const id = (s.id || s.name || '').toLowerCase()
+      const host = (s.host || s.ip || '').toLowerCase()
+      const name = (s.name || '').toLowerCase()
+      return id.includes(kw) || host.includes(kw) || name.includes(kw)
+    })
+  }, [servers, serverFilter])
+  // 当前分组展开 + 过滤后可见的服务器 id 列表（用于"全选当前可见"）
+  const visibleServerIds = useMemo(() => {
+    const ids: string[] = []
+    Object.entries(groupedServers).forEach(([group, list]) => {
+      if (expandedGroups[group] === false) return
+      ;(list as any[]).forEach((s) => {
+        if (filteredServers.includes(s)) {
+          const id = s.id || s.name
+          if (id) ids.push(id)
+        }
+      })
+    })
+    return ids
+  }, [groupedServers, expandedGroups, filteredServers])
 
   return (
     <div className="page-container inspection-page">
@@ -784,75 +870,229 @@ export default function InspectionCenterPage() {
 
       {tab === 'server' && (
         <section className="panel-card">
-          <h2>服务器巡检</h2>
-          <p className="muted">只执行只读命令，覆盖登录、账号、命令、进程端口、防火墙、磁盘、服务、备份等基础项。</p>
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
-            <label>单台服务器 <select value={serverId} onChange={(e) => setServerId(e.target.value)}>{servers.map((s) => <option key={s.id || s.name} value={s.id || s.name} disabled={!isServerInspectable(s)}>{s.name || s.id} · {s.host || '-'} · {serverStatusText(s)}</option>)}</select></label>
-            <button className="btn primary" onClick={runServer} disabled={running || !serverId}>{running ? '巡检中...' : '一键巡检选中服务器'}</button>
-            <button className="btn" onClick={runServersBatch} disabled={running || selectedServerIds.length === 0}>{running ? '巡检中...' : `一键巡检 ${selectedServerIds.length || 0} 台服务器`}</button>
-            <button className="btn btn-subtle" onClick={() => { setSelectedServerIds(activeServerIds); setMessage(`已选择全部在线/启用服务器 ${activeServerIds.length} 台，停用/离线 ${disabledServerCount} 台会自动跳过。`) }} disabled={running || activeServerIds.length === 0}>选择全部在线/启用</button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 4 }}>
+            <h2 style={{ margin: 0 }}>服务器巡检</h2>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>只读命令 · 登录/账号/命令/端口/防火墙/磁盘/服务/备份</span>
           </div>
-          <div className="mini-card" style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-            <strong>并发与超时限制</strong>
-            <label>并发 <input type="number" min={1} max={8} value={batchConcurrency} onChange={(e) => setBatchConcurrency(Math.max(1, Math.min(8, Number(e.target.value || 1))))} style={{ width: 72 }} /></label>
-            <label>分批大小 <input type="number" min={1} max={20} value={batchSize} onChange={(e) => setBatchSize(Math.max(1, Math.min(20, Number(e.target.value || 1))))} style={{ width: 72 }} /></label>
-            <label>单命令超时(秒) <input type="number" min={5} max={120} value={commandTimeoutSeconds} onChange={(e) => setCommandTimeoutSeconds(Math.max(5, Math.min(120, Number(e.target.value || 20))))} style={{ width: 86 }} /></label>
-            <label>单服务器总超时(秒) <input type="number" min={30} max={1800} value={runTimeoutSeconds} onChange={(e) => setRunTimeoutSeconds(Math.max(30, Math.min(1800, Number(e.target.value || 180))))} style={{ width: 92 }} /></label>
-            <small className="muted">共 {servers.length} 台，在线/启用 {activeServerIds.length} 台，停用/离线 {disabledServerCount} 台。</small>
+
+          {/* 1. 4 项统计 */}
+          <div className="inspection-stats-row">
+            <div className="stat-card">
+              <span className="stat-icon">⬡</span>
+              <div className="stat-body"><span>服务器总数</span><strong>{servers.length}</strong></div>
+            </div>
+            <div className="stat-card stat-card--success">
+              <span className="stat-icon" style={{ background: 'color-mix(in srgb, var(--success, #16a34a) 18%, transparent)', color: 'var(--success, #16a34a)' }}>●</span>
+              <div className="stat-body"><span>在线 / 启用</span><strong>{activeServerIds.length}</strong></div>
+            </div>
+            <div className="stat-card stat-card--warning">
+              <span className="stat-icon" style={{ background: 'color-mix(in srgb, var(--warning) 18%, transparent)', color: 'var(--warning)' }}>○</span>
+              <div className="stat-body"><span>停用 / 离线</span><strong>{disabledServerCount}</strong></div>
+            </div>
+            <div className="stat-card stat-card--accent">
+              <span className="stat-icon">✓</span>
+              <div className="stat-body"><span>当前已选</span><strong>{selectedServerIds.length + selectedGroups.length}</strong></div>
+            </div>
           </div>
-          <div className="mini-card" style={{ marginBottom: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <strong>批量服务器选择（按分组折叠）</strong>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button className="btn btn-subtle" onClick={() => setSelectedServerIds(activeServerIds)}>全选在线/启用</button>
-                <button className="btn btn-subtle" onClick={() => setSelectedServerIds([])}>清空</button>
-                <button className="btn btn-subtle" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}>展开全部</button>
-                <button className="btn btn-subtle" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}>收起全部</button>
-              </div>
+
+          {/* 2. 工具栏 */}
+          <div className="inspection-toolbar">
+            <div className="toolbar-search">
+              <span className="toolbar-search-icon">⌕</span>
+              <input
+                value={serverFilter}
+                onChange={(e) => setServerFilter(e.target.value)}
+                placeholder="搜索名称 / IP"
+                aria-label="搜索服务器"
+              />
+              {serverFilter && (
+                <button className="btn btn-subtle" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => setServerFilter('')}>清空</button>
+              )}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 10 }}>
-              <strong>按分组直接巡检：</strong>
-              {Object.keys(groupedServers).map((g) => {
-                const checked = selectedGroups.includes(g)
-                return (
-                  <label key={g} className="check-row" style={{ padding: '2px 8px', border: '1px solid var(--border-color, #d9d9d9)', borderRadius: 6 }}>
-                    <input type="checkbox" checked={checked} onChange={(e) => setSelectedGroups(e.target.checked ? Array.from(new Set([...selectedGroups, g])) : selectedGroups.filter((x) => x !== g))} />
-                    <span style={{ marginLeft: 4 }}>{g}</span>
-                  </label>
-                )
-              })}
-              <button className="btn btn-subtle" onClick={() => setSelectedGroups([])}>清空分组</button>
-              <button className="btn" onClick={() => runServersBatch()} disabled={running || (selectedGroups.length === 0 && selectedServerIds.length === 0)}>{running ? '巡检中...' : `按所选分组发起巡检（${selectedGroups.length}）`}</button>
+            <div className="toolbar-divider" />
+            <div className="toolbar-actions">
+              <button className="btn btn-subtle" onClick={() => { setSelectedServerIds(activeServerIds); setMessage(`已选择全部在线/启用服务器 ${activeServerIds.length} 台，停用/离线 ${disabledServerCount} 台会自动跳过。`) }} disabled={running || activeServerIds.length === 0}>全选在线</button>
+              <button className="btn btn-subtle" onClick={() => { setSelectedServerIds([]); setSelectedGroups([]) }}>清空选择</button>
+              <button className="btn btn-subtle" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}>展开全部</button>
+              <button className="btn btn-subtle" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}>收起全部</button>
             </div>
-            <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
+            <div className="toolbar-cta">
+              <label className="toolbar-summary" title="选择单台服务器">
+                单台
+                <select value={serverId} onChange={(e) => setServerId(e.target.value)} style={{ marginLeft: 6, padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-page)' }}>
+                  {servers.filter(isServerInspectable).map((s) => <option key={s.id || s.name} value={s.id || s.name}>{s.name || s.id}</option>)}
+                </select>
+              </label>
+              <button className="btn primary" onClick={runServer} disabled={running || !serverId}>{running ? '巡检中…' : '巡检单台'}</button>
+              <button className="btn" onClick={() => runServersBatch()} disabled={running || (selectedServerIds.length === 0 && selectedGroups.length === 0)}>{running ? '巡检中…' : `巡检选中 (${selectedServerIds.length + selectedGroups.length})`}</button>
+            </div>
+          </div>
+
+          {/* 3. 分组快速选择（chip） */}
+          {Object.keys(groupedServers).length > 0 && (
+            <div className="inspection-group-quick">
+              <span className="quick-label">按分组：</span>
               {Object.entries(groupedServers).map(([group, list]) => {
-                const ids = (list as any[]).filter(isServerInspectable).map((s) => s.id || s.name).filter(Boolean)
-                const allChecked = ids.length > 0 && ids.every((id) => selectedServerIds.includes(id))
-                const someChecked = ids.some((id) => selectedServerIds.includes(id))
-                const expanded = expandedGroups[group] !== false
+                const inspectableCount = (list as any[]).filter(isServerInspectable).length
+                const active = selectedGroups.includes(group)
                 return (
-                  <div key={group} className="mini-card" style={{ padding: 10 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <label className="check-row" style={{ margin: 0 }}>
-                        <input
-                          type="checkbox"
-                          checked={allChecked}
-                          ref={(el) => { if (el) el.indeterminate = !allChecked && someChecked }}
-                          onChange={(e) => setSelectedServerIds(e.target.checked ? Array.from(new Set([...selectedServerIds, ...ids])) : selectedServerIds.filter((x) => !ids.includes(x)))}
-                        />
-                        <span><strong>{group}</strong> <small className="muted">在线/启用 {ids.length} 台，停用/离线 {(list as any[]).length - ids.length} 台，已选 {ids.filter((id) => selectedServerIds.includes(id)).length} 台</small></span>
-                      </label>
-                      <button className="btn btn-subtle" onClick={() => setExpandedGroups({ ...expandedGroups, [group]: !expanded })}>{expanded ? '收起' : '展开'}</button>
-                    </div>
-                    {expanded && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 8, marginTop: 8 }}>
-                      {(list as any[]).map((s) => { const id = s.id || s.name; const inspectable = isServerInspectable(s); return <label key={id} className="check-row" style={{ opacity: inspectable ? 1 : 0.55 }}><input type="checkbox" disabled={!inspectable} checked={inspectable && selectedServerIds.includes(id)} onChange={(e) => setSelectedServerIds(e.target.checked ? Array.from(new Set([...selectedServerIds, id])) : selectedServerIds.filter((x) => x !== id))} /> <span><strong>{s.name || id}</strong> <small className="muted">{s.host || s.ip || '-'} · {serverStatusText(s)}</small></span></label> })}
-                    </div>}
-                  </div>
+                  <span
+                    key={group}
+                    className={`group-chip${active ? ' group-chip--active' : ''}`}
+                    onClick={() => {
+                      const next = active ? selectedGroups.filter((x) => x !== group) : Array.from(new Set([...selectedGroups, group]))
+                      setSelectedGroups(next)
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); (e.currentTarget as HTMLSpanElement).click() } }}
+                  >
+                    {group}
+                    <span className="group-chip-count">{inspectableCount}</span>
+                  </span>
                 )
               })}
+              {selectedGroups.length > 0 && (
+                <button className="btn btn-subtle" style={{ marginLeft: 4, padding: '2px 8px', fontSize: 11 }} onClick={() => setSelectedGroups([])}>清空分组</button>
+              )}
             </div>
+          )}
+
+          {/* 4. 紧凑服务器表格（按分组折叠） */}
+          <div className="inspection-server-scroll">
+            <table className="inspection-server-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }}><input type="checkbox" title="全选当前可见" checked={visibleServerIds.length > 0 && visibleServerIds.every((id) => selectedServerIds.includes(id))} onChange={(e) => setSelectedServerIds(e.target.checked ? Array.from(new Set([...selectedServerIds, ...visibleServerIds])) : selectedServerIds.filter((x) => !visibleServerIds.includes(x)))} /></th>
+                  <th>服务器</th>
+                  <th>IP / 主机</th>
+                  <th>状态</th>
+                  <th>分组</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.keys(groupedServers).length === 0 && (
+                  <tr><td colSpan={5} style={{ textAlign: 'center', padding: 24, color: 'var(--text-muted)' }}>{serverFilter ? `没有匹配「${serverFilter}」的服务器` : '暂无服务器，请先在「服务器」管理中添加'}</td></tr>
+                )}
+                {Object.entries(groupedServers).map(([group, list]) => {
+                  const ids = (list as any[]).filter(isServerInspectable).map((s) => s.id || s.name).filter(Boolean)
+                  const allChecked = ids.length > 0 && ids.every((id) => selectedServerIds.includes(id))
+                  const someChecked = ids.some((id) => selectedServerIds.includes(id))
+                  const groupIsSelected = selectedGroups.includes(group)
+                  // 选中分组时自动展开（仅在被选中时为 true），便于用户看到联动高亮
+                  const expanded = groupIsSelected || expandedGroups[group] !== false
+                  return (
+                    <Fragment key={group}>
+                      <tr className={`group-header${groupIsSelected ? ' group-header--selected' : ''}`}>
+                        <td colSpan={5}>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={allChecked}
+                              ref={(el) => { if (el) el.indeterminate = !allChecked && someChecked }}
+                              onChange={(e) => setSelectedServerIds(e.target.checked ? Array.from(new Set([...selectedServerIds, ...ids])) : selectedServerIds.filter((x) => !ids.includes(x)))}
+                            />
+                            <strong>{group}</strong>
+                            <span className="group-meta">在线 {ids.length} / 全部 {(list as any[]).length} · 已选 {ids.filter((id) => selectedServerIds.includes(id)).length}</span>
+                            {groupIsSelected && <span className="group-meta group-meta--selected">已加入巡检批次</span>}
+                          </label>
+                          <button className="group-toggle" onClick={() => setExpandedGroups({ ...expandedGroups, [group]: !expanded })}>{expanded ? '收起 ▾' : '展开 ▸'}</button>
+                        </td>
+                      </tr>
+                      {expanded && (list as any[]).map((s) => {
+                        const id = s.id || s.name
+                        const inspectable = isServerInspectable(s)
+                        const status = normalizeServerStatus(s)
+                        const inSelectedGroup = selectedGroups.length > 0 && selectedGroups.includes(group)
+                        const rowClass = [
+                          inspectable ? '' : 'row-disabled',
+                          inSelectedGroup ? 'is-in-selected-group' : '',
+                          inspectable && selectedServerIds.includes(id) ? 'is-selected' : '',
+                        ].filter(Boolean).join(' ')
+                        return (
+                          <tr key={id} className={rowClass}>
+                            <td><input type="checkbox" disabled={!inspectable} checked={inspectable && selectedServerIds.includes(id)} onChange={(e) => setSelectedServerIds(e.target.checked ? Array.from(new Set([...selectedServerIds, id])) : selectedServerIds.filter((x) => x !== id))} /></td>
+                            <td>
+                              <div className="server-name">
+                                {s.name || id}
+                                {s.description && <small>{s.description}</small>}
+                              </div>
+                            </td>
+                            <td><span className="server-host">{s.host || s.ip || '-'}</span></td>
+                            <td><span className={`server-status server-status--${status}`}>{serverStatusText(s)}</span></td>
+                            <td>
+                              <small style={{ color: inSelectedGroup ? 'var(--primary, #2563eb)' : 'var(--text-muted)', fontWeight: inSelectedGroup ? 600 : 400 }}>{group}</small>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
-          {categoryOptions(categories.server || [], serverCats, setServerCats, itemConfigs.server, openItemConfigEditor)}
+
+          {/* 5. 巡检类别（紧凑 chip） */}
+          <div className="inspection-category-chips">
+            <span className="chip-label">巡检类别：</span>
+            {(categories.server || []).map((item: any) => {
+              const cfg = (itemConfigs.server || []).find((c: any) => c.item_code === item.code)
+              const enabled = cfg ? cfg.enabled !== false : true
+              const active = serverCats.includes(item.code)
+              const chipClass = `chip${active ? ' chip--active' : ''}${enabled ? '' : ' chip--disabled'}`
+              return (
+                <span
+                  key={item.code}
+                  className={chipClass}
+                  title={enabled ? item.description : '已禁用'}
+                  onClick={() => enabled && setServerCats(active ? serverCats.filter((x) => x !== item.code) : [...serverCats, item.code])}
+                  role="button"
+                  tabIndex={enabled ? 0 : -1}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); enabled && (active ? setServerCats(serverCats.filter((x) => x !== item.code)) : setServerCats([...serverCats, item.code])) } }}
+                >
+                  {item.name}
+                  {cfg && <small>{cfg.rules?.length || 0} 规则</small>}
+                  {openItemConfigEditor && cfg && (
+                    <span className="chip-actions">
+                      <button onClick={(e) => { e.stopPropagation(); openItemConfigEditor(cfg) }}>配置</button>
+                    </span>
+                  )}
+                </span>
+              )
+            })}
+            {(categories.server || []).length > 0 && (
+              <>
+                <div className="toolbar-divider" />
+                <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => setServerCats((categories.server || []).map((x: any) => x.code))}>全选</button>
+                <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => setServerCats([])}>清空</button>
+                <span className="toolbar-summary" style={{ marginLeft: 'auto' }}><strong>{serverCats.length}</strong> / {(categories.server || []).length} 已选</span>
+              </>
+            )}
+          </div>
+
+          {/* 6. 高级设置 + 阈值配置（默认折叠，一处全看到） */}
+          <details className="inspection-advanced">
+            <summary>高级设置 · 并发 / 超时 / 阈值配置</summary>
+            <div className="inspection-advanced-body">
+              <label>并发数 (1-8)
+                <input type="number" min={1} max={8} value={batchConcurrency} onChange={(e) => setBatchConcurrency(Math.max(1, Math.min(8, Number(e.target.value || 1))))} />
+              </label>
+              <label>分批大小 (1-20)
+                <input type="number" min={1} max={20} value={batchSize} onChange={(e) => setBatchSize(Math.max(1, Math.min(20, Number(e.target.value || 1))))} />
+              </label>
+              <label>单命令超时 (秒)
+                <input type="number" min={5} max={120} value={commandTimeoutSeconds} onChange={(e) => setCommandTimeoutSeconds(Math.max(5, Math.min(120, Number(e.target.value || 20))))} />
+              </label>
+              <label>单服务器总超时 (秒)
+                <input type="number" min={30} max={1800} value={runTimeoutSeconds} onChange={(e) => setRunTimeoutSeconds(Math.max(30, Math.min(1800, Number(e.target.value || 180))))} />
+              </label>
+            </div>
+            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 14px 0' }} />
+            <div style={{ padding: '12px 14px 14px' }}>
+              <ThresholdSettingsSection compact />
+            </div>
+          </details>
         </section>
       )}
 
@@ -913,7 +1153,7 @@ export default function InspectionCenterPage() {
               <label>范围 <select value={runFilter} onChange={(e) => { setRunFilter(e.target.value); setRunOffset(0); setSelectedRunIds([]) }}><option value="">全部</option><option value="SERVER">服务器</option><option value="PROJECT">项目</option><option value="PROJECT_COMBINED">综合</option></select></label>
             </div>
           </div>
-          {runs.length === 0 ? <EmptyState title="暂无巡检记录" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={runs.length > 0 && runs.every((r: any) => selectedRunIds.includes(r.id))} onChange={(e) => setSelectedRunIds(e.target.checked ? runs.map((r: any) => r.id) : [])} /></th><th>时间</th><th>范围</th><th>对象</th><th>评分</th><th>风险</th><th>状态</th><th>操作</th></tr></thead><tbody>{runs.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedRunIds.includes(r.id)} onChange={(e) => toggleRunSelection(r.id, e.target.checked)} /></td><td>{formatTime(r.created_at)}</td><td>{r.scope_type}</td><td>{r.project_id || r.server_id || '-'}</td><td><span className={`status-badge status-badge--${scoreTone(r.score)}`}>{r.score}</span></td><td>{r.high_count}/{r.medium_count}/{r.low_count}</td><td><StatusBadge value={r.status} /></td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(r.id).then((res: any) => { setCurrentResult(res.data); const st = res.data?.run?.status; if (st === 'RUNNING' || st === 'PENDING') setActiveRunIds((prev) => Array.from(new Set([...prev, r.id]))); })}>详情</button><button className="btn btn-subtle" onClick={() => openRunDetailRaw(r.id)}>原始数据</button><button className="btn btn-subtle" onClick={() => generateReport(r.id)}>生成报告</button><button className="btn btn-danger" onClick={() => deleteInspectionRuns([r.id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={runsTotal} limit={runPageSize} offset={runOffset} onChange={setRunOffset} onPageSizeChange={setRunPageSize} /></>}
+          {runs.length === 0 ? <EmptyState title="暂无巡检记录" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={runs.length > 0 && runs.every((r: any) => selectedRunIds.includes(r.id))} onChange={(e) => setSelectedRunIds(e.target.checked ? runs.map((r: any) => r.id) : [])} /></th><th>时间</th><th>范围</th><th>对象</th><th>评分</th><th>风险</th><th>状态</th><th>操作</th></tr></thead><tbody>{runs.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedRunIds.includes(r.id)} onChange={(e) => toggleRunSelection(r.id, e.target.checked)} /></td><td>{formatTime(r.created_at)}</td><td>{r.scope_type}</td><td>{r.project_id || r.server_id || '-'}</td><td><span className={`status-badge status-badge--${scoreTone(r.score)}`}>{r.score}</span></td><td>{r.high_count}/{r.medium_count}/{r.low_count}</td><td><StatusBadge value={r.status} /></td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(r.id).then((res: any) => { setCurrentResult(res.data); const st = res.data?.run?.status; if (st === 'RUNNING' || st === 'PENDING') setActiveRunIds((prev) => Array.from(new Set([...prev, r.id]))); })}>详情</button><button className="btn btn-subtle" onClick={() => openRunDetailRaw(r.id)}>原始数据</button>{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/download`} target="_blank" rel="noreferrer">查看报告</a>}<button className="btn btn-danger" onClick={() => deleteInspectionRuns([r.id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={runsTotal} limit={runPageSize} offset={runOffset} onChange={setRunOffset} onPageSizeChange={setRunPageSize} /></>}
           {currentResult && <div className="mini-card" style={{ marginTop: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <strong>当前详情：{currentResult.run?.summary || currentResult.summary || '-'}</strong>
@@ -923,7 +1163,7 @@ export default function InspectionCenterPage() {
               {(currentResult.run?.status === 'RUNNING' || currentResult.run?.status === 'PENDING') && <div className="alert alert-info">巡检执行中，页面每 2 秒自动刷新执行过程。已完成 {(currentResult.items || []).length} 项。</div>}
               {currentResult.ledger && <div className="stats-grid"><div className="stat-card"><span>巡检项</span><strong>{currentResult.ledger.item_count}</strong><small>已入台账</small></div><div className="stat-card"><span>未闭环</span><strong>{currentResult.ledger.open_issue_count}</strong><small>待处理/处理中</small></div><div className="stat-card"><span>已闭环</span><strong>{currentResult.ledger.closed_issue_count}</strong><small>已修复/验证/忽略</small></div><div className="stat-card"><span>执行耗时</span><strong>{currentResult.ledger.duration_text}</strong><small>{currentResult.ledger.trigger_type || '-'}</small></div></div>}
               {(currentResult.category_summary || []).length > 0 && <div className="table-scroll"><table className="data-table"><thead><tr><th>分类</th><th>总数</th><th>通过</th><th>风险</th><th>错误</th><th>高/中/低</th></tr></thead><tbody>{(currentResult.category_summary || []).map((c: any) => <tr key={c.category}><td>{c.category}</td><td>{c.total}</td><td>{c.pass}</td><td>{c.risk}</td><td>{c.error}</td><td>{c.high}/{c.medium}/{c.low}</td></tr>)}</tbody></table></div>}
-              <div className="table-scroll"><table className="data-table"><thead><tr><th>分类</th><th>巡检项</th><th>等级</th><th>结果</th><th>可验证 Shell 命令</th><th>建议</th></tr></thead><tbody>{(currentResult.items || []).length === 0 ? <tr><td colSpan={6}>暂无巡检项结果；如果状态为 RUNNING，请等待执行输出。</td></tr> : (currentResult.items || []).map((i: any) => <tr key={i.id}><td>{i.category}</td><td>{i.item_name}</td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.message}</td><td><pre className="inspection-command-cell">{extractShellCommand(i.raw_output, i.command) || '-'}</pre></td><td>{i.suggestion}</td></tr>)}</tbody></table></div>
+              <div className="table-scroll"><table className="data-table"><thead><tr><th>分类</th><th>巡检项</th><th>等级</th><th>结果</th><th>可验证 Shell 命令</th><th>建议</th></tr></thead><tbody>{(currentResult.items || []).length === 0 ? <tr><td colSpan={6}>暂无巡检项结果；如果状态为 RUNNING，请等待执行输出。</td></tr> : (currentResult.items || []).map((i: any) => <tr key={i.id}><td>{i.category}</td><td>{i.item_name}</td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.message}{i.parsed_facts?.summary ? <><br /><small className="muted" style={{ color: 'var(--accent, #3182ce)' }}>📊 {i.parsed_facts.summary}</small></> : ''}</td><td><pre className="inspection-command-cell">{extractShellCommand(i.raw_output, i.command) || '-'}</pre></td><td>{i.suggestion}</td></tr>)}</tbody></table></div>
               <div>
                 <strong>执行过程</strong>
                 <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto', background: 'rgba(15,23,42,.05)', borderRadius: 12, padding: 12 }}>
@@ -1002,7 +1242,79 @@ export default function InspectionCenterPage() {
             </div>
             <button className="btn primary" onClick={openCreateRule}>新增规则</button>
           </div>
-          {rules.length === 0 ? <EmptyState title="暂无规则" /> : <div className="table-scroll"><table className="data-table"><thead><tr><th>范围</th><th>分类</th><th>规则</th><th>等级</th><th>状态</th><th>内容/说明</th><th>建议</th><th>操作</th></tr></thead><tbody>{rules.map((r: any) => <tr key={r.id || r.rule_code}><td>{r.scope_type}</td><td>{r.category}</td><td>{r.rule_name || r.rule_code}<br /><small className="muted">{r.rule_code}</small>{r.builtin && <><br /><small className="muted">内置</small></>}</td><td><RiskBadge level={r.risk_level} label={riskLabel(r.risk_level)} /></td><td><StatusBadge value={r.enabled === false ? 'DISABLED' : 'ENABLED'} /></td><td><div style={{ maxWidth: 360 }}><strong>{r.rule_content || '-'}</strong><br /><small className="muted">{r.description}</small></div></td><td>{r.suggestion || '-'}</td><td><button className="btn btn-subtle" onClick={() => editRule(r)}>编辑</button><button className="btn btn-subtle" onClick={() => toggleRule(r)}>{r.enabled === false ? '启用' : '停用'}</button><button className="btn btn-subtle" onClick={() => deleteRule(r)}>删除</button></td></tr>)}</tbody></table></div>}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+            <label style={{ fontSize: 13 }}>关键词 <input value={ruleFilter} onChange={(e) => { setRuleFilter(e.target.value); setRuleOffset(0) }} placeholder="搜索规则名称/编码" style={{ width: 160, padding: '4px 8px' }} /></label>
+            <label style={{ fontSize: 13 }}>范围 <select value={ruleScopeFilter} onChange={(e) => { setRuleScopeFilter(e.target.value); setRuleOffset(0) }} style={{ padding: '4px 8px' }}><option value="">全部</option><option value="SERVER">SERVER</option><option value="PROJECT">PROJECT</option><option value="BOTH">BOTH</option></select></label>
+            <label style={{ fontSize: 13 }}>风险 <select value={ruleRiskFilter} onChange={(e) => { setRuleRiskFilter(e.target.value); setRuleOffset(0) }} style={{ padding: '4px 8px' }}><option value="">全部</option><option value="HIGH">高危</option><option value="MEDIUM">中危</option><option value="LOW">低危</option><option value="NONE">无风险</option></select></label>
+            <button className="btn btn-subtle" onClick={() => { setRuleFilter(''); setRuleScopeFilter(''); setRuleRiskFilter(''); setRuleOffset(0) }}>重置</button>
+          </div>
+          {rules.length === 0 ? <EmptyState title="暂无规则" /> : (
+            <>
+            <div className="table-scroll">
+              <table className="data-table inspection-rule-table">
+                <colgroup>
+                  <col style={{ width: 220, minWidth: 220 }} />
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: 110 }} />
+                  <col style={{ width: 80 }} />
+                  <col style={{ width: 90 }} />
+                  <col style={{ minWidth: 360 }} />
+                  <col style={{ minWidth: 220 }} />
+                  <col style={{ width: 220, minWidth: 220 }} />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th className="col-sticky-left">规则</th>
+                    <th>范围</th>
+                    <th>分类</th>
+                    <th>等级</th>
+                    <th>状态</th>
+                    <th>内容/说明</th>
+                    <th>建议</th>
+                    <th className="col-sticky-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rules.map((r: any) => {
+                    const cfg = r.config && typeof r.config === 'object' ? r.config : {}
+                    const hasExtractor = !!cfg.extractor
+                    const hasThreshold = !!cfg.threshold
+                    const th = cfg.threshold || {}
+                    return (
+                    <tr key={r.id || r.rule_code}>
+                      <td className="col-sticky-left">
+                        {r.rule_name || r.rule_code}
+                        <br /><small className="muted">{r.rule_code}</small>
+                        {r.builtin && <><br /><small className="muted">内置</small></>}
+                      </td>
+                      <td>{r.scope_type}</td>
+                      <td>{r.category}</td>
+                      <td>
+                        <RiskBadge level={r.risk_level} label={riskLabel(r.risk_level)} />
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                          {hasExtractor && <span className="group-chip group-chip--active" style={{ fontSize: 10, padding: '1px 6px' }} title={`提取器: ${cfg.extractor?.mode} ${cfg.extractor?.pattern || cfg.extractor?.value_field || ''}`}>📊 提取</span>}
+                          {hasThreshold && <span className="group-chip" style={{ fontSize: 10, padding: '1px 6px', background: '#fef3c7' }} title={`阈值: ${th.comparator || '>'} H=${th.high ?? '-'} M=${th.medium ?? '-'} L=${th.low ?? '-'}`}>🎯 阈值</span>}
+                        </div>
+                      </td>
+                      <td><StatusBadge value={r.enabled === false ? 'DISABLED' : 'ENABLED'} /></td>
+                      <td><div style={{ maxWidth: 360 }}><strong>{r.rule_content || '-'}</strong><br /><small className="muted">{r.description}</small></div></td>
+                      <td>{r.suggestion || '-'}</td>
+                      <td className="col-sticky-right">
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          <button className="btn btn-subtle" onClick={() => editRule(r)}>编辑</button>
+                          <button className="btn btn-subtle" onClick={() => toggleRule(r)}>{r.enabled === false ? '启用' : '停用'}</button>
+                          <button className="btn btn-subtle" onClick={() => deleteRule(r)}>删除</button>
+                        </div>
+                      </td>
+                    </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <PaginationControls total={rulesTotal} limit={rulePageSize} offset={ruleOffset} onChange={setRuleOffset} onPageSizeChange={setRulePageSize} />
+            </>
+          )}
           {ruleEditor.open && (
             <div className="inspection-modal-overlay" onClick={() => setRuleEditor({ open: false, mode: 'create', originalCode: '', form: {} })}>
               <div className="panel-card inspection-rule-modal" onClick={(e) => e.stopPropagation()}>
@@ -1021,20 +1333,118 @@ export default function InspectionCenterPage() {
                   <label>风险等级<select value={ruleEditor.form.risk_level || 'MEDIUM'} onChange={(e) => updateRuleForm({ risk_level: e.target.value })}><option value="HIGH">HIGH 高危</option><option value="MEDIUM">MEDIUM 中危</option><option value="LOW">LOW 低危</option><option value="NONE">NONE 无风险</option></select></label>
                   <label>状态<select value={ruleEditor.form.enabled === false ? 'false' : 'true'} onChange={(e) => updateRuleForm({ enabled: e.target.value === 'true' })}><option value="true">启用</option><option value="false">停用</option></select></label>
                 </div>
-                <div className="inspection-rule-editor-body">
-                  <div className="inspection-rule-main-column">
-                    <label>规则内容 / 可执行命令<textarea rows={14} value={ruleEditor.form.rule_content || ''} onChange={(e) => updateRuleForm({ rule_content: e.target.value })} placeholder={'# 示例：只读巡检命令\nss -ntulp\ndf -h\n# 判定要点：高危端口外网暴露、磁盘超过 85%'} /></label>
-                    <label>规则配置 JSON<textarea rows={8} value={ruleEditor.form.config_text || '{}'} onChange={(e) => updateRuleForm({ config_text: e.target.value })} placeholder='{ "commands": ["ss -ntulp"], "threshold": 85 }' /></label>
-                  </div>
-                  <div className="inspection-rule-side-column">
-                    <label>规则说明<textarea rows={7} value={ruleEditor.form.description || ''} onChange={(e) => updateRuleForm({ description: e.target.value })} /></label>
-                    <label>整改建议<textarea rows={7} value={ruleEditor.form.suggestion || ''} onChange={(e) => updateRuleForm({ suggestion: e.target.value })} /></label>
-                    <div className="mini-card">
-                      <strong>变量约定</strong>
-                      <p className="muted">项目规则可使用 &lt;deploy_path&gt;、&lt;config_path&gt;、&lt;log_path&gt;、&lt;backup_path&gt;、&lt;main_port&gt;、&lt;runtime_user&gt;，执行时由项目部署信息替换。</p>
+
+                {/* 三段式布局：命令 / 提取器 / 阈值，每段独立卡片、配色分明 */}
+                <div className="inspection-rule-stack">
+                  {/* Section A: 命令内容 - 灰 */}
+                  <section className="rule-section rule-section--cmd">
+                    <header className="rule-section__head">
+                      <span className="rule-section__icon" aria-hidden>💻</span>
+                      <h3>规则内容 / 可执行命令</h3>
+                    </header>
+                    <label className="rule-section__body">
+                      <textarea rows={6} value={ruleEditor.form.rule_content || ''} onChange={(e) => updateRuleForm({ rule_content: e.target.value })} placeholder={'# 示例：只读巡检命令\nss -ntulp\ndf -h\n# 判定要点：高危端口外网暴露、磁盘超过 85%'} />
+                    </label>
+                  </section>
+
+                  {/* Section B: 提取器 - 蓝 */}
+                  <section className="rule-section rule-section--extractor">
+                    <header className="rule-section__head">
+                      <span className="rule-section__icon" aria-hidden>📊</span>
+                      <h3>提取器 <small>· 从命令输出中提取一个数值</small></h3>
+                    </header>
+                    <div className="rule-section__body rule-grid rule-grid--2col">
+                      <label>提取模式
+                        <select value={ruleEditor.form.extractor_mode || 'regex'} onChange={(e) => updateRuleForm({ extractor_mode: e.target.value })}>
+                          <option value="regex">正则 regex</option>
+                          <option value="json">JSONPath</option>
+                          <option value="numeric">首段数字</option>
+                          <option value="keyword">关键字计数</option>
+                        </select>
+                      </label>
+                      <label>模式 / 表达式
+                        <input value={ruleEditor.form.extractor_pattern || ''} onChange={(e) => updateRuleForm({ extractor_pattern: e.target.value })} placeholder={ruleEditor.form.extractor_mode === 'regex' ? 'MemAvailable:\\s+(\\d+)' : '$..memory.used'} />
+                      </label>
+                      <label>JSON 取值字段
+                        <input value={ruleEditor.form.extractor_value_field || 'value'} onChange={(e) => updateRuleForm({ extractor_value_field: e.target.value })} placeholder="value" />
+                      </label>
+                      <label>关键字列表 <small>· 逗号分隔</small>
+                        <input value={ruleEditor.form.extractor_keywords || ''} onChange={(e) => updateRuleForm({ extractor_keywords: e.target.value })} placeholder="kdevtmpfsi, kinsing, xmrig" />
+                      </label>
                     </div>
-                  </div>
+                  </section>
+
+                  {/* Section C: 阈值 - 橙 */}
+                  <section className={`rule-section rule-section--threshold ${ruleEditor.form.threshold_enabled ? 'is-active' : ''}`}>
+                    <header className="rule-section__head">
+                      <span className="rule-section__icon" aria-hidden>🎯</span>
+                      <h3>阈值判定 <small>· 启用后根据提取值自动判定风险等级</small></h3>
+                      <label className="rule-section__switch" onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" checked={!!ruleEditor.form.threshold_enabled} onChange={(e) => updateRuleForm({ threshold_enabled: e.target.checked })} />
+                        <span>{ruleEditor.form.threshold_enabled ? '已启用' : '未启用'}</span>
+                      </label>
+                    </header>
+                    <div className="rule-section__body rule-grid rule-grid--threshold">
+                      <label className="rule-cell rule-cell--high">
+                        <span className="rule-cell__label">HIGH ≥</span>
+                        <input type="number" value={ruleEditor.form.threshold_high ?? ''} onChange={(e) => updateRuleForm({ threshold_high: e.target.value })} placeholder="90" />
+                      </label>
+                      <label className="rule-cell rule-cell--medium">
+                        <span className="rule-cell__label">MEDIUM ≥</span>
+                        <input type="number" value={ruleEditor.form.threshold_medium ?? ''} onChange={(e) => updateRuleForm({ threshold_medium: e.target.value })} placeholder="75" />
+                      </label>
+                      <label className="rule-cell rule-cell--low">
+                        <span className="rule-cell__label">LOW ≥</span>
+                        <input type="number" value={ruleEditor.form.threshold_low ?? ''} onChange={(e) => updateRuleForm({ threshold_low: e.target.value })} placeholder="50" />
+                      </label>
+                      <label>比较符
+                        <select value={ruleEditor.form.threshold_comparator || '>'} onChange={(e) => updateRuleForm({ threshold_comparator: e.target.value })}>
+                          <option value=">">{'>'} 大于</option>
+                          <option value=">=">{'>='} 大于等于</option>
+                          <option value="<">{'<'} 小于</option>
+                          <option value="<=">{'<='} 小于等于</option>
+                          <option value="==">== 等于</option>
+                          <option value="contains">包含</option>
+                        </select>
+                      </label>
+                      <label>单位
+                        <select value={ruleEditor.form.threshold_unit || 'count'} onChange={(e) => updateRuleForm({ threshold_unit: e.target.value })}>
+                          <option value="count">个</option>
+                          <option value="%">百分比</option>
+                          <option value="byte">字节</option>
+                          <option value="ms">毫秒</option>
+                        </select>
+                      </label>
+                    </div>
+                  </section>
+
+                  {/* Section D: 说明/建议 + 高级 - 紫（默认折叠）*/}
+                  <section className="rule-section rule-section--notes">
+                    <header className="rule-section__head">
+                      <span className="rule-section__icon" aria-hidden>📝</span>
+                      <h3>规则说明 & 整改建议</h3>
+                    </header>
+                    <div className="rule-section__body rule-grid rule-grid--2col">
+                      <label>规则说明
+                        <textarea rows={3} value={ruleEditor.form.description || ''} onChange={(e) => updateRuleForm({ description: e.target.value })} placeholder="该规则检测什么、为什么重要、判定逻辑" />
+                      </label>
+                      <label>整改建议
+                        <textarea rows={3} value={ruleEditor.form.suggestion || ''} onChange={(e) => updateRuleForm({ suggestion: e.target.value })} placeholder="命中风险后推荐的处理步骤" />
+                      </label>
+                    </div>
+                    <div className="rule-section__tip">
+                      项目规则可使用 <code>&lt;deploy_path&gt;</code>、<code>&lt;config_path&gt;</code>、<code>&lt;log_path&gt;</code>、<code>&lt;backup_path&gt;</code>、<code>&lt;main_port&gt;</code>、<code>&lt;runtime_user&gt;</code>，执行时由项目部署信息替换。
+                    </div>
+                  </section>
+
+                  <details className="rule-advanced">
+                    <summary>⚙️ 高级：编辑原始 JSON 配置</summary>
+                    <label>规则配置 JSON
+                      <textarea rows={5} value={ruleEditor.form.config_text || '{}'} onChange={(e) => updateRuleForm({ config_text: e.target.value })} placeholder='{ "commands": ["ss -ntulp"] }' />
+                    </label>
+                  </details>
                 </div>
+
                 <div className="inspection-modal-actions">
                   <button className="btn btn-subtle" onClick={() => setRuleEditor({ open: false, mode: 'create', originalCode: '', form: {} })}>取消</button>
                   <button className="btn primary" onClick={submitRuleForm}>{ruleEditor.mode === 'create' ? '新增规则' : '保存规则'}</button>
@@ -1141,16 +1551,32 @@ function ItemConfigEditorModal({ item, onClose, onSave, onToggleEnabled }: { ite
           <label>执行顺序<input type="number" value={sortOrder} onChange={(e) => setSortOrder(Number(e.target.value))} /></label>
           <label style={{ gridColumn: '1 / -1' }}>描述<textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={2} /></label>
         </div>
-        <div className="mini-card" style={{ marginTop: 12 }}>
-          <strong>关联规则（{rules.length}）</strong>
-          <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
-            {rules.map((r, idx) => (
-              <div key={r.id || r.rule_code} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 6, background: 'var(--bg-elev, #fafafa)', borderRadius: 4 }}>
-                <input type="checkbox" checked={r.enabled !== false} onChange={() => toggleRule(idx)} />
-                <span style={{ flex: 1 }}><code>{r.rule_code}</code></span>
-                <small className="muted">顺序 {r.sort_order || 0}</small>
-              </div>
-            ))}
+        <div className="rule-section rule-section--notes" style={{ marginTop: 12 }}>
+          <header className="rule-section__head">
+            <span className="rule-section__icon" aria-hidden>📋</span>
+            <h3>关联规则 <small>· 已启用 {rules.filter((r) => r.enabled !== false).length} / {rules.length} · 勾选框可快速启用/禁用</small></h3>
+          </header>
+          <div className="rule-section__body" style={{ display: 'grid', gap: 6 }}>
+            {rules.length === 0 && <small className="muted">该项目尚未关联任何规则</small>}
+            {rules.map((r, idx) => {
+              const isOn = r.enabled !== false
+              return (
+                <div
+                  key={r.id || r.rule_code}
+                  className={`rule-row ${isOn ? 'is-on' : 'is-off'}`}
+                >
+                  <input type="checkbox" checked={isOn} onChange={() => toggleRule(idx)} />
+                  <span className="rule-row__main">
+                    <code>{r.rule_code}</code>
+                    <small className="muted">{r.rule_name || r.rule_code}</small>
+                  </span>
+                  <span className="rule-row__meta">
+                    {r.risk_level && <span className={`rule-row__risk rule-row__risk--${String(r.risk_level).toLowerCase()}`}>{r.risk_level}</span>}
+                    <small className="muted">顺序 {r.sort_order || 0}</small>
+                  </span>
+                </div>
+              )
+            })}
           </div>
         </div>
         <div className="inspection-modal-actions">
@@ -1184,7 +1610,7 @@ function RunDetailRawModal({ runId, items, onClose }: { runId: string; items: an
                 <span className={`status-pill status-${(it.status || 'normal').toLowerCase()}`} style={{ fontSize: 11 }}>{it.status}</span>
                 {it.risk_level && it.risk_level !== 'NONE' && <span style={{ fontSize: 11, color: it.risk_level === 'HIGH' ? '#c0392b' : it.risk_level === 'MEDIUM' ? '#d35400' : '#7f8c8d' }}>风险: {it.risk_level}</span>}
               </div>
-              {it.message && <div style={{ marginTop: 6 }}><strong>结果描述：</strong>{it.message}</div>}
+              {it.message && <div style={{ marginTop: 6 }}><strong>结果描述：</strong>{it.message}{it.parsed_facts?.summary ? <><br /><small style={{ color: 'var(--accent, #3182ce)' }}>📊 量化指标: {it.parsed_facts.summary}</small></> : ''}</div>}
               {it.suggestion && <div style={{ marginTop: 4, color: '#2c3e50' }}><strong>建议：</strong>{it.suggestion}</div>}
               {it.raw_output && (
                 <details open style={{ marginTop: 6 }}>
@@ -1200,5 +1626,256 @@ function RunDetailRawModal({ runId, items, onClose }: { runId: string; items: an
         </div>
       </div>
     </div>
+  )
+}
+
+// ============ 巡检阈值配置（DISK/BACKUP/LOGIN/PORT/ACCOUNT） ============
+function ThresholdSettingsSection({ compact = false }: { compact?: boolean } = {}) {
+  const [thresholds, setThresholds] = useState<Record<string, any> | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+  const [message, setMessage] = useState<string>('')
+  const [error, setError] = useState<string>('')
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res: any = await inspection.getThresholds()
+        setThresholds(res.data || {})
+      } catch (e: any) { setError(e?.message || String(e)) }
+    })()
+  }, [])
+
+  function updateField(cat: string, key: string, value: any) {
+    setThresholds((prev) => prev ? { ...prev, [cat]: { ...(prev[cat] || {}), [key]: value } } : prev)
+  }
+
+  function updateList(cat: string, key: string, text: string) {
+    const arr = text.split(/[,\n]/).map((s) => s.trim()).filter(Boolean)
+    updateField(cat, key, arr)
+  }
+
+  async function saveCategory(cat: string) {
+    if (!thresholds) return
+    setSaving(cat); setMessage(''); setError('')
+    try {
+      await inspection.saveThresholds(cat, thresholds[cat] || {})
+      setMessage(`${cat} 阈值已保存`)
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setSaving(null) }
+  }
+
+  if (!thresholds) {
+    return compact
+      ? <div className="muted" style={{ padding: 12 }}>阈值加载中…</div>
+      : <section className="panel-card"><h2>巡检阈值配置</h2><p className="muted">加载中…</p></section>
+  }
+
+  const disk = thresholds.DISK || {}
+  const backup = thresholds.BACKUP || {}
+  const login = thresholds.LOGIN_SECURITY || {}
+  const port = thresholds.PROCESS_PORT || {}
+  const account = thresholds.ACCOUNT_SECURITY || {}
+  const cmdHist = thresholds.COMMAND_HISTORY || {}
+  const firewall = thresholds.FIREWALL || {}
+  const service = thresholds.SERVICE_STATUS || {}
+  const memoryThres = thresholds.MEMORY || {}
+
+  if (compact) {
+    return (
+      <div>
+        {message && <div className="alert alert-success" style={{ marginTop: 8 }}>{message}</div>}
+        {error && <div className="alert alert-danger" style={{ marginTop: 8 }}>{error}</div>}
+        <div className="threshold-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, marginTop: 12 }}>
+          {/* DISK */}
+          <div className="mini-card">
+            <strong>磁盘空间（DISK）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>达「高阈值」判 HIGH；「中阈值」判 MEDIUM；系统分区额外严格 N%</p>
+            <label style={{ display: 'block' }}>高阈值（%）<input type="number" min={50} max={100} value={disk.high_pct ?? 90} onChange={(e) => updateField('DISK', 'high_pct', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>中阈值（%）<input type="number" min={30} max={100} value={disk.medium_pct ?? 75} onChange={(e) => updateField('DISK', 'medium_pct', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>系统分区路径<input type="text" value={(disk.system_mounts || []).join(', ')} onChange={(e) => updateList('DISK', 'system_mounts', e.target.value)} style={{ width: '100%', marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>系统分区严格偏移(%)<input type="number" min={0} max={30} value={disk.system_pct_offset ?? 5} onChange={(e) => updateField('DISK', 'system_pct_offset', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>inode高阈值(%)<input type="number" min={50} max={100} value={disk.inode_high_pct ?? 90} onChange={(e) => updateField('DISK', 'inode_high_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>inode中阈值(%)<input type="number" min={30} max={100} value={disk.inode_medium_pct ?? 80} onChange={(e) => updateField('DISK', 'inode_medium_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <button className="btn primary" disabled={saving === 'DISK'} onClick={() => saveCategory('DISK')}>{saving === 'DISK' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* BACKUP */}
+          <div className="mini-card">
+            <strong>备份任务（BACKUP）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>无备份判 HIGH；有cron无文件/0字节文件判 MEDIUM</p>
+            <label style={{ display: 'block' }}>备份路径（逗号或换行分隔）<textarea rows={2} value={(Array.isArray(backup.backup_paths) ? backup.backup_paths : []).join('\n')} onChange={(e) => updateList('BACKUP', 'backup_paths', e.target.value)} style={{ width: '100%' }} /></label>
+            <label style={{ display: 'block' }}>最近 N 天<input type="number" min={1} max={30} value={backup.min_age_days ?? 2} onChange={(e) => updateField('BACKUP', 'min_age_days', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <button className="btn primary" disabled={saving === 'BACKUP'} onClick={() => saveCategory('BACKUP')}>{saving === 'BACKUP' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* LOGIN */}
+          <div className="mini-card">
+            <strong>登录安全（LOGIN_SECURITY）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>失败登录达到高阈值判 HIGH；低阈值判 LOW；root远程登录判 MEDIUM</p>
+            <label style={{ display: 'block' }}>失败登录高阈值<input type="number" min={1} max={1000} value={login.failed_high ?? 10} onChange={(e) => updateField('LOGIN_SECURITY', 'failed_high', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>失败登录低阈值<input type="number" min={1} max={1000} value={login.failed_low ?? 3} onChange={(e) => updateField('LOGIN_SECURITY', 'failed_low', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>统计时间窗口(小时)<input type="number" min={1} max={720} value={login.failed_window_hours ?? 24} onChange={(e) => updateField('LOGIN_SECURITY', 'failed_window_hours', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>root远程登录判 MEDIUM<input type="checkbox" checked={login.root_remote_medium !== false} onChange={(e) => updateField('LOGIN_SECURITY', 'root_remote_medium', e.target.checked)} style={{ marginLeft: 6 }} /></label>
+            <button className="btn primary" disabled={saving === 'LOGIN_SECURITY'} onClick={() => saveCategory('LOGIN_SECURITY')}>{saving === 'LOGIN_SECURITY' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* PROCESS_PORT */}
+          <div className="mini-card">
+            <strong>进程端口（PROCESS_PORT）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>公网暴露高危端口判 MEDIUM；可疑进程判 HIGH；CPU超阈值判 MEDIUM</p>
+            <label style={{ display: 'block' }}>高危端口（逗号或换行分隔）<textarea rows={2} value={(port.high_risk_ports || []).join(', ')} onChange={(e) => updateList('PROCESS_PORT', 'high_risk_ports', e.target.value)} style={{ width: '100%' }} /></label>
+            <label style={{ display: 'block' }}>可疑进程关键字（逗号或换行分隔）<textarea rows={2} value={(port.suspicious_keywords || []).join(', ')} onChange={(e) => updateList('PROCESS_PORT', 'suspicious_keywords', e.target.value)} style={{ width: '100%' }} /></label>
+            <label style={{ display: 'block' }}>CPU 阈值（%）<input type="number" min={10} max={100} value={port.cpu_threshold ?? 80} onChange={(e) => updateField('PROCESS_PORT', 'cpu_threshold', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <button className="btn primary" disabled={saving === 'PROCESS_PORT'} onClick={() => saveCategory('PROCESS_PORT')}>{saving === 'PROCESS_PORT' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* ACCOUNT_SECURITY */}
+          <div className="mini-card">
+            <strong>账号安全（ACCOUNT_SECURITY）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>UID=0 超阈值判 HIGH；可登录账号超阈值判 MEDIUM/LOW</p>
+            <label style={{ display: 'block' }}>UID=0 阈值<input type="number" min={1} max={10} value={account.max_uid0 ?? 1} onChange={(e) => updateField('ACCOUNT_SECURITY', 'max_uid0', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>可登录账号 LOW 阈值<input type="number" min={1} max={100} value={account.max_login_users ?? 10} onChange={(e) => updateField('ACCOUNT_SECURITY', 'max_login_users', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>可登录账号 MEDIUM 阈值<input type="number" min={1} max={100} value={account.max_login_users_medium ?? 20} onChange={(e) => updateField('ACCOUNT_SECURITY', 'max_login_users_medium', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <button className="btn primary" disabled={saving === 'ACCOUNT_SECURITY'} onClick={() => saveCategory('ACCOUNT_SECURITY')}>{saving === 'ACCOUNT_SECURITY' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* COMMAND_HISTORY */}
+          <div className="mini-card">
+            <strong>命令日志（COMMAND_HISTORY）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>高危命令判 HIGH/MEDIUM；管道攻击判 HIGH；history清空判 HIGH</p>
+            <label style={{ display: 'block' }}>高危关键字（逗号或换行分隔）<textarea rows={2} value={(cmdHist.high_keywords || []).join(', ')} onChange={(e) => updateList('COMMAND_HISTORY', 'high_keywords', e.target.value)} style={{ width: '100%' }} /></label>
+            <label style={{ display: 'block' }}>管道攻击组合（每行: keyword1,keyword2）<textarea rows={2} value={(cmdHist.pipe_combos || []).map((p: string[]) => Array.isArray(p) ? p.join(', ') : p).join('\n')} onChange={(e) => { const arr = e.target.value.split('\n').filter(Boolean).map((s) => s.split(',').map((x) => x.trim()).filter(Boolean)); updateField('COMMAND_HISTORY', 'pipe_combos', arr) }} style={{ width: '100%' }} /></label>
+            <button className="btn primary" disabled={saving === 'COMMAND_HISTORY'} onClick={() => saveCategory('COMMAND_HISTORY')}>{saving === 'COMMAND_HISTORY' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* FIREWALL */}
+          <div className="mini-card">
+            <strong>防火墙（FIREWALL）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>防火墙未启用时的风险等级（云环境可设为 LOW）</p>
+            <label style={{ display: 'block' }}>未启用等级<select value={firewall.inactive_level ?? 'MEDIUM'} onChange={(e) => updateField('FIREWALL', 'inactive_level', e.target.value)} style={{ marginLeft: 6 }}><option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option></select></label>
+            <button className="btn primary" disabled={saving === 'FIREWALL'} onClick={() => saveCategory('FIREWALL')}>{saving === 'FIREWALL' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* SERVICE_STATUS */}
+          <div className="mini-card">
+            <strong>服务状态（SERVICE_STATUS）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>核心服务失败判 HIGH；其他失败单元判 MEDIUM</p>
+            <label style={{ display: 'block' }}>核心服务（逗号或换行分隔）<textarea rows={2} value={(service.core_services || []).join(', ')} onChange={(e) => updateList('SERVICE_STATUS', 'core_services', e.target.value)} style={{ width: '100%' }} /></label>
+            <button className="btn primary" disabled={saving === 'SERVICE_STATUS'} onClick={() => saveCategory('SERVICE_STATUS')}>{saving === 'SERVICE_STATUS' ? '保存中…' : '保存'}</button>
+          </div>
+
+          {/* MEMORY */}
+          <div className="mini-card">
+            <strong>内存状况（MEMORY）</strong>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>内存使用率达高阈值判 HIGH，中阈值判 MEDIUM；Swap 达临界阈值判 HIGH</p>
+            <label style={{ display: 'block' }}>内存高阈值(%)<input type="number" min={50} max={100} value={memoryThres.mem_high_pct ?? 95} onChange={(e) => updateField('MEMORY', 'mem_high_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>内存中阈值(%)<input type="number" min={30} max={100} value={memoryThres.mem_medium_pct ?? 85} onChange={(e) => updateField('MEMORY', 'mem_medium_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>Swap高阈值(%)<input type="number" min={10} max={100} value={memoryThres.swap_high_pct ?? 50} onChange={(e) => updateField('MEMORY', 'swap_high_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <label style={{ display: 'block' }}>Swap临界阈值(%)<input type="number" min={10} max={100} value={memoryThres.swap_critical_pct ?? 80} onChange={(e) => updateField('MEMORY', 'swap_critical_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+            <button className="btn primary" disabled={saving === 'MEMORY'} onClick={() => saveCategory('MEMORY')}>{saving === 'MEMORY' ? '保存中…' : '保存'}</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <section className="panel-card">
+      <h2>巡检阈值配置</h2>
+      <p className="muted">为各巡检项设置判定阈值。修改后立即生效，后续巡检会按新阈值评分；报告会展示「评分依据」小节。</p>
+      {message && <div className="alert alert-success" style={{ marginTop: 8 }}>{message}</div>}
+      {error && <div className="alert alert-danger" style={{ marginTop: 8 }}>{error}</div>}
+
+      <div className="threshold-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, marginTop: 12 }}>
+        {/* DISK */}
+        <div className="mini-card">
+          <strong>磁盘空间（DISK）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>达「高阈值」判 HIGH；「中阈值」判 MEDIUM；系统分区额外严格 N%</p>
+          <label style={{ display: 'block' }}>高阈值（%）<input type="number" min={50} max={100} value={disk.high_pct ?? 90} onChange={(e) => updateField('DISK', 'high_pct', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>中阈值（%）<input type="number" min={30} max={100} value={disk.medium_pct ?? 75} onChange={(e) => updateField('DISK', 'medium_pct', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>系统分区路径<input type="text" value={(disk.system_mounts || []).join(', ')} onChange={(e) => updateList('DISK', 'system_mounts', e.target.value)} style={{ width: '100%', marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>系统分区严格偏移(%)<input type="number" min={0} max={30} value={disk.system_pct_offset ?? 5} onChange={(e) => updateField('DISK', 'system_pct_offset', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>inode高阈值(%)<input type="number" min={50} max={100} value={disk.inode_high_pct ?? 90} onChange={(e) => updateField('DISK', 'inode_high_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>inode中阈值(%)<input type="number" min={30} max={100} value={disk.inode_medium_pct ?? 80} onChange={(e) => updateField('DISK', 'inode_medium_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <button className="btn primary" disabled={saving === 'DISK'} onClick={() => saveCategory('DISK')}>{saving === 'DISK' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* BACKUP */}
+        <div className="mini-card">
+          <strong>备份任务（BACKUP）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>无备份判 HIGH；有cron无文件/0字节文件判 MEDIUM</p>
+          <label style={{ display: 'block' }}>备份路径（逗号或换行分隔）<textarea rows={2} value={(Array.isArray(backup.backup_paths) ? backup.backup_paths : []).join('\n')} onChange={(e) => updateList('BACKUP', 'backup_paths', e.target.value)} style={{ width: '100%' }} /></label>
+          <label style={{ display: 'block' }}>最近 N 天<input type="number" min={1} max={30} value={backup.min_age_days ?? 2} onChange={(e) => updateField('BACKUP', 'min_age_days', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <button className="btn primary" disabled={saving === 'BACKUP'} onClick={() => saveCategory('BACKUP')}>{saving === 'BACKUP' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* LOGIN */}
+        <div className="mini-card">
+          <strong>登录安全（LOGIN_SECURITY）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>失败登录达到高阈值判 HIGH；低阈值判 LOW；root远程登录判 MEDIUM</p>
+          <label style={{ display: 'block' }}>失败登录高阈值<input type="number" min={1} max={1000} value={login.failed_high ?? 10} onChange={(e) => updateField('LOGIN_SECURITY', 'failed_high', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>失败登录低阈值<input type="number" min={1} max={1000} value={login.failed_low ?? 3} onChange={(e) => updateField('LOGIN_SECURITY', 'failed_low', Number(e.target.value))} style={{ width: 80, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>统计时间窗口(小时)<input type="number" min={1} max={720} value={login.failed_window_hours ?? 24} onChange={(e) => updateField('LOGIN_SECURITY', 'failed_window_hours', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>root远程登录判 MEDIUM<input type="checkbox" checked={login.root_remote_medium !== false} onChange={(e) => updateField('LOGIN_SECURITY', 'root_remote_medium', e.target.checked)} style={{ marginLeft: 6 }} /></label>
+          <button className="btn primary" disabled={saving === 'LOGIN_SECURITY'} onClick={() => saveCategory('LOGIN_SECURITY')}>{saving === 'LOGIN_SECURITY' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* PROCESS_PORT */}
+        <div className="mini-card">
+          <strong>进程端口（PROCESS_PORT）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>公网暴露高危端口判 MEDIUM；可疑进程判 HIGH；CPU超阈值判 MEDIUM</p>
+          <label style={{ display: 'block' }}>高危端口（逗号或换行分隔）<textarea rows={2} value={(port.high_risk_ports || []).join(', ')} onChange={(e) => updateList('PROCESS_PORT', 'high_risk_ports', e.target.value)} style={{ width: '100%' }} /></label>
+          <label style={{ display: 'block' }}>可疑进程关键字（逗号或换行分隔）<textarea rows={2} value={(port.suspicious_keywords || []).join(', ')} onChange={(e) => updateList('PROCESS_PORT', 'suspicious_keywords', e.target.value)} style={{ width: '100%' }} /></label>
+          <label style={{ display: 'block' }}>CPU 阈值（%）<input type="number" min={10} max={100} value={port.cpu_threshold ?? 80} onChange={(e) => updateField('PROCESS_PORT', 'cpu_threshold', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <button className="btn primary" disabled={saving === 'PROCESS_PORT'} onClick={() => saveCategory('PROCESS_PORT')}>{saving === 'PROCESS_PORT' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* ACCOUNT_SECURITY */}
+        <div className="mini-card">
+          <strong>账号安全（ACCOUNT_SECURITY）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>UID=0 超阈值判 HIGH；可登录账号超阈值判 MEDIUM/LOW</p>
+          <label style={{ display: 'block' }}>UID=0 阈值<input type="number" min={1} max={10} value={account.max_uid0 ?? 1} onChange={(e) => updateField('ACCOUNT_SECURITY', 'max_uid0', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>可登录账号 LOW 阈值<input type="number" min={1} max={100} value={account.max_login_users ?? 10} onChange={(e) => updateField('ACCOUNT_SECURITY', 'max_login_users', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>可登录账号 MEDIUM 阈值<input type="number" min={1} max={100} value={account.max_login_users_medium ?? 20} onChange={(e) => updateField('ACCOUNT_SECURITY', 'max_login_users_medium', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <button className="btn primary" disabled={saving === 'ACCOUNT_SECURITY'} onClick={() => saveCategory('ACCOUNT_SECURITY')}>{saving === 'ACCOUNT_SECURITY' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* COMMAND_HISTORY */}
+        <div className="mini-card">
+          <strong>命令日志（COMMAND_HISTORY）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>高危命令判 HIGH/MEDIUM；管道攻击判 HIGH；history清空判 HIGH</p>
+          <label style={{ display: 'block' }}>高危关键字（逗号或换行分隔）<textarea rows={2} value={(cmdHist.high_keywords || []).join(', ')} onChange={(e) => updateList('COMMAND_HISTORY', 'high_keywords', e.target.value)} style={{ width: '100%' }} /></label>
+          <label style={{ display: 'block' }}>管道攻击组合（每行: keyword1,keyword2）<textarea rows={2} value={(cmdHist.pipe_combos || []).map((p: string[]) => Array.isArray(p) ? p.join(', ') : p).join('\n')} onChange={(e) => { const arr = e.target.value.split('\n').filter(Boolean).map((s) => s.split(',').map((x) => x.trim()).filter(Boolean)); updateField('COMMAND_HISTORY', 'pipe_combos', arr) }} style={{ width: '100%' }} /></label>
+          <button className="btn primary" disabled={saving === 'COMMAND_HISTORY'} onClick={() => saveCategory('COMMAND_HISTORY')}>{saving === 'COMMAND_HISTORY' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* FIREWALL */}
+        <div className="mini-card">
+          <strong>防火墙（FIREWALL）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>防火墙未启用时的风险等级（云环境可设为 LOW）</p>
+          <label style={{ display: 'block' }}>未启用等级<select value={firewall.inactive_level ?? 'MEDIUM'} onChange={(e) => updateField('FIREWALL', 'inactive_level', e.target.value)} style={{ marginLeft: 6 }}><option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option></select></label>
+          <button className="btn primary" disabled={saving === 'FIREWALL'} onClick={() => saveCategory('FIREWALL')}>{saving === 'FIREWALL' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* SERVICE_STATUS */}
+        <div className="mini-card">
+          <strong>服务状态（SERVICE_STATUS）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>核心服务失败判 HIGH；其他失败单元判 MEDIUM</p>
+          <label style={{ display: 'block' }}>核心服务（逗号或换行分隔）<textarea rows={2} value={(service.core_services || []).join(', ')} onChange={(e) => updateList('SERVICE_STATUS', 'core_services', e.target.value)} style={{ width: '100%' }} /></label>
+          <button className="btn primary" disabled={saving === 'SERVICE_STATUS'} onClick={() => saveCategory('SERVICE_STATUS')}>{saving === 'SERVICE_STATUS' ? '保存中…' : '保存'}</button>
+        </div>
+
+        {/* MEMORY */}
+        <div className="mini-card">
+          <strong>内存状况（MEMORY）</strong>
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 8px' }}>内存使用率达高阈值判 HIGH，中阈值判 MEDIUM；Swap 达临界阈值判 HIGH</p>
+          <label style={{ display: 'block' }}>内存高阈值(%)<input type="number" min={50} max={100} value={memoryThres.mem_high_pct ?? 95} onChange={(e) => updateField('MEMORY', 'mem_high_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>内存中阈值(%)<input type="number" min={30} max={100} value={memoryThres.mem_medium_pct ?? 85} onChange={(e) => updateField('MEMORY', 'mem_medium_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>Swap高阈值(%)<input type="number" min={10} max={100} value={memoryThres.swap_high_pct ?? 50} onChange={(e) => updateField('MEMORY', 'swap_high_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <label style={{ display: 'block' }}>Swap临界阈值(%)<input type="number" min={10} max={100} value={memoryThres.swap_critical_pct ?? 80} onChange={(e) => updateField('MEMORY', 'swap_critical_pct', Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /></label>
+          <button className="btn primary" disabled={saving === 'MEMORY'} onClick={() => saveCategory('MEMORY')}>{saving === 'MEMORY' ? '保存中…' : '保存'}</button>
+        </div>
+      </div>
+    </section>
   )
 }

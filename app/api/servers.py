@@ -361,6 +361,10 @@ async def create_server_v2(request: Request, db: Session = Depends(get_db)):
     tags = data.get("tags", [])
     sftp_allowed_roots = data.get("sftp_allowed_roots") or data.get("allowed_roots") or ["/"]
 
+    status = str(data.get("status") or "online").strip().lower()
+    if status not in {"online", "disabled", "offline"}:
+        status = "online"
+
     server = {
         "name": name,
         "host": host,
@@ -375,6 +379,8 @@ async def create_server_v2(request: Request, db: Session = Depends(get_db)):
         "tags": tags,
         "group": data.get("group", ""),
         "sftp_allowed_roots": sftp_allowed_roots,
+        "status": status,
+        "enabled": status != "disabled",
     }
     if not save_server(server):
         logger.error(f"Failed to save server '{name}': config save returned False, user={request.state.username}")
@@ -429,6 +435,11 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
         or ["/"]
     )
 
+    status = data.get("status") if data.get("status") is not None else existing.get("status", "online")
+    status = str(status or "online").strip().lower()
+    if status not in {"online", "disabled", "offline"}:
+        status = "online"
+
     server = {
         "name": name,
         "host": host,
@@ -443,6 +454,8 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
         "tags": tags,
         "group": data.get("group") if data.get("group") is not None else existing.get("group", ""),
         "sftp_allowed_roots": sftp_allowed_roots,
+        "status": status,
+        "enabled": status != "disabled",
     }
     if not save_server(server):
         logger.error(f"Failed to update server '{name}': config save returned False, user={request.state.username}")

@@ -19,7 +19,7 @@ def _server_obj_to_dict(server: Any) -> Dict[str, Any]:
     for key in (
         "id", "name", "host", "port", "user", "username", "key", "key_file",
         "key_content", "password", "jump_host", "group", "auth_type", "created_at", "updated_at",
-        "sftp_allowed_roots", "allowed_roots", "file_roots", "description", "tags",
+        "sftp_allowed_roots", "allowed_roots", "file_roots", "description", "tags", "status", "enabled",
     ):
         if hasattr(server, key):
             value = getattr(server, key)
@@ -65,6 +65,13 @@ def _normalize_server(server: Dict[str, Any], source: str) -> Optional[Dict[str,
     key_content = server.get("key_content")
     auth_type = server.get("auth_type") or ("key_content" if key_content else "key_file" if key else "password" if password else "")
     allowed_roots = _coerce_allowed_roots(server)
+    raw_status = str(server.get("status") or "").strip().lower()
+    if server.get("enabled") is False or raw_status in {"disabled", "停用", "inactive", "off"}:
+        asset_status = "disabled"
+    elif raw_status in {"offline", "离线"}:
+        asset_status = "offline"
+    else:
+        asset_status = raw_status or "online"
     result = {
         "id": server.get("id") or name or host,
         "name": name or host,
@@ -81,6 +88,8 @@ def _normalize_server(server: Dict[str, Any], source: str) -> Optional[Dict[str,
         "has_key_content": bool(key_content),
         "has_key": bool(key),
         "source": source,
+        "status": asset_status,
+        "enabled": asset_status != "disabled",
     }
     if allowed_roots is not None:
         result["sftp_allowed_roots"] = allowed_roots
@@ -102,7 +111,7 @@ def _merge_server_lists(*lists: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]
             else:
                 # Prefer the richer record if the earlier one was sparse.
                 existing = by_name[key]
-                for field in ("host", "user", "username", "key", "key_file", "jump_host", "group", "auth_type"):
+                for field in ("host", "user", "username", "key", "key_file", "jump_host", "group", "auth_type", "status", "enabled"):
                     if not existing.get(field) and item.get(field):
                         existing[field] = item[field]
                 if not existing.get("sftp_allowed_roots") and item.get("sftp_allowed_roots"):
@@ -148,6 +157,7 @@ def list_server_assets(db=None) -> List[Dict[str, Any]]:
                     "key": getattr(row, "key", None),
                     "key_file": getattr(row, "key", None),
                     "jump_host": getattr(row, "jump_host", None),
+                    "status": getattr(row, "status", None) or "online",
                     "has_password": bool(getattr(row, "password", None)),
                     "has_key_content": bool(getattr(row, "key_content", None)),
                     "source": "database",

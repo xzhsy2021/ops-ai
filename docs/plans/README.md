@@ -30,6 +30,15 @@ This iteration's headline themes:
 4. **UX polish** (P1-3 skeleton + xterm lazy, P1-4 dist banner)
 5. **Resource governance** (P2-1 SQLite retention, P2-2 SSE subscriber TTL, P2-3 missing indexes)
 
+### 2026-06 巡检中心子线（并行交付，独立 runbook）
+
+巡检中心为独立子线，规范与交付文档位于：
+
+- 技术方案 / 落地状态：[../inspection_center_upgrade_spec.md](../inspection_center_upgrade_spec.md)（2026-06-03 已追加 §6 实际落地状态）
+- 完整开发文档：[2026-06-01-inspection-center-development.md](2026-06-01-inspection-center-development.md)
+- oncall / 已知缺陷：[../runbooks/INSPECTION_TROUBLESHOOTING.md](../runbooks/INSPECTION_TROUBLESHOOTING.md)
+- MCP 工具矩阵：[../runbooks/mcp-capability-matrix.md](../runbooks/mcp-capability-matrix.md)（Server & Inspection 章节）
+
 ## Keep in Root
 
 Keep only these document types in `docs/plans/`:
@@ -46,6 +55,7 @@ These remain in root because they are still valid design references, not status 
 - `2026-05-01-runtime-source-of-truth.md`
 - `2026-05-02-ops-remote-workbench-design.md`
 - `2026-05-03-pipeline-variable-binding-design.md`
+- `2026-06-01-inspection-center-development.md` — 巡检中心完整开发文档（2026-06-01 交付口径）
 
 ## Archived / Superseded
 

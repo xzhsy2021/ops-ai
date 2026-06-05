@@ -8,7 +8,7 @@ from app.config.cache import (
 )
 from app.config.migration import (
     _ensure_defaults, _migrate_dovo_regions, _ensure_group_field_defaults,
-    _ensure_group_servers, _apply_migrations_and_save,
+    _ensure_group_servers, _apply_migrations_and_save, _migrate_legacy_default_config_to_db,
 )
 from app.config.servers import (
     get_all_servers, get_server_by_name, save_server, delete_server,

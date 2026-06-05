@@ -299,7 +299,7 @@ def run_precheck(args, ctx, db):
     risk="high",
     category="package_write",
     write=True,
-    requires_confirmation=False,
+    requires_confirmation=True,
     input_schema={
         "type": "object",
         "properties": {
@@ -415,6 +415,8 @@ def prepare_release_from_local_package(args, ctx, db):
     category="deploy_execute",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {"plan_id": {"type": "string"}, "confirm_text": {"type": "string"}, "reason": {"type": "string"}, "change_reason": {"type": "string"}},
@@ -477,6 +479,8 @@ def execute_deploy_plan(args, ctx, db):
     task_id = uuid.uuid4().hex[:12]
     try:
         keys = _acquire_locks(_lock_keys(req.system, req.service, req.environment, req.servers))
+    except HTTPException:
+        raise
     except Exception:
         DeploymentRepository(db).update_status(deployment.id, "failed", "Failed to acquire deployment locks")
         raise
@@ -507,6 +511,8 @@ def execute_deploy_plan(args, ctx, db):
     risk="high",
     category="deploy_execute",
     write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
     input_schema={
         "type": "object",
         "properties": {"deployment_id": {"type": "string"}},
@@ -588,6 +594,47 @@ def list_deployments(args, ctx, db):
         data=payload,
         summary=f"返回 {len(payload.get('items') or [])} 条发布记录，共 {payload.get('pagination', {}).get('total', 0)} 条",
         message="deployments listed",
+    )
+
+
+@registry.register(
+    name="ops.deploy.aggregate_status",
+    title="查询发布聚合状态",
+    description="获取发布中心的聚合健康状态：最近发布、活动任务、运行中发布、回滚次数、worker 存活与预检开关。可按 system/environment 过滤。只读。",
+    scopes=["ops:read"],
+    risk="low",
+    category="deploy_read",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    example_prompts=["当前发布中心整体健康状况", "有哪些发布正在运行", "最近 5 条发布记录"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "system": {"type": "string", "description": "按系统名过滤"},
+            "environment": {"type": "string", "description": "按环境过滤（dev/staging/prod 等）"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最近发布返回数量，默认 5"},
+        },
+        "additionalProperties": False,
+    },
+)
+def deploy_aggregate_status_tool(args, ctx, db):
+    from app.domain.runtime.snapshots import build_deployments_aggregate
+
+    payload = build_deployments_aggregate(
+        db,
+        system=args.get("system") or "",
+        environment=args.get("environment") or "",
+        limit=int(args.get("limit") or 5),
+    )
+    latest = payload.get("latest_deployments") or []
+    active = payload.get("active_jobs") or []
+    return tool_result(
+        data=payload,
+        summary=f"发布聚合状态：最近 {len(latest)} 条，活动 {len(active)} 条，运行中 {payload.get('running_count', 0)} 条",
+        message="deploy aggregate status",
     )
 
 
@@ -743,6 +790,8 @@ def create_rollback_plan(args, ctx, db):
     category="deploy_execute",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {"plan_id": {"type": "string"}, "confirm_text": {"type": "string"}},

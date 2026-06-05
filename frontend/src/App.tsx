@@ -27,8 +27,14 @@ const AdminMaintenancePage = lazy(() => import('./pages/AdminMaintenancePage'))
 const TaskCenterPage = lazy(() => import('./pages/TaskCenterPage'))
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'))
 const ReportCenterPage = lazy(() => import('./pages/ReportCenterPage'))
+const InspectionCenterPage = lazy(() => import('./pages/InspectionCenterPage'))
 const DatabaseToolsPage = lazy(() => import('./pages/DatabaseToolsPage'))
 const ToolAccessPage = lazy(() => import('./pages/ToolAccessPage'))
+const McpToolsPage = lazy(() => import('./pages/McpToolsPage'))
+const McpAuditPage = lazy(() => import('./pages/McpAuditPage'))
+const AiWorkflowsPage = lazy(() => import('./pages/AiWorkflowsPage'))
+const AiAnalysisPage = lazy(() => import('./pages/AiAnalysisPage'))
+const AiAnalysisDetailPage = lazy(() => import('./pages/AiAnalysisDetailPage'))
 const SystemStatusPage = lazy(() => import('./pages/SystemStatusPage'))
 const SystemDiagnosticsPage = lazy(() => import('./pages/SystemDiagnosticsPage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
@@ -536,8 +542,14 @@ function App() {
                   <Route path={ROUTES.sqlQuery} element={<Navigate to={`${ROUTES.database}?tab=query`} replace />} />
                   <Route path={ROUTES.audit} element={requireAuth(hasMinRole('admin') ? <AuditLogPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.reports} element={requireAuth(hasMinRole('readonly') ? <ReportCenterPage /> : <NotFoundPage />)} />
+                  <Route path={ROUTES.inspection} element={requireAuth(hasMinRole('readonly') ? <InspectionCenterPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.database} element={requireAuth(hasMinRole('readonly') ? <DatabaseToolsPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.tools} element={requireAuth(hasMinRole('readonly') ? <ToolAccessPage /> : <NotFoundPage />)} />
+                  <Route path={ROUTES.mcpTools} element={requireAuth(hasMinRole('readonly') ? <McpToolsPage /> : <NotFoundPage />)} />
+                  <Route path={ROUTES.mcpAudit} element={requireAuth(hasMinRole('admin') ? <McpAuditPage /> : <NotFoundPage />)} />
+                  <Route path={ROUTES.aiWorkflows} element={requireAuth(hasMinRole('readonly') ? <AiWorkflowsPage /> : <NotFoundPage />)} />
+                  <Route path={ROUTES.aiAnalysis} element={requireAuth(hasMinRole('readonly') ? <AiAnalysisPage /> : <NotFoundPage />)} />
+                  <Route path={`${ROUTES.aiAnalysis}/:id`} element={requireAuth(hasMinRole('readonly') ? <AiAnalysisDetailPage /> : <NotFoundPage />)} />
                   <Route path="*" element={requireAuth(<NotFoundPage />)} />
                 </Routes>
                 </Suspense>

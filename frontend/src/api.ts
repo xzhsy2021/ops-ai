@@ -122,7 +122,7 @@ export const deploy = {
   deploymentTasks: (deploymentId: string) => api.get(`/deploy/deployments/${deploymentId}/tasks`),
   cancelDeployment: (deploymentId: string) => api.post(`/deploy/deployments/${deploymentId}/cancel`),
   workerStatus: () => api.get('/deploy/worker/status'),
-  aggregateStatus: () => api.get('/api/v2/status/deploy-aggregate'),
+  aggregateStatus: () => api.get('/status/deploy-aggregate'),
 }
 
 
@@ -447,6 +447,7 @@ export const capabilityTools = {
   updateSettings: (settings: Record<string, any>) => api.put('/tools/settings', { settings }),
   tokens: () => api.get('/tools/tokens'),
   createToken: (data: any) => api.post('/tools/tokens', data),
+  updateToken: (id: string, data: any) => api.patch(`/tools/tokens/${encodeURIComponent(id)}`, data),
   revokeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}`),
   calls: (params?: { limit?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
   plans: (params?: { limit?: number; plan_type?: string; status?: string }) => api.get('/tools/plans', { params }),
@@ -458,7 +459,7 @@ export const capabilityTools = {
 }
 
 export const reports = {
-  list: (params?: { report_type?: string; limit?: number }) => api.get('/reports', { params }),
+  list: (params?: { report_type?: string; limit?: number; offset?: number }) => api.get('/reports', { params }),
   summary: () => api.get('/reports/summary'),
   types: () => api.get('/reports/types'),
   generate: (data: { report_type: string; target_id?: string; format?: string; title?: string; include_raw?: boolean; focus?: string }) => api.post('/reports/generate', data),
@@ -493,3 +494,95 @@ rawApi.interceptors.request.use((config) => {
   return config
 })
 
+
+export const inspection = {
+  overview: () => api.get('/inspection/overview'),
+  categories: () => api.get('/inspection/categories'),
+  servers: () => api.get('/inspection/servers'),
+  serverGroups: () => api.get('/inspection/server-groups'),
+  projects: () => api.get('/inspection/projects'),
+  runServer: (data: { server_id: string; categories?: string[]; generate_report?: boolean }) => api.post(`/inspection/servers/${encodeURIComponent(data.server_id)}/run`, data),
+  startServer: (data: { server_id: string; categories?: string[] }) => api.post(`/inspection/servers/${encodeURIComponent(data.server_id)}/start`, data),
+  runServersBatch: (data: { server_ids?: string[]; groups?: string[]; group?: string; categories?: string[]; generate_report?: boolean; concurrency?: number; batch_size?: number; command_timeout_seconds?: number; run_timeout_seconds?: number; skip_disabled?: boolean; all_servers?: boolean }) => {
+    const groups = data.groups || (data.group ? [data.group] : [])
+    return api.post('/inspection/servers/batch-run', {
+      ...data,
+      serverIds: data.server_ids || [],
+      groups,
+      groupNames: groups,
+      categoryCodes: data.categories || [],
+      generateReport: data.generate_report,
+      batchSize: data.batch_size,
+      commandTimeoutSeconds: data.command_timeout_seconds,
+      runTimeoutSeconds: data.run_timeout_seconds,
+      skipDisabled: data.skip_disabled,
+      allServers: data.all_servers,
+    })
+  },
+  startServersBatch: (data: { server_ids?: string[]; groups?: string[]; group?: string; categories?: string[]; concurrency?: number; batch_size?: number; command_timeout_seconds?: number; run_timeout_seconds?: number; skip_disabled?: boolean; all_servers?: boolean }) => {
+    const groups = data.groups || (data.group ? [data.group] : [])
+    return api.post('/inspection/servers/batch-start', {
+      ...data,
+      serverIds: data.server_ids || [],
+      groups,
+      groupNames: groups,
+      categoryCodes: data.categories || [],
+      batchSize: data.batch_size,
+      commandTimeoutSeconds: data.command_timeout_seconds,
+      runTimeoutSeconds: data.run_timeout_seconds,
+      skipDisabled: data.skip_disabled,
+      allServers: data.all_servers,
+    })
+  },
+  runProject: (data: { project_id: string; categories?: string[]; include_server_summary?: boolean; generate_report?: boolean }) => api.post(`/inspection/projects/${encodeURIComponent(data.project_id)}/run`, data),
+  startProject: (data: { project_id: string; categories?: string[]; include_server_summary?: boolean }) => api.post(`/inspection/projects/${encodeURIComponent(data.project_id)}/start`, data),
+  runCombined: (projectId: string, data: { categories?: string[]; generate_report?: boolean }) => api.post(`/inspection/projects/${encodeURIComponent(projectId)}/combined-run`, data),
+  runs: (params?: { scope_type?: string; server_id?: string; project_id?: string; limit?: number; offset?: number }) => api.get('/inspection/runs', { params }),
+  ledger: (params?: { period?: string; date_from?: string; date_to?: string; scope_type?: string; server_id?: string; project_id?: string; status?: string; limit?: number; offset?: number }) => api.get('/inspection/ledger', { params }),
+  periodicReportPreview: (params?: { period?: string; date_from?: string; date_to?: string; scope_type?: string }) => api.get('/inspection/reports/periodic-preview', { params }),
+  generatePeriodicReport: (data: { period?: string; date_from?: string; date_to?: string; scope_type?: string; format?: string; title?: string }) => api.post('/inspection/reports/periodic', data),
+  runDetail: (runId: string) => api.get(`/inspection/runs/${encodeURIComponent(runId)}`),
+  generateReport: (runId: string, data?: { format?: string; title?: string }) => api.post(`/inspection/runs/${encodeURIComponent(runId)}/report`, data || { format: 'md' }),
+  generateReports: (data: { run_ids: string[]; format?: string; title?: string }) => api.post('/inspection/runs/report', data),
+  deleteRun: (runId: string, params?: { delete_reports?: boolean; force?: boolean }) => api.delete(`/inspection/runs/${encodeURIComponent(runId)}`, { params }),
+  deleteRuns: (data: { run_ids: string[]; delete_reports?: boolean; force?: boolean }) => api.post('/inspection/runs/delete', data),
+  deleteLedger: (data: { period?: string; date_from?: string; date_to?: string; scope_type?: string; server_id?: string; project_id?: string; status?: string; delete_reports?: boolean; force?: boolean }) => api.post('/inspection/ledger/delete', data),
+  deleteIssue: (issueId: string) => api.delete(`/inspection/issues/${encodeURIComponent(issueId)}`),
+  rules: (params?: { scope_type?: string; category?: string; enabled?: boolean; keyword?: string; risk_level?: string; limit?: number; offset?: number }) => api.get('/inspection/rules', { params }),
+  createRule: (data: any) => api.post('/inspection/rules', data),
+  updateRule: (ruleCode: string, data: any) => api.patch(`/inspection/rules/${encodeURIComponent(ruleCode)}`, data),
+  deleteRule: (ruleCode: string) => api.delete(`/inspection/rules/${encodeURIComponent(ruleCode)}`),
+  baselines: (params?: { scope_type?: string; server_id?: string; project_id?: string; baseline_type?: string }) => api.get('/inspection/baselines', { params }),
+  relations: (params?: { project_id?: string }) => api.get('/inspection/project-server-relations', { params }),
+  saveRelation: (data: any) => api.post('/inspection/project-server-relations', data),
+  updateRelation: (relationId: string, data: any) => api.patch(`/inspection/project-server-relations/${encodeURIComponent(relationId)}`, data),
+  issues: (params?: { scope_type?: string; risk_level?: string; status?: string; server_id?: string; project_id?: string; limit?: number }) => api.get('/inspection/issues', { params }),
+  updateIssue: (issueId: string, data: { status?: string; owner_id?: string; suggestion?: string }) => api.patch(`/inspection/issues/${encodeURIComponent(issueId)}`, data),
+  // 巡检项目配置管理（可选/可编辑/可调整）
+  listItemConfigs: (scopeType: string = 'SERVER') => api.get('/inspection/item-configs', { params: { scope_type: scopeType } }),
+  getItemConfig: (itemId: string) => api.get(`/inspection/item-configs/${encodeURIComponent(itemId)}`),
+  updateItemConfig: (itemId: string, data: any) => api.put(`/inspection/item-configs/${encodeURIComponent(itemId)}`, data),
+  toggleItemConfig: (itemId: string) => api.post(`/inspection/item-configs/${encodeURIComponent(itemId)}/toggle`),
+  reorderItemConfigs: (data: { scope_type: string; ordered_ids: string[] }) => api.put('/inspection/item-configs/reorder', data),
+  updateItemConfigRules: (itemId: string, rules: any[]) => api.put(`/inspection/item-configs/${encodeURIComponent(itemId)}/rules`, { rules }),
+  getThresholds: () => api.get('/inspection/thresholds'),
+  saveThresholds: (category: string, thresholds: Record<string, any>) => api.post('/inspection/thresholds', { category, thresholds }),
+  getRunRawOutput: (runId: string) => api.get(`/inspection/runs/${encodeURIComponent(runId)}/raw-output`),
+}
+
+export const mcpAi = {
+  tools: (params?: { category?: string; risk?: string; include_schema?: boolean; limit?: number; cursor?: number }) => api.get('/tools', { params }),
+  toolDetail: (name: string) => api.get(`/tools/detail/${encodeURIComponent(name)}`),
+  toolCalls: (params?: { limit?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
+  resources: () => api.get('/mcp/resources'),
+  readResource: (uri: string) => api.post('/mcp/resources/read', { uri }),
+  workflow: (tool: string, arguments_: Record<string, any>) => api.post('/tools/call', { tool, arguments: arguments_ }),
+  recommendTools: (scenario: string) => api.get('/mcp/tools/recommend', { params: { scenario } }),
+}
+
+export const aiAnalysis = {
+  list: (params?: { analysis_type?: string; target_type?: string; target_id?: string; limit?: number }) => api.get('/ai/analysis', { params }),
+  get: (id: string) => api.get(`/ai/analysis/${encodeURIComponent(id)}`),
+  save: (data: any) => api.post('/ai/analysis', data),
+  generateReport: (id: string) => api.post(`/ai/analysis/${encodeURIComponent(id)}/generate-report`),
+}

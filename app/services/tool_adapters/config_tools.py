@@ -149,6 +149,8 @@ def create_config_change_plan(args, ctx, db):
     category="config_write",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {"plan_id": {"type": "string"}, "confirm_text": {"type": "string"}},
@@ -167,8 +169,11 @@ def apply_config_change_plan(args, ctx, db):
     if args.get("confirm_text") != plan.confirm_text:
         raise HTTPException(status_code=400, detail=f"确认短语不匹配，应输入: {plan.confirm_text}")
     payload = plan.payload or {}
+    system_name = payload.get("system")
+    if not system_name:
+        raise HTTPException(status_code=400, detail="Plan payload missing 'system'")
     cfg = load_config_cached()
-    systems, sys_cfg = _find_system(cfg, payload.get("system"))
+    systems, sys_cfg = _find_system(cfg, system_name)
     change_type = payload.get("change_type")
 
     if change_type == "create_environment":
@@ -178,7 +183,10 @@ def apply_config_change_plan(args, ctx, db):
             environments.append(env_item)
         sys_cfg["environments"] = environments
     elif change_type == "update_service_env_servers":
-        _, _, sys_cfg, services, idx, svc = _find_service(payload.get("system"), payload.get("service"))
+        service_name = payload.get("service")
+        if not service_name:
+            raise HTTPException(status_code=400, detail="Plan payload missing 'service'")
+        _, _, sys_cfg, services, idx, svc = _find_service(system_name, service_name)
         tv = dict(svc.get("template_variables") or {})
         servers_by_env = dict(tv.get("servers_by_env") or {})
         servers_by_env[payload.get("environment")] = payload.get("servers") or []
@@ -186,7 +194,10 @@ def apply_config_change_plan(args, ctx, db):
         services[idx] = {**svc, "template_variables": tv}
         sys_cfg["services"] = services
     elif change_type in {"update_service_script", "update_service_health_check"}:
-        _, _, sys_cfg, services, idx, svc = _find_service(payload.get("system"), payload.get("service"))
+        service_name = payload.get("service")
+        if not service_name:
+            raise HTTPException(status_code=400, detail="Plan payload missing 'service'")
+        _, _, sys_cfg, services, idx, svc = _find_service(system_name, service_name)
         tv = dict(svc.get("template_variables") or {})
         tv.update(payload.get("fields") or {})
         services[idx] = {**svc, "template_variables": tv}
@@ -194,7 +205,7 @@ def apply_config_change_plan(args, ctx, db):
     else:
         raise HTTPException(status_code=400, detail="Unsupported change_type")
 
-    systems[payload.get("system")] = sys_cfg
+    systems[system_name] = sys_cfg
     cfg["systems"] = systems
     save_config(cfg)
     invalidate_config_cache()

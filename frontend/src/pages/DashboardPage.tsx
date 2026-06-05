@@ -212,6 +212,7 @@ function QuickActions({ actions }: { actions?: DashboardData['quick_actions'] })
   const pinned = favorites.filter((f) => f.pinned)
   const recentSearches = usePreferenceStore((s) => s.recentSearches)
   const fallback = [
+    { title: '巡检中心', description: '服务器巡检、项目巡检和风险闭环', to: ROUTES.inspection },
     { title: '发起发布', description: '预检、确认、部署日志', to: ROUTES.deploy },
     { title: '连接服务器', description: '只读巡检、终端和文件', to: ROUTES.servers },
     { title: 'AI 工具中心', description: '浏览和调试 MCP 工具', to: ROUTES.tools },

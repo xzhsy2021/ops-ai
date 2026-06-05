@@ -112,6 +112,8 @@ def create_backup_tool(args: Dict[str, Any], ctx, db):
     category="backup_restore",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {
@@ -150,6 +152,8 @@ def restore_backup_tool(args: Dict[str, Any], ctx, db):
     category="backup_write",
     write=True,
     requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {

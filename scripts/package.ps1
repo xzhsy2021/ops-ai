@@ -42,8 +42,7 @@ $copyItems = @(
     ".env.docker.example",
     ".env.windows.example",
     "dev_ops.md",
-    "UPGRADE.md",
-    "ARCHITECTURE.md"
+    "UPGRADE.md"
 )
 
 foreach ($item in $copyItems) {

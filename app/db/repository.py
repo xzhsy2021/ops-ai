@@ -105,11 +105,11 @@ class ServerRepository:
 
     def create(self, name: str, host: str, port: int = 22, user: str = "root",
                key: str = "~/.ssh/id_rsa", key_content: str = None, password: str = None,
-               jump_host: str = None) -> Server:
+               jump_host: str = None, status: str = "online") -> Server:
         server = Server(
             name=name, host=host, port=port, user=user,
             key=key, key_content=key_content, password=password,
-            jump_host=jump_host
+            jump_host=jump_host, status=status or "online"
         )
         _encrypt_server_fields(server)
         self.db.add(server)
@@ -121,7 +121,7 @@ class ServerRepository:
         persisted = self._get_server_row_by_id(server.id)
         if not persisted:
             raise ValueError(f"Server not found: {server.id}")
-        for field in ("name", "host", "port", "user", "key", "key_content", "password", "jump_host"):
+        for field in ("name", "host", "port", "user", "key", "key_content", "password", "jump_host", "status"):
             if hasattr(server, field):
                 setattr(persisted, field, getattr(server, field))
         _encrypt_server_fields(persisted)

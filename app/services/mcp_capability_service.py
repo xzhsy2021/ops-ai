@@ -12,6 +12,29 @@ ASCII_DESCRIPTIONS = os.getenv("OPS_MCP_ASCII_DESCRIPTIONS", "1").lower() not in
 MCP_ALIAS_TO_TOOL: Dict[str, str] = {}
 
 
+MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
+    "ops.workflow.inspect": (
+        "Natural-language first inspection workflow. Use for server inspection requests including all servers, "
+        "grouped batch inspection, routine inspection, and inspection reports. Preview first; for all-server "
+        "grouped requests it returns grouped_preview with per-group next actions. Execution is delegated to audited "
+        "inspection tools and can generate a merged report after collecting run_ids."
+    ),
+    "ops.inspection.preview_servers_batch": (
+        "Preview server batch inspection targets before execution. Resolves server_ids, groups, group, or all_servers; "
+        "returns skipped targets, batch_size/concurrency plan, and the exact Chinese confirmation phrase."
+    ),
+    "ops.inspection.run_servers_batch": (
+        "Run audited server inspections for multiple servers after preview confirmation. High risk; requires the exact "
+        "confirm_text returned by ops.inspection.preview_servers_batch, for example confirm phrase '确认巡检 <fingerprint>'."
+    ),
+    "ops.inspection.generate_report": "Generate one inspection report from a single inspection run id.",
+    "ops.inspection.generate_report_for_runs": (
+        "Generate one merged inspection report from multiple run ids. Use after batch or grouped inspections."
+    ),
+    "ops.list_server_groups": "List server groups with total, inspectable, and online counts. Use before grouped inspections.",
+}
+
+
 def to_mcp_tool_name(name: str) -> str:
     if not SAFE_TOOL_NAMES:
         return name
@@ -113,7 +136,10 @@ def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_ov
         limit=max(1, min(limit, 200)),
         cursor=max(0, cursor),
     )
-    tools = [mcp_tool_payload(t, description_overrides) for t in (listed.get("tools") or [])]
+    effective_overrides = dict(MCP_TOOL_DESCRIPTION_OVERRIDES)
+    if description_overrides:
+        effective_overrides.update(description_overrides)
+    tools = [mcp_tool_payload(t, effective_overrides) for t in (listed.get("tools") or [])]
     result: Dict[str, Any] = {"tools": tools}
     next_cursor = (listed.get("pagination") or {}).get("next_cursor")
     if next_cursor is not None:
@@ -265,7 +291,18 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
     elif uri == "ops://ai-workflows":
         data = {
             "items": [
-                {"tool": "ops.workflow.inspect", "description": "Natural-language server inspection workflow"},
+                {
+                    "tool": "ops.workflow.inspect",
+                    "description": "Natural-language server inspection workflow for single group, explicit targets, and all-server grouped batch inspection.",
+                    "recommended_before": ["ops.list_server_groups", "ops.inspection.preview_servers_batch"],
+                    "recommended_after": ["ops.inspection.get_run", "ops.inspection.list_issues", "ops.inspection.generate_report_for_runs"],
+                    "output_modes": ["preview", "grouped_preview", "run"],
+                    "natural_language_examples": [
+                        "巡检 crypto 分组并输出报告",
+                        "巡检全部服务器，按分组分批巡检并输出报告",
+                        "Run all servers by group with batch size 8 and generate a merged report",
+                    ],
+                },
                 {"tool": "ops.workflow.generate_project_health_brief", "description": "Project health brief"},
                 {"tool": "ops.workflow.analyze_failed_deploy", "description": "Failed deployment analysis"},
                 {"tool": "ops.workflow.inspect_project_security", "description": "Project security inspection analysis"},
@@ -295,6 +332,7 @@ def mcp_prompt_items() -> List[Dict[str, Any]]:
         {"name": "ops_operation_replay", "description": "Replay an OPS/MCP/AI operation chain from audit evidence.", "arguments": [{"name": "chain_id", "description": "tool:/job:/plan:/deployment:/audit id", "required": True}]},
         {"name": "ops_report_brief", "description": "Summarize a generated OPS report artifact.", "arguments": [{"name": "report_id", "description": "Report artifact id", "required": True}]},
         {"name": "ops_db_export_request", "description": "Plan a safe database workflow: query, export, or maintain tables.", "arguments": [{"name": "request", "description": "Natural language query/export request", "required": True}]},
+        {"name": "ops_inspection_workflow", "description": "Run OPS server inspection from natural language, including all-server grouped batch inspection.", "arguments": [{"name": "request", "description": "Natural language inspection request", "required": True}]},
         {"name": "ops_server_management", "description": "Manage OPS server assets.", "arguments": [{"name": "request", "description": "Natural language server management request", "required": True}]},
         {"name": "ops_backup_workflow", "description": "Safe OPS database backup workflow.", "arguments": [{"name": "request", "description": "Natural language backup request", "required": True}]},
         {"name": "ops_project_health_brief", "description": "Generate a lightweight single-project health brief.", "arguments": [{"name": "project_id", "description": "Project/system identifier", "required": True}]},
@@ -352,6 +390,20 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "- export as CSV/Excel -> ops.db.export_query_result\n"
             "- modify data / UPDATE/DELETE -> ops.db.preview_dml then ops.db.execute_dml\n\n"
             "Workflow: tables -> describe -> query -> export. Never skip steps when table/field names are uncertain.\n"
+            "User request=" + str(args.get("request") or "")
+        )
+    elif name == "ops_inspection_workflow":
+        text = (
+            "Use OPS Path A inspection tools for any request that says inspection, 巡检, 检查服务器, grouped batch, "
+            "all servers, or compliance check. Prefer ops.workflow.inspect first.\n\n"
+            "Natural-language routing:\n"
+            "- all servers / 全部服务器 / 按分组 / grouped -> call ops.workflow.inspect with request, batch_size, concurrency, generate_report=true.\n"
+            "- If response mode=grouped_preview, follow its per-group next_actions. Each group still needs preview-first confirmation.\n"
+            "- Ask the user to approve the exact confirmation phrase `确认巡检 <fingerprint>` before execution.\n"
+            "- After all groups finish, collect all run_ids and call ops.inspection.generate_report_for_runs for one merged report.\n"
+            "- Do not fall back to single-shot probes unless the user explicitly asks for one metric or Path A is blocked.\n\n"
+            "Required record behavior: execution must preserve inspection_runs, inspection_issues, inspection_reports, "
+            "tool_call_logs, operation_jobs, and audit_logs.\n"
             "User request=" + str(args.get("request") or "")
         )
     elif name == "ops_server_management":

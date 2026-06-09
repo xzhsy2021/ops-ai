@@ -31,6 +31,7 @@ from typing import Any, Dict, Tuple
 
 from app.services.mcp_capability_service import (
     MCP_ALIAS_TO_TOOL,
+    MCP_TOOL_DESCRIPTION_OVERRIDES,
     ascii_only,
     from_mcp_tool_name,
     mcp_prompt_get,
@@ -63,6 +64,7 @@ SAFE_TOOL_NAMES = os.getenv("OPS_MCP_SAFE_TOOL_NAMES", "1").lower() not in {"0",
 ASCII_DESCRIPTIONS = os.getenv("OPS_MCP_ASCII_DESCRIPTIONS", "1").lower() not in {"0", "false", "no", "off"}
 
 ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
+    **MCP_TOOL_DESCRIPTION_OVERRIDES,
     # ── Capability Discovery ──
     "ops.describe_capabilities": "Describe the OPS tools, resources, prompts, risk levels, and schemas available to the current token. Use this FIRST when you need to discover what OPS can do or when a user asks 'what capabilities do you have'. 中文: 能力发现/查看可用工具/有哪些功能.",
     "ops.get_tool_risk_policy": "View OPS MCP tool risk policies, confirmation rules, and task-queue suggestions. Read-only. 中文: 查看工具风险策略/安全规则.",
@@ -178,7 +180,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.db.get_dml_execution": "Get one DML execution detail by execution_id including before-sample rows and audit fields. 中文: 查看DML执行详情.",
 
     # ── Server Groups ──
-    "ops.list_server_groups": "List server groups with member counts. Use when user asks 'what groups exist' or 'list server groups'. 中文: 查看服务器分组/分组列表.",
+    "ops.list_server_groups": MCP_TOOL_DESCRIPTION_OVERRIDES["ops.list_server_groups"],
 
     # ── Inspection Tools (Path A — PRIMARY, default for "巡检" requests) ──
     # 任何「巡检/检查服务器/合规检查」请求应优先调用本组工具，
@@ -189,11 +191,11 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.inspection.get_run": "【路径 A 主】Get detailed inspection run results by run_id. 中文: 查看巡检详情/巡检结果.",
     "ops.inspection.list_issues": "【路径 A 主】List inspection issues/risks with filters. Use when user asks 'what issues were found' or 'list risks'. 中文: 查看巡检问题/风险列表.",
     "ops.inspection.get_issue": "【路径 A 主】Get one inspection issue detail by issue_id. 中文: 查看巡检问题详情/风险详情.",
-    "ops.inspection.generate_report": "【路径 A 主】Generate an inspection report from one run. 中文: 生成巡检报告/单次巡检报告.",
-    "ops.inspection.generate_report_for_runs": "【路径 A 主】Generate one merged inspection report from multiple run ids. Use after batch or grouped inspections. 中文: 生成巡检合并报告/批量巡检报告.",
+    "ops.inspection.generate_report": MCP_TOOL_DESCRIPTION_OVERRIDES["ops.inspection.generate_report"],
+    "ops.inspection.generate_report_for_runs": MCP_TOOL_DESCRIPTION_OVERRIDES["ops.inspection.generate_report_for_runs"],
     "ops.inspection.summarize_run": "【路径 A 主】Summarize an inspection run in FIRE structure (Findings, Impact, Recommendations, Evidence). 中文: 巡检摘要/巡检总结.",
     "ops.inspection.run_server": "【路径 A 主】PRIMARY PATH A. Run an inspection on a single server. High risk; requires confirmation. 中文: 执行服务器巡检/巡检服务器. — 用户提到「巡检」时默认选我。",
-    "ops.inspection.run_servers_batch": "【路径 A 主 · 批量首选】PRIMARY PATH A. Run inspections on multiple servers in batch. High risk; requires confirmation. 中文: 批量巡检服务器/批量巡检. — 用户提到「批量巡检」「巡检一组服务器」时默认选我。",
+    "ops.inspection.run_servers_batch": MCP_TOOL_DESCRIPTION_OVERRIDES["ops.inspection.run_servers_batch"],
     "ops.inspection.run_project": "【路径 A 主】PRIMARY PATH A. Run an inspection for a project. High risk; requires confirmation. 中文: 执行项目巡检/巡检项目.",
     "ops.inspection.run_combined": "【路径 A 主】PRIMARY PATH A. Run a combined project inspection. High risk; requires confirmation. 中文: 执行综合巡检/项目综合巡检.",
     "ops.inspection.list_item_configs": "【路径 A 主】List inspection item configurations. 中文: 查看巡检项配置/巡检配置列表.",
@@ -238,7 +240,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.agent.health_check": "Check if agent functionality is enabled. Currently disabled. 中文: Agent健康检查/Agent功能状态.",
 
     # ── Workflow Tools ──
-    "ops.workflow.inspect": "Natural-language first inspection workflow. Use for requests like all servers, grouped batch inspection, inspection report, or routine server inspection. Preview first; execution stays delegated to audited inspection tools. 中文: 自然语言巡检/全量分组巡检/巡检报告工作流.",
+    "ops.workflow.inspect": MCP_TOOL_DESCRIPTION_OVERRIDES["ops.workflow.inspect"],
     "ops.workflow.generate_project_health_brief": "Generate a lightweight project health brief using read-only tools. Low risk. 中文: 项目健康分析/项目状态简报.",
     "ops.workflow.analyze_failed_deploy": "Analyze a failed deployment using logs, diagnostics, and risk data. Medium risk. 中文: 发布失败分析/部署失败分析.",
     "ops.workflow.inspect_project_security": "Inspect project security posture using inspection and risk data. Medium risk. 中文: 项目安全巡检分析/安全评估.",

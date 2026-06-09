@@ -184,7 +184,9 @@ def test_mcp_aliases_round_trip_without_prior_tools_list_cache():
     from app.mcp.server import _from_mcp_tool_name
 
     assert _from_mcp_tool_name("ops_describe_capabilities") == "ops.describe_capabilities"
+    assert _from_mcp_tool_name("ops_workflow_inspect") == "ops.workflow.inspect"
     assert _from_mcp_tool_name("ops_inspection_run_servers_batch") == "ops.inspection.run_servers_batch"
+    assert _from_mcp_tool_name("ops_inspection_generate_report_for_runs") == "ops.inspection.generate_report_for_runs"
     assert _from_mcp_tool_name("ops_db_export_query_result") == "ops.db.export_query_result"
 
 
@@ -303,6 +305,38 @@ def test_mcp_tools_list_defaults_to_daily_ops_and_can_expand_profile(tmp_path):
         assert "ops.workflow.inspect" in daily_names
         assert "ops.execute_deploy_plan" not in daily_names
         assert len(admin_names) > len(daily_names)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_remote_mcp_tools_list_exposes_inspection_workflow_semantics(tmp_path):
+    from app.services.mcp_capability_service import mcp_tools_list
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    try:
+        register_builtin_tools()
+
+        listed = mcp_tools_list(db, ctx, {"limit": 200})
+        tools = {tool["name"]: tool for tool in listed["tools"]}
+
+        workflow = tools["ops_workflow_inspect"]
+        workflow_description = workflow["description"].lower()
+        workflow_schema = workflow["inputSchema"]
+        workflow_props = workflow_schema["properties"]
+        assert "all servers" in workflow_description
+        assert "grouped" in workflow_description
+        assert "merged report" in workflow_description
+        assert "ops.workflow.inspect" == workflow["annotations"]["ops.originalToolName"]
+        assert {"request", "all_servers", "grouped", "batch_size", "concurrency", "generate_report"} <= set(workflow_props)
+
+        merged_report = tools["ops_inspection_generate_report_for_runs"]
+        assert "multiple run ids" in merged_report["description"].lower()
+        assert merged_report["inputSchema"]["required"] == ["run_ids"]
     finally:
         db.close()
         engine.dispose()
@@ -556,6 +590,27 @@ def test_mcp_capability_service_owns_resource_catalog_and_read_wrapper(tmp_path)
         engine.dispose()
 
 
+def test_mcp_ai_workflows_resource_explains_grouped_inspection(tmp_path):
+    from app.services.mcp_capability_service import mcp_resource_read
+    from app.services.tool_context import ToolContext
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    try:
+        response = mcp_resource_read(db, ctx, {"uri": "ops://ai-workflows"})
+        payload = json.loads(response["contents"][0]["text"])
+        items = (payload["data"] or {}).get("items") or []
+        inspect_item = next(item for item in items if item.get("tool") == "ops.workflow.inspect")
+
+        assert "all-server grouped batch inspection" in inspect_item["description"]
+        assert "ops.inspection.generate_report_for_runs" in inspect_item["recommended_after"]
+        assert "grouped_preview" in inspect_item["output_modes"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_mcp_capability_service_owns_prompt_catalog_and_get_contract():
     from app.services.mcp_capability_service import mcp_prompt_get, mcp_prompt_items, mcp_prompts_list
 
@@ -563,6 +618,7 @@ def test_mcp_capability_service_owns_prompt_catalog_and_get_contract():
     names = {item["name"] for item in prompts}
     assert "ops_release_plan" in names
     assert "ops_db_export_request" in names
+    assert "ops_inspection_workflow" in names
 
     listed = mcp_prompts_list()
     assert listed["prompts"] == prompts
@@ -572,6 +628,16 @@ def test_mcp_capability_service_owns_prompt_catalog_and_get_contract():
     assert prompt["description"] == "ops_db_export_request"
     assert "NEVER write standalone Python scripts" in text
     assert "export users as csv" in text
+
+    inspection_prompt = mcp_prompt_get({
+        "name": "ops_inspection_workflow",
+        "arguments": {"request": "巡检全部服务器，按分组分批巡检并输出报告"},
+    })
+    inspection_text = inspection_prompt["messages"][0]["content"]["text"]
+    assert "ops.workflow.inspect" in inspection_text
+    assert "grouped_preview" in inspection_text
+    assert "ops.inspection.generate_report_for_runs" in inspection_text
+    assert "确认巡检 <fingerprint>" in inspection_text
 
 
 def test_stdio_mcp_static_resources_and_prompts_use_capability_service_without_http(monkeypatch):
@@ -610,6 +676,20 @@ def test_stdio_mcp_descriptions_are_ascii_safe_for_default_clients():
         cleaned = stdio_server._ascii_only(description, fallback=tool_name)
         assert cleaned
         assert cleaned.encode("ascii", errors="ignore").decode("ascii") == cleaned
+
+
+def test_stdio_mcp_inspection_descriptions_match_agent_routing_contract():
+    from app.mcp import server as stdio_server
+
+    workflow_description = stdio_server.ENGLISH_TOOL_DESCRIPTIONS["ops.workflow.inspect"].lower()
+    batch_description = stdio_server.ENGLISH_TOOL_DESCRIPTIONS["ops.inspection.run_servers_batch"].lower()
+    merged_report_description = stdio_server.ENGLISH_TOOL_DESCRIPTIONS["ops.inspection.generate_report_for_runs"].lower()
+
+    assert "all servers" in workflow_description
+    assert "grouped" in workflow_description
+    assert "merged report" in workflow_description
+    assert "confirm_text" in batch_description
+    assert "multiple run ids" in merged_report_description
 
 
 def test_stdio_diagnostic_tool_has_clean_utf8_when_ascii_descriptions_disabled(monkeypatch):

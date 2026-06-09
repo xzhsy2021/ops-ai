@@ -118,6 +118,18 @@ def expected_confirmation_text(tool_def, args: Dict[str, Any], db=None) -> str:
         return "CLEANUP PACKAGES"
     if name == "ops.protect_package":
         return f"PROTECT PACKAGE {file_name}" if bool(args.get("protected", True)) else f"UNPROTECT PACKAGE {file_name}"
+    if name == "ops.inspection.profile.run":
+        profile_id = str(args.get("profile_id") or "").strip()
+        expected_count = args.get("expected_count")
+        fingerprint = str(args.get("fingerprint") or "").strip()
+        try:
+            from app.services.inspection_profiles import profile_expected_confirm_text
+
+            return profile_expected_confirm_text(db, profile_id, expected_count=expected_count, fingerprint=fingerprint)
+        except Exception:
+            if profile_id and expected_count is not None and fingerprint:
+                return f"RUN INSPECTION {profile_id} {expected_count} {fingerprint}"
+            return f"RUN INSPECTION {profile_id or '<profile>'} <count> <fingerprint>"
     return f"CONFIRM {name}"
 
 

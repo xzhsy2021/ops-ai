@@ -9,6 +9,25 @@ def _actor(ctx) -> str:
     return getattr(ctx, "username", "") or getattr(ctx, "token_owner", "") or "mcp-ai"
 
 
+def _inspection_followup(result: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(result or {})
+    run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+    runs = payload.get("runs") if isinstance(payload.get("runs"), list) else []
+    run_ids = [str(item.get("id")) for item in runs if isinstance(item, dict) and item.get("id")]
+    if run.get("id"):
+        payload["run_id"] = str(run.get("id"))
+        run_ids = [payload["run_id"]]
+    if run_ids:
+        payload["run_ids"] = run_ids
+        payload.setdefault("status", str(run.get("status") or ("PARTIAL" if payload.get("failed") else "COMPLETED")))
+        payload["next_actions"] = [
+            {"tool": "ops.inspection.get_run", "arguments": {"run_id": run_ids[0]}, "description": "Fetch normalized inspection detail."},
+            {"tool": "ops.inspection.get_run_raw_output", "arguments": {"run_id": run_ids[0]}, "description": "Fetch raw command output and evidence for the run."},
+            {"tool": "ops.inspection.summarize_run", "arguments": {"run_id": run_ids[0]}, "description": "Build an AI-friendly evidence summary."},
+        ]
+    return payload
+
+
 @registry.register(
     name="ops.inspection.list_runs",
     title="查询巡检记录",
@@ -201,11 +220,121 @@ def summarize_run(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="sensitive",
     output_masking=True,
-    input_schema={"type": "object", "properties": {"server_id": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}}, "required": ["server_id"], "additionalProperties": False},
+    input_schema={"type": "object", "properties": {"server_id": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}, "confirm_text": {"type": "string", "description": "用户确认短语（与高风险工具 expected_confirm_text 匹配）"}, "environment": {"type": "string"}}, "required": ["server_id"], "additionalProperties": False},
 )
 def run_server(args: Dict[str, Any], ctx, db):
     from app.services.inspection_center import run_server_inspection as svc_run_server
-    return svc_run_server(db, server_id=args.get("server_id") or "", categories=args.get("categories") or [], created_by=_actor(ctx))
+    return _inspection_followup(svc_run_server(db, server_id=args.get("server_id") or "", categories=args.get("categories") or [], created_by=_actor(ctx)))
+
+
+@registry.register(
+    name="ops.inspection.profile.list",
+    title="查询巡检方案",
+    description="查询可复用的服务器巡检方案，供 MCP/AI 选择日巡、周巡、月巡或分组巡检流程。",
+    scopes=["ops:read"],
+    risk="low",
+    category="inspection",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.inspection.profile.preview", "ops.inspection.profile.run"],
+    input_schema={
+        "type": "object",
+        "properties": {"include_disabled": {"type": "boolean"}},
+        "additionalProperties": False,
+    },
+)
+def profile_list(args: Dict[str, Any], ctx, db):
+    from app.services.inspection_profiles import list_profiles
+
+    return list_profiles(db, include_disabled=bool(args.get("include_disabled", False)))
+
+
+@registry.register(
+    name="ops.inspection.profile.preview",
+    title="预览巡检方案目标",
+    description="解析巡检方案的实际目标服务器、巡检项和确认短语。执行前应先调用本工具。",
+    scopes=["ops:read"],
+    risk="low",
+    category="inspection",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.inspection.profile.run", "ops.list_server_groups", "ops.list_servers"],
+    input_schema={
+        "type": "object",
+        "properties": {"profile_id": {"type": "string"}},
+        "required": ["profile_id"],
+        "additionalProperties": False,
+    },
+)
+def profile_preview(args: Dict[str, Any], ctx, db):
+    from app.services.inspection_profiles import preview_profile
+
+    return preview_profile(db, args.get("profile_id") or "")
+
+
+@registry.register(
+    name="ops.inspection.profile.run",
+    title="执行巡检方案",
+    description="按已保存巡检方案执行批量服务器巡检。需要使用 profile.preview 返回的 RUN INSPECTION 短语确认。",
+    scopes=["ops:read", "ops:write"],
+    risk="high",
+    category="inspection_execute",
+    write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    ai_callable=True,
+    ai_auto_callable=False,
+    data_sensitivity="sensitive",
+    output_masking=True,
+    related_tools=["ops.inspection.profile.preview", "ops.inspection.get_run", "ops.inspection.generate_report"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "profile_id": {"type": "string"},
+            "expected_count": {"type": "integer", "minimum": 0},
+            "fingerprint": {"type": "string"},
+            "confirm_text": {"type": "string", "description": "profile.preview 返回的 RUN INSPECTION 确认短语"},
+        },
+        "required": ["profile_id"],
+        "additionalProperties": False,
+    },
+)
+def profile_run(args: Dict[str, Any], ctx, db):
+    from app.services.inspection_profiles import preview_profile, run_profile
+
+    profile_id = args.get("profile_id") or ""
+    if not args.get("confirm_text"):
+        preview = preview_profile(db, profile_id)
+        return {
+            **preview,
+            "status": "confirmation_required",
+            "next_actions": [
+                {
+                    "tool": "ops.inspection.profile.run",
+                    "arguments": {
+                        "profile_id": profile_id,
+                        "expected_count": preview.get("eligible_count") or 0,
+                        "fingerprint": (preview.get("confirmation") or {}).get("fingerprint"),
+                        "confirm_text": (preview.get("confirmation") or {}).get("confirm_text"),
+                    },
+                    "description": "After user approval, call with the exact confirmation phrase.",
+                }
+            ],
+        }
+    result = run_profile(db, profile_id, confirm_text=args.get("confirm_text") or "", created_by=_actor(ctx))
+    run_ids = result.get("run_ids") or []
+    if run_ids:
+        result["next_actions"] = [
+            {"tool": "ops.inspection.get_run", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the first inspection run detail."},
+            {"tool": "ops.inspection.list_issues", "arguments": {"limit": 100}, "description": "Review generated inspection issues."},
+        ]
+    return result
 
 
 @registry.register(
@@ -236,6 +365,7 @@ def run_server(args: Dict[str, Any], ctx, db):
             "command_timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
             "run_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
             "generate_report": {"type": "boolean"},
+            "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.run_servers_batch）"},
         },
         "additionalProperties": False,
     },
@@ -247,7 +377,7 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
         groups = [args.get("group")]
     if not (args.get("server_ids") or groups or args.get("all_servers")):
         return {"summary": "需要至少提供 server_ids / groups / all_servers 之一"}
-    return svc_run_batch(
+    return _inspection_followup(svc_run_batch(
         db,
         server_ids=args.get("server_ids") or [],
         categories=args.get("categories") or [],
@@ -259,7 +389,7 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
         skip_disabled=bool(args.get("skip_disabled", True)),
         all_servers=bool(args.get("all_servers", False)),
         groups=groups or None,
-    )
+    ))
 
 
 @registry.register(
@@ -276,11 +406,11 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="sensitive",
     output_masking=True,
-    input_schema={"type": "object", "properties": {"project_id": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}}, "required": ["project_id"], "additionalProperties": False},
+    input_schema={"type": "object", "properties": {"project_id": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}, "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.run_project）"}}, "required": ["project_id"], "additionalProperties": False},
 )
 def run_project(args: Dict[str, Any], ctx, db):
     from app.services.inspection_center import run_project_inspection as svc_run_project
-    return svc_run_project(db, project_id=args.get("project_id") or "", categories=args.get("categories") or [], created_by=_actor(ctx))
+    return _inspection_followup(svc_run_project(db, project_id=args.get("project_id") or "", categories=args.get("categories") or [], created_by=_actor(ctx)))
 
 
 @registry.register(
@@ -297,11 +427,11 @@ def run_project(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="sensitive",
     output_masking=True,
-    input_schema={"type": "object", "properties": {"project_id": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}}, "required": ["project_id"], "additionalProperties": False},
+    input_schema={"type": "object", "properties": {"project_id": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string"}}, "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.run_combined）"}}, "required": ["project_id"], "additionalProperties": False},
 )
 def run_combined(args: Dict[str, Any], ctx, db):
     from app.services.inspection_center import run_project_combined_inspection as svc_run_combined
-    return svc_run_combined(db, project_id=args.get("project_id") or "", categories=args.get("categories") or [], created_by=_actor(ctx))
+    return _inspection_followup(svc_run_combined(db, project_id=args.get("project_id") or "", categories=args.get("categories") or [], created_by=_actor(ctx)))
 
 
 # ============ 巡检项目配置管理（可选/可编辑/可调整） ============
@@ -383,6 +513,7 @@ def get_item_config(args: Dict[str, Any], ctx, db):
             "enabled": {"type": "boolean"},
             "sort_order": {"type": "integer"},
             "config_json": {"type": "object"},
+            "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.update_item_config）"},
         },
         "required": ["item_id"],
         "additionalProperties": False,
@@ -391,7 +522,7 @@ def get_item_config(args: Dict[str, Any], ctx, db):
 def update_item_config(args: Dict[str, Any], ctx, db):
     from app.services.inspection_item_config import update_item_config as svc
     item_id = args.get("item_id") or ""
-    payload = {k: v for k, v in args.items() if k != "item_id"}
+    payload = {k: v for k, v in args.items() if k not in {"item_id", "confirm_text"}}
     result = svc(db, item_id, payload)
     if not result:
         return {"item": None, "summary": f"项目 {item_id} 不存在"}
@@ -412,7 +543,7 @@ def update_item_config(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="internal",
     output_masking=True,
-    input_schema={"type": "object", "properties": {"item_id": {"type": "string"}}, "required": ["item_id"], "additionalProperties": False},
+    input_schema={"type": "object", "properties": {"item_id": {"type": "string"}, "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.toggle_item_config）"}}, "required": ["item_id"], "additionalProperties": False},
 )
 def toggle_item_config(args: Dict[str, Any], ctx, db):
     from app.services.inspection_item_config import toggle_item_config as svc
@@ -453,6 +584,7 @@ def toggle_item_config(args: Dict[str, Any], ctx, db):
                     },
                 },
             },
+            "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.update_item_rules）"},
         },
         "required": ["item_id", "rules"],
         "additionalProperties": False,
@@ -515,6 +647,7 @@ def get_run_raw_output(args: Dict[str, Any], ctx, db):
             "run_ids": {"type": "array", "items": {"type": "string"}},
             "delete_reports": {"type": "boolean"},
             "force": {"type": "boolean", "description": "是否强制删除 RUNNING/PENDING 状态的记录"},
+            "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.delete_runs）"},
         },
         "required": ["run_ids"],
         "additionalProperties": False,
@@ -553,7 +686,7 @@ def delete_runs(args: Dict[str, Any], ctx, db):
     output_masking=True,
     recommended_use_cases=["清理误报风险", "历史脏数据维护"],
     related_tools=["ops.inspection.list_issues", "ops.inspection.update_issue"],
-    input_schema={"type": "object", "properties": {"issue_id": {"type": "string"}}, "required": ["issue_id"], "additionalProperties": False},
+    input_schema={"type": "object", "properties": {"issue_id": {"type": "string"}, "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.delete_issue）"}}, "required": ["issue_id"], "additionalProperties": False},
 )
 def delete_issue(args: Dict[str, Any], ctx, db):
     from app.services.inspection_center import delete_issue as svc

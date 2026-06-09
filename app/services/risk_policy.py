@@ -128,9 +128,43 @@ def expected_confirmation_text(tool_def, args: Dict[str, Any], db=None) -> str:
             return profile_expected_confirm_text(db, profile_id, expected_count=expected_count, fingerprint=fingerprint)
         except Exception:
             if profile_id and expected_count is not None and fingerprint:
-                return f"RUN INSPECTION {profile_id} {expected_count} {fingerprint}"
-            return f"RUN INSPECTION {profile_id or '<profile>'} <count> <fingerprint>"
+                return f"RUN {profile_id} {expected_count} {fingerprint}"
+            return f"RUN {profile_id or '<profile>'} <count> <fingerprint>"
     return f"CONFIRM {name}"
+
+
+def accepted_confirmation_texts(tool_def, args: Dict[str, Any], db=None) -> List[str]:
+    """Return acceptable confirmation phrases, ordered by preferred display text."""
+    args = args or {}
+    expected = expected_confirmation_text(tool_def, args, db)
+    values = [expected]
+    name = getattr(tool_def, "name", "") or ""
+    if name == "ops.inspection.profile.run":
+        profile_id = str(args.get("profile_id") or "").strip()
+        expected_count = args.get("expected_count")
+        fingerprint = str(args.get("fingerprint") or "").strip()
+        if profile_id and expected_count is not None and fingerprint:
+            try:
+                count = int(expected_count)
+                values.append(f"RUN INSPECTION {profile_id} {count} {fingerprint}")
+            except Exception:
+                pass
+        elif db and profile_id:
+            try:
+                from app.services.inspection_profiles import preview_profile
+
+                confirmation = preview_profile(db, profile_id).get("confirmation") or {}
+                values.extend(confirmation.get("accepted_confirm_texts") or [])
+            except Exception:
+                pass
+    result: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def _is_non_destructive_plan_creation(tool_def) -> bool:
@@ -171,9 +205,10 @@ def evaluate_risk_policy(tool_def, args: Optional[Dict[str, Any]] = None, *, ctx
         and is_at_least(risk, DEFAULT_CONFIRMATION_REQUIRED_FROM)
     )
 
-    expected = expected_confirmation_text(tool_def, args, db) if confirmation_required else ""
+    accepted = accepted_confirmation_texts(tool_def, args, db) if confirmation_required else []
+    expected = accepted[0] if accepted else ""
     supplied = str(args.get("confirm_text") or "").strip()
-    matched = bool(expected and supplied == expected) if confirmation_required else True
+    matched = bool(expected and supplied in accepted) if confirmation_required else True
 
     if confirmation_required:
         reasons.append(f"{RISK_LABELS.get(risk, risk)}写操作需要人工确认")
@@ -191,6 +226,7 @@ def evaluate_risk_policy(tool_def, args: Optional[Dict[str, Any]] = None, *, ctx
             "type": "confirmation_required",
             "description": "要求用户明确输入确认短语后再执行。",
             "confirm_text": expected,
+            "accepted_confirm_texts": accepted,
         })
     if must_create_job:
         next_actions.append({
@@ -227,6 +263,7 @@ def enforce_risk_policy(tool_def, args: Optional[Dict[str, Any]], *, ctx=None, d
                 "tool": getattr(tool_def, "name", ""),
                 "risk": decision.get("risk_level"),
                 "expected_confirm_text": expected,
+                "accepted_confirm_texts": (decision.get("next_actions") or [{}])[0].get("accepted_confirm_texts", []),
                 "next_actions": decision.get("next_actions") or [],
             },
         )

@@ -58,7 +58,9 @@ def test_default_profiles_preview_crypto_test_targets_and_confirmation(monkeypat
         assert [item["asset_id"] for item in preview["eligible"]] == ["uuid-a", "uuid-b"]
         assert preview["filtered_count"] == 1
         assert preview["skipped_count"] == 1
-        assert preview["confirmation"]["confirm_text"].startswith("RUN INSPECTION crypto-test-daily 2 ")
+        assert preview["confirmation"]["confirm_text"].startswith("RUN crypto-test-daily 2 ")
+        assert preview["confirmation"]["legacy_confirm_text"].startswith("RUN INSPECTION crypto-test-daily 2 ")
+        assert preview["confirmation"]["accepted_confirm_texts"][0] == preview["confirmation"]["confirm_text"]
         assert preview["confirmation"]["fingerprint"]
         assert "DISK" in preview["categories"]
     finally:
@@ -85,8 +87,8 @@ def test_confirmation_phrase_changes_when_target_set_changes(monkeypatch, tmp_pa
         second = preview_profile(db, "crypto-test-daily")["confirmation"]["confirm_text"]
 
         assert first != second
-        assert first.startswith("RUN INSPECTION crypto-test-daily 1 ")
-        assert second.startswith("RUN INSPECTION crypto-test-daily 2 ")
+        assert first.startswith("RUN crypto-test-daily 1 ")
+        assert second.startswith("RUN crypto-test-daily 2 ")
     finally:
         db.close()
         engine.dispose()
@@ -126,7 +128,7 @@ def test_run_profile_requires_current_confirmation_and_generates_combined_report
     try:
         confirm_text = preview_profile(db, "crypto-test-daily")["confirmation"]["confirm_text"]
         with pytest.raises(HTTPException) as excinfo:
-            run_profile(db, "crypto-test-daily", confirm_text="RUN INSPECTION crypto-test-daily 2 stale", created_by="tester")
+            run_profile(db, "crypto-test-daily", confirm_text="RUN crypto-test-daily 2 stale", created_by="tester")
         assert excinfo.value.status_code == 428
 
         with (
@@ -143,13 +145,21 @@ def test_run_profile_requires_current_confirmation_and_generates_combined_report
         assert result["report"]["id"] == "report-a"
         assert result["profile"]["id"] == "crypto-test-daily"
         assert result["confirmation"]["confirm_text"] == confirm_text
+
+        legacy_confirm_text = preview_profile(db, "crypto-test-daily")["confirmation"]["legacy_confirm_text"]
+        with (
+            patch("app.services.inspection_center.run_servers_batch_inspection", _fake_batch),
+            patch("app.services.inspection_center.generate_report_for_runs", _fake_report),
+        ):
+            legacy_result = run_profile(db, "crypto-test-daily", confirm_text=legacy_confirm_text, created_by="tester")
+        assert legacy_result["run_ids"] == ["run-a", "run-b"]
     finally:
         db.close()
         engine.dispose()
 
 
 def test_profile_mcp_tools_schema_and_risk_policy_confirmation(tmp_path):
-    from app.services.risk_policy import expected_confirmation_text
+    from app.services.risk_policy import evaluate_risk_policy, expected_confirmation_text
     from app.services.tool_registry import register_builtin_tools, registry
     from app.services.tool_schema import validate_schema
 
@@ -161,9 +171,14 @@ def test_profile_mcp_tools_schema_and_risk_policy_confirmation(tmp_path):
             assert registry.get(name), name
 
         run_tool = registry.get("ops.inspection.profile.run")
-        args = {"profile_id": "crypto-test-daily", "expected_count": 2, "fingerprint": "abc123", "confirm_text": "RUN INSPECTION crypto-test-daily 2 abc123"}
+        args = {"profile_id": "crypto-test-daily", "expected_count": 2, "fingerprint": "abc123", "confirm_text": "RUN crypto-test-daily 2 abc123"}
         validate_schema(args, run_tool.input_schema)
-        assert expected_confirmation_text(run_tool, args, db) == "RUN INSPECTION crypto-test-daily 2 abc123"
+        assert expected_confirmation_text(run_tool, args, db) == "RUN crypto-test-daily 2 abc123"
+        legacy_args = {**args, "confirm_text": "RUN INSPECTION crypto-test-daily 2 abc123"}
+        assert expected_confirmation_text(run_tool, legacy_args, db) == "RUN crypto-test-daily 2 abc123"
+        decision = evaluate_risk_policy(run_tool, legacy_args, db=db, settings={"require_confirmation": True})
+        assert decision.confirm_text_matched is True
+        assert decision.expected_confirm_text == "RUN crypto-test-daily 2 abc123"
     finally:
         db.close()
         engine.dispose()
@@ -179,7 +194,8 @@ def test_profile_mcp_run_handler_returns_preview_when_missing_confirmation(monke
     try:
         result = inspection_tools.profile_run({"profile_id": "crypto-test-daily"}, ctx, db)
         assert result["status"] == "confirmation_required"
-        assert result["confirmation"]["confirm_text"].startswith("RUN INSPECTION crypto-test-daily 1 ")
+        assert result["confirmation"]["confirm_text"].startswith("RUN crypto-test-daily 1 ")
+        assert result["confirmation"]["legacy_confirm_text"].startswith("RUN INSPECTION crypto-test-daily 1 ")
         assert result["next_actions"][0]["tool"] == "ops.inspection.profile.run"
     finally:
         db.close()

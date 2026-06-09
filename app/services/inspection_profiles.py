@@ -278,10 +278,13 @@ def confirmation_fingerprint(profile: Dict[str, Any], resolved: Dict[str, Any]) 
 def build_confirmation(profile: Dict[str, Any], resolved: Dict[str, Any]) -> Dict[str, Any]:
     count = int(resolved.get("eligible_count") or 0)
     fingerprint = confirmation_fingerprint(profile, resolved)
-    text = f"RUN INSPECTION {profile.get('id')} {count} {fingerprint}"
+    text = f"RUN {profile.get('id')} {count} {fingerprint}"
+    legacy_text = f"RUN INSPECTION {profile.get('id')} {count} {fingerprint}"
     return {
         "confirm_text": text,
         "expected_confirm_text": text,
+        "legacy_confirm_text": legacy_text,
+        "accepted_confirm_texts": [text, legacy_text],
         "fingerprint": fingerprint,
         "target_count": count,
         "mode": "copy",
@@ -324,28 +327,31 @@ def profile_expected_confirm_text(db: Session, profile_id: str, *, expected_coun
     if profile_id and expected_count is not None and fingerprint:
         try:
             count = int(expected_count)
-            return f"RUN INSPECTION {profile_id} {count} {fingerprint}"
+            return f"RUN {profile_id} {count} {fingerprint}"
         except Exception:
             pass
     if profile_id:
         try:
             return preview_profile(db, profile_id)["confirmation"]["confirm_text"]
         except Exception:
-            return f"RUN INSPECTION {profile_id} <count> <fingerprint>"
-    return "RUN INSPECTION <profile> <count> <fingerprint>"
+            return f"RUN {profile_id} <count> <fingerprint>"
+    return "RUN <profile> <count> <fingerprint>"
 
 
 def _validate_confirmation(preview: Dict[str, Any], confirm_text: str) -> None:
-    expected = (preview.get("confirmation") or {}).get("confirm_text") or ""
+    confirmation = preview.get("confirmation") or {}
+    expected = confirmation.get("confirm_text") or ""
+    accepted = [str(item or "").strip() for item in (confirmation.get("accepted_confirm_texts") or [expected]) if str(item or "").strip()]
     supplied = str(confirm_text or "").strip()
-    if supplied != expected:
+    if supplied not in accepted:
         raise HTTPException(
             status_code=428,
             detail={
                 "code": "CONFIRMATION_REQUIRED",
                 "message": "Inspection profile execution requires current confirmation text",
                 "expected_confirm_text": expected,
-                "confirmation": preview.get("confirmation"),
+                "accepted_confirm_texts": accepted,
+                "confirmation": confirmation,
                 "preview": {
                     "profile_id": preview.get("profile_id"),
                     "eligible_count": preview.get("eligible_count"),

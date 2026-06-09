@@ -19,6 +19,7 @@ from app.services.tool_registry import registry
     input_schema={
         "type": "object",
         "properties": {
+            "profile": {"type": "string", "description": "Tool exposure profile: daily_ops, expert, or admin_full."},
             "category": {"type": "string", "description": "可选工具分类，例如 app、deploy_plan、server_read"},
             "include_schema": {"type": "boolean", "description": "是否返回 input_schema 和 output_schema"},
             "include_disabled": {"type": "boolean", "description": "是否返回被策略禁用/权限不足的工具及原因"},
@@ -33,6 +34,7 @@ def describe_capabilities(args: Dict[str, Any], ctx, db):
         db,
         ctx,
         category=args.get("category") or "",
+        profile=args.get("profile") or "daily_ops",
         include_schema=bool(args.get("include_schema", True)),
         include_disabled=bool(args.get("include_disabled", False)),
         limit=int(args.get("limit") or 200),

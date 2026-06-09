@@ -3,6 +3,7 @@ import { mcpAi } from '../api'
 import AiEvidenceView from '../components/AiEvidenceView'
 
 const workflows = [
+  { tool: 'ops.workflow.inspect', title: '服务器巡检工作流', fields: ['request'] },
   { tool: 'ops.workflow.generate_project_health_brief', title: '项目健康分析', fields: ['project_id'] },
   { tool: 'ops.workflow.analyze_failed_deploy', title: '发布失败分析', fields: ['deployment_id'] },
   { tool: 'ops.workflow.inspect_project_security', title: '项目安全巡检分析', fields: ['project_id'] },

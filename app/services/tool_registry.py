@@ -154,6 +154,162 @@ def _default_output_schema() -> Dict[str, Any]:
     }
 
 
+DAILY_OPS_TOOL_NAMES = frozenset({
+    "ops.workflow.inspect",
+    "ops.workflow.generate_project_health_brief",
+    "ops.workflow.analyze_failed_deploy",
+    "ops.workflow.inspect_project_security",
+    "ops.workflow.triage_open_risks",
+    "ops.workflow.generate_monthly_ops_report",
+    "ops.describe_capabilities",
+    "ops.get_tool_risk_policy",
+    "ops.analyze_diagnostics",
+    "ops.run_diagnostics",
+    "ops.get_system_status",
+    "ops.get_build_info",
+    "ops.get_recent_errors",
+    "ops.export_diagnostics_report",
+    "ops.list_jobs",
+    "ops.get_job_status",
+    "ops.list_operation_chains",
+    "ops.get_operation_chain",
+    "ops.list_servers",
+    "ops.get_server",
+    "ops.list_server_groups",
+    "ops.list_systems",
+    "ops.list_services",
+    "ops.list_environments",
+    "ops.check_disk",
+    "ops.run_health_check",
+    "ops.log.search",
+    "ops.log.summarize_errors",
+    "ops.log.get_recent_exceptions",
+    "ops.inspection.profile.list",
+    "ops.inspection.profile.preview",
+    "ops.inspection.profile.run",
+    "ops.inspection.preview_servers_batch",
+    "ops.inspection.run_servers_batch",
+    "ops.inspection.list_runs",
+    "ops.inspection.get_run",
+    "ops.inspection.get_run_raw_output",
+    "ops.inspection.list_issues",
+    "ops.inspection.get_issue",
+    "ops.inspection.generate_report",
+    "ops.inspection.summarize_run",
+    "ops.inspection.run_server",
+    "ops.risk.list",
+    "ops.risk.get",
+    "ops.risk.triage",
+    "ops.risk.generate_fix_plan",
+    "ops.list_reports",
+    "ops.get_report",
+    "ops.get_report_summary",
+    "ops.list_report_types",
+    "ops.generate_report",
+    "ops.list_deployments",
+    "ops.deploy.aggregate_status",
+    "ops.get_deployment_status",
+    "ops.get_deployment_report",
+    "ops.get_deployment_tasks",
+    "ops.get_deployment_logs",
+    "ops.list_deploy_plans",
+    "ops.get_deploy_plan",
+    "ops.generate_release_runbook",
+    "ops.get_rollback_readiness",
+    "ops.list_packages",
+    "ops.inspect_local_package",
+    "ops.get_package_checksum",
+    "ops.db.list_tables",
+    "ops.db.describe_table",
+    "ops.db.query_readonly",
+    "ops.db.export_query_result",
+    "ops.db.list_exports",
+    "ops.db.get_export",
+    "ops.list_backups",
+    "ops.verify_backup",
+})
+
+
+TOOL_PROFILE_ALIASES = {
+    "": "daily_ops",
+    "default": "daily_ops",
+    "daily": "daily_ops",
+    "daily_ops": "daily_ops",
+    "ops": "daily_ops",
+    "expert": "expert",
+    "advanced": "expert",
+    "admin": "admin_full",
+    "admin_full": "admin_full",
+    "full": "admin_full",
+    "all": "admin_full",
+}
+
+
+EXPERT_BLOCKED_CATEGORIES = {
+    "backup_restore",
+    "backup_write",
+    "config_write",
+    "connection_write",
+    "db_write",
+    "deploy_execute",
+    "inspection_config",
+    "package_cleanup",
+    "package_write",
+    "pipeline_write",
+    "risk_write",
+    "runtime_cleanup",
+    "server_write",
+    "ssh_key_write",
+}
+
+
+def normalize_tool_profile(profile: str | None = None, *, default: str = "daily_ops") -> str:
+    key = str(profile if profile not in (None, "") else default or "daily_ops").strip().lower().replace("-", "_")
+    return TOOL_PROFILE_ALIASES.get(key, "daily_ops")
+
+
+def tool_matches_profile(tool: ToolDefinition, profile: str | None = None) -> bool:
+    profile_name = normalize_tool_profile(profile)
+    if profile_name == "admin_full":
+        return True
+    if profile_name == "daily_ops":
+        return tool.name in DAILY_OPS_TOOL_NAMES
+    if profile_name == "expert":
+        if tool.name in DAILY_OPS_TOOL_NAMES:
+            return True
+        if not tool.ai_callable:
+            return False
+        if tool.category in EXPERT_BLOCKED_CATEGORIES:
+            return False
+        if tool.write and (tool.risk in {"high", "critical"} or tool.requires_confirmation or tool.requires_human_approval):
+            return False
+        return True
+    return False
+
+
+def tool_profile_manifest() -> List[Dict[str, Any]]:
+    return [
+        {
+            "key": "daily_ops",
+            "name": "Daily OPS",
+            "default": True,
+            "description": "Natural-language first workflow and read tools for routine AI agent operations.",
+        },
+        {
+            "key": "expert",
+            "name": "Expert",
+            "default": False,
+            "description": "Expanded non-destructive catalog for troubleshooting and advanced analysis.",
+        },
+        {
+            "key": "admin_full",
+            "name": "Admin Full",
+            "default": False,
+            "description": "Full registered tool catalog for OPS web administration and explicit maintenance.",
+        },
+    ]
+
+
 class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, ToolDefinition] = {}
@@ -232,6 +388,7 @@ class ToolRegistry:
         *,
         category: str = "",
         risk: str = "",
+        profile: str = "",
         include_disabled: bool = False,
         include_schema: bool = True,
         output_format: str = "native",
@@ -241,8 +398,11 @@ class ToolRegistry:
         items: List[Dict[str, Any]] = []
         category = (category or "").strip()
         risk = (risk or "").strip()
+        profile_name = normalize_tool_profile(profile, default="admin_full")
         for key in sorted(self._tools.keys()):
             tool = self._tools[key]
+            if not tool_matches_profile(tool, profile_name):
+                continue
             if category and tool.category != category:
                 continue
             if risk and tool.risk != risk:
@@ -268,21 +428,23 @@ class ToolRegistry:
         page = items[cursor:cursor + limit]
         next_cursor = cursor + limit if cursor + limit < total else None
         # Backwards compatibility: old internal callers expected a plain list.
-        if db is None and ctx is None and not category and not risk and not include_disabled and output_format == "native":
+        if db is None and ctx is None and not category and not risk and not profile and not include_disabled and output_format == "native":
             return page
         return {
             "tools": page,
             "pagination": {"total": total, "limit": limit, "cursor": cursor, "next_cursor": next_cursor},
-            "filters": {"category": category, "risk": risk, "include_disabled": include_disabled, "format": output_format},
+            "filters": {"category": category, "risk": risk, "profile": profile_name, "include_disabled": include_disabled, "format": output_format},
         }
 
     def list_categories(self) -> List[str]:
         return sorted({t.category for t in self._tools.values() if t.enabled})
 
-    def capability_version(self, db=None, ctx=None) -> str:
+    def capability_version(self, db=None, ctx=None, *, profile: str = "") -> str:
         now_ts = datetime.now(timezone.utc).timestamp()
+        profile_name = normalize_tool_profile(profile, default="daily_ops")
         cache_key = (
             f"rev:{self._capability_revision}:"
+            f"{profile_name}:"
             f"{getattr(ctx, 'token_id', '')}:"
             f"{getattr(ctx, 'auth_type', '')}:"
             f"{','.join(getattr(ctx, 'scopes', []) or [])}:"
@@ -296,7 +458,12 @@ class ToolRegistry:
                 return self._cap_version_cache['version']
         payload = {
             "revision": self._capability_revision,
-            "tools": [self._tools[k].to_public_dict(include_schema=True) for k in sorted(self._tools.keys())],
+            "profile": profile_name,
+            "tools": [
+                self._tools[k].to_public_dict(include_schema=True)
+                for k in sorted(self._tools.keys())
+                if tool_matches_profile(self._tools[k], profile_name)
+            ],
         }
         if db is not None:
             try:
@@ -331,6 +498,7 @@ class ToolRegistry:
         ctx,
         *,
         category: str = "",
+        profile: str = "",
         include_schema: bool = True,
         include_disabled: bool = False,
         output_format: str = "native",
@@ -338,10 +506,12 @@ class ToolRegistry:
         cursor: int = 0,
     ) -> Dict[str, Any]:
         from app.services.tool_policy import get_capability_settings
+        profile_name = normalize_tool_profile(profile, default="admin_full")
         listed = self.list_tools(
             db,
             ctx,
             category=category,
+            profile=profile_name,
             include_disabled=include_disabled,
             include_schema=include_schema,
             output_format=output_format,
@@ -353,7 +523,8 @@ class ToolRegistry:
             "server": {
                 "name": "ops-capability-server",
                 "version": "1.3.0",
-                "capability_version": self.capability_version(db, ctx),
+                "capability_version": self.capability_version(db, ctx, profile=profile_name),
+                "tool_profile": profile_name,
             },
             "auth": {
                 "auth_type": getattr(ctx, "auth_type", ""),
@@ -385,6 +556,8 @@ class ToolRegistry:
             },
             "tools": listed.get("tools", []) if isinstance(listed, dict) else listed,
             "pagination": listed.get("pagination", {}) if isinstance(listed, dict) else {},
+            "filters": listed.get("filters", {}) if isinstance(listed, dict) else {"profile": profile_name},
+            "tool_profiles": tool_profile_manifest(),
             "categories": self.list_categories(),
             "policies": {
                 "requires_confirmation_risk": ["high", "critical"],

@@ -10,6 +10,16 @@ Naming rule:
 - MCP stdio/JSON-RPC exposes MCP-safe aliases by replacing dots with underscores, for example `ops_inspection_run_servers_batch`.
 - Remote HTTP MCP accepts the same MCP payload shape, while `/api/v2/tools/call` keeps dotted names.
 
+## Tool Exposure Profiles
+
+OPS keeps the full registered tool catalog for administration, but AI/MCP discovery defaults to a smaller natural-language operations profile:
+
+- `daily_ops` is the default for `/api/v2/tools`, `/api/v2/capabilities`, MCP `tools/list`, `ops://tools`, and stdio MCP. It exposes workflow-first inspection, reports, risk triage, diagnostics, read-only inventory, and guarded inspection execution.
+- `expert` expands non-destructive troubleshooting tools while still hiding destructive/admin write families.
+- `admin_full` exposes the full registered catalog for the OPS web tool-management page and explicit administrator maintenance.
+
+This is a visibility profile only. It does not delete backend tools. Tool calls are still governed by token scopes, capability switches, risk policy, confirmation phrases, taskization, and audit logging.
+
 ## Default Safety Baseline
 
 The default capability profile is no longer "read-only only".
@@ -19,6 +29,7 @@ The default capability profile is no longer "read-only only".
 - Inspection profile execution (`ops.inspection.profile.run` and `ops.inspection.profile.retry_issues`) is preview-first and requires the returned `RUN <profile> <count> <fingerprint>` confirmation phrase.
 - Agent runtime tools (`ops.agent.*`) stay hidden unless `agent_runtime_enabled=true`.
 - Deploy execution, rollback, config write, server write, package cleanup, runtime cleanup, DB write/DML, and destructive deletes remain behind explicit capability gates, scopes, and confirmation.
+- `ops.workflow.inspect` is the preferred natural-language inspection entry for AI agents. It previews first and delegates execution to the audited `ops.inspection.*` tools, so `inspection_runs`, issues, reports, operation jobs, tool-call logs, and audit logs are preserved.
 
 ## Release And Deployment Tools
 
@@ -55,6 +66,7 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 | HTTP tool | MCP alias | Type | Scope(s) | Needs backend | stdio offline | Risk | Recommended before | Recommended after |
 |---|---|---:|---|---:|---:|---|---|---|
 | `ops.list_servers` | `ops_list_servers` | read | `ops:read`, `server:read` | yes | no | low | - | `ops.list_server_groups`, `ops.inspection.run_servers_batch` |
+| `ops.workflow.inspect` | `ops_workflow_inspect` | workflow | `ops:read` for preview; child execution still requires `ops:write` | yes | no | medium | natural-language request | `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, reports |
 | `ops.list_server_groups` | `ops_list_server_groups` | read | `ops:read`, `server:read` | yes | no | low | - | filter by `group` in `ops.list_servers` |
 | `ops.inspection.overview` | `ops_inspection_overview` | read | `ops:read` | yes | no | low | - | choose inspection target |
 | `ops.inspection.categories` | `ops_inspection_categories` | read | `ops:read` | yes | no | low | - | select category codes |
@@ -82,6 +94,7 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 
 ### Recommended Inspection Workflow
 
+0. For natural-language requests such as "巡检 crypto 测试服务器并生成报告", call `ops.workflow.inspect(request=...)` first. If it returns `mode=preview`, ask the user to confirm the returned short phrase, then call `ops.workflow.inspect` again with `confirm_text`.
 1. For routine grouped inspections, call `ops.inspection.profile.list`, choose a profile such as `crypto-test-daily`, then call `ops.inspection.profile.preview`.
 2. Ask the user for the returned confirmation phrase, then call `ops.inspection.profile.run` with `confirm_text`.
 3. For ad-hoc target checks, use `ops.list_server_groups`, `ops.list_servers(group="crypto")`, and `ops.inspection.list_item_configs(scope_type="SERVER")`, then call `ops.inspection.preview_servers_batch`.

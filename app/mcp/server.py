@@ -462,7 +462,8 @@ def _tools_for_mcp(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     global _cached_capability_etag, _cached_capability_data
     params = params or {}
     cursor = params.get("cursor")
-    path = "/api/v2/tools?format=mcp&limit=100"
+    profile = str(params.get("profile") or "daily_ops")
+    path = "/api/v2/tools?format=mcp&limit=100&profile=" + urllib.parse.quote(profile)
     if cursor is not None:
         path += "&cursor=" + str(cursor)
     try:

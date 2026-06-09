@@ -1,8 +1,228 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from app.services.tool_registry import registry
+
+
+INSPECTION_RECORD_TYPES = [
+    "inspection_runs",
+    "inspection_issues",
+    "inspection_reports",
+    "operation_jobs",
+    "tool_call_logs",
+    "audit_logs",
+]
+
+
+def _as_list(value: Any) -> List[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _unwrap_tool_result(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict) and isinstance(value.get("result"), dict):
+        return value["result"]
+    return value if isinstance(value, dict) else {"value": value}
+
+
+def _infer_inspection_groups(request: str, explicit_groups: Any, group: Any = "") -> List[str]:
+    groups = _as_list(explicit_groups)
+    groups.extend(_as_list(group))
+    lowered = (request or "").lower()
+    if not groups and "crypto" in lowered:
+        groups.append("crypto")
+    return list(dict.fromkeys(groups))
+
+
+def _inspection_payload(args: Dict[str, Any], *, include_execution_fields: bool) -> Dict[str, Any]:
+    request = str(args.get("request") or args.get("scope_label") or "")
+    payload: Dict[str, Any] = {}
+    server_ids = _as_list(args.get("server_ids"))
+    groups = _infer_inspection_groups(request, args.get("groups"), args.get("group"))
+    categories = _as_list(args.get("categories"))
+    if server_ids:
+        payload["server_ids"] = server_ids
+    if groups:
+        payload["groups"] = groups
+    if categories:
+        payload["categories"] = categories
+    for key in ["concurrency", "batch_size", "command_timeout_seconds", "run_timeout_seconds"]:
+        if args.get(key) not in (None, ""):
+            payload[key] = args.get(key)
+    for key in ["all_servers", "skip_disabled"]:
+        if key in args:
+            payload[key] = bool(args.get(key))
+    if include_execution_fields:
+        if args.get("generate_report") is not None:
+            payload["generate_report"] = bool(args.get("generate_report"))
+        if args.get("confirm_text"):
+            payload["confirm_text"] = str(args.get("confirm_text") or "")
+    return payload
+
+
+def _inspection_profile_payload(args: Dict[str, Any], *, include_execution_fields: bool) -> Dict[str, Any]:
+    payload = {"profile_id": str(args.get("profile_id") or "").strip()}
+    if include_execution_fields and args.get("confirm_text"):
+        payload["confirm_text"] = str(args.get("confirm_text") or "")
+    return payload
+
+
+@registry.register(
+    name="ops.workflow.inspect",
+    title="自然语言服务器巡检工作流",
+    description=(
+        "Natural-language first OPS inspection workflow. It previews target servers and confirmation text first; "
+        "after user confirmation it delegates execution to ops.inspection.run_servers_batch so normal inspection, "
+        "job, tool-call and audit records are preserved."
+    ),
+    scopes=["ops:read"],
+    risk="medium",
+    category="workflow",
+    write=False,
+    requires_confirmation=False,
+    ai_callable=True,
+    ai_auto_callable=False,
+    data_sensitivity="sensitive",
+    output_masking=True,
+    recommended_use_cases=["自然语言服务器巡检", "批量巡检预览", "巡检报告工作流"],
+    example_prompts=["巡检 crypto 下测试服务器并生成报告", "执行日常轻量巡检"],
+    related_tools=["ops.inspection.preview_servers_batch", "ops.inspection.run_servers_batch", "ops.inspection.generate_report"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "request": {"type": "string", "description": "Natural language inspection request."},
+            "scope_label": {"type": "string", "description": "Human-readable target scope label."},
+            "profile_id": {"type": "string", "description": "Saved inspection profile id, for example crypto-test-daily."},
+            "server_ids": {"type": "array", "items": {"type": "string"}},
+            "groups": {"type": "array", "items": {"type": "string"}},
+            "group": {"type": "string"},
+            "categories": {"type": "array", "items": {"type": "string"}},
+            "concurrency": {"type": "integer", "minimum": 1, "maximum": 20},
+            "batch_size": {"type": "integer", "minimum": 1, "maximum": 20},
+            "all_servers": {"type": "boolean"},
+            "skip_disabled": {"type": "boolean"},
+            "command_timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+            "run_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
+            "generate_report": {"type": "boolean"},
+            "confirm_text": {"type": "string", "description": "Confirmation text returned by preview."},
+        },
+        "additionalProperties": False,
+    },
+)
+def inspect_servers(args: Dict[str, Any], ctx, db):
+    from app.services.tool_registry import registry as reg
+
+    args = args or {}
+    request = str(args.get("request") or args.get("scope_label") or "")
+    records = {
+        "preserved": True,
+        "types": INSPECTION_RECORD_TYPES,
+        "note": "Execution is delegated to underlying inspection tools; records and logs remain queryable in inspection center, reports, jobs and audit pages.",
+    }
+    child_tools = ["ops.inspection.preview_servers_batch", "ops.inspection.run_servers_batch"]
+
+    if args.get("profile_id"):
+        child_tools = ["ops.inspection.profile.preview", "ops.inspection.profile.run"]
+        if not args.get("confirm_text"):
+            preview_payload = _inspection_profile_payload(args, include_execution_fields=False)
+            preview_call = reg.call(db, "ops.inspection.profile.preview", preview_payload, ctx)
+            preview = _unwrap_tool_result(preview_call)
+            confirm_text = (preview.get("confirmation") or {}).get("confirm_text") if isinstance(preview, dict) else ""
+            next_arguments = dict(args)
+            if confirm_text:
+                next_arguments["confirm_text"] = confirm_text
+            return {
+                "summary": "Inspection profile preview is ready. Confirm with the returned phrase before execution.",
+                "workflow_type": "inspection",
+                "source_tool": "ops.workflow.inspect",
+                "mode": "preview",
+                "request": request,
+                "routed_arguments": preview_payload,
+                "child_tools": child_tools,
+                "records": records,
+                "preview": preview,
+                "confirmation": preview.get("confirmation") if isinstance(preview, dict) else {},
+                "next_actions": [
+                    {
+                        "tool": "ops.workflow.inspect",
+                        "arguments": next_arguments,
+                        "description": "Use the returned confirmation text to execute the saved inspection profile.",
+                    }
+                ],
+            }
+        run_payload = _inspection_profile_payload(args, include_execution_fields=True)
+        run_call = reg.call(db, "ops.inspection.profile.run", run_payload, ctx)
+        run_result = _unwrap_tool_result(run_call)
+        return {
+            "summary": "Inspection profile execution was delegated to the audited profile run tool.",
+            "workflow_type": "inspection",
+            "source_tool": "ops.workflow.inspect",
+            "mode": "run",
+            "request": request,
+            "routed_arguments": run_payload,
+            "child_tools": child_tools,
+            "records": records,
+            "run": run_result,
+            "next_actions": run_result.get("next_actions") if isinstance(run_result, dict) else [],
+        }
+
+    if not args.get("confirm_text"):
+        preview_payload = _inspection_payload(args, include_execution_fields=False)
+        preview_call = reg.call(db, "ops.inspection.preview_servers_batch", preview_payload, ctx)
+        preview = _unwrap_tool_result(preview_call)
+        confirm_text = (preview.get("confirmation") or {}).get("confirm_text") if isinstance(preview, dict) else ""
+        next_arguments = dict(args)
+        if confirm_text:
+            next_arguments["confirm_text"] = confirm_text
+        return {
+            "summary": "Inspection workflow preview is ready. Confirm with the returned short Chinese phrase before execution.",
+            "workflow_type": "inspection",
+            "source_tool": "ops.workflow.inspect",
+            "mode": "preview",
+            "request": request,
+            "routed_arguments": preview_payload,
+            "child_tools": child_tools,
+            "records": records,
+            "preview": preview,
+            "confirmation": preview.get("confirmation") if isinstance(preview, dict) else {},
+            "next_actions": [
+                {
+                    "tool": "ops.workflow.inspect",
+                    "arguments": next_arguments,
+                    "description": "Use the returned confirmation text to execute the inspection workflow.",
+                }
+            ],
+        }
+
+    run_payload = _inspection_payload(args, include_execution_fields=True)
+    run_call = reg.call(db, "ops.inspection.run_servers_batch", run_payload, ctx)
+    run_result = _unwrap_tool_result(run_call)
+    next_actions = run_result.get("next_actions") if isinstance(run_result, dict) else []
+    if args.get("generate_report") and isinstance(run_result, dict) and run_result.get("run_ids"):
+        child_tools.append("ops.inspection.generate_report")
+        next_actions = list(next_actions or [])
+        if not any(action.get("tool") == "ops.inspection.generate_report" for action in next_actions if isinstance(action, dict)):
+            next_actions.append({
+                "tool": "ops.inspection.generate_report",
+                "arguments": {"run_ids": run_result.get("run_ids") or []},
+                "description": "Generate an inspection report from the completed run records.",
+            })
+    return {
+        "summary": "Inspection workflow execution was delegated to the audited batch inspection tool.",
+        "workflow_type": "inspection",
+        "source_tool": "ops.workflow.inspect",
+        "mode": "run",
+        "request": request,
+        "routed_arguments": run_payload,
+        "child_tools": child_tools,
+        "records": records,
+        "run": run_result,
+        "next_actions": next_actions or [],
+    }
 
 
 @registry.register(

@@ -15,7 +15,14 @@ from app.db.models import ToolToken, ToolCallLog, ToolPlan, ToolPlanEvent
 from app.services.tool_context import ToolContext
 from app.services.tool_policy import get_capability_settings, save_capability_settings
 from app.services.risk_policy import risk_policy_manifest
-from app.services.tool_registry import register_builtin_tools, registry, bump_capability_version as _bump_capability_version
+from app.services.tool_registry import (
+    normalize_tool_profile,
+    register_builtin_tools,
+    registry,
+    tool_matches_profile,
+    tool_profile_manifest,
+    bump_capability_version as _bump_capability_version,
+)
 from app.services.tool_token import create_tool_token, recommended_tool_token_templates, validate_tool_token, token_to_dict
 from app.services.mcp_capability_service import (
     mcp_call_tool,
@@ -255,6 +262,7 @@ def list_tools(
     response: Response,
     category: str = "",
     risk: str = "",
+    profile: str = "daily_ops",
     include_disabled: bool = False,
     include_schema: bool = True,
     limit: int = 100,
@@ -264,7 +272,12 @@ def list_tools(
 ):
     ctx = get_tool_context(request, db)
     register_builtin_tools()
-    all_tools = [registry._tools[name] for name in sorted(registry._tools.keys())]
+    profile_name = normalize_tool_profile(profile, default="daily_ops")
+    all_tools = [
+        registry._tools[name]
+        for name in sorted(registry._tools.keys())
+        if tool_matches_profile(registry._tools[name], profile_name)
+    ]
     listed = build_tool_manifest(
         all_tools,
         output_format=output_format,
@@ -274,12 +287,15 @@ def list_tools(
         limit=limit,
         cursor=cursor,
     )
-    version = registry.capability_version(db, ctx)
+    listed["filters"] = {**(listed.get("filters") or {}), "profile": profile_name}
+    version = registry.capability_version(db, ctx, profile=profile_name)
     _maybe_return_not_modified(request, response, version)
     data = {
         **listed,
         "settings": get_capability_settings(db),
         "capability_version": version,
+        "tool_profile": profile_name,
+        "tool_profiles": tool_profile_manifest(),
         "categories": registry.list_categories(),
     }
     return api_response(data=data)
@@ -299,6 +315,7 @@ def get_capabilities(
     request: Request,
     response: Response,
     category: str = "",
+    profile: str = "daily_ops",
     include_disabled: bool = False,
     include_schema: bool = True,
     limit: int = 200,
@@ -312,13 +329,14 @@ def get_capabilities(
         db,
         ctx,
         category=category,
+        profile=profile,
         include_schema=include_schema,
         include_disabled=include_disabled,
         output_format=output_format,
         limit=limit,
         cursor=cursor,
     )
-    version = data.get("server", {}).get("capability_version") or registry.capability_version(db, ctx)
+    version = data.get("server", {}).get("capability_version") or registry.capability_version(db, ctx, profile=profile)
     _maybe_return_not_modified(request, response, version)
     return api_response(data=data)
 
@@ -858,7 +876,7 @@ def mcp_http_root(request: Request, db: Session = Depends(get_db)):
         "transport": "streamable-http-jsonrpc",
         "protocolVersions": MCP_PROTOCOL_VERSIONS,
         "canonical_endpoints": MCP_CANONICAL_ENDPOINTS,
-        "capability_version": registry.capability_version(db, ctx),
+        "capability_version": registry.capability_version(db, ctx, profile="daily_ops"),
         "resources_count": len(mcp_resource_items()),
         "prompts_count": len(service_mcp_prompt_items()),
         "usage": "POST JSON-RPC messages to this endpoint, e.g. initialize, tools/list, tools/call.",
@@ -917,10 +935,10 @@ def mcp_manifest(request: Request, db: Session = Depends(get_db)):
         "capabilities_endpoint": "/api/v2/capabilities",
         "mcp_endpoint": "/api/v2/mcp",
         "legacy_gateway_endpoint": "/api/v2/mcp/legacy",
-        "capability_version": registry.capability_version(db, ctx),
+        "capability_version": registry.capability_version(db, ctx, profile="daily_ops"),
         "resources": mcp_resource_items(),
         "prompts": service_mcp_prompt_items(),
-        "tools": registry.list_tools(db, ctx).get("tools", []),
+        "tools": registry.list_tools(db, ctx, profile="daily_ops").get("tools", []),
     })
 
 
@@ -929,11 +947,12 @@ def mcp_tools(
     request: Request,
     response: Response,
     category: str = "",
+    profile: str = "daily_ops",
     limit: int = 100,
     cursor: int = 0,
     db: Session = Depends(get_db),
 ):
-    return list_tools(request, response, category=category, limit=limit, cursor=cursor, output_format="mcp", db=db)
+    return list_tools(request, response, category=category, profile=profile, limit=limit, cursor=cursor, output_format="mcp", db=db)
 
 
 
@@ -946,7 +965,7 @@ def mcp_tool_recommend(request: Request, scenario: str = "", db: Session = Depen
     mapping = {
         "project_health": ["ops.workflow.generate_project_health_brief", "ops.get_system_status", "ops.inspection.list_runs", "ops.risk.list"],
         "risk_triage": ["ops.workflow.triage_open_risks", "ops.risk.list", "ops.risk.generate_fix_plan"],
-        "inspection": ["ops.inspection.list_runs", "ops.inspection.get_run", "ops.inspection.summarize_run", "ops.inspection.generate_report"],
+        "inspection": ["ops.workflow.inspect", "ops.inspection.preview_servers_batch", "ops.inspection.run_servers_batch", "ops.inspection.list_runs", "ops.inspection.get_run", "ops.inspection.summarize_run", "ops.inspection.generate_report"],
         "failed_deploy": ["ops.workflow.analyze_failed_deploy", "ops.get_deployment_report", "ops.get_deployment_tasks", "ops.get_deployment_logs"],
         "monthly_report": ["ops.workflow.generate_monthly_ops_report", "ops.list_reports", "ops.risk.list", "ops.inspection.list_runs"],
     }

@@ -106,6 +106,7 @@ def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_ov
         db,
         ctx,
         category=str(params.get("category") or ""),
+        profile=str(params.get("profile") or "daily_ops"),
         include_disabled=False,
         include_schema=True,
         output_format="mcp",
@@ -219,13 +220,13 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
     uri = (params or {}).get("uri") or ""
     generated_at = _utcnow().isoformat()
     if uri == "ops://capabilities":
-        data = registry.describe_capabilities(db, ctx, include_schema=True, include_disabled=False)
+        data = registry.describe_capabilities(db, ctx, include_schema=True, include_disabled=False, profile="daily_ops")
     elif uri == "ops://systems":
         data = registry.call(db, "ops.list_systems", {}, ctx)["result"]
     elif uri == "ops://deployments/recent":
         data = registry.call(db, "ops.list_deployments", {"limit": 20}, ctx)["result"]
     elif uri == "ops://tools":
-        data = registry.list_tools(db, ctx, include_schema=True).get("tools", [])
+        data = registry.list_tools(db, ctx, include_schema=True, profile="daily_ops").get("tools", [])
     elif uri == "ops://ai-diagnostics":
         from app.services.ai_diagnostics import build_ai_diagnostic_analysis
         data = build_ai_diagnostic_analysis(db, mode="summary", focus="mcp")
@@ -264,6 +265,7 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
     elif uri == "ops://ai-workflows":
         data = {
             "items": [
+                {"tool": "ops.workflow.inspect", "description": "Natural-language server inspection workflow"},
                 {"tool": "ops.workflow.generate_project_health_brief", "description": "Project health brief"},
                 {"tool": "ops.workflow.analyze_failed_deploy", "description": "Failed deployment analysis"},
                 {"tool": "ops.workflow.inspect_project_security", "description": "Project security inspection analysis"},

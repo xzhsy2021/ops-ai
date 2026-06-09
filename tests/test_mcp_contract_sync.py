@@ -218,7 +218,7 @@ def test_mcp_capability_service_owns_alias_payload_and_call_contract(tmp_path):
         assert payload["name"] == "ops_contract_service_call"
         assert payload["annotations"]["ops.originalToolName"] == "ops.contract.service_call"
 
-        listed = mcp_tools_list(db, ctx, {"limit": 1000})
+        listed = mcp_tools_list(db, ctx, {"limit": 1000, "profile": "admin_full"})
         names = {tool["name"] for tool in listed["tools"]}
         assert "ops_contract_service_call" in names
 
@@ -228,6 +228,184 @@ def test_mcp_capability_service_owns_alias_payload_and_call_contract(tmp_path):
         assert data["result"]["value"] == 3
     finally:
         registry._tools.pop("ops.contract.service_call", None)
+        db.close()
+        engine.dispose()
+
+
+def test_mcp_default_profile_is_slim_but_admin_full_keeps_all_tools(tmp_path):
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    try:
+        register_builtin_tools()
+
+        daily = registry.list_tools(
+            db,
+            ctx,
+            include_disabled=True,
+            include_schema=False,
+            limit=500,
+            profile="daily_ops",
+        )
+        admin = registry.list_tools(
+            db,
+            ctx,
+            include_disabled=True,
+            include_schema=False,
+            limit=500,
+            profile="admin_full",
+        )
+        daily_names = {tool["name"] for tool in daily["tools"]}
+        admin_names = {tool["name"] for tool in admin["tools"]}
+
+        assert daily["filters"]["profile"] == "daily_ops"
+        assert admin["filters"]["profile"] == "admin_full"
+        assert len(admin_names) >= 170
+        assert 8 <= len(daily_names) <= 80
+        assert daily_names < admin_names
+        assert "ops.workflow.inspect" in daily_names
+        assert "ops.inspection.run_servers_batch" in daily_names
+        assert "ops.execute_deploy_plan" not in daily_names
+        assert "ops.delete_server" not in daily_names
+        assert "ops.execute_deploy_plan" in admin_names
+        assert "ops.delete_server" in admin_names
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_mcp_tools_list_defaults_to_daily_ops_and_can_expand_profile(tmp_path):
+    from app.services.mcp_capability_service import mcp_tools_list
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    try:
+        register_builtin_tools()
+
+        daily = mcp_tools_list(db, ctx, {"limit": 200})
+        admin = mcp_tools_list(db, ctx, {"limit": 200, "profile": "admin_full"})
+
+        daily_names = {
+            (tool.get("annotations") or {}).get("ops.originalToolName") or tool.get("name")
+            for tool in daily["tools"]
+        }
+        admin_names = {
+            (tool.get("annotations") or {}).get("ops.originalToolName") or tool.get("name")
+            for tool in admin["tools"]
+        }
+
+        assert "ops.workflow.inspect" in daily_names
+        assert "ops.execute_deploy_plan" not in daily_names
+        assert len(admin_names) > len(daily_names)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_stdio_mcp_bridge_requests_daily_ops_tool_profile_by_default():
+    text = open("app/mcp/server.py", encoding="utf-8").read()
+
+    assert 'params.get("profile") or "daily_ops"' in text
+    assert "profile=\" + urllib.parse.quote(profile)" in text
+
+
+def test_workflow_inspect_routes_to_underlying_inspection_and_preserves_records(monkeypatch, tmp_path):
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    calls = []
+
+    def _fake_call(db_arg, tool_name, arguments, ctx_arg, stream_callback=None):
+        calls.append((tool_name, dict(arguments or {})))
+        if tool_name == "ops.inspection.preview_servers_batch":
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "result": {
+                    "summary": "preview ok",
+                    "eligible_count": 58,
+                    "confirmation": {"confirm_text": "确认巡检 c6cd0b45"},
+                },
+            }
+        if tool_name == "ops.inspection.run_servers_batch":
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "result": {
+                    "summary": "run ok",
+                    "status": "COMPLETED",
+                    "run_ids": ["run-1"],
+                    "next_actions": [{"tool": "ops.inspection.generate_report", "arguments": {"run_ids": ["run-1"]}}],
+                },
+            }
+        if tool_name == "ops.inspection.profile.preview":
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "result": {
+                    "profile_id": "crypto-test-daily",
+                    "eligible_count": 2,
+                    "confirmation": {"confirm_text": "RUN crypto-test-daily 2 abc123"},
+                },
+            }
+        if tool_name == "ops.inspection.profile.run":
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "result": {
+                    "profile_id": "crypto-test-daily",
+                    "run_ids": ["run-profile-1"],
+                },
+            }
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+    try:
+        register_builtin_tools()
+        monkeypatch.setattr(registry, "call", _fake_call)
+        tool = registry.get("ops.workflow.inspect")
+
+        preview = tool.handler({"request": "请巡检 crypto 下测试服务器并生成报告", "generate_report": True}, ctx, db)
+        assert calls[0] == ("ops.inspection.preview_servers_batch", {"groups": ["crypto"]})
+        assert preview["mode"] == "preview"
+        assert preview["workflow_type"] == "inspection"
+        assert preview["records"]["preserved"] is True
+        assert "inspection_runs" in preview["records"]["types"]
+        assert preview["next_actions"][0]["tool"] == "ops.workflow.inspect"
+        assert preview["next_actions"][0]["arguments"]["confirm_text"] == "确认巡检 c6cd0b45"
+        assert preview["next_actions"][0]["arguments"]["generate_report"] is True
+
+        calls.clear()
+        executed = tool.handler({"request": "巡检 crypto 测试服务器", "confirm_text": "确认巡检 c6cd0b45"}, ctx, db)
+        assert calls[0] == (
+            "ops.inspection.run_servers_batch",
+            {"groups": ["crypto"], "confirm_text": "确认巡检 c6cd0b45"},
+        )
+        assert executed["mode"] == "run"
+        assert executed["run"]["run_ids"] == ["run-1"]
+        assert executed["records"]["preserved"] is True
+
+        calls.clear()
+        profile_preview = tool.handler({"profile_id": "crypto-test-daily"}, ctx, db)
+        assert calls[0] == ("ops.inspection.profile.preview", {"profile_id": "crypto-test-daily"})
+        assert profile_preview["next_actions"][0]["arguments"]["confirm_text"] == "RUN crypto-test-daily 2 abc123"
+
+        calls.clear()
+        profile_run = tool.handler({"profile_id": "crypto-test-daily", "confirm_text": "RUN crypto-test-daily 2 abc123"}, ctx, db)
+        assert calls[0] == (
+            "ops.inspection.profile.run",
+            {"profile_id": "crypto-test-daily", "confirm_text": "RUN crypto-test-daily 2 abc123"},
+        )
+        assert profile_run["run"]["run_ids"] == ["run-profile-1"]
+    finally:
         db.close()
         engine.dispose()
 

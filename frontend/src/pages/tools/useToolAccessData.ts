@@ -28,7 +28,7 @@ export function useToolAccessData(): ToolAccessData {
     setLoading(true)
     setError(null)
     try {
-      const res = await capabilityTools.list({ include_disabled: true, include_schema: true })
+      const res = await capabilityTools.list({ profile: 'admin_full', include_disabled: true, include_schema: true })
       const data = res.data?.tools || res.data?.data || res.data || []
       const items = Array.isArray(data) ? data : []
       setTools(items)

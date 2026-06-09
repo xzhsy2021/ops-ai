@@ -13,6 +13,7 @@ def test_tool_access_page_uses_schema_light_initial_load_and_tab_lazy_loaders():
     page = open("frontend/src/pages/ToolAccessPage.tsx", encoding="utf-8").read()
 
     assert "include_schema: false" in page
+    assert "profile: 'admin_full'" in page
     assert "const loadInitial = async" in page
     assert "const loadTabData = async" in page
     assert "loadTabData(activeTab)" in page

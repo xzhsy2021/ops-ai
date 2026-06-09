@@ -155,13 +155,14 @@ export default function ToolAccessPage() {
     setLoading(true)
     try {
       const params = {
+        profile: 'admin_full',
         include_disabled: true,
         include_schema: false,
         limit: 300,
       }
       const [listRes, capRes, settingsRes, tokensRes, tokenTemplateRes] = await Promise.allSettled([
         capabilityTools.list(params),
-        capabilityTools.capabilities({ include_disabled: true, include_schema: false, limit: 300 }),
+        capabilityTools.capabilities({ profile: 'admin_full', include_disabled: true, include_schema: false, limit: 300 }),
         capabilityTools.settings(),
         capabilityTools.tokens(),
         capabilityTools.tokenTemplates(),
@@ -195,7 +196,7 @@ export default function ToolAccessPage() {
         if (manifestRes.status === 'fulfilled') setManifest(getData(manifestRes.value))
         if (riskPolicyRes.status === 'fulfilled') setRiskPolicy(getData(riskPolicyRes.value))
       } else if (tab === 'catalog') {
-        const res = await capabilityTools.list({ include_disabled: true, include_schema: true, limit: 300 })
+        const res = await capabilityTools.list({ profile: 'admin_full', include_disabled: true, include_schema: true, limit: 300 })
         const d = getData(res)
         setTools(d.tools || [])
         setSettings(d.settings || settings)

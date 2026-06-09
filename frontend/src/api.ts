@@ -462,9 +462,9 @@ export const capabilityTools = {
     clearCachedGet('mcp.')
     clearCachedGet('capability.')
   },
-  list: (params?: { category?: string; risk?: string; include_disabled?: boolean; include_schema?: boolean; limit?: number; cursor?: number; format?: string }) => cachedGet(stableKey('tools.list', params), 60000, () => api.get('/tools', { params })),
+  list: (params?: { category?: string; risk?: string; profile?: string; include_disabled?: boolean; include_schema?: boolean; limit?: number; cursor?: number; format?: string }) => cachedGet(stableKey('tools.list', params), 60000, () => api.get('/tools', { params })),
   detail: (name: string) => api.get(`/tools/detail/${encodeURIComponent(name)}`),
-  capabilities: (params?: { category?: string; include_disabled?: boolean; include_schema?: boolean; limit?: number; cursor?: number; format?: string }) => cachedGet(stableKey('tools.capabilities', params), 60000, () => api.get('/capabilities', { params })),
+  capabilities: (params?: { category?: string; profile?: string; include_disabled?: boolean; include_schema?: boolean; limit?: number; cursor?: number; format?: string }) => cachedGet(stableKey('tools.capabilities', params), 60000, () => api.get('/capabilities', { params })),
   riskPolicy: () => cachedGet('tools.riskPolicy', 60000, () => api.get('/tools/risk-policy')),
   policyPreview: (data: any) => api.post('/tools/policy-preview', data),
   call: (tool: string, args?: Record<string, any>) => api.post('/tools/call', { tool, arguments: args || {} }),

@@ -25,6 +25,7 @@ RISK_LABELS = {
 
 DEFAULT_CONFIRMATION_REQUIRED_FROM = "medium"
 JOB_REQUIRED_FROM = "high"
+PROFILE_CONFIRMATION_TOOLS = {"ops.inspection.profile.run", "ops.inspection.profile.retry_issues"}
 
 
 @dataclass(frozen=True)
@@ -118,11 +119,21 @@ def expected_confirmation_text(tool_def, args: Dict[str, Any], db=None) -> str:
         return "CLEANUP PACKAGES"
     if name == "ops.protect_package":
         return f"PROTECT PACKAGE {file_name}" if bool(args.get("protected", True)) else f"UNPROTECT PACKAGE {file_name}"
-    if name == "ops.inspection.profile.run":
+    if name in PROFILE_CONFIRMATION_TOOLS:
         profile_id = str(args.get("profile_id") or "").strip()
         expected_count = args.get("expected_count")
         fingerprint = str(args.get("fingerprint") or "").strip()
         try:
+            if name == "ops.inspection.profile.retry_issues" and db and profile_id and not (expected_count is not None and fingerprint):
+                from app.services.inspection_profiles import preview_issue_retry
+
+                confirmation = preview_issue_retry(
+                    db,
+                    profile_id=profile_id,
+                    risk_level=str(args.get("risk_level") or ""),
+                    status=str(args.get("status") or ""),
+                ).get("confirmation") or {}
+                return str(confirmation.get("confirm_text") or "").strip()
             from app.services.inspection_profiles import profile_expected_confirm_text
 
             return profile_expected_confirm_text(db, profile_id, expected_count=expected_count, fingerprint=fingerprint)
@@ -139,7 +150,7 @@ def accepted_confirmation_texts(tool_def, args: Dict[str, Any], db=None) -> List
     expected = expected_confirmation_text(tool_def, args, db)
     values = [expected]
     name = getattr(tool_def, "name", "") or ""
-    if name == "ops.inspection.profile.run":
+    if name in PROFILE_CONFIRMATION_TOOLS:
         profile_id = str(args.get("profile_id") or "").strip()
         expected_count = args.get("expected_count")
         fingerprint = str(args.get("fingerprint") or "").strip()
@@ -151,9 +162,19 @@ def accepted_confirmation_texts(tool_def, args: Dict[str, Any], db=None) -> List
                 pass
         elif db and profile_id:
             try:
-                from app.services.inspection_profiles import preview_profile
+                if name == "ops.inspection.profile.retry_issues":
+                    from app.services.inspection_profiles import preview_issue_retry
 
-                confirmation = preview_profile(db, profile_id).get("confirmation") or {}
+                    confirmation = preview_issue_retry(
+                        db,
+                        profile_id=profile_id,
+                        risk_level=str(args.get("risk_level") or ""),
+                        status=str(args.get("status") or ""),
+                    ).get("confirmation") or {}
+                else:
+                    from app.services.inspection_profiles import preview_profile
+
+                    confirmation = preview_profile(db, profile_id).get("confirmation") or {}
                 values.extend(confirmation.get("accepted_confirm_texts") or [])
             except Exception:
                 pass

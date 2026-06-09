@@ -300,6 +300,32 @@ def profile_run(payload: Any = Body(default_factory=dict), request: Request = No
     return api_response(data=result, message=result.get("summary") or "巡检方案执行完成")
 
 
+@router.post("/profiles/retry-issues")
+def profile_retry_issues(payload: Any = Body(default_factory=dict), request: Request = None, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    data = _payload_dict(payload)
+    profile_id = str(data.get("profile_id") or data.get("profileId") or "daily-lite").strip() or "daily-lite"
+    risk_level = str(data.get("risk_level") or data.get("riskLevel") or "").strip()
+    status = str(data.get("status") or "").strip()
+    confirm_text = str(data.get("confirm_text") or data.get("confirmText") or "").strip()
+    from app.services.inspection_profiles import preview_issue_retry, run_issue_retry
+
+    if not confirm_text:
+        result = preview_issue_retry(db, profile_id=profile_id, risk_level=risk_level, status=status)
+        return api_response(data={**result, "status": "confirmation_required"}, message=result.get("summary") or "Issue retry preview generated")
+
+    result = run_issue_retry(
+        db,
+        profile_id=profile_id,
+        risk_level=risk_level,
+        status=status,
+        confirm_text=confirm_text,
+        created_by=user.get("username") or "",
+    )
+    audit("inspection.profile.retry_issues", "inspection", profile_id, f"user={user.get('username')} runs={len(result.get('run_ids') or [])} report={result.get('report', {}).get('id') if isinstance(result.get('report'), dict) else ''}")
+    return api_response(data=result, message=result.get("summary") or "Issue retry inspection completed")
+
+
 @router.get("/project-server-relations")
 def project_server_relations(request: Request, project_id: str = "", db: Session = Depends(get_db)):
     require_auth(request, db)

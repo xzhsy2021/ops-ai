@@ -1,6 +1,6 @@
 # MCP Capability Matrix
 
-Updated: 2026-06-08
+Updated: 2026-06-09
 
 This matrix is the current OPS MCP/HTTP tool capability map for local small-team operations.
 
@@ -16,6 +16,7 @@ The default capability profile is no longer "read-only only".
 
 - Low-risk read tools are auto-callable when token scopes allow them.
 - Path A inspection execution (`ops.inspection.run_*`) is enabled for AI/MCP tool tokens only when `confirm_text` matches the backend confirmation phrase. High-risk calls are still taskized/audited.
+- Inspection profile execution (`ops.inspection.profile.run` and `ops.inspection.profile.retry_issues`) is preview-first and requires the returned `RUN <profile> <count> <fingerprint>` confirmation phrase.
 - Agent runtime tools (`ops.agent.*`) stay hidden unless `agent_runtime_enabled=true`.
 - Deploy execution, rollback, config write, server write, package cleanup, runtime cleanup, DB write/DML, and destructive deletes remain behind explicit capability gates, scopes, and confirmation.
 
@@ -57,6 +58,10 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 | `ops.list_server_groups` | `ops_list_server_groups` | read | `ops:read`, `server:read` | yes | no | low | - | filter by `group` in `ops.list_servers` |
 | `ops.inspection.overview` | `ops_inspection_overview` | read | `ops:read` | yes | no | low | - | choose inspection target |
 | `ops.inspection.categories` | `ops_inspection_categories` | read | `ops:read` | yes | no | low | - | select category codes |
+| `ops.inspection.profile.list` | `ops_inspection_profile_list` | read | `ops:read` | yes | no | low | - | `ops.inspection.profile.preview` |
+| `ops.inspection.profile.preview` | `ops_inspection_profile_preview` | read | `ops:read` | yes | no | low | profile id | `ops.inspection.profile.run` |
+| `ops.inspection.profile.run` | `ops_inspection_profile_run` | execute | `ops:read`, `ops:write` | yes | no | high | preview result, exact `RUN <profile> <count> <fingerprint>` | `ops.inspection.get_run`, `ops.inspection.generate_report` |
+| `ops.inspection.profile.retry_issues` | `ops_inspection_profile_retry_issues` | execute | `ops:read`, `ops:write` | yes | no | high | open inspection issues, preview result, exact `RUN <profile> <count> <fingerprint>` | `ops.inspection.get_run`, `ops.inspection.list_issues` |
 | `ops.inspection.list_item_configs` | `ops_inspection_list_item_configs` | read | `ops:read` | yes | no | low | - | `ops.inspection.toggle_item_config`, `ops.inspection.update_item_config` |
 | `ops.inspection.update_item_config` | `ops_inspection_update_item_config` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.list_item_configs` | `ops.inspection.run_servers_batch` |
 | `ops.inspection.toggle_item_config` | `ops_inspection_toggle_item_config` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.list_item_configs` | `ops.inspection.run_servers_batch` |
@@ -76,17 +81,18 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 
 ### Recommended Inspection Workflow
 
-1. `ops.list_server_groups` to choose target group name, for example `crypto`.
-2. `ops.list_servers(group="crypto")` to confirm target hosts.
-3. `ops.inspection.list_item_configs(scope_type="SERVER")` to confirm enabled inspection items.
-4. Ask the user for confirmation, then call `ops.inspection.run_servers_batch` with `confirm_text`.
-5. `ops.inspection.get_run(run_id=...)` until `status` is `SUCCESS`, `PARTIAL_SUCCESS`, or `FAILED`.
-6. `ops.inspection.list_issues(run_id=...)` to triage HIGH / MEDIUM / LOW issues.
-7. `ops.inspection.generate_report(run_id=..., format="md")` to archive the report.
+1. For routine grouped inspections, call `ops.inspection.profile.list`, choose a profile such as `crypto-test-daily`, then call `ops.inspection.profile.preview`.
+2. Ask the user for the returned confirmation phrase, then call `ops.inspection.profile.run` with `confirm_text`.
+3. For ad-hoc target checks, use `ops.list_server_groups`, `ops.list_servers(group="crypto")`, and `ops.inspection.list_item_configs(scope_type="SERVER")`, then call `ops.inspection.run_servers_batch` with exact `confirm_text`.
+4. `ops.inspection.get_run(run_id=...)` until `status` is `SUCCESS`, `PARTIAL_SUCCESS`, or `FAILED`.
+5. `ops.inspection.list_issues(run_id=...)` to triage HIGH / MEDIUM / LOW issues.
+6. `ops.inspection.generate_report(run_id=..., format="md")` to archive the report.
+7. After remediation, call `ops.inspection.profile.retry_issues` without `confirm_text` to preview only OPEN / PROCESSING issue servers, then rerun it with the returned `RUN <profile> <count> <fingerprint>` phrase.
 
 Notes:
 
 - `ops.inspection.run_servers_batch` accepts `server_ids`, `groups`, `group`, and `all_servers`, then merges targets.
+- `ops.inspection.profile.retry_issues` keeps the selected profile categories and runtime knobs, but replaces targets with servers that still have OPEN / PROCESSING inspection issues.
 - Category values must use full uppercase codes such as `LOGIN_SECURITY`, `ACCOUNT_SECURITY`, `PROCESS_PORT`, `DISK_USAGE`, and `BACKUP`.
 - Servers with `inspectable=false` or `status != online` are skipped by default; pass `skip_disabled=false` only when debugging.
 

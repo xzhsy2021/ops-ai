@@ -523,6 +523,7 @@ export const inspection = {
   profiles: () => api.get('/inspection/profiles'),
   profilePreview: (data: { profile_id: string }) => api.post('/inspection/profiles/preview', data),
   profileRun: (data: { profile_id: string; confirm_text: string; expected_count?: number; fingerprint?: string }) => api.post('/inspection/profiles/run', data),
+  profileRetryIssues: (data: { profile_id?: string; risk_level?: string; status?: string; confirm_text?: string; expected_count?: number; fingerprint?: string }) => api.post('/inspection/profiles/retry-issues', data),
   runServer: (data: { server_id: string; categories?: string[]; generate_report?: boolean }) => api.post(`/inspection/servers/${encodeURIComponent(data.server_id)}/run`, data),
   startServer: (data: { server_id: string; categories?: string[] }) => api.post(`/inspection/servers/${encodeURIComponent(data.server_id)}/start`, data),
   runServersBatch: (data: { server_ids?: string[]; groups?: string[]; group?: string; categories?: string[]; generate_report?: boolean; concurrency?: number; batch_size?: number; command_timeout_seconds?: number; run_timeout_seconds?: number; skip_disabled?: boolean; all_servers?: boolean }) => {

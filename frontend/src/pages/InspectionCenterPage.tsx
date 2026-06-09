@@ -176,6 +176,7 @@ export default function InspectionCenterPage() {
   const [servers, setServers] = useState<any[]>([])
   const [inspectionProfiles, setInspectionProfiles] = useState<any[]>([])
   const [profilePreviewData, setProfilePreviewData] = useState<any>(null)
+  const [profileRunMode, setProfileRunMode] = useState<'profile' | 'issue_retry'>('profile')
   const [profileConfirmOpen, setProfileConfirmOpen] = useState(false)
   const [profileConfirmValue, setProfileConfirmValue] = useState('')
   const [projects, setProjects] = useState<any[]>([])
@@ -438,9 +439,24 @@ export default function InspectionCenterPage() {
     try {
       const res: any = await inspection.profilePreview({ profile_id: profileId })
       setProfilePreviewData(res.data)
+      setProfileRunMode('profile')
       setProfileConfirmValue('')
       setProfileConfirmOpen(true)
       setMessage(res.data?.summary || '巡检方案预览已生成，请确认后执行。')
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setRunning(false) }
+  }
+
+  async function previewIssueRetry(profileId?: string) {
+    const selectedProfile = profileId || inspectionProfiles.find((p: any) => p.id === 'crypto-test-daily')?.id || inspectionProfiles[0]?.id || 'daily-lite'
+    setRunning(true); setError(''); setMessage('')
+    try {
+      const res: any = await inspection.profileRetryIssues({ profile_id: selectedProfile })
+      setProfilePreviewData(res.data)
+      setProfileRunMode('issue_retry')
+      setProfileConfirmValue('')
+      setProfileConfirmOpen(true)
+      setMessage(res.data?.summary || '复巡目标预览已生成，请确认后执行。')
     } catch (e: any) { setError(e?.message || String(e)) }
     finally { setRunning(false) }
   }
@@ -453,12 +469,15 @@ export default function InspectionCenterPage() {
     const confirmText = (profileConfirmValue.trim() || confirmation.confirm_text || '').trim()
     setRunning(true); setError(''); setMessage('')
     try {
-      const res: any = await inspection.profileRun({
+      const profilePayload = {
         profile_id: profileId,
         confirm_text: confirmText,
         expected_count: Number(confirmation.target_count || preview.eligible_count || 0),
         fingerprint: confirmation.fingerprint || '',
-      })
+      }
+      const res: any = profileRunMode === 'issue_retry'
+        ? await inspection.profileRetryIssues(profilePayload)
+        : await inspection.profileRun(profilePayload)
       const runIds = res.data?.run_ids || []
       if (runIds.length > 0) setActiveRunIds(runIds)
       if (runIds[0]) {
@@ -469,6 +488,7 @@ export default function InspectionCenterPage() {
       }
       setProfileConfirmOpen(false)
       setProfilePreviewData(null)
+      setProfileRunMode('profile')
       setProfileConfirmValue('')
       setTab('runs')
       setMessage(res.data?.summary || '巡检方案已执行，报告生成后可在报告中心查看。')
@@ -935,8 +955,11 @@ export default function InspectionCenterPage() {
           {inspectionProfiles.length > 0 && (
             <div className="inspection-profile-strip">
               <div className="inspection-profile-strip-head">
-                <strong>常用巡检方案</strong>
-                <span className="muted">先预览目标和确认短语，再执行批量巡检。</span>
+                <div>
+                  <strong>常用巡检方案</strong>
+                  <span className="muted">先预览目标和确认短语，再执行批量巡检。</span>
+                </div>
+                <button className="btn btn-subtle" type="button" disabled={running} onClick={() => previewIssueRetry()}>复巡未关闭风险</button>
               </div>
               <div className="inspection-profile-grid">
                 {inspectionProfiles.map((profile: any) => (
@@ -1623,8 +1646,8 @@ export default function InspectionCenterPage() {
 
       <RiskConfirmDialog
         open={profileConfirmOpen}
-        title="确认执行巡检方案"
-        description="请核对目标数量、巡检项和确认短语。确认短语会随目标和参数变化。"
+        title={profileRunMode === 'issue_retry' ? '确认复巡未关闭风险' : '确认执行巡检方案'}
+        description={profileRunMode === 'issue_retry' ? '仅复巡当前未关闭风险问题关联的服务器。确认短语会随目标和参数变化。' : '请核对目标数量、巡检项和确认短语。确认短语会随目标和参数变化。'}
         target={profilePreviewData?.profile?.name || profilePreviewData?.profile_id || '-'}
         confirmText={profilePreviewData?.confirmation?.confirm_text || ''}
         value={profileConfirmValue}
@@ -1633,6 +1656,7 @@ export default function InspectionCenterPage() {
         onConfirm={runInspectionProfile}
         riskLevel="high"
         details={[
+          { label: '执行模式', value: profileRunMode === 'issue_retry' ? '复巡未关闭风险' : '巡检方案' },
           { label: '目标服务器', value: `${profilePreviewData?.eligible_count || 0} 台` },
           { label: '跳过/过滤', value: `${profilePreviewData?.skipped_count || 0} / ${profilePreviewData?.filtered_count || 0}` },
           { label: '巡检项', value: Array.isArray(profilePreviewData?.categories) ? profilePreviewData.categories.join(', ') : '-' },

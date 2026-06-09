@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.db.models import InspectionIssue
 from app.db.repository import ConfigRepository
 
 PROFILE_CONFIG_KEY = "inspection_profiles"
@@ -321,6 +322,103 @@ def preview_profile(db: Session, profile_id: str, overrides: Optional[Dict[str, 
     }
 
 
+def _open_issue_rows(db: Session, *, risk_level: str = "", status: str = "") -> List[InspectionIssue]:
+    q = db.query(InspectionIssue).filter(
+        InspectionIssue.scope_type == "SERVER",
+        InspectionIssue.server_id != None,  # noqa: E711
+    )
+    if status:
+        q = q.filter(InspectionIssue.status == str(status).upper())
+    else:
+        q = q.filter(InspectionIssue.status.in_(["OPEN", "PROCESSING"]))
+    if risk_level:
+        q = q.filter(InspectionIssue.risk_level == str(risk_level).upper())
+    return q.order_by(InspectionIssue.created_at.desc()).limit(500).all()
+
+
+def _issue_retry_profile(db: Session, profile_id: str, *, risk_level: str = "", status: str = "") -> Dict[str, Any]:
+    profile = get_profile(db, profile_id)
+    base_resolved = resolve_profile_targets(db, profile)
+    allowed_server_ids = set(_strings(base_resolved.get("eligible_ids") or []))
+    for server in base_resolved.get("eligible") or []:
+        if not isinstance(server, dict):
+            continue
+        allowed_server_ids.update(_strings([
+            server.get("id"),
+            server.get("asset_id"),
+            server.get("name"),
+            server.get("host"),
+            server.get("ip"),
+        ]))
+    issues = _open_issue_rows(db, risk_level=risk_level, status=status)
+    server_ids = sorted(server_id for server_id in _strings([row.server_id for row in issues]) if server_id in allowed_server_ids)
+    selected_server_id_set = set(server_ids)
+    selected_issues = [row for row in issues if row.server_id in selected_server_id_set]
+    profile = _normalize_profile({
+        **profile,
+        "target": {
+            **(profile.get("target") or {}),
+            "all_servers": False,
+            "server_ids": server_ids,
+            "groups": [],
+            "include_keywords": [],
+            "exclude_keywords": [],
+        },
+    })
+    return {
+        "profile": profile,
+        "issues": selected_issues,
+        "issue_summary": {
+            "issue_count": len(selected_issues),
+            "matched_issue_count": len(issues),
+            "server_count": len(server_ids),
+            "risk_level": str(risk_level or "").upper(),
+            "status": str(status or "OPEN,PROCESSING").upper(),
+        },
+    }
+
+
+def preview_issue_retry(db: Session, *, profile_id: str = "daily-lite", risk_level: str = "", status: str = "") -> Dict[str, Any]:
+    prepared = _issue_retry_profile(db, profile_id, risk_level=risk_level, status=status)
+    profile = prepared["profile"]
+    resolved = resolve_profile_targets(db, profile)
+    confirmation = build_confirmation(profile, resolved)
+    return {
+        "mode": "issue_retry",
+        "profile": profile,
+        "profile_id": profile["id"],
+        "eligible": resolved.get("eligible") or [],
+        "eligible_ids": resolved.get("eligible_ids") or [],
+        "eligible_count": resolved.get("eligible_count") or 0,
+        "skipped": resolved.get("skipped") or [],
+        "skipped_count": resolved.get("skipped_count") or 0,
+        "filtered_out": resolved.get("filtered_out") or [],
+        "filtered_count": resolved.get("filtered_count") or 0,
+        "total_requested": resolved.get("total_requested") or 0,
+        "categories": profile.get("categories") or [],
+        "concurrency": profile.get("concurrency"),
+        "batch_size": profile.get("batch_size"),
+        "command_timeout_seconds": profile.get("command_timeout_seconds"),
+        "run_timeout_seconds": profile.get("run_timeout_seconds"),
+        "generate_report": profile.get("generate_report"),
+        "report_format": profile.get("report_format"),
+        "confirmation": confirmation,
+        "issue_summary": prepared["issue_summary"],
+        "issues": [
+            {
+                "id": row.id,
+                "server_id": row.server_id,
+                "risk_level": row.risk_level,
+                "status": row.status,
+                "title": row.title,
+                "run_id": row.run_id,
+            }
+            for row in prepared["issues"][:100]
+        ],
+        "summary": f"{profile.get('name')} issue retry targets {resolved.get('eligible_count') or 0} server(s).",
+    }
+
+
 def profile_expected_confirm_text(db: Session, profile_id: str, *, expected_count: Any = None, fingerprint: str = "") -> str:
     profile_id = str(profile_id or "").strip()
     fingerprint = str(fingerprint or "").strip()
@@ -415,3 +513,26 @@ def run_profile(db: Session, profile_id: str, *, confirm_text: str, created_by: 
         "report_error": report_error,
         "summary": batch_result.get("summary") or f"{profile.get('name')} 巡检完成。",
     }
+
+
+def run_issue_retry(db: Session, *, profile_id: str = "daily-lite", confirm_text: str, created_by: str = "", risk_level: str = "", status: str = "") -> Dict[str, Any]:
+    preview = preview_issue_retry(db, profile_id=profile_id, risk_level=risk_level, status=status)
+    overrides = {
+        "target": {
+            "all_servers": False,
+            "server_ids": [
+                str(item.get("id") or item.get("asset_id") or item.get("name") or item.get("host") or "")
+                for item in preview.get("eligible") or []
+            ],
+            "groups": [],
+            "include_keywords": [],
+            "exclude_keywords": [],
+        }
+    }
+    result = run_profile(db, profile_id, confirm_text=confirm_text, created_by=created_by, overrides=overrides)
+    result["mode"] = "issue_retry"
+    result["issue_retry"] = {
+        "issue_summary": preview.get("issue_summary") or {},
+        "source_confirmation": preview.get("confirmation") or {},
+    }
+    return result

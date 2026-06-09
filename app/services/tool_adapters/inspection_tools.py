@@ -338,6 +338,77 @@ def profile_run(args: Dict[str, Any], ctx, db):
 
 
 @registry.register(
+    name="ops.inspection.profile.retry_issues",
+    title="复巡未关闭风险服务器",
+    description="基于未关闭巡检风险问题生成复巡目标，只重跑仍有 OPEN/PROCESSING 风险的服务器。需要使用返回的 RUN 短语确认。",
+    scopes=["ops:read", "ops:write"],
+    risk="high",
+    category="inspection_execute",
+    write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    ai_callable=True,
+    ai_auto_callable=False,
+    data_sensitivity="sensitive",
+    output_masking=True,
+    related_tools=["ops.inspection.profile.preview", "ops.inspection.list_issues", "ops.inspection.get_run"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "profile_id": {"type": "string", "description": "复用的巡检方案，默认 daily-lite。"},
+            "risk_level": {"type": "string", "description": "可选，仅复巡指定风险等级。"},
+            "status": {"type": "string", "description": "可选，默认 OPEN + PROCESSING。"},
+            "expected_count": {"type": "integer", "minimum": 0},
+            "fingerprint": {"type": "string"},
+            "confirm_text": {"type": "string", "description": "预览返回的 RUN 确认短语。"},
+        },
+        "additionalProperties": False,
+    },
+)
+def profile_retry_issues(args: Dict[str, Any], ctx, db):
+    from app.services.inspection_profiles import preview_issue_retry, run_issue_retry
+
+    profile_id = args.get("profile_id") or "daily-lite"
+    risk_level = args.get("risk_level") or ""
+    status = args.get("status") or ""
+    if not args.get("confirm_text"):
+        preview = preview_issue_retry(db, profile_id=profile_id, risk_level=risk_level, status=status)
+        return {
+            **preview,
+            "status": "confirmation_required",
+            "next_actions": [
+                {
+                    "tool": "ops.inspection.profile.retry_issues",
+                    "arguments": {
+                        "profile_id": profile_id,
+                        "risk_level": risk_level,
+                        "status": status,
+                        "expected_count": preview.get("eligible_count") or 0,
+                        "fingerprint": (preview.get("confirmation") or {}).get("fingerprint"),
+                        "confirm_text": (preview.get("confirmation") or {}).get("confirm_text"),
+                    },
+                    "description": "After user approval, rerun only servers with open inspection issues.",
+                }
+            ],
+        }
+    result = run_issue_retry(
+        db,
+        profile_id=profile_id,
+        risk_level=risk_level,
+        status=status,
+        confirm_text=args.get("confirm_text") or "",
+        created_by=_actor(ctx),
+    )
+    run_ids = result.get("run_ids") or []
+    if run_ids:
+        result["next_actions"] = [
+            {"tool": "ops.inspection.get_run", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the first retry inspection run detail."},
+            {"tool": "ops.inspection.list_issues", "arguments": {"limit": 100}, "description": "Review remaining inspection issues after retry."},
+        ]
+    return result
+
+
+@registry.register(
     name="ops.inspection.run_servers_batch",
     title="批量/按分组执行服务器巡检",
     description="批量执行服务器巡检。支持按 server_ids / groups / group / all_servers 选择目标。AI/MCP token 不允许自动执行。groups 字段与 'ops.list_server_groups' 工具返回的 group 名称保持一致（区分大小写不敏感），可与 server_ids 同时传入合并。",

@@ -71,3 +71,7 @@ reports/_*.json
 # 一次性巡检报告 (非周期性产出)
 reports/*.md
 reports/*.json
+reports/**/*.md
+reports/**/*.json
+reports/codex-inspection/
+scripts/hardening_crypto.sh

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+import hashlib
+import json
+from typing import Any, Dict, List
 
+from fastapi import HTTPException
 from app.services.tool_registry import registry
 
 
@@ -26,6 +29,135 @@ def _inspection_followup(result: Dict[str, Any]) -> Dict[str, Any]:
             {"tool": "ops.inspection.summarize_run", "arguments": {"run_id": run_ids[0]}, "description": "Build an AI-friendly evidence summary."},
         ]
     return payload
+
+
+def _strings(value: Any) -> List[str]:
+    if value is None:
+        return []
+    raw = value if isinstance(value, list) else [value]
+    result: List[str] = []
+    seen = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _batch_groups(args: Dict[str, Any]) -> List[str]:
+    groups = _strings(args.get("groups"))
+    if args.get("group") and not groups:
+        groups = _strings([args.get("group")])
+    return groups
+
+
+def _batch_categories(args: Dict[str, Any]) -> List[str]:
+    return _strings(args.get("categories"))
+
+
+def _batch_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except Exception:
+        number = default
+    return max(low, min(number, high))
+
+
+def _batch_preview(args: Dict[str, Any]) -> Dict[str, Any]:
+    from app.services import inspection_center as svc
+
+    server_ids = _strings(args.get("server_ids"))
+    groups = _batch_groups(args)
+    all_servers = bool(args.get("all_servers", False))
+    if not (server_ids or groups or all_servers):
+        raise HTTPException(status_code=400, detail="server_ids / groups / all_servers 至少提供一个")
+
+    skip_disabled = bool(args.get("skip_disabled", True))
+    resolved = svc.resolve_servers_for_inspection(
+        server_ids,
+        all_servers=all_servers,
+        skip_disabled=skip_disabled,
+        groups=groups or None,
+    )
+    categories = _batch_categories(args)
+    concurrency = _batch_int(args.get("concurrency"), svc.DEFAULT_BATCH_CONCURRENCY, 1, svc.MAX_BATCH_CONCURRENCY)
+    batch_size = _batch_int(args.get("batch_size"), svc.DEFAULT_BATCH_SIZE, 1, svc.MAX_BATCH_SIZE)
+    command_timeout_seconds = _batch_int(args.get("command_timeout_seconds"), svc.DEFAULT_COMMAND_TIMEOUT_SECONDS, 5, svc.MAX_COMMAND_TIMEOUT_SECONDS)
+    run_timeout_seconds = _batch_int(args.get("run_timeout_seconds"), svc.DEFAULT_RUN_TIMEOUT_SECONDS, 30, svc.MAX_RUN_TIMEOUT_SECONDS)
+    eligible_ids = _strings(resolved.get("eligible_ids") or [])
+    payload = {
+        "server_ids": eligible_ids,
+        "groups": groups,
+        "all_servers": all_servers,
+        "categories": categories,
+        "concurrency": concurrency,
+        "batch_size": batch_size,
+        "command_timeout_seconds": command_timeout_seconds,
+        "run_timeout_seconds": run_timeout_seconds,
+        "skip_disabled": skip_disabled,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    confirm_text = f"确认巡检 {fingerprint}"
+    legacy_text = "CONFIRM ops.inspection.run_servers_batch"
+    batch_count = (len(eligible_ids) + batch_size - 1) // batch_size if eligible_ids else 0
+    return {
+        "status": "confirmation_required",
+        "summary": f"将巡检 {len(eligible_ids)} 台服务器，跳过 {resolved.get('skipped_count', 0)} 台；并发 {concurrency}，每批 {batch_size} 台。",
+        "eligible": resolved.get("eligible") or [],
+        "eligible_ids": eligible_ids,
+        "eligible_count": len(eligible_ids),
+        "skipped": resolved.get("skipped") or [],
+        "skipped_count": int(resolved.get("skipped_count") or 0),
+        "total_requested": int(resolved.get("total_requested") or 0),
+        "categories": categories,
+        "groups": groups,
+        "all_servers": all_servers,
+        "skip_disabled": skip_disabled,
+        "execution_plan": {
+            "concurrency": concurrency,
+            "batch_size": batch_size,
+            "batch_count": batch_count,
+            "command_timeout_seconds": command_timeout_seconds,
+            "run_timeout_seconds": run_timeout_seconds,
+        },
+        "confirmation": {
+            "confirm_text": confirm_text,
+            "expected_confirm_text": confirm_text,
+            "legacy_confirm_text": legacy_text,
+            "accepted_confirm_texts": [confirm_text, legacy_text],
+            "fingerprint": fingerprint,
+            "target_count": len(eligible_ids),
+            "mode": "one-click-friendly",
+            "description": "请确认本次巡检目标、巡检项、并发和超时设置。确认短语为短中文格式，已绑定目标和参数；目标变化后请重新预览。",
+        },
+    }
+
+
+def _validate_batch_confirmation(args: Dict[str, Any]) -> Dict[str, Any]:
+    preview = _batch_preview(args)
+    confirmation = preview.get("confirmation") or {}
+    expected = str(confirmation.get("confirm_text") or "").strip()
+    supplied = str(args.get("confirm_text") or "").strip()
+    if supplied != expected:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "code": "CONFIRMATION_REQUIRED",
+                "message": "批量巡检需要先预览并使用当前中文确认短语",
+                "expected_confirm_text": expected,
+                "accepted_confirm_texts": [expected],
+                "confirmation": confirmation,
+                "preview": {
+                    "eligible_count": preview.get("eligible_count"),
+                    "skipped_count": preview.get("skipped_count"),
+                    "categories": preview.get("categories"),
+                    "groups": preview.get("groups"),
+                },
+            },
+        )
+    return preview
 
 
 @registry.register(
@@ -409,9 +541,62 @@ def profile_retry_issues(args: Dict[str, Any], ctx, db):
 
 
 @registry.register(
+    name="ops.inspection.preview_servers_batch",
+    title="预览批量服务器巡检",
+    description="执行批量服务器巡检前，解析 server_ids / groups / all_servers 的实际目标、跳过项、批次计划和短中文确认短语。AI/MCP 应先调用本工具，再让用户确认。",
+    scopes=["ops:read"],
+    risk="low",
+    category="inspection",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.list_server_groups", "ops.list_servers", "ops.inspection.run_servers_batch"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "server_ids": {"type": "array", "items": {"type": "string"}, "description": "显式选择的服务器 ID/name 列表。"},
+            "groups": {"type": "array", "items": {"type": "string"}, "description": "按分组筛选服务器。"},
+            "group": {"type": "string", "description": "单分组快捷字段。"},
+            "categories": {"type": "array", "items": {"type": "string"}, "description": "巡检分类编码列表。"},
+            "concurrency": {"type": "integer", "minimum": 1, "maximum": 20},
+            "batch_size": {"type": "integer", "minimum": 1, "maximum": 20},
+            "all_servers": {"type": "boolean"},
+            "skip_disabled": {"type": "boolean"},
+            "command_timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+            "run_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
+        },
+        "additionalProperties": False,
+    },
+)
+def preview_servers_batch(args: Dict[str, Any], ctx, db):
+    preview = _batch_preview(args or {})
+    preview["next_actions"] = [
+        {
+            "tool": "ops.inspection.run_servers_batch",
+            "arguments": {
+                "server_ids": preview.get("eligible_ids") or [],
+                "groups": preview.get("groups") or [],
+                "categories": preview.get("categories") or [],
+                "concurrency": (preview.get("execution_plan") or {}).get("concurrency"),
+                "batch_size": (preview.get("execution_plan") or {}).get("batch_size"),
+                "command_timeout_seconds": (preview.get("execution_plan") or {}).get("command_timeout_seconds"),
+                "run_timeout_seconds": (preview.get("execution_plan") or {}).get("run_timeout_seconds"),
+                "skip_disabled": preview.get("skip_disabled"),
+                "all_servers": preview.get("all_servers"),
+                "confirm_text": (preview.get("confirmation") or {}).get("confirm_text"),
+            },
+            "description": "用户确认后，用该中文确认短语执行批量巡检。",
+        }
+    ]
+    return preview
+
+
+@registry.register(
     name="ops.inspection.run_servers_batch",
     title="批量/按分组执行服务器巡检",
-    description="批量执行服务器巡检。支持按 server_ids / groups / group / all_servers 选择目标。AI/MCP token 不允许自动执行。groups 字段与 'ops.list_server_groups' 工具返回的 group 名称保持一致（区分大小写不敏感），可与 server_ids 同时传入合并。",
+    description="批量执行服务器巡检。执行前请先调用 ops.inspection.preview_servers_batch，使用返回的短中文确认短语。支持按 server_ids / groups / group / all_servers 选择目标。",
     scopes=["ops:read", "ops:write"],
     risk="high",
     category="inspection_execute",
@@ -422,7 +607,7 @@ def profile_retry_issues(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="sensitive",
     output_masking=True,
-    related_tools=["ops.list_servers", "ops.list_server_groups", "ops.inspection.run_server"],
+    related_tools=["ops.inspection.preview_servers_batch", "ops.list_servers", "ops.list_server_groups", "ops.inspection.run_server"],
     input_schema={
         "type": "object",
         "properties": {
@@ -436,31 +621,33 @@ def profile_retry_issues(args: Dict[str, Any], ctx, db):
             "command_timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
             "run_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
             "generate_report": {"type": "boolean"},
-            "confirm_text": {"type": "string", "description": "用户确认短语（例如 CONFIRM ops.inspection.run_servers_batch）"},
+            "confirm_text": {"type": "string", "description": "ops.inspection.preview_servers_batch 返回的短中文确认短语，例如 确认巡检 <fingerprint>。"},
         },
         "additionalProperties": False,
     },
 )
 def run_servers_batch(args: Dict[str, Any], ctx, db):
     from app.services.inspection_center import run_servers_batch_inspection as svc_run_batch
-    groups = args.get("groups") or []
-    if args.get("group") and not groups:
-        groups = [args.get("group")]
-    if not (args.get("server_ids") or groups or args.get("all_servers")):
-        return {"summary": "需要至少提供 server_ids / groups / all_servers 之一"}
-    return _inspection_followup(svc_run_batch(
+    args = args or {}
+    preview = _validate_batch_confirmation(args)
+    groups = preview.get("groups") or []
+    result = _inspection_followup(svc_run_batch(
         db,
-        server_ids=args.get("server_ids") or [],
-        categories=args.get("categories") or [],
+        server_ids=preview.get("eligible_ids") or [],
+        categories=preview.get("categories") or [],
         generate_report=bool(args.get("generate_report", False)),
         created_by=_actor(ctx),
-        concurrency=int(args.get("concurrency") or 4),
-        command_timeout_seconds=int(args.get("command_timeout_seconds") or 60),
-        run_timeout_seconds=int(args.get("run_timeout_seconds") or 600),
-        skip_disabled=bool(args.get("skip_disabled", True)),
-        all_servers=bool(args.get("all_servers", False)),
+        concurrency=(preview.get("execution_plan") or {}).get("concurrency"),
+        batch_size=(preview.get("execution_plan") or {}).get("batch_size"),
+        command_timeout_seconds=(preview.get("execution_plan") or {}).get("command_timeout_seconds"),
+        run_timeout_seconds=(preview.get("execution_plan") or {}).get("run_timeout_seconds"),
+        skip_disabled=bool(preview.get("skip_disabled", True)),
+        all_servers=False,
         groups=groups or None,
     ))
+    result["preview"] = preview
+    result["confirmation"] = preview.get("confirmation")
+    return result
 
 
 @registry.register(

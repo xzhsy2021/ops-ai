@@ -95,7 +95,12 @@ Content-Type: application/json
 
 ## Inspection Execution Example
 
-For MCP clients, use the MCP-safe alias:
+For grouped or large-batch inspection, preview first. The preview returns the
+resolved targets, skipped servers, batch plan, and a short Chinese confirmation
+phrase such as `确认巡检 <fingerprint>`. Use that exact phrase after the user
+approves the target list.
+
+Preview with the MCP-safe alias:
 
 ```json
 {
@@ -103,17 +108,18 @@ For MCP clients, use the MCP-safe alias:
   "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "ops_inspection_run_servers_batch",
+    "name": "ops_inspection_preview_servers_batch",
     "arguments": {
       "groups": ["crypto"],
       "categories": ["LOGIN_SECURITY", "ACCOUNT_SECURITY", "PROCESS_PORT", "DISK_USAGE", "BACKUP"],
-      "confirm_text": "CONFIRM ops.inspection.run_servers_batch"
+      "concurrency": 4,
+      "batch_size": 8
     }
   }
 }
 ```
 
-For HTTP Tool API, use the dotted backend name:
+Then execute with the returned `confirmation.confirm_text`:
 
 ```json
 {
@@ -121,7 +127,9 @@ For HTTP Tool API, use the dotted backend name:
   "arguments": {
     "groups": ["crypto"],
     "categories": ["LOGIN_SECURITY", "ACCOUNT_SECURITY", "PROCESS_PORT", "DISK_USAGE", "BACKUP"],
-    "confirm_text": "CONFIRM ops.inspection.run_servers_batch"
+    "concurrency": 4,
+    "batch_size": 8,
+    "confirm_text": "确认巡检 <fingerprint>"
   }
 }
 ```

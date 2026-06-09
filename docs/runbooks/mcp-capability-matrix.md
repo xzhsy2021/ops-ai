@@ -15,7 +15,7 @@ Naming rule:
 The default capability profile is no longer "read-only only".
 
 - Low-risk read tools are auto-callable when token scopes allow them.
-- Path A inspection execution (`ops.inspection.run_*`) is enabled for AI/MCP tool tokens only when `confirm_text` matches the backend confirmation phrase. High-risk calls are still taskized/audited.
+- Path A inspection execution (`ops.inspection.run_*`) is enabled for AI/MCP tool tokens only when `confirm_text` matches the backend confirmation phrase. For ad-hoc batch inspection, call `ops.inspection.preview_servers_batch` first and use its short Chinese phrase (`确认巡检 <fingerprint>`). High-risk calls are still taskized/audited.
 - Inspection profile execution (`ops.inspection.profile.run` and `ops.inspection.profile.retry_issues`) is preview-first and requires the returned `RUN <profile> <count> <fingerprint>` confirmation phrase.
 - Agent runtime tools (`ops.agent.*`) stay hidden unless `agent_runtime_enabled=true`.
 - Deploy execution, rollback, config write, server write, package cleanup, runtime cleanup, DB write/DML, and destructive deletes remain behind explicit capability gates, scopes, and confirmation.
@@ -67,7 +67,8 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 | `ops.inspection.toggle_item_config` | `ops_inspection_toggle_item_config` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.list_item_configs` | `ops.inspection.run_servers_batch` |
 | `ops.inspection.update_item_rules` | `ops_inspection_update_item_rules` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.get_item_config` | `ops.inspection.run_servers_batch` |
 | `ops.inspection.run_server` | `ops_inspection_run_server` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.list_servers`, exact `confirm_text` | `ops.inspection.get_run` |
-| `ops.inspection.run_servers_batch` | `ops_inspection_run_servers_batch` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.list_server_groups`, exact `confirm_text` | `ops.inspection.get_run` |
+| `ops.inspection.preview_servers_batch` | `ops_inspection_preview_servers_batch` | read / preview | `ops:read` | yes | no | low | group/server target | `ops.inspection.run_servers_batch` |
+| `ops.inspection.run_servers_batch` | `ops_inspection_run_servers_batch` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.inspection.preview_servers_batch`, exact `确认巡检 <fingerprint>` | `ops.inspection.get_run` |
 | `ops.inspection.run_project` | `ops_inspection_run_project` | execute | `ops:read`, `ops:write` | yes | no | high | project target, exact `confirm_text` | `ops.inspection.get_run` |
 | `ops.inspection.run_combined` | `ops_inspection_run_combined` | execute | `ops:read`, `ops:write` | yes | no | high | project target, exact `confirm_text` | `ops.inspection.get_run` |
 | `ops.inspection.list_runs` | `ops_inspection_list_runs` | read | `ops:read` | yes | no | low | - | `ops.inspection.get_run` |
@@ -83,17 +84,19 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 
 1. For routine grouped inspections, call `ops.inspection.profile.list`, choose a profile such as `crypto-test-daily`, then call `ops.inspection.profile.preview`.
 2. Ask the user for the returned confirmation phrase, then call `ops.inspection.profile.run` with `confirm_text`.
-3. For ad-hoc target checks, use `ops.list_server_groups`, `ops.list_servers(group="crypto")`, and `ops.inspection.list_item_configs(scope_type="SERVER")`, then call `ops.inspection.run_servers_batch` with exact `confirm_text`.
-4. `ops.inspection.get_run(run_id=...)` until `status` is `SUCCESS`, `PARTIAL_SUCCESS`, or `FAILED`.
-5. `ops.inspection.list_issues(run_id=...)` to triage HIGH / MEDIUM / LOW issues.
-6. `ops.inspection.generate_report(run_id=..., format="md")` to archive the report.
-7. After remediation, call `ops.inspection.profile.retry_issues` without `confirm_text` to preview only OPEN / PROCESSING issue servers, then rerun it with the returned `RUN <profile> <count> <fingerprint>` phrase.
+3. For ad-hoc target checks, use `ops.list_server_groups`, `ops.list_servers(group="crypto")`, and `ops.inspection.list_item_configs(scope_type="SERVER")`, then call `ops.inspection.preview_servers_batch`.
+4. Ask the user to approve the previewed target count, skipped servers, batch plan, and returned `确认巡检 <fingerprint>` phrase; call `ops.inspection.run_servers_batch` with that exact `confirm_text`.
+5. `ops.inspection.get_run(run_id=...)` until `status` is `SUCCESS`, `PARTIAL_SUCCESS`, or `FAILED`.
+6. `ops.inspection.list_issues(run_id=...)` to triage HIGH / MEDIUM / LOW issues.
+7. `ops.inspection.generate_report(run_id=..., format="md")` to archive the report.
+8. After remediation, call `ops.inspection.profile.retry_issues` without `confirm_text` to preview only OPEN / PROCESSING issue servers, then rerun it with the returned `RUN <profile> <count> <fingerprint>` phrase.
 
 Notes:
 
-- `ops.inspection.run_servers_batch` accepts `server_ids`, `groups`, `group`, and `all_servers`, then merges targets.
+- `ops.inspection.preview_servers_batch` accepts `server_ids`, `groups`, `group`, and `all_servers`, then merges targets and returns the exact short Chinese confirmation phrase for `ops.inspection.run_servers_batch`.
+- `ops.inspection.run_servers_batch` now requires the preview phrase so AI agents do not have to ask users to type a long tool-name string.
 - `ops.inspection.profile.retry_issues` keeps the selected profile categories and runtime knobs, but replaces targets with servers that still have OPEN / PROCESSING inspection issues.
-- UI one-click confirmation only changes the browser workflow. AI agents must keep using the preview-first MCP flow: read `confirmation.confirm_text` from `ops.inspection.profile.preview` or `ops.inspection.profile.retry_issues`, get explicit user approval, then pass that exact value as `confirm_text` to the execution call.
+- UI one-click confirmation only changes the browser workflow. AI agents must keep using the preview-first MCP flow: read `confirmation.confirm_text` from `ops.inspection.profile.preview`, `ops.inspection.profile.retry_issues`, or `ops.inspection.preview_servers_batch`; get explicit user approval; then pass that exact value as `confirm_text` to the execution call.
 - Category values must use full uppercase codes such as `LOGIN_SECURITY`, `ACCOUNT_SECURITY`, `PROCESS_PORT`, `DISK_USAGE`, and `BACKUP`.
 - Servers with `inspectable=false` or `status != online` are skipped by default; pass `skip_disabled=false` only when debugging.
 

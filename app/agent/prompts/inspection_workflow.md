@@ -51,21 +51,24 @@ admin 可以在 "AI 工具接入 → 概览与接入 → 能力开关" 调整，
 
 后端 default 中 `allow_ai_token_to_run_inspection_execute=True`：
 - tool-token 调 `ops.inspection.run_server` / `run_servers_batch` / `run_project` / `run_combined` 不再被 403 拍死
-- 2nd-layer `enforce_risk_policy` 仍会校验 `confirm_text`（必须传 `"CONFIRM ops.inspection.run_server"` 等匹配短语），不传会返回 428 CONFIRMATION_REQUIRED
+- 2nd-layer `enforce_risk_policy` 仍会校验 `confirm_text`。批量巡检必须先调 `ops.inspection.preview_servers_batch`，让用户确认返回的短中文短语（`确认巡检 <fingerprint>`），再传给 `ops.inspection.run_servers_batch`；不传会返回 428 CONFIRMATION_REQUIRED
 - 其他写工具（deploy execute / rollback / config_write / db_write / package_write / backup_restore）保持 admin-only，**不受本开关影响**
 
 调用模板（推荐 AI 端到端执行）：
 ```
 1. ops.list_server_groups → 取 group 列表
-2. ops.inspection.run_servers_batch(
+2. ops.inspection.preview_servers_batch(
      groups=["<group>"],
      categories=["ACCOUNT_SECURITY","DISK","PROCESS_PORT","SERVICE_STATUS"],
-     confirm_text="CONFIRM ops.inspection.run_servers_batch"
+     concurrency=4,
+     batch_size=8
    )
-3. ops.inspection.get_run(run_id=...) → 轮询到 SUCCESS
-4. ops.inspection.list_issues(run_id=...) → 拉问题
-5. ops.inspection.summarize_run(run_id=...) → FIRE 摘要
-6. ops.inspection.generate_report(run_id=...) → 落报告
+3. 向用户复述 preview 的目标数量、跳过数量、批次计划，并请用户确认 `确认巡检 <fingerprint>`
+4. ops.inspection.run_servers_batch(..., confirm_text="<preview.confirmation.confirm_text>")
+5. ops.inspection.get_run(run_id=...) → 轮询到 SUCCESS
+6. ops.inspection.list_issues(run_id=...) → 拉问题
+7. ops.inspection.summarize_run(run_id=...) → FIRE 摘要
+8. ops.inspection.generate_report(run_id=...) → 落报告
 ```
 
 ## ⚠️ Path Priority Policy (MANDATORY — DO NOT DEFAULT TO PATH B)
@@ -77,8 +80,8 @@ supplement Path A — never the other way around.
 
 | Priority | Path | Tools | When to use |
 |---|---|---|---|
-| **A — PRIMARY (default)** | **System inspection** (the system's own capability) | `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.summarize_run`, `ops.inspection.summarize_issues` | **Any** request mentioning 巡检 / inspect / 检查服务器 / 健康检查 / 批量巡检 / 系统巡检 / 合规检查. Path A creates `inspection_runs` + `inspection_reports` + `audit_logs` records and runs 9 built-in rule categories (ACCOUNT_SECURITY, DISK_USAGE, PROCESS_PORT, FIREWALL, LOGIN_SECURITY, COMMAND_HISTORY, MEMORY, SERVICE_STATUS, BACKUP). |
-| **B — FALLBACK (only when Path A is unavailable)** | **Single-shot SSH probes** (the ops individual capabilities) | `ops.check_disk`, `ops.check_process`, `ops.list_service_directory`, `ops.tail_service_log`, `ops.run_health_check` | **Only** when Path A errored / `ops.inspection.run_servers_batch` is blocked, or the user explicitly asks for an ad-hoc check on one specific metric. Path B does **not** create `inspection_runs`, cannot run batch rules, and is meant to supplement — not replace — Path A. |
+| **A — PRIMARY (default)** | **System inspection** (the system's own capability) | `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.summarize_run`, `ops.inspection.summarize_issues` | **Any** request mentioning 巡检 / inspect / 检查服务器 / 健康检查 / 批量巡检 / 系统巡检 / 合规检查. Path A creates `inspection_runs` + `inspection_reports` + `audit_logs` records and runs 9 built-in rule categories (ACCOUNT_SECURITY, DISK_USAGE, PROCESS_PORT, FIREWALL, LOGIN_SECURITY, COMMAND_HISTORY, MEMORY, SERVICE_STATUS, BACKUP). |
+| **B — FALLBACK (only when Path A is unavailable)** | **Single-shot SSH probes** (the ops individual capabilities) | `ops.check_disk`, `ops.check_process`, `ops.list_service_directory`, `ops.tail_service_log`, `ops.run_health_check` | **Only** when Path A errored / `ops.inspection.preview_servers_batch` or `ops.inspection.run_servers_batch` was blocked, or the user explicitly asks for an ad-hoc check on one specific metric. Path B does **not** create `inspection_runs`, cannot run batch rules, and is meant to supplement — not replace — Path A. |
 
 **When a user says "巡检" / "检查" / "inspect" / "健康检查":**
 
@@ -99,10 +102,12 @@ User asks: 巡检 / inspect / 检查 server
   ├─ Default: 走 Path A (系统的能力)
   │     Step 1: ops.list_server_groups (find target group)
   │     Step 2: ops.list_systems (find system name)
-  │     Step 3: ops.inspection.run_servers_batch (PRIMARY; may need human approval)
-  │     Step 4: ops.inspection.get_run / list_issues (collect findings)
-  │     Step 5: ops.inspection.generate_report (produce report)
-  │     Step 6: Summarize in FIRE structure for user
+  │     Step 3: ops.inspection.preview_servers_batch (resolve target count + short phrase)
+  │     Step 4: Ask user to approve `确认巡检 <fingerprint>`
+  │     Step 5: ops.inspection.run_servers_batch (PRIMARY; with preview confirm_text)
+  │     Step 6: ops.inspection.get_run / list_issues (collect findings)
+  │     Step 7: ops.inspection.generate_report (produce report)
+  │     Step 8: Summarize in FIRE structure for user
   │
   └─ Fallback to Path B (ops 单项能力 — 备用) ONLY if:
         • Path A errored / `ops.inspection.run_servers_batch` was blocked

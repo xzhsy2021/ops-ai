@@ -114,7 +114,11 @@ def test_inspection_path_a_run_tools_return_followup_metadata(monkeypatch):
 
     ctx = SimpleNamespace(username="tester", token_owner="")
     single = inspection_tools.run_server({"server_id": "server-a"}, ctx, object())
-    batch = inspection_tools.run_servers_batch({"server_ids": ["server-a", "server-b"]}, ctx, object())
+    batch_preview = inspection_tools.preview_servers_batch({"server_ids": ["server-a", "server-b"]}, ctx, object())
+    batch = inspection_tools.run_servers_batch({
+        "server_ids": ["server-a", "server-b"],
+        "confirm_text": batch_preview["confirmation"]["confirm_text"],
+    }, ctx, object())
 
     assert single["run_id"] == "run-server-1"
     assert single["status"] == "COMPLETED"
@@ -122,6 +126,7 @@ def test_inspection_path_a_run_tools_return_followup_metadata(monkeypatch):
     assert single["next_actions"][1]["tool"] == "ops.inspection.get_run_raw_output"
 
     assert batch["run_ids"] == ["run-a", "run-b"]
+    assert batch["confirmation"]["confirm_text"].startswith("确认巡检 ")
     assert batch["status"] == "PARTIAL"
     assert batch["next_actions"][0]["arguments"] == {"run_id": "run-a"}
 

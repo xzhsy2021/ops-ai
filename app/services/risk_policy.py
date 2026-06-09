@@ -26,6 +26,7 @@ RISK_LABELS = {
 DEFAULT_CONFIRMATION_REQUIRED_FROM = "medium"
 JOB_REQUIRED_FROM = "high"
 PROFILE_CONFIRMATION_TOOLS = {"ops.inspection.profile.run", "ops.inspection.profile.retry_issues"}
+BATCH_INSPECTION_CONFIRMATION_TOOLS = {"ops.inspection.run_servers_batch"}
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,14 @@ def expected_confirmation_text(tool_def, args: Dict[str, Any], db=None) -> str:
             if profile_id and expected_count is not None and fingerprint:
                 return f"RUN {profile_id} {expected_count} {fingerprint}"
             return f"RUN {profile_id or '<profile>'} <count> <fingerprint>"
+    if name in BATCH_INSPECTION_CONFIRMATION_TOOLS:
+        try:
+            from app.services.tool_adapters.inspection_tools import _batch_preview
+
+            confirmation = _batch_preview(args).get("confirmation") or {}
+            return str(confirmation.get("confirm_text") or "").strip() or "确认巡检 <fingerprint>"
+        except Exception:
+            return "确认巡检 <fingerprint>"
     return f"CONFIRM {name}"
 
 
@@ -178,6 +187,14 @@ def accepted_confirmation_texts(tool_def, args: Dict[str, Any], db=None) -> List
                 values.extend(confirmation.get("accepted_confirm_texts") or [])
             except Exception:
                 pass
+    if name in BATCH_INSPECTION_CONFIRMATION_TOOLS:
+        try:
+            from app.services.tool_adapters.inspection_tools import _batch_preview
+
+            confirmation = _batch_preview(args).get("confirmation") or {}
+            values.extend(confirmation.get("accepted_confirm_texts") or [])
+        except Exception:
+            pass
     result: List[str] = []
     seen = set()
     for value in values:

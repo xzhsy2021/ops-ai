@@ -143,10 +143,16 @@ export function useDeploymentStream() {
     }
   }, [])
 
-  const clearRun = useCallback((_nextStatus: string = '') => {
+  const clearRun = useCallback((nextStatus: string = '') => {
     stoppedRef.current = true
     disconnectSSE()
     stopPolling()
+    setTaskId('')
+    setDeploymentId('')
+    deploymentIdRef.current = ''
+    setLogs([])
+    setStatus(nextStatus)
+    setTaskDetails(null)
   }, [disconnectSSE, stopPolling])
 
   const startRun = useCallback(async (tid: string) => {

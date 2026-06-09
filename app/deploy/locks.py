@@ -27,8 +27,7 @@ def acquire_deployment_locks(req: DeployRequest, deployment_id: str, task_id: st
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     for key in keys:
         if not DeployLock.acquire(key):
-            for existing in acquired:
-                DeployLock.release(existing)
+            release_deployment_locks(acquired, db)
             raise HTTPException(status_code=409, detail=f"发布锁冲突: {key}")
         acquired.append(key)
         try:

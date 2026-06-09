@@ -17,7 +17,7 @@ from app.db.models import ToolPlan, ToolPlanEvent, Deployment
 
 
 PROD_ENVS = {"prod", "production", "online", "release", "live", "线上", "生产"}
-TERMINAL_DEPLOY_STATUSES = {"success", "failed", "canceled", "cancelled"}
+TERMINAL_DEPLOY_STATUSES = {"success", "failed", "partial_failed", "canceled", "cancelled"}
 
 
 def _dt(value: Any) -> Optional[str]:

@@ -19,6 +19,8 @@ from app.deploy.logs import deployment_logs_payload, deployment_tasks_payload
 from app.deploy.preflight import plan_precheck_payload
 from app.deploy.tool_response import tool_result
 from app.deploy.schemas import DeployRequest
+from app.deploy.locks import acquire_deployment_locks, release_deployment_locks
+from app.deploy.state import normalize_status
 from app.api.deploy._shared import (
     _build_confirmation,
     _deploy_confirm_text,
@@ -478,8 +480,9 @@ def execute_deploy_plan(args, ctx, db):
     db.commit()
     task_id = uuid.uuid4().hex[:12]
     try:
-        keys = _acquire_locks(_lock_keys(req.system, req.service, req.environment, req.servers))
+        keys = acquire_deployment_locks(req, deployment.id, task_id, ctx.username or ctx.token_owner or "", db)
     except HTTPException:
+        DeploymentRepository(db).update_status(deployment.id, "failed", "Failed to acquire deployment locks")
         raise
     except Exception:
         DeploymentRepository(db).update_status(deployment.id, "failed", "Failed to acquire deployment locks")
@@ -488,8 +491,7 @@ def execute_deploy_plan(args, ctx, db):
     try:
         DeployTaskRepository(db).create(deployment_id=deployment.id, task_id=task_id, payload_json=json.dumps(task_payload, ensure_ascii=False), lock_key=",".join(keys))
     except Exception:
-        for key in keys:
-            DeployLock.release(key)
+        release_deployment_locks(keys, db)
         DeploymentRepository(db).update_status(deployment.id, "failed", "Failed to create deployment task")
         raise
     plan.status = "executed"
@@ -521,10 +523,17 @@ def execute_deploy_plan(args, ctx, db):
     },
 )
 def cancel_deployment(args, ctx, db):
-    tasks = DeployTaskRepository(db).list_by_deployment(args.get("deployment_id"))
+    deployment_id = args.get("deployment_id")
+    tasks = DeployTaskRepository(db).list_by_deployment(deployment_id)
     for task in tasks:
         DeployTaskRepository(db).request_cancel(task.id)
-    return {"deployment_id": args.get("deployment_id"), "cancel_requested": len(tasks), "task_ids": [t.id for t in tasks]}
+        if normalize_status(task.status) == "pending":
+            DeployTaskRepository(db).update_status(task.id, "canceled", result="Canceled before worker start")
+            lock_keys = [x for x in str(getattr(task, "lock_key", "") or "").split(",") if x]
+            release_deployment_locks(lock_keys, db)
+    if tasks:
+        DeploymentRepository(db).update_status(deployment_id, "canceled", "Cancel requested")
+    return {"deployment_id": deployment_id, "cancel_requested": len(tasks), "task_ids": [t.id for t in tasks]}
 
 
 @registry.register(

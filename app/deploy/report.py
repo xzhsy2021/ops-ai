@@ -20,6 +20,8 @@ def _lower_text(value: Any) -> str:
 
 def _is_bad_status(value: Any) -> bool:
     text = _lower_text(value)
+    if text == "partial_failed":
+        return True
     return text in {"failed", "error", "cancelled", "canceled", "timeout"} or "失败" in text or "异常" in text
 
 
@@ -88,8 +90,9 @@ def _analyze_failure(deployment: Any, logs: List[Any], server_tasks: List[Any], 
     suggestions = suggestions[:5]
 
     status = getattr(deployment, "status", "") or ""
+    bad_deployment_status = _is_bad_status(status)
     summary_text = "发布成功，未发现失败步骤。"
-    if status in {"failed", "cancelled", "canceled"} or failed_servers or failed_steps or error_logs:
+    if bad_deployment_status or failed_servers or failed_steps or error_logs:
         server_names = [x.get("server_name") for x in failed_servers if x.get("server_name") and x.get("server_name") != "-"]
         step_names = [x.get("step_name") for x in failed_steps if x.get("step_name") and x.get("step_name") != "-"]
         bits = []
@@ -102,7 +105,7 @@ def _analyze_failure(deployment: Any, logs: List[Any], server_tasks: List[Any], 
         summary_text = "；".join(bits) or (getattr(deployment, "message", "") or "发布失败，建议查看错误日志。")
 
     return {
-        "status": "failed" if failed_servers or failed_steps or error_logs or status in {"failed", "cancelled", "canceled"} else "ok",
+        "status": "failed" if failed_servers or failed_steps or error_logs or bad_deployment_status else "ok",
         "summary_text": summary_text,
         "failed_servers": failed_servers[:20],
         "failed_steps": failed_steps[:30],

@@ -48,5 +48,22 @@ def test_deploy_frontend_treats_partial_failed_as_terminal_status():
 
     assert "partial_failed" in polling
     assert "partial_failed" in stream
+
+
+def test_deploy_stream_reset_clears_visible_run_state():
+    stream = open("frontend/src/pages/deploy/useDeploymentStream.ts", encoding="utf-8").read()
+
+    assert "setTaskId('')" in stream
+    assert "setDeploymentId('')" in stream
+    assert "deploymentIdRef.current = ''" in stream
+    assert "setLogs([])" in stream
+    assert "setStatus(nextStatus)" in stream
+    assert "setTaskDetails(null)" in stream
+
+
+def test_deploy_frontend_partial_failed_labels_are_localized():
+    panel = open("frontend/src/pages/deploy/DeploymentRunPanel.tsx", encoding="utf-8").read()
+    history = open("frontend/src/pages/deploy/DeploymentHistoryTable.tsx", encoding="utf-8").read()
+
     assert "部分失败" in panel
     assert "部分失败" in history

@@ -908,6 +908,214 @@ def test_execute_deploy_plan_rejects_invalid_saved_payload(sqlite_session):
     assert exc_info.value.detail == "Invalid deployment task payload: request must be an object"
 
 
+def test_deployment_lock_records_released_when_later_lock_acquire_fails(sqlite_session):
+    from fastapi import HTTPException
+    from app.core.deploy_lock import DeployLock
+    from app.db.models import DeploymentLockRecord
+    from app.deploy.locks import acquire_deployment_locks
+    from app.deploy.schemas import DeployRequest
+
+    db, _ = sqlite_session
+    DeployLock.clear_all()
+    req = DeployRequest(
+        system="ops",
+        service="api",
+        environment="test",
+        file_name="pkg.tar.gz",
+        servers=["s1", "s2"],
+    )
+    assert DeployLock.acquire("ops:api:test:server:s2") is True
+
+    try:
+        with pytest.raises(HTTPException):
+            acquire_deployment_locks(req, "dep-lock-fail", "task-lock-fail", "tester", db)
+
+        records = db.query(DeploymentLockRecord).filter(
+            DeploymentLockRecord.task_id == "task-lock-fail"
+        ).all()
+        assert records
+        assert all(record.status == "released" for record in records)
+        assert not DeployLock.is_locked("ops:api:test")
+        assert not DeployLock.is_locked("ops:api:test:server:s1")
+    finally:
+        DeployLock.release("ops:api:test:server:s2")
+        DeployLock.clear_all()
+
+
+def test_deployment_report_treats_partial_failed_as_actionable(sqlite_session):
+    from app.db import DeploymentRepository
+    from app.deploy.report import deployment_report_payload
+
+    db, _ = sqlite_session
+    deployment = DeploymentRepository(db).create(
+        system="ops",
+        service="api",
+        environment="test",
+        servers="s1,s2",
+        status="partial_failed",
+    )
+
+    payload = deployment_report_payload(deployment.id, db)
+
+    assert payload["failure_analysis"]["status"] == "failed"
+    assert payload["summary_text"] == payload["failure_analysis"]["summary_text"]
+    assert not payload["summary_text"].startswith("发布partial_failed")
+
+
+def test_mcp_execute_deploy_plan_marks_deployment_failed_when_lock_conflicts(monkeypatch, sqlite_session):
+    from fastapi import HTTPException
+    from app.db import DeploymentRepository
+    from app.db.models import ToolPlan
+    from app.services.tool_adapters import deploy_tools
+
+    db, _ = sqlite_session
+    plan = ToolPlan(
+        plan_type="deploy",
+        status="ready",
+        created_by="tester",
+        source_tool="ops.create_deploy_plan",
+        system="ops",
+        service="api",
+        environment="test",
+        servers=["local"],
+        package_name="pkg.tar.gz",
+        payload={
+            "request": {
+                "system": "ops",
+                "service": "api",
+                "environment": "test",
+                "file_name": "pkg.tar.gz",
+                "servers": ["local"],
+            },
+            "steps": [],
+        },
+        confirmation={},
+        precheck={"ok": True},
+        risk_level="medium",
+        confirm_text="CONFIRM",
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+
+    ctx = types.SimpleNamespace(
+        role="admin",
+        is_admin=True,
+        can_deploy=True,
+        allow_write=True,
+        allow_prod=False,
+        username="tester",
+        token_owner="tester",
+    )
+    monkeypatch.setattr(deploy_tools, "_precheck_with_runtime_guards", lambda plan, confirmation: {"ok": True})
+    monkeypatch.setattr(deploy_tools, "require_deploy_for_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        deploy_tools,
+        "acquire_deployment_locks",
+        lambda *args, **kwargs: (_ for _ in ()).throw(HTTPException(status_code=409, detail="lock conflict")),
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        deploy_tools.execute_deploy_plan({"plan_id": plan.id, "confirm_text": "CONFIRM"}, ctx, db)
+
+    assert exc_info.value.status_code == 409
+    deployments = DeploymentRepository(db).list_all(limit=5)
+    assert len(deployments) == 1
+    assert deployments[0].status == "failed"
+    assert deployments[0].message == "Failed to acquire deployment locks"
+
+
+def test_mcp_execute_deploy_plan_persists_deployment_lock_records(monkeypatch, sqlite_session):
+    from app.core.deploy_lock import DeployLock
+    from app.db.models import DeploymentLockRecord, ToolPlan
+    from app.services.tool_adapters import deploy_tools
+
+    db, _ = sqlite_session
+    DeployLock.clear_all()
+    plan = ToolPlan(
+        plan_type="deploy",
+        status="ready",
+        created_by="tester",
+        source_tool="ops.create_deploy_plan",
+        system="ops",
+        service="api",
+        environment="test",
+        servers=["local"],
+        package_name="pkg.tar.gz",
+        payload={
+            "request": {
+                "system": "ops",
+                "service": "api",
+                "environment": "test",
+                "file_name": "pkg.tar.gz",
+                "servers": ["local"],
+            },
+            "steps": [],
+        },
+        confirmation={},
+        precheck={"ok": True},
+        risk_level="medium",
+        confirm_text="CONFIRM",
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+
+    ctx = types.SimpleNamespace(
+        role="admin",
+        is_admin=True,
+        can_deploy=True,
+        allow_write=True,
+        allow_prod=False,
+        username="tester",
+        token_owner="tester",
+    )
+    monkeypatch.setattr(deploy_tools, "_precheck_with_runtime_guards", lambda plan, confirmation: {"ok": True})
+    monkeypatch.setattr(deploy_tools, "require_deploy_for_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(deploy_tools, "ensure_deploy_worker_running", lambda: None)
+
+    try:
+        result = deploy_tools.execute_deploy_plan({"plan_id": plan.id, "confirm_text": "CONFIRM"}, ctx, db)
+
+        records = db.query(DeploymentLockRecord).filter(DeploymentLockRecord.task_id == result["task_id"]).all()
+        assert {record.lock_key for record in records} == {"ops:api:test", "ops:api:test:server:local"}
+        assert all(record.status == "locked" for record in records)
+    finally:
+        DeployLock.clear_all()
+
+
+def test_mcp_cancel_deployment_cancels_pending_tasks_and_releases_locks(sqlite_session):
+    from app.core.deploy_lock import DeployLock
+    from app.db import DeployTaskRepository, DeploymentRepository
+    from app.services.tool_adapters import deploy_tools
+
+    db, _ = sqlite_session
+    DeployLock.clear_all()
+    deployment = DeploymentRepository(db).create(system="ops", service="api", servers="local", status="pending")
+    lock_key = "ops:api:test"
+    assert DeployLock.acquire(lock_key) is True
+    task = DeployTaskRepository(db).create(
+        deployment_id=deployment.id,
+        task_id="task-mcp-cancel",
+        payload_json="{}",
+        lock_key=lock_key,
+    )
+
+    try:
+        result = deploy_tools.cancel_deployment({"deployment_id": deployment.id}, types.SimpleNamespace(), db)
+
+        db.expire_all()
+        deployment = DeploymentRepository(db).get_by_id(deployment.id)
+        task = DeployTaskRepository(db).get_by_id(task.id)
+        assert result["cancel_requested"] == 1
+        assert deployment.status == "canceled"
+        assert task.status == "canceled"
+        assert not DeployLock.is_locked(lock_key)
+    finally:
+        DeployLock.clear_all()
+
+
 def test_pipeline_deployment_is_failed_when_lock_acquire_raises(monkeypatch, sqlite_session):
     import asyncio
     import json

@@ -231,6 +231,7 @@ export const files = {
   updatePackageRetention: (data: any) => api.put('/files/packages/retention', data),
   previewPackageCleanup: (data?: any) => api.post('/files/packages/cleanup/preview', data || {}),
   cleanupPackages: (data?: any) => api.post('/files/packages/cleanup', data || {}),
+  deletePackage: (packageName: string) => api.delete(`/files/packages/${encodeURIComponent(packageName)}`),
   protectPackage: (packageName: string, protectedValue: boolean) => api.post(`/files/packages/${encodeURIComponent(packageName)}/protect`, { protected: protectedValue }),
 }
 

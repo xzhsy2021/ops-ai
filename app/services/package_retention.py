@@ -115,6 +115,17 @@ def package_path(name: str) -> str:
     return os.path.join(_upload_dir(), safe_package_name(name))
 
 
+def _deletable_package_path(row: DeployPackage, name: str) -> str:
+    stored = os.path.abspath(row.file_path or package_path(name))
+    upload_dir = os.path.abspath(_upload_dir())
+    try:
+        if os.path.commonpath([upload_dir, stored]) == upload_dir:
+            return stored
+    except ValueError:
+        pass
+    return package_path(name)
+
+
 def sha256_file(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -637,7 +648,7 @@ def cleanup_packages(db: Session, policy: Dict[str, Any] | None = None, *, dry_r
             row = db.query(DeployPackage).filter(DeployPackage.package_name == name).first()
             if not row:
                 continue
-            path = row.file_path or package_path(name)
+            path = _deletable_package_path(row, name)
             try:
                 if os.path.isfile(path):
                     os.remove(path)
@@ -649,3 +660,43 @@ def cleanup_packages(db: Session, policy: Dict[str, Any] | None = None, *, dry_r
                 errors.append({"package_name": name, "error": str(exc)})
         db.commit()
     return {**preview, "dry_run": dry_run, "removed": removed, "errors": errors}
+
+
+def delete_package(db: Session, package_name: str, *, actor: str = "") -> Dict[str, Any]:
+    """Delete one File Center package and mark its metadata as removed."""
+    name = safe_package_name(package_name)
+    row = db.query(DeployPackage).filter(
+        DeployPackage.package_name == name,
+        DeployPackage.deleted == False,  # noqa: E712
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    protected = _protected_names_from_deployments(db, get_package_retention_policy(db))
+    reasons: List[str] = []
+    if row.protected:
+        reasons.append("manual protected")
+    reasons.extend(protected.get(name, []))
+    if reasons:
+        raise HTTPException(status_code=409, detail={"message": "Package is protected; unprotect or clear references before deleting", "reasons": reasons[:8]})
+
+    path = _deletable_package_path(row, name)
+    existed = os.path.isfile(path)
+    size_bytes = int(row.size_bytes or 0)
+    try:
+        if existed:
+            os.remove(path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete package file: {exc}") from exc
+
+    row.deleted = True
+    row.deleted_at = _now()
+    row.delete_reason = f"manual_delete by {actor or 'unknown'}"
+    db.commit()
+    return {
+        "package_name": name,
+        "deleted": True,
+        "file_deleted": existed,
+        "size_bytes": size_bytes,
+        "delete_reason": row.delete_reason,
+    }

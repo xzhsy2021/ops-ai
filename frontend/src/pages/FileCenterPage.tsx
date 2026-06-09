@@ -21,6 +21,8 @@ export default function FileCenterPage() {
   const [cleanupPreview, setCleanupPreview] = useState<any>(null)
   const [cleanupBusy, setCleanupBusy] = useState(false)
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
+  const [deletePackageCandidate, setDeletePackageCandidate] = useState<any | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadPackages = () => {
@@ -119,6 +121,25 @@ export default function FileCenterPage() {
     }
   }
 
+  const confirmDeletePackage = async () => {
+    if (!deletePackageCandidate) return
+    const name = deletePackageCandidate.package_name || deletePackageCandidate.name
+    setDeleteBusy(true)
+    setUploadMsg('')
+    try {
+      const res: any = await files.deletePackage(name)
+      const size = res.data?.size_bytes ? `${(Number(res.data.size_bytes) / 1024 / 1024).toFixed(2)} MB` : ''
+      setUploadMsg(`文件包已删除: ${name}${size ? ` (${size})` : ''}`)
+      setDeletePackageCandidate(null)
+      loadPackages()
+    } catch (e: any) {
+      const reason = typeof e === 'string' ? e : e?.message || e
+      setUploadMsg('删除文件包失败: ' + reason)
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
   return (
     <div style={{ display: 'grid', gap: '20px' }}>
       <PageHeader title="文件中心" description="管理 OPS 本地发布包上传、校验、MCP 上传入口和清理策略；远程文件操作请进入服务器详情的文件功能。" />
@@ -154,7 +175,7 @@ export default function FileCenterPage() {
               <div style={{ maxHeight: '560px', overflow: 'auto', marginTop: '16px' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead><tr style={{ borderBottom: '1px solid var(--border-strong)', textAlign: 'left' }}>
-                    <th style={{ padding: '8px 6px' }}>文件名</th><th style={{ padding: '8px 6px' }}>大小</th><th style={{ padding: '8px 6px' }}>服务/版本</th><th style={{ padding: '8px 6px' }}>使用</th><th style={{ padding: '8px 6px' }}>保护</th><th style={{ padding: '8px 6px' }}>SHA256</th>
+                    <th style={{ padding: '8px 6px' }}>文件名</th><th style={{ padding: '8px 6px' }}>大小</th><th style={{ padding: '8px 6px' }}>服务/版本</th><th style={{ padding: '8px 6px' }}>使用</th><th style={{ padding: '8px 6px' }}>保护</th><th style={{ padding: '8px 6px' }}>SHA256</th><th style={{ padding: '8px 6px' }}>操作</th>
                   </tr></thead>
                   <tbody>{packages.map((p) => {
                     const protectedReasons = p.retention?.reasons || []
@@ -166,9 +187,22 @@ export default function FileCenterPage() {
                       <td style={{ padding: '8px 6px', minWidth: 160 }}>
                         <span style={{ color: protectedReasons.length ? 'var(--success)' : 'var(--text-muted)' }}>{protectedReasons.length ? '已保护' : '可按规则清理'}</span>
                         {protectedReasons.length > 0 && <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>{protectedReasons.slice(0, 2).join('；')}</div>}
-                        <button className="btn" onClick={() => toggleProtect(p)} style={{ marginTop: 4, padding: '2px 8px', fontSize: 12 }}>{p.protected ? '取消手动保护' : '手动保护'}</button>
                       </td>
                       <td style={{ padding: '8px 6px' }}>{checksums[p.name] ? <span style={{ fontSize: '11px', fontFamily: 'monospace', color: checksums[p.name] === '计算失败' ? 'var(--danger)' : 'var(--success)', wordBreak: 'break-all' }}>{checksums[p.name]}</span> : p.sha256 ? <span style={{ fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-muted)', wordBreak: 'break-all' }}>{String(p.sha256).slice(0, 12)}...</span> : <button className="btn" onClick={() => calcChecksum(p.name)} disabled={checking[p.name]} style={{ padding: '2px 8px', fontSize: '12px' }}>{checking[p.name] ? '...' : '校验'}</button>}</td>
+                      <td style={{ padding: '8px 6px', minWidth: 120 }}>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button className="btn" onClick={() => toggleProtect(p)} style={{ padding: '2px 8px', fontSize: 12 }}>{p.protected ? '取消保护' : '保护'}</button>
+                          <button
+                            className="btn btn-danger"
+                            onClick={() => setDeletePackageCandidate(p)}
+                            disabled={protectedReasons.length > 0}
+                            title={protectedReasons.length > 0 ? '该包仍受保护，需先取消手动保护或解除引用后再删除' : '手动删除文件包'}
+                            style={{ padding: '2px 8px', fontSize: 12 }}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   })}</tbody>
                 </table>
@@ -247,7 +281,24 @@ export default function FileCenterPage() {
         onCancel={() => setCleanupConfirmOpen(false)}
         onConfirm={runCleanup}
       />
+      <ConfirmDialog
+        open={!!deletePackageCandidate}
+        title="确认删除文件包"
+        description="将从文件中心手动删除该发布包文件，并把元数据标记为已删除；已受保护的包需要先取消保护。"
+        confirmLabel={deleteBusy ? '删除中...' : '确认删除'}
+        danger
+        onCancel={() => setDeletePackageCandidate(null)}
+        onConfirm={confirmDeletePackage}
+      >
+        {deletePackageCandidate && (
+          <div style={{ display: 'grid', gap: 6, fontSize: 13 }}>
+            <div>文件包：<code>{deletePackageCandidate.package_name || deletePackageCandidate.name}</code></div>
+            <div>大小：{deletePackageCandidate.size_mb ?? '-'} MB</div>
+            <div>使用次数：{deletePackageCandidate.used_count || 0}</div>
+            <div>最后使用：{deletePackageCandidate.last_used_at?.slice(0, 16) || '未使用'}</div>
+          </div>
+        )}
+      </ConfirmDialog>
     </div>
   )
 }
-

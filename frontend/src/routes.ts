@@ -11,7 +11,6 @@ import {
   PlugZap,
   Rocket,
   ServerCog,
-  Stethoscope,
   ShieldCheck,
   Wrench,
 } from 'lucide-react'
@@ -63,8 +62,7 @@ export const NAV_LINKS: NavItem[] = [
   { path: ROUTES.systems, label: '配置中心', icon: Files, desc: '当前项目、服务、环境与分组配置', minRole: 'admin' },
   { path: ROUTES.deploy, label: '发布', icon: Rocket, desc: '发布预检与部署日志' },
   { path: ROUTES.tasks, label: '任务', icon: ListChecks, desc: '平台任务与执行状态' },
-  { path: ROUTES.system, label: '状态诊断', icon: HeartPulse, desc: '平台状态、安装诊断与健康检查' },
-  { path: ROUTES.diagnostics, label: '诊断', icon: Stethoscope, desc: '安装自检与问题排查' },
+  { path: ROUTES.system, label: '状态诊断', icon: HeartPulse, desc: '平台状态、安装自检与问题排查' },
   { path: ROUTES.inspection, label: '巡检中心', icon: ShieldCheck, desc: '单项目轻量巡检、台账与报告' },
   { path: ROUTES.servers, label: '服务器', icon: ServerCog, desc: '资产、终端与文件' },
   { path: ROUTES.files, label: '文件', icon: Files, desc: '本地发布包管理' },

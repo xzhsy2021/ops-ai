@@ -1235,6 +1235,19 @@ async def cleanup_package_api(payload: Dict[str, Any] | None = None, request: Re
     return api_response(data=result, message="Package cleanup completed" if not result.get("dry_run") else "Package cleanup preview completed")
 
 
+@resource_v2_router.delete("/files/packages/{package_name:path}")
+async def delete_package_api(package_name: str, request: Request = None, db: Session = Depends(get_db)):
+    from app.core.auth_v2 import require_auth
+    from app.services.package_retention import safe_package_name, delete_package
+    user = require_auth(request, db)
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+    name = safe_package_name(package_name)
+    result = delete_package(db, name, actor=getattr(request.state, "username", ""))
+    audit("package.delete", "file", name, f"manual=true file_deleted={result.get('file_deleted')}")
+    return api_response(data=result, message="Package deleted")
+
+
 @resource_v2_router.post("/files/packages/{package_name:path}/protect")
 async def protect_package_api(package_name: str, payload: Dict[str, Any] | None = None, request: Request = None, db: Session = Depends(get_db)):
     from app.core.auth_v2 import require_auth

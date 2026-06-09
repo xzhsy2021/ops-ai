@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import OverviewTab from '../components/server-workbench/OverviewTab'
 import FilesTab from '../components/server-workbench/FilesTab'
 import { serverWorkbench } from '../api'
+import { ConfirmDialog } from '../components/ui'
 
 type Tab = 'overview' | 'terminal' | 'files' | 'history'
 
@@ -20,18 +21,26 @@ function ExecHistoryTab({ name }: { name: string }) {
   const [loading, setLoading] = useState(true)
   const [total, setTotal] = useState(0)
   const [riskFilter, setRiskFilter] = useState('')
+  const [historyOffset, setHistoryOffset] = useState(0)
+  const [historyPageSize, setHistoryPageSize] = useState(50)
+  const [selectedLogIds, setSelectedLogIds] = useState<string[]>([])
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
 
-  const load = async () => {
+  const load = async (nextOffset = historyOffset, nextPageSize = historyPageSize) => {
     setLoading(true)
     try {
-      const res: any = await serverWorkbench.execHistory(name, 50, 0, riskFilter || undefined)
-      setEntries(res.data?.entries || [])
+      const res: any = await serverWorkbench.execHistory(name, nextPageSize, nextOffset, riskFilter || undefined)
+      const nextEntries = res.data?.entries || []
+      setEntries(nextEntries)
       setTotal(res.data?.total || 0)
+      const visibleIds = new Set(nextEntries.map((item: any) => String(item.id || '')).filter(Boolean))
+      setSelectedLogIds((prev) => prev.filter((id) => visibleIds.has(id)))
     } catch { }
     setLoading(false)
   }
 
-  useEffect(() => { load() }, [name, riskFilter])
+  useEffect(() => { load() }, [name, riskFilter, historyOffset, historyPageSize])
 
   const riskBadge = (level: string) => {
     if (level === 'blocked') return 'exec-risk-badge exec-risk-badge--blocked'
@@ -39,17 +48,47 @@ function ExecHistoryTab({ name }: { name: string }) {
     return 'exec-risk-badge exec-risk-badge--safe'
   }
 
+  const logPageIds = entries.map((item: any) => String(item.id || '')).filter(Boolean)
+  const allLogsSelected = logPageIds.length > 0 && logPageIds.every((id) => selectedLogIds.includes(id))
+  const historyPage = Math.floor(historyOffset / historyPageSize) + 1
+  const historyPages = Math.max(1, Math.ceil(total / historyPageSize))
+
+  const toggleLogSelection = (id: string, checked: boolean) => {
+    setSelectedLogIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((item) => item !== id))
+  }
+
+  const deleteSelectedLogs = async (ids: string[]) => {
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)))
+    if (uniqueIds.length === 0) return
+    try {
+      await serverWorkbench.deleteExecHistories({ log_ids: uniqueIds })
+      setSelectedLogIds([])
+      setDeleteTarget(null)
+      setBatchDeleteOpen(false)
+      const remaining = Math.max(0, total - uniqueIds.length)
+      const maxOffset = Math.max(0, Math.floor(Math.max(remaining - 1, 0) / historyPageSize) * historyPageSize)
+      const nextOffset = Math.min(historyOffset, maxOffset)
+      if (nextOffset !== historyOffset) setHistoryOffset(nextOffset)
+      else await load(nextOffset, historyPageSize)
+    } catch { }
+  }
+
   return (
     <div style={{ display: 'grid', gap: '16px' }}>
       <div className="exec-history-toolbar">
-        <span className="exec-history-count">命令执行历史 ({total})</span>
-        <select value={riskFilter} onChange={(e) => setRiskFilter(e.target.value)} className="exec-history-select">
+        <span className="exec-history-count">命令执行历史 ({total}) - 第 {historyPage}/{historyPages} 页</span>
+        <label className="exec-history-count"><input type="checkbox" checked={allLogsSelected} disabled={logPageIds.length === 0} onChange={(e) => setSelectedLogIds(e.target.checked ? logPageIds : [])} /> 选择本页</label>
+        <select value={riskFilter} onChange={(e) => { setRiskFilter(e.target.value); setHistoryOffset(0); setSelectedLogIds([]) }} className="exec-history-select">
           <option value="">全部</option>
           <option value="safe">安全</option>
           <option value="dangerous">危险</option>
           <option value="blocked">已拦截</option>
         </select>
-        <button className="btn btn-sm" onClick={load}>刷新</button>
+        <select value={historyPageSize} onChange={(e) => { setHistoryPageSize(Number(e.target.value)); setHistoryOffset(0); setSelectedLogIds([]) }} className="exec-history-select">
+          {[20, 50, 100].map((size) => <option key={size} value={size}>{size} 条/页</option>)}
+        </select>
+        <button className="btn btn-danger btn-sm" disabled={selectedLogIds.length === 0} onClick={() => setBatchDeleteOpen(true)}>批量删除 ({selectedLogIds.length})</button>
+        <button className="btn btn-sm" onClick={() => load()}>刷新</button>
       </div>
       <div className="card" style={{ padding: 0, overflow: 'auto' }}>
         {loading ? (
@@ -58,12 +97,14 @@ function ExecHistoryTab({ name }: { name: string }) {
           <table className="exec-history-table">
             <thead>
               <tr>
-                <th>时间</th><th>用户</th><th>命令</th><th>退出码</th><th>耗时</th><th>风险</th>
+                <th><input type="checkbox" checked={allLogsSelected} disabled={logPageIds.length === 0} onChange={(e) => setSelectedLogIds(e.target.checked ? logPageIds : [])} /></th>
+                <th>时间</th><th>用户</th><th>命令</th><th>退出码</th><th>耗时</th><th>风险</th><th>操作</th>
               </tr>
             </thead>
             <tbody>
               {entries.map((e: any) => (
                 <tr key={e.id} className="exec-history-row">
+                  <td><input type="checkbox" checked={selectedLogIds.includes(String(e.id))} onChange={(event) => toggleLogSelection(String(e.id), event.target.checked)} /></td>
                   <td className="exec-history-time">
                     {e.created_at ? new Date(e.created_at).toLocaleString() : '-'}
                   </td>
@@ -80,15 +121,43 @@ function ExecHistoryTab({ name }: { name: string }) {
                   <td>
                     <span className={riskBadge(e.risk_level)}>{e.risk_level}</span>
                   </td>
+                  <td>
+                    <button className="btn btn-danger btn-sm" onClick={() => setDeleteTarget(e)}>删除</button>
+                  </td>
                 </tr>
               ))}
               {entries.length === 0 && (
-                <tr><td colSpan={6} className="exec-history-empty">暂无执行记录</td></tr>
+                <tr><td colSpan={8} className="exec-history-empty">暂无执行记录</td></tr>
               )}
             </tbody>
           </table>
         )}
       </div>
+      <div className="pagination-footer">
+        <span className="pagination-page">显示 {total === 0 ? 0 : historyOffset + 1}-{Math.min(historyOffset + historyPageSize, total)} / {total}</span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="pagination-btn" disabled={historyOffset === 0} onClick={() => setHistoryOffset(Math.max(0, historyOffset - historyPageSize))}>上一页</button>
+          <button className="pagination-btn" disabled={historyOffset + historyPageSize >= total} onClick={() => setHistoryOffset(historyOffset + historyPageSize)}>下一页</button>
+        </div>
+      </div>
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="删除命令执行历史"
+        description={`确认删除 ${deleteTarget?.server_name || name} 的这条命令历史？只删除审计展示记录，不影响服务器状态。`}
+        confirmLabel="删除"
+        danger
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => deleteSelectedLogs([String(deleteTarget?.id || '')])}
+      />
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        title="批量删除命令执行历史"
+        description={`确认删除选中的 ${selectedLogIds.length} 条命令执行历史？只删除审计展示记录，不影响服务器状态。`}
+        confirmLabel="批量删除"
+        danger
+        onCancel={() => setBatchDeleteOpen(false)}
+        onConfirm={() => deleteSelectedLogs(selectedLogIds)}
+      />
     </div>
   )
 }

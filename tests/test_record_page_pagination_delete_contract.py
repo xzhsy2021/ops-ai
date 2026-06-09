@@ -169,6 +169,96 @@ def test_tool_record_cleanup_rejects_active_plans_without_force(sqlite_session):
     assert db.query(ToolPlan).filter_by(id="plan_active").count() == 1
 
 
+def test_dml_execution_history_supports_offset_pagination_and_batch_delete(sqlite_session):
+    from app.db.models import DmlExecutionLog
+    from app.services.db_query_export import DbQueryExportService
+
+    db = sqlite_session
+    created = _now()
+    for idx in range(3):
+        db.add(DmlExecutionLog(
+            id=f"dml_{idx}",
+            preview_id=f"preview_{idx}",
+            source="local_ops_db",
+            connection_id="",
+            connection_name="local_ops_db",
+            database_name="ops",
+            statement_type="UPDATE",
+            table_name="report_artifacts",
+            history_sql=f"UPDATE report_artifacts SET status = 'archived' WHERE id = '{idx}'",
+            affected_rows=1,
+            risk_level="high",
+            status="success",
+            reason="contract test",
+            operator="alice",
+            created_at=created - timedelta(minutes=idx),
+        ))
+    db.commit()
+
+    svc = DbQueryExportService(db)
+    page = svc.list_dml_executions(limit=1, offset=1)
+    assert page["pagination"]["total"] == 3
+    assert page["pagination"]["offset"] == 1
+    assert [item["id"] for item in page["items"]] == ["dml_1"]
+
+    result = svc.delete_dml_executions(["dml_0", "dml_2"])
+    assert result["execution_ids"] == ["dml_0", "dml_2"]
+    assert result["deleted"] == 2
+    assert db.query(DmlExecutionLog).count() == 1
+    assert db.query(DmlExecutionLog).filter_by(id="dml_1").count() == 1
+
+
+def test_command_execution_history_supports_offset_pagination_and_batch_delete(sqlite_session):
+    from app.db.models import CommandExecutionLog
+    from app.services.command_history import count_executions, delete_executions, query_executions
+
+    db = sqlite_session
+    created = _now()
+    for idx in range(3):
+        db.add(CommandExecutionLog(
+            id=f"cmd_{idx}",
+            server_name="srv-a",
+            username="root",
+            command=f"echo {idx}",
+            exit_code=0,
+            stdout_preview=str(idx),
+            stderr_preview="",
+            duration_ms=idx + 1,
+            risk_level="safe",
+            created_at=created - timedelta(minutes=idx),
+        ))
+    db.commit()
+
+    page = query_executions(db, server_name="srv-a", limit=1, offset=1)
+    assert count_executions(db, server_name="srv-a") == 3
+    assert [item.id for item in page] == ["cmd_1"]
+
+    result = delete_executions(db, ["cmd_0", "cmd_2"])
+    assert result["log_ids"] == ["cmd_0", "cmd_2"]
+    assert result["deleted"] == 2
+    assert db.query(CommandExecutionLog).count() == 1
+    assert db.query(CommandExecutionLog).filter_by(id="cmd_1").count() == 1
+
+
+def test_dml_and_command_history_clients_expose_pagination_and_batch_delete_controls():
+    api = open("frontend/src/api.ts", encoding="utf-8").read()
+    db_page = open("frontend/src/pages/DatabaseToolsPage.tsx", encoding="utf-8").read()
+    server_page = open("frontend/src/pages/ServerDetailPage.tsx", encoding="utf-8").read()
+
+    assert "deleteExecuteHistory" in api
+    assert "deleteExecuteHistories" in api
+    assert "deleteExecHistory" in api
+    assert "deleteExecHistories" in api
+    assert "historyOffset" in db_page
+    assert "historyPageSize" in db_page
+    assert "selectedHistoryIds" in db_page
+    assert "deleteSelectedDmlHistory" in db_page
+    assert "historyOffset" in server_page
+    assert "historyPageSize" in server_page
+    assert "selectedLogIds" in server_page
+    assert "deleteSelectedLogs" in server_page
+
+
 def test_audit_log_api_and_client_expose_offset_without_delete_endpoint():
     backend = open("app/api/task_center.py", encoding="utf-8").read()
     api = open("frontend/src/api.ts", encoding="utf-8").read()

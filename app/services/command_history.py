@@ -67,6 +67,40 @@ def get_execution(db: Session, log_id: str) -> Optional[CommandExecutionLog]:
     return db.query(CommandExecutionLog).filter(CommandExecutionLog.id == log_id).first()
 
 
+def delete_execution(db: Session, log_id: str) -> Dict[str, Any]:
+    result = delete_executions(db, [log_id])
+    return {"id": log_id, "deleted": bool(result.get("deleted")), **result}
+
+
+def delete_executions(db: Session, log_ids: List[str]) -> Dict[str, Any]:
+    ids: List[str] = []
+    seen = set()
+    for raw in log_ids or []:
+        log_id = str(raw or "").strip()
+        if log_id and log_id not in seen:
+            seen.add(log_id)
+            ids.append(log_id)
+    if not ids:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="log_ids is required")
+    if len(ids) > 200:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Cannot delete more than 200 command executions at once")
+    rows = db.query(CommandExecutionLog).filter(CommandExecutionLog.id.in_(ids)).all()
+    by_id = {row.id: row for row in rows}
+    missing = [log_id for log_id in ids if log_id not in by_id]
+    if missing:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Execution log not found: {', '.join(missing[:5])}")
+    for log_id in ids:
+        db.delete(by_id[log_id])
+    db.commit()
+    return {
+        "log_ids": ids,
+        "deleted": len(ids),
+    }
+
+
 def count_executions(db: Session, server_name: str = None, username: str = None, risk_level: str = None) -> int:
     q = db.query(CommandExecutionLog)
     if server_name:

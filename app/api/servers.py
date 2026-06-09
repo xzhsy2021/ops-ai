@@ -5,6 +5,7 @@ import shlex
 from contextlib import contextmanager
 from typing import Dict
 from fastapi import APIRouter, HTTPException, Request, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from config_manager import save_server, delete_server
 from app.domain.inventory import inventory
@@ -16,7 +17,7 @@ from app.db.repository import ServerGroupRepository
 from app.core.auth_v2 import require_auth, require_admin
 from app.core.command_security import validate_command, sanitize_command_output
 from app.services.remote_access import build_audit_context, format_audit_detail, get_hop_summary
-from app.services.command_history import record_execution, query_executions, get_execution, count_executions, log_to_dict
+from app.services.command_history import record_execution, query_executions, get_execution, delete_execution, delete_executions, count_executions, log_to_dict
 from app.services.server_ops import analyze_server_config, summarize_servers, build_server_health_probe_result
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ def _mask_sensitive_command(command: str) -> str:
         masked = _re.sub(pattern, replacement, masked, flags=_re.IGNORECASE)
     return masked
 _MAX_EXEC_TIMEOUT = 60
+
+
+class DeleteCommandExecutionsPayload(BaseModel):
+    log_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
 def _get_ssh(name: str):
@@ -483,6 +488,22 @@ def all_exec_history(
     })
 
 
+@servers_v2_router.post("/exec/history/delete")
+def delete_exec_histories(payload: DeleteCommandExecutionsPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    result = delete_executions(db, payload.log_ids)
+    audit("server.exec.history.delete_many", "command_execution", ",".join(result.get("log_ids") or []), f"user={user.get('username')} deleted={result.get('deleted')}")
+    return api_response(data=result, message="Command execution histories deleted")
+
+
+@servers_v2_router.delete("/exec/history/{log_id}")
+def delete_exec_history(request: Request, log_id: str, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    result = delete_execution(db, log_id)
+    audit("server.exec.history.delete", "command_execution", log_id, f"user={user.get('username')}")
+    return api_response(data=result, message="Command execution history deleted")
+
+
 @servers_v2_router.get("/exec/history/{log_id}")
 def exec_history_detail(request: Request, log_id: str, db: Session = Depends(get_db)):
     require_admin(request, db)
@@ -690,7 +711,7 @@ def server_exec_history(
 ):
     require_admin(request, db)
     entries = query_executions(db, server_name=name, risk_level=risk_level, limit=limit, offset=offset)
-    total = count_executions(db, server_name=name)
+    total = count_executions(db, server_name=name, risk_level=risk_level)
     return api_response(data={
         "server": name,
         "entries": [log_to_dict(e) for e in entries],

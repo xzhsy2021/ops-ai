@@ -340,6 +340,12 @@ function DatabaseExecutePanel({ connections, sharedContext, onSharedContextChang
   previewRef.current = preview
   const [result, setResult] = useState<any>(null)
   const [history, setHistory] = useState<any[]>([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyOffset, setHistoryOffset] = useState(0)
+  const [historyPageSize, setHistoryPageSize] = useState(20)
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([])
+  const [deleteHistoryTarget, setDeleteHistoryTarget] = useState<any | null>(null)
+  const [batchDeleteHistoryOpen, setBatchDeleteHistoryOpen] = useState(false)
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
   
@@ -355,15 +361,46 @@ function DatabaseExecutePanel({ connections, sharedContext, onSharedContextChang
     if (sharedContext.maxAffectedRows !== undefined && sharedContext.maxAffectedRows !== maxAffectedRows) setMaxAffectedRows(sharedContext.maxAffectedRows || 100)
   }, [sharedContext.connectionId, sharedContext.databaseName, sharedContext.maxAffectedRows])
 
-  const loadHistory = async () => {
+  const loadHistory = async (nextOffset = historyOffset, nextPageSize = historyPageSize) => {
     try {
-      const res = await dbTools.executeHistory({ limit: 20 })
+      const res = await dbTools.executeHistory({ limit: nextPageSize, offset: nextOffset })
       const data = pickData<any>(res, {})
-      setHistory(data.items || [])
+      const items = data.items || []
+      setHistory(items)
+      setHistoryTotal(Number(data.pagination?.total ?? data.total ?? items.length))
+      const visibleIds = new Set(items.map((item: any) => String(item.id || item.execution_id || '')).filter(Boolean))
+      setSelectedHistoryIds((prev) => prev.filter((id) => visibleIds.has(id)))
     } catch (_) {}
   }
 
-  useEffect(() => { loadHistory() }, [])
+  useEffect(() => { loadHistory() }, [historyOffset, historyPageSize])
+
+  const historyPageIds = history.map((item: any) => String(item.id || item.execution_id || '')).filter(Boolean)
+  const allHistorySelected = historyPageIds.length > 0 && historyPageIds.every((id) => selectedHistoryIds.includes(id))
+  const historyPage = Math.floor(historyOffset / historyPageSize) + 1
+  const historyPages = Math.max(1, Math.ceil(historyTotal / historyPageSize))
+
+  const toggleHistorySelection = (id: string, checked: boolean) => {
+    setSelectedHistoryIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((item) => item !== id))
+  }
+
+  const deleteSelectedDmlHistory = async (ids: string[]) => {
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)))
+    if (uniqueIds.length === 0) return
+    try {
+      await dbTools.deleteExecuteHistories({ execution_ids: uniqueIds })
+      setSelectedHistoryIds([])
+      setBatchDeleteHistoryOpen(false)
+      setDeleteHistoryTarget(null)
+      const remaining = Math.max(0, historyTotal - uniqueIds.length)
+      const maxOffset = Math.max(0, Math.floor(Math.max(remaining - 1, 0) / historyPageSize) * historyPageSize)
+      const nextOffset = Math.min(historyOffset, maxOffset)
+      if (nextOffset !== historyOffset) setHistoryOffset(nextOffset)
+      else await loadHistory(nextOffset, historyPageSize)
+    } catch (e) {
+      setMessage(errorMessage(e, '删除 DML 执行历史失败'))
+    }
+  }
 
   const runPreview = async () => {
     setLoading(true)
@@ -591,19 +628,58 @@ function DatabaseExecutePanel({ connections, sharedContext, onSharedContextChang
             </ul>
           </section>
           <section className="glass-card">
-            <div className="section-title-row section-title-row--compact"><div><h2>最近 DML 执行</h2><p>用于快速复盘和定位审计链路。</p></div><button className="btn btn-subtle" onClick={loadHistory}>刷新</button></div>
+            <div className="section-title-row section-title-row--compact">
+              <div><h2>最近 DML 执行</h2><p>共 {historyTotal} 条，第 {historyPage}/{historyPages} 页。</p></div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <button className="btn btn-subtle" onClick={() => loadHistory()}>刷新</button>
+                <button className="btn btn-danger" disabled={selectedHistoryIds.length === 0} onClick={() => setBatchDeleteHistoryOpen(true)}>批量删除 ({selectedHistoryIds.length})</button>
+              </div>
+            </div>
+            <div className="record-selection-row">
+              <label><input type="checkbox" checked={allHistorySelected} disabled={historyPageIds.length === 0} onChange={(e) => setSelectedHistoryIds(e.target.checked ? historyPageIds : [])} /> 选择本页</label>
+              <select value={historyPageSize} onChange={(e) => { setHistoryPageSize(Number(e.target.value)); setHistoryOffset(0); setSelectedHistoryIds([]) }}>
+                {[10, 20, 50].map((size) => <option key={size} value={size}>{size} 条/页</option>)}
+              </select>
+            </div>
             <div className="history-list">
               {history.map((item: any) => (
-                <div key={item.id} className="history-item">
+                <div key={item.id} className="history-item history-item--selectable">
+                  <input type="checkbox" checked={selectedHistoryIds.includes(String(item.id))} onChange={(e) => toggleHistorySelection(String(item.id), e.target.checked)} />
                   <span className={`status-dot ${item.status === 'success' ? 'online' : 'offline'}`} />
                   <span><strong>{item.statement_type} · {item.table_name || '-'}</strong><small>{item.connection_name || 'local_ops_db'} · 影响 {item.affected_rows ?? '-'} 行 · {item.status}</small><code>{item.history_sql}</code></span>
+                  <button className="btn btn-danger btn-sm" onClick={() => setDeleteHistoryTarget(item)}>删除</button>
                 </div>
               ))}
               {history.length === 0 && <div className="empty-state"><strong>暂无执行记录</strong><span>DML 执行后会显示在这里。</span></div>}
             </div>
+            <div className="pagination-footer">
+              <span className="pagination-page">显示 {historyTotal === 0 ? 0 : historyOffset + 1}-{Math.min(historyOffset + historyPageSize, historyTotal)} / {historyTotal}</span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="pagination-btn" disabled={historyOffset === 0} onClick={() => setHistoryOffset(Math.max(0, historyOffset - historyPageSize))}>上一页</button>
+                <button className="pagination-btn" disabled={historyOffset + historyPageSize >= historyTotal} onClick={() => setHistoryOffset(historyOffset + historyPageSize)}>下一页</button>
+              </div>
+            </div>
           </section>
         </aside>
       </div>
+      <ConfirmDialog
+        open={Boolean(deleteHistoryTarget)}
+        title="删除 DML 执行历史"
+        description={`确认删除 ${deleteHistoryTarget?.statement_type || ''} ${deleteHistoryTarget?.table_name || ''} 的执行记录？只删除历史记录，不回滚数据库变更。`}
+        confirmLabel="删除"
+        danger
+        onCancel={() => setDeleteHistoryTarget(null)}
+        onConfirm={() => deleteSelectedDmlHistory([String(deleteHistoryTarget?.id || '')])}
+      />
+      <ConfirmDialog
+        open={batchDeleteHistoryOpen}
+        title="批量删除 DML 执行历史"
+        description={`确认删除选中的 ${selectedHistoryIds.length} 条 DML 执行历史？只删除历史记录，不回滚数据库变更。`}
+        confirmLabel="批量删除"
+        danger
+        onCancel={() => setBatchDeleteHistoryOpen(false)}
+        onConfirm={() => deleteSelectedDmlHistory(selectedHistoryIds)}
+      />
     </div>
   )
 }

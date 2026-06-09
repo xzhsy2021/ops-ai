@@ -466,6 +466,35 @@ class DbQueryExportService:
             raise HTTPException(status_code=404, detail="DML execution not found")
         return self._dml_log_to_dict(row)
 
+    def delete_dml_execution(self, execution_id: str) -> Dict[str, Any]:
+        result = self.delete_dml_executions([execution_id])
+        return {"id": execution_id, "deleted": bool(result.get("deleted")), **result}
+
+    def delete_dml_executions(self, execution_ids: List[str]) -> Dict[str, Any]:
+        ids: List[str] = []
+        seen = set()
+        for raw in execution_ids or []:
+            execution_id = str(raw or "").strip()
+            if execution_id and execution_id not in seen:
+                seen.add(execution_id)
+                ids.append(execution_id)
+        if not ids:
+            raise HTTPException(status_code=400, detail="execution_ids is required")
+        if len(ids) > 200:
+            raise HTTPException(status_code=400, detail="Cannot delete more than 200 DML executions at once")
+        rows = self.db.query(DmlExecutionLog).filter(DmlExecutionLog.id.in_(ids)).all()
+        by_id = {row.id: row for row in rows}
+        missing = [execution_id for execution_id in ids if execution_id not in by_id]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"DML execution not found: {', '.join(missing[:5])}")
+        for execution_id in ids:
+            self.db.delete(by_id[execution_id])
+        self.db.commit()
+        return {
+            "execution_ids": ids,
+            "deleted": len(ids),
+        }
+
     def preview_execute_sql(
         self,
         *,

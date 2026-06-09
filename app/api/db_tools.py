@@ -43,6 +43,10 @@ class DeleteDbExportsPayload(BaseModel):
     export_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
+class DeleteDmlExecutionsPayload(BaseModel):
+    execution_ids: list[str] = Field(default_factory=list, max_length=200)
+
+
 def _operator_from_user(user: Dict[str, Any]) -> str:
     return str(user.get("username") or user.get("id") or "anonymous")
 
@@ -140,6 +144,22 @@ def list_db_execute_history(
 def get_db_execute_history(execution_id: str, request: Request, db: Session = Depends(get_db)):
     require_auth(request, db)
     return api_response(data=DbQueryExportService(db).get_dml_execution(execution_id))
+
+
+@router.delete("/execute/history/{execution_id}")
+def delete_db_execute_history(execution_id: str, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    result = DbQueryExportService(db).delete_dml_execution(execution_id)
+    audit("db.execute.history.delete", "dml_execution", execution_id, f"user={_operator_from_user(user)}")
+    return api_response(data=result, message="DML execution history deleted")
+
+
+@router.post("/execute/history/delete")
+def delete_db_execute_histories(payload: DeleteDmlExecutionsPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    result = DbQueryExportService(db).delete_dml_executions(payload.execution_ids)
+    audit("db.execute.history.delete_many", "dml_execution", ",".join(result.get("execution_ids") or []), f"user={_operator_from_user(user)} deleted={result.get('deleted')}")
+    return api_response(data=result, message="DML execution histories deleted")
 
 
 @router.post("/query/export")

@@ -1166,6 +1166,11 @@ textarea:focus {
   transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
 }
 
+.history-item--selectable {
+  grid-template-columns: 18px 10px minmax(0, 1fr) auto;
+  align-items: center;
+}
+
 .history-item:hover {
   transform: translateY(-1px);
   border-color: color-mix(in srgb, var(--cyan) 36%, var(--border));
@@ -1984,6 +1989,8 @@ kbd {
 .exec-history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .exec-history-table thead tr { border-bottom: 1px solid var(--border); text-align: left; position: sticky; top: 0; background: var(--bg-surface); }
 .exec-history-table th { padding: 8px; color: var(--text-secondary); font-weight: 600; }
+.exec-history-table td:first-child,
+.exec-history-table th:first-child { width: 36px; padding: 6px 8px; }
 .exec-history-row { border-bottom: 1px solid var(--border-subtle); }
 .exec-history-time { padding: 6px 8px; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .exec-history-user { padding: 6px 8px; color: var(--text-secondary); }
@@ -4327,6 +4334,29 @@ html[data-theme='dark'] .resource-bucket-card {
   border: 1px solid var(--border-strong);
   font-size: 13px;
   cursor: pointer;
+}
+.record-selection-row,
+.pagination-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.record-selection-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.record-selection-row select {
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
 }
 .pagination-btn {
   padding: 4px 10px;

@@ -384,7 +384,11 @@ export const serverWorkbench = {
       params: { limit: limit || 50, offset: offset || 0, server_name: serverName, username, risk_level: riskLevel },
     }),
   execHistoryDetail: (logId: string) =>
-    api.get(`/servers/exec/history/${logId}`),
+    api.get(`/servers/exec/history/${encodeURIComponent(logId)}`),
+  deleteExecHistory: (logId: string) =>
+    api.delete(`/servers/exec/history/${encodeURIComponent(logId)}`),
+  deleteExecHistories: (data: { log_ids: string[] }) =>
+    api.post('/servers/exec/history/delete', data),
 
   terminalSessionCreate: (name: string, cols?: number, rows?: number) =>
     api.post(`/servers/${encodeURIComponent(name)}/terminal/sessions`, { cols, rows }),
@@ -509,6 +513,8 @@ export const dbTools = {
   execute: (data: { sql: string; connection_id?: string; database_name?: string; max_affected_rows?: number; confirm_text?: string; reason?: string }) => api.post('/db/execute', data),
   executeHistory: (params?: { connection_id?: string; status?: string; statement_type?: string; limit?: number; offset?: number }) => api.get('/db/execute/history', { params }),
   executeHistoryDetail: (id: string) => api.get(`/db/execute/history/${encodeURIComponent(id)}`),
+  deleteExecuteHistory: (id: string) => api.delete(`/db/execute/history/${encodeURIComponent(id)}`),
+  deleteExecuteHistories: (data: { execution_ids: string[] }) => api.post('/db/execute/history/delete', data),
 }
 
 export const rawApi = axios.create({

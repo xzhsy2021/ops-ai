@@ -4,7 +4,7 @@ import type { DeploymentLogEntry as LogEntry } from '../../types/deploy'
 
 export type { LogEntry }
 
-const FINAL_STATUSES = new Set(['success', 'failed', 'canceled', 'cancelled'])
+const FINAL_STATUSES = new Set(['success', 'failed', 'partial_failed', 'canceled', 'cancelled'])
 const SSE_FALLBACK_TIMEOUT_MS = 5000
 
 function getApiBaseUrl(): string {

@@ -238,6 +238,84 @@ def test_pipeline_task_does_not_override_cancel_after_step_success(monkeypatch, 
         verify.close()
 
 
+def test_serial_pipeline_continues_when_fail_fast_disabled(monkeypatch, sqlite_session):
+    import asyncio
+    import config_manager
+    from app.api import deploy_v2
+    from app.db import DeployTaskRepository, DeploymentRepository
+    from app.deploy.schemas import DeployRequest
+
+    db, Session = sqlite_session
+    deployment = DeploymentRepository(db).create(system="ops", service="api", servers="bad,good")
+    deployment_id = deployment.id
+    DeployTaskRepository(db).create(deployment_id=deployment_id, task_id="task-serial-continue")
+    db.close()
+
+    visited = []
+    monkeypatch.setattr(deploy_v2, "SessionLocal", Session)
+    monkeypatch.setattr(config_manager, "get_server_by_name", lambda name: {"name": name, "host": "127.0.0.1"})
+    monkeypatch.setattr(deploy_v2, "_connect_ssh", lambda srv: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(deploy_v2, "_merge_release_variables", lambda req, db: dict(req.variables or {}))
+    monkeypatch.setattr(deploy_v2, "_distribute_package_to_server", lambda *args, **kwargs: None)
+
+    class FakePipelineEngine:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, task_id, deployment_id, steps, ctx_data):
+            server_name = ctx_data["server"]["name"]
+            visited.append(server_name)
+            if server_name == "bad":
+                return {"success": False, "error": "simulated failure"}
+            return {"success": True}
+
+    monkeypatch.setattr(deploy_v2, "PipelineEngine", FakePipelineEngine)
+
+    asyncio.run(deploy_v2._run_pipeline_task(
+        "task-serial-continue",
+        deployment_id,
+        DeployRequest(
+            system="ops",
+            service="api",
+            servers=["bad", "good"],
+            file_name="pkg.tar.gz",
+            fail_fast=False,
+        ),
+        [{"type": "command", "name": "noop", "config": {}}],
+    ))
+
+    verify = Session()
+    try:
+        task = DeployTaskRepository(verify).get_by_id("task-serial-continue")
+        deployment = DeploymentRepository(verify).get_by_id(deployment_id)
+        assert visited == ["bad", "good"]
+        assert task.status == "partial_failed"
+        assert deployment.status == "partial_failed"
+        assert task.result == "success=1 failed=1 skipped=0"
+    finally:
+        verify.close()
+
+
+def test_legacy_precheck_route_exposes_enhanced_preflight_contract():
+    source = open("app/api/deploy/plans.py", encoding="utf-8").read()
+
+    assert "from app.api.deploy.precheck import deploy_precheck as enhanced_deploy_precheck" in source
+    assert "return await enhanced_deploy_precheck(request, db)" in source
+    assert "\"parallel_summary\"" not in source
+
+
+def test_precheck_rollback_readiness_uses_current_rollback_plan_signature():
+    source = open("app/api/deploy/precheck.py", encoding="utf-8").read()
+
+    assert "_rollback_plan_for(deployment, db)" not in source
+    assert "_rollback_plan_for(" in source
+    assert "deployment.system" in source
+    assert "deployment.service or \"\"" in source
+    assert "deployment.environment or \"\"" in source
+    assert "servers," in source
+    assert "variables," in source
+
+
 def test_service_model_has_pipeline_id_column():
     from app.db.models import Service
 

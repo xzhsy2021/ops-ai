@@ -17,13 +17,28 @@ interface DeploymentHistoryTableProps {
 }
 
 function statusStyle(status: string): CSSProperties {
+  const normalized = String(status || '').toLowerCase()
+  const isFailed = normalized === 'failed'
+  const isPartialFailed = normalized === 'partial_failed'
+  const isSuccess = normalized === 'success'
   return {
-    color: status === 'success' ? 'var(--success)' : status === 'failed' ? 'var(--danger)' : 'var(--warning)',
-    background: status === 'success' ? 'var(--success-surface)' : status === 'failed' ? 'var(--danger-surface)' : 'var(--warning-surface)',
+    color: isSuccess ? 'var(--success)' : isFailed ? 'var(--danger)' : isPartialFailed ? 'var(--warning)' : 'var(--warning)',
+    background: isSuccess ? 'var(--success-surface)' : isFailed ? 'var(--danger-surface)' : isPartialFailed ? 'var(--warning-surface)' : 'var(--warning-surface)',
     padding: '2px 8px',
     borderRadius: '4px',
     whiteSpace: 'nowrap',
   }
+}
+
+function statusLabel(status: string): string {
+  const normalized = String(status || '').toLowerCase()
+  if (normalized === 'success') return '成功'
+  if (normalized === 'failed') return '失败'
+  if (normalized === 'partial_failed') return '部分失败'
+  if (normalized === 'running') return '运行中'
+  if (normalized === 'pending' || normalized === 'queued') return '排队中'
+  if (normalized === 'canceled' || normalized === 'cancelled') return '已取消'
+  return status || '-'
 }
 
 function canDeleteDeployment(deployment: DeploymentRecord) {
@@ -96,6 +111,7 @@ export default function DeploymentHistoryTable({
           <option value="">全部状态</option>
           <option value="success">成功</option>
           <option value="failed">失败</option>
+          <option value="partial_failed">部分失败</option>
           <option value="running">运行中</option>
           <option value="pending">排队中</option>
           <option value="cancelled">已取消</option>
@@ -151,7 +167,7 @@ export default function DeploymentHistoryTable({
                 <td style={{ padding: '8px' }}>
                   <span style={{ color: d.environment?.toLowerCase() === 'prod' || d.environment?.toLowerCase() === 'production' ? 'var(--danger-solid)' : 'var(--text-secondary)', fontWeight: (d.environment?.toLowerCase() === 'prod' || d.environment?.toLowerCase() === 'production') ? 'bold' : 'normal' }}>{d.environment || '-'}</span>
                 </td>
-                <td style={{ padding: '8px' }}><span style={statusStyle(d.status)}>{d.status}</span></td>
+                <td style={{ padding: '8px' }}><span style={statusStyle(d.status)}>{statusLabel(d.status)}</span></td>
                 <td style={{ padding: '8px', color: 'var(--text-secondary)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.version || '-'}</td>
                 <td style={{ padding: '8px', color: 'var(--text-muted)', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.servers || '-'}</td>
                 <td style={{ padding: '8px', color: 'var(--text-secondary)' }}>{d.created_by || '-'}</td>

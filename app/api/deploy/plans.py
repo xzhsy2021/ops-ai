@@ -1,6 +1,5 @@
 """发布管理 - 发布计划、变量解析、确认等相关路由"""
-from typing import Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Request, Depends, Query
+from fastapi import APIRouter, Request, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.helpers import api_response, audit
@@ -10,11 +9,10 @@ from app.pipeline.variables import get_variable_registry, STEP_FIELD_BINDINGS
 from app.pipeline.resolver import resolve_pipeline_steps, validate_required_fields
 
 from app.api.deploy._shared import (
-    _build_confirmation, _derive_servers, _find_config_service, _merge_release_variables,
-    _service_topology, logger,
+    _build_confirmation, _find_config_service, _merge_release_variables,
 )
+from app.api.deploy.precheck import deploy_precheck as enhanced_deploy_precheck
 from app.deploy.schemas import DeployRequest, ResolutionPreviewRequest
-from app.deploy.preflight import build_preflight_payload
 
 plans_router = APIRouter(tags=["发布管理v2-计划"])
 
@@ -105,48 +103,7 @@ async def pipeline_binding_metadata(request: Request, db: Session = Depends(get_
 @plans_router.post("/preflight")
 async def deploy_precheck(request: Request, db: Session = Depends(get_db)):
     """发布前预检 — 委托给 precheck 模块的共享逻辑。"""
-    from app.api.deploy.precheck import _collect_precheck_checks
-
-    require_auth(request, db)
-    data = await request.json()
-    system = data.get("system", "")
-    servers_raw = data.get("servers", [])
-    file_name = data.get("file_name", "")
-    environment = data.get("environment", "")
-    service = data.get("service", "")
-    variables = data.get("variables") or {}
-
-    checks, ssh_fail, remote_disks, _ssh_cache, topology, package_match = \
-        _collect_precheck_checks(
-            system, service, environment, file_name,
-            servers_raw, variables, data.get("server_group", ""), db
-        )
-
-    pkg = package_match.get("package", {})
-    servers_list = [
-        str(x) if isinstance(x, str) else str((x or {}).get("name") or "")
-        for x in (servers_raw or [])
-    ]
-
-    req_for_confirm = DeployRequest(
-        system=system, service=service, environment=environment,
-        file_name=file_name, servers=servers_list,
-        server_group=data.get("server_group", ""), variables=variables,
-    )
-    confirmation = _build_confirmation(req_for_confirm, db, {})
-
-    return api_response(data=build_preflight_payload(
-        checks=checks,
-        environment=environment,
-        file_name=file_name,
-        ssh_fail=ssh_fail,
-        servers=servers_list,
-        remote_disks=remote_disks,
-        topology=topology,
-        package=pkg,
-        required_confirmation=confirmation.get("required_confirmation") or "",
-        requires_confirmation=bool(confirmation.get("requires_confirmation")),
-    ))
+    return await enhanced_deploy_precheck(request, db)
 
 
 @plans_router.get("/tool-plans")

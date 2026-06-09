@@ -1599,10 +1599,11 @@ async def _run_pipeline_task(task_id: str, deployment_id: str, req: DeployReques
                         task_repo.update_status(task_id, "canceled", result="Canceled by operator")
                         deployment_repo_cls(db).update_status(deployment_id, "canceled", "Canceled by operator")
                         return
-                    break
+                    if fail_fast:
+                        break
 
             all_ok = all(r[1] for r in serial_results)
-            _finalize_deployment_status(db, task_id, deployment_id, task_repo, all_ok, fail_fast=False, results=serial_results)
+            _finalize_deployment_status(db, task_id, deployment_id, task_repo, all_ok, fail_fast=fail_fast, results=serial_results)
             return
 
         semaphore = asyncio.Semaphore(parallelism)

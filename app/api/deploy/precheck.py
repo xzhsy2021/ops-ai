@@ -23,6 +23,7 @@ from app.api.deploy._shared import (
     _environment_server_conflicts,
     _find_config_service,
     _load_system_cfg,
+    _merge_release_variables,
     _package_info,
     _package_service_match,
     _remote_checks_for_service,
@@ -455,7 +456,25 @@ async def rollback_readiness(
     if not deployment:
         raise HTTPException(404, "未找到该发布记录")
 
-    plan = _rollback_plan_for(deployment, db) or {}
+    servers = [x.strip() for x in (deployment.servers or "").split(",") if x.strip()]
+    req = DeployRequest(
+        system=deployment.system,
+        service=deployment.service or "",
+        environment=deployment.environment or "",
+        version=deployment.version or "",
+        servers=servers,
+        file_name=deployment.version or "",
+        variables={},
+    )
+    variables = _merge_release_variables(req, db)
+    plan = _rollback_plan_for(
+        deployment.system,
+        deployment.service or "",
+        deployment.environment or "",
+        servers,
+        variables,
+        db,
+    ) or {}
     precheck_result = _rollback_precheck_for(deployment, plan, db)
     candidates = _rollback_candidates_for(deployment, db)
     topology = _service_topology(

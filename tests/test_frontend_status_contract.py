@@ -39,3 +39,14 @@ def test_frontend_status_endpoint_returns_dist_freshness(monkeypatch):
     assert body["status"] == "warn"
     assert body["hint"] == "dist stale"
 
+
+def test_deploy_frontend_treats_partial_failed_as_terminal_status():
+    polling = open("frontend/src/pages/deploy/useDeploymentPolling.ts", encoding="utf-8").read()
+    stream = open("frontend/src/pages/deploy/useDeploymentStream.ts", encoding="utf-8").read()
+    panel = open("frontend/src/pages/deploy/DeploymentRunPanel.tsx", encoding="utf-8").read()
+    history = open("frontend/src/pages/deploy/DeploymentHistoryTable.tsx", encoding="utf-8").read()
+
+    assert "partial_failed" in polling
+    assert "partial_failed" in stream
+    assert "部分失败" in panel
+    assert "部分失败" in history

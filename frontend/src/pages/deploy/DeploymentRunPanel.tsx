@@ -113,6 +113,7 @@ export default function DeploymentRunPanel({
     status === 'running' ? '执行中'
     : status === 'success' ? '已完成'
     : status === 'failed' ? '失败'
+    : status === 'partial_failed' ? '部分失败'
     : status === 'cancelled' || status === 'canceled' ? '已取消'
     : status === 'pending' ? '等待中'
     : status || '-'
@@ -122,7 +123,7 @@ export default function DeploymentRunPanel({
     taskDetails?.steps?.some((s: any) => s.captured_config)
 
   const runStats = [
-    { label: '状态', value: statusLabel, tone: (status === 'success' ? 'success' : status === 'failed' ? 'danger' : 'default') as any },
+    { label: '状态', value: statusLabel, tone: (status === 'success' ? 'success' : status === 'failed' || status === 'partial_failed' ? 'danger' : 'default') as any },
     { label: '任务 ID', value: taskId ? `#${taskId.slice(0, 8)}` : '-' },
     { label: '部署 ID', value: deploymentId ? deploymentId.slice(0, 8) : '-' },
     { label: '服务器', value: `${serverExecutionRows.length} 台` },

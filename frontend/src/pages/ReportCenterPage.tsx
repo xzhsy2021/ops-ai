@@ -87,6 +87,8 @@ export default function ReportCenterPage() {
   const [editStatus, setEditStatus] = useState('')
   const [editSummary, setEditSummary] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<any>(null)
+  const [selectedReportIds, setSelectedReportIds] = useState<string[]>([])
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -97,10 +99,13 @@ export default function ReportCenterPage() {
         reports.summary(),
         reports.types(),
       ])
-      setItems(listRes.data?.items || [])
+      const nextItems = listRes.data?.items || []
+      setItems(nextItems)
       setTotal(Number(listRes.data?.total || 0))
       setSummary(summaryRes.data || {})
       setTypes(typesRes.data?.types || {})
+      const visibleIds = new Set(nextItems.map((item: any) => item.id))
+      setSelectedReportIds((prev) => prev.filter((id) => visibleIds.has(id)))
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -158,7 +163,27 @@ export default function ReportCenterPage() {
     try {
       await reports.delete(deleteTarget.id)
       setDeleteTarget(null)
+      setSelectedReportIds((prev) => prev.filter((id) => id !== deleteTarget.id))
       setMessage('报告已删除')
+      await load()
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    }
+  }
+
+  function toggleReportSelection(id: string, checked: boolean) {
+    setSelectedReportIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id))
+  }
+
+  async function deleteSelectedReports(ids = selectedReportIds) {
+    if (!ids.length) return
+    setError('')
+    setMessage('')
+    try {
+      await reports.deleteMany({ report_ids: ids })
+      setBatchDeleteOpen(false)
+      setSelectedReportIds([])
+      setMessage(`批量删除 ${ids.length} 份报告`)
       await load()
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -174,6 +199,8 @@ export default function ReportCenterPage() {
     ? generatableTypeKeys
     : Object.keys(TYPE_LABELS).filter((key) => key !== 'db_query_export')
   const selectedFormats = selectedType.formats || ['json', 'md']
+  const currentPageReportIds = items.map((item) => item.id)
+  const allReportsOnPageSelected = currentPageReportIds.length > 0 && currentPageReportIds.every((id) => selectedReportIds.includes(id))
 
   useEffect(() => {
     if (generateTypeKeys.length > 0 && !generateTypeKeys.includes(generateType)) {
@@ -249,17 +276,21 @@ export default function ReportCenterPage() {
               {Object.keys(types).length ? Object.keys(types).map((key) => <option key={key} value={key}>{TYPE_LABELS[key] || key}</option>) : Object.keys(TYPE_LABELS).map((key) => <option key={key} value={key}>{TYPE_LABELS[key]}</option>)}
             </select>
           </label>
-          <div style={{ display: 'flex', alignItems: 'end' }}><button className="btn" onClick={load}>筛选</button></div>
+          <div style={{ display: 'flex', alignItems: 'end', gap: 8, flexWrap: 'wrap' }}>
+            <button className="btn" onClick={load}>筛选</button>
+            <button className="btn btn-danger" disabled={!selectedReportIds.length || loading} onClick={() => setBatchDeleteOpen(true)}>批量删除 ({selectedReportIds.length})</button>
+          </div>
         </div>
       </div>
 
       {!items.length && !loading ? <EmptyState title="暂无报告" description="先生成一份系统诊断报告或操作链路报告。" /> : (
         <div className="card table-card">
           <table className="data-table">
-            <thead><tr><th>时间</th><th>报告</th><th>目标</th><th>格式</th><th>大小</th><th>SHA256</th><th>操作</th></tr></thead>
+            <thead><tr><th style={{ width: 36 }}><input type="checkbox" checked={allReportsOnPageSelected} onChange={(e) => setSelectedReportIds(e.target.checked ? currentPageReportIds : [])} aria-label="选择当前页报告" /></th><th>时间</th><th>报告</th><th>目标</th><th>格式</th><th>大小</th><th>SHA256</th><th>操作</th></tr></thead>
             <tbody>
               {items.map((item) => (
                 <tr key={item.id}>
+                  <td><input type="checkbox" checked={selectedReportIds.includes(item.id)} onChange={(e) => toggleReportSelection(item.id, e.target.checked)} aria-label={`选择报告 ${item.title || item.id}`} /></td>
                   <td>{formatTime(item.created_at)}</td>
                   <td><div style={{ fontWeight: 700 }}>{item.title}</div><div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{TYPE_LABELS[item.report_type] || item.report_type} · {item.summary || '-'}</div></td>
                   <td><div>{item.target_type || '-'}</div><div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{item.target_id || '-'}</div></td>
@@ -317,6 +348,15 @@ export default function ReportCenterPage() {
         danger
         onCancel={() => setDeleteTarget(null)}
         onConfirm={deleteReport}
+      />
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        title="批量删除报告"
+        description={`确认删除选中的 ${selectedReportIds.length} 份报告？会同步尝试删除本地报告文件。`}
+        confirmLabel="批量删除"
+        danger
+        onCancel={() => setBatchDeleteOpen(false)}
+        onConfirm={() => deleteSelectedReports(selectedReportIds)}
       />
     </div>
   )

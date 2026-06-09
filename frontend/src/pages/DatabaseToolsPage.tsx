@@ -65,6 +65,11 @@ function LocalOpsQueryPanel() {
   const [tables, setTables] = useState<any[]>([])
   const [result, setResult] = useState<any>(null)
   const [exportsList, setExportsList] = useState<any[]>([])
+  const [exportsTotal, setExportsTotal] = useState(0)
+  const [exportOffset, setExportOffset] = useState(0)
+  const [exportPageSize, setExportPageSize] = useState(10)
+  const [selectedExportIds, setSelectedExportIds] = useState<string[]>([])
+  const [batchDeleteExportsOpen, setBatchDeleteExportsOpen] = useState(false)
   const [deleteExportTarget, setDeleteExportTarget] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
@@ -73,6 +78,7 @@ function LocalOpsQueryPanel() {
   const columns: string[] = result?.columns || []
   const maskedColumns = result?.sensitive_columns_masked || []
   const tableCount = useMemo(() => tables.length, [tables])
+  const exportId = (item: any) => item.export_id || item.id
 
   const loadTables = async () => {
     try {
@@ -86,16 +92,23 @@ function LocalOpsQueryPanel() {
 
   const loadExports = async () => {
     try {
-      const res = await dbTools.exports({ limit: 30 })
+      const res = await dbTools.exports({ limit: exportPageSize, offset: exportOffset })
       const data = pickData<any>(res, {})
-      setExportsList(data.items || [])
+      const nextItems = data.items || []
+      setExportsList(nextItems)
+      setExportsTotal(Number(data.total || nextItems.length || 0))
+      const visibleIds = new Set(nextItems.map((item: any) => exportId(item)))
+      setSelectedExportIds((prev) => prev.filter((id) => visibleIds.has(id)))
     } catch (_) {}
   }
 
   useEffect(() => {
     loadTables()
-    loadExports()
   }, [])
+
+  useEffect(() => {
+    loadExports()
+  }, [exportOffset, exportPageSize])
 
   const runQuery = async () => {
     setLoading(true)
@@ -133,7 +146,7 @@ function LocalOpsQueryPanel() {
     setLoading(true)
     setMessage('')
     try {
-      await dbTools.deleteExport(deleteExportTarget.export_id || deleteExportTarget.id)
+      await dbTools.deleteExports({ export_ids: [exportId(deleteExportTarget)] })
       setDeleteExportTarget(null)
       await loadExports()
     } catch (e) {
@@ -142,6 +155,29 @@ function LocalOpsQueryPanel() {
       setLoading(false)
     }
   }
+
+  function toggleExportSelection(id: string, checked: boolean) {
+    setSelectedExportIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id))
+  }
+
+  const deleteSelectedExports = async (ids = selectedExportIds) => {
+    if (!ids.length) return
+    setLoading(true)
+    setMessage('')
+    try {
+      await dbTools.deleteExports({ export_ids: ids })
+      setBatchDeleteExportsOpen(false)
+      setSelectedExportIds([])
+      await loadExports()
+    } catch (e) {
+      setMessage(errorMessage(e, '批量删除导出失败'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const exportPage = Math.floor(exportOffset / exportPageSize) + 1
+  const exportPages = Math.max(1, Math.ceil(exportsTotal / exportPageSize))
 
   return (
     <div className="database-tab-panel">
@@ -234,19 +270,38 @@ function LocalOpsQueryPanel() {
           </section>
 
           <section className="glass-card">
-            <div className="section-title-row section-title-row--compact"><div><h2>最近导出</h2><p>报告中心制品，可下载和审计。</p></div><button className="btn btn-subtle" onClick={loadExports}>刷新</button></div>
+            <div className="section-title-row section-title-row--compact">
+              <div><h2>最近导出</h2><p>报告中心制品，可下载和审计。</p></div>
+              <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <button className="btn btn-subtle" onClick={loadExports}>刷新</button>
+                <button className="btn btn-danger" disabled={!selectedExportIds.length || loading} onClick={() => setBatchDeleteExportsOpen(true)}>批量删除 ({selectedExportIds.length})</button>
+              </span>
+            </div>
             <div className="history-list">
               {exportsList.map((item: any) => (
                 <div key={item.id} className="history-item">
+                  <input type="checkbox" checked={selectedExportIds.includes(exportId(item))} onChange={(e) => toggleExportSelection(exportId(item), e.target.checked)} aria-label={`选择导出 ${item.title || item.id}`} />
                   <span className="status-dot online" />
                   <span><strong>{item.title}</strong><small>{item.format} · {item.size_bytes || 0} bytes</small><code>{item.sha256}</code></span>
                   <span style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
-                    <a className="btn btn-subtle" href={dbTools.downloadUrl(item.export_id || item.id)} target="_blank" rel="noreferrer">下载</a>
+                    <a className="btn btn-subtle" href={dbTools.downloadUrl(exportId(item))} target="_blank" rel="noreferrer">下载</a>
                     <button className="btn btn-danger" onClick={() => setDeleteExportTarget(item)} disabled={loading}>删除</button>
                   </span>
                 </div>
               ))}
               {exportsList.length === 0 && <div className="empty-state"><strong>暂无导出</strong><span>生成 CSV/SQL/JSON 后会显示在这里。</span></div>}
+            </div>
+            <div className="pagination-bar" style={{ marginTop: 10 }}>
+              <div className="pagination-info">第 {exportPage}/{exportPages} 页 · 共 {exportsTotal} 条</div>
+              <div className="pagination-controls">
+                <label className="pagination-size-label">每页
+                  <select value={exportPageSize} onChange={(e) => { setExportPageSize(Number(e.target.value)); setExportOffset(0) }}>
+                    {[10, 20, 50].map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+                <button className="pagination-btn" disabled={exportOffset <= 0} onClick={() => setExportOffset(Math.max(0, exportOffset - exportPageSize))}>上一页</button>
+                <button className="pagination-btn" disabled={exportOffset + exportPageSize >= exportsTotal} onClick={() => setExportOffset(exportOffset + exportPageSize)}>下一页</button>
+              </div>
             </div>
           </section>
         </aside>
@@ -259,6 +314,15 @@ function LocalOpsQueryPanel() {
         danger
         onCancel={() => setDeleteExportTarget(null)}
         onConfirm={deleteExport}
+      />
+      <ConfirmDialog
+        open={batchDeleteExportsOpen}
+        title="批量删除数据库导出"
+        description={`确认删除选中的 ${selectedExportIds.length} 个导出制品？会同步删除本地导出文件。`}
+        confirmLabel="批量删除"
+        danger
+        onCancel={() => setBatchDeleteExportsOpen(false)}
+        onConfirm={() => deleteSelectedExports(selectedExportIds)}
       />
     </div>
   )

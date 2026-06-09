@@ -13,6 +13,7 @@ from app.db import get_db
 from app.db.models import ReportArtifact
 from app.services.db_query_export import export_media_type
 from app.services.report_center import (
+    delete_reports,
     generate_report,
     get_report,
     list_report_types,
@@ -38,6 +39,10 @@ class UpdateReportPayload(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     status: str | None = Field(default=None, max_length=24)
     summary: str | None = Field(default=None, max_length=4000)
+
+
+class DeleteReportsPayload(BaseModel):
+    report_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
 @router.get("/types")
@@ -113,6 +118,14 @@ def export_operation_chain_report(
 def reports_get(report_id: str, request: Request, db: Session = Depends(get_db)):
     require_auth(request, db)
     return api_response(data=report_to_dict(get_report(db, report_id)))
+
+
+@router.post("/delete")
+def reports_delete_many(payload: DeleteReportsPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    result = delete_reports(db, payload.report_ids, actor=user.get("username") or "")
+    audit("report.delete_many", "report", ",".join(result.get("report_ids") or []), f"user={user.get('username')} deleted={result.get('deleted')}")
+    return api_response(data=result, message="Reports deleted")
 
 
 @router.patch("/{report_id}")
@@ -216,20 +229,6 @@ def _resolve_report(db, report_id: str, desired_format: str):
 @router.delete("/{report_id}")
 def reports_delete(report_id: str, request: Request, db: Session = Depends(get_db)):
     user = require_admin(request, db)
-    row = get_report(db, report_id)
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found")
-    path = None
-    try:
-        path = report_download_path(row)
-    except Exception:
-        path = None
-    if path:
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
-    db.delete(row)
-    db.commit()
+    result = delete_reports(db, [report_id], actor=user.get("username") or "")
     audit("report.delete", "report", report_id, f"user={user.get('username')}")
-    return api_response(data={"id": report_id}, message="Report deleted")
+    return api_response(data={"id": report_id, **result}, message="Report deleted")

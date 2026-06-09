@@ -5,6 +5,9 @@ from app.domain.runtime.jobs import (
     get_runtime_job_detail,
     list_runtime_job_summary,
     runtime_job_to_dict,
+    delete_runtime_tasks,
+    reconcile_stale_operation_jobs,
+    runtime_tasks_delete_confirm_text,
 )
 
 __all__ = [
@@ -14,4 +17,7 @@ __all__ = [
     "get_runtime_job_detail",
     "list_runtime_job_summary",
     "runtime_job_to_dict",
+    "delete_runtime_tasks",
+    "reconcile_stale_operation_jobs",
+    "runtime_tasks_delete_confirm_text",
 ]

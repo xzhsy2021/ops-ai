@@ -10,6 +10,10 @@ interface DeploymentHistoryTableProps {
   onViewLogs: (deployment: DeploymentRecord) => void
   onViewReport?: (deployment: DeploymentRecord) => void
   onReuse?: (deployment: DeploymentRecord) => void
+  onDelete?: (deployment: DeploymentRecord) => void
+  selectedIds?: string[]
+  onSelectionChange?: (deploymentIds: string[]) => void
+  onDeleteSelected?: () => void
 }
 
 function statusStyle(status: string): CSSProperties {
@@ -22,7 +26,23 @@ function statusStyle(status: string): CSSProperties {
   }
 }
 
-export default function DeploymentHistoryTable({ deployments, pagination, onQuery, onRollback, onViewLogs, onViewReport, onReuse }: DeploymentHistoryTableProps) {
+function canDeleteDeployment(deployment: DeploymentRecord) {
+  return !['running', 'pending', 'queued'].includes(String(deployment.status || '').toLowerCase())
+}
+
+export default function DeploymentHistoryTable({
+  deployments,
+  pagination,
+  onQuery,
+  onRollback,
+  onViewLogs,
+  onViewReport,
+  onReuse,
+  onDelete,
+  selectedIds = [],
+  onSelectionChange,
+  onDeleteSelected,
+}: DeploymentHistoryTableProps) {
   const [filters, setFilters] = useState<HistoryFilters>({ limit: 50, offset: 0 })
   const updateFilter = (patch: Partial<HistoryFilters>) => setFilters((prev) => ({ ...prev, ...patch, offset: patch.offset ?? 0 }))
   const query = (patch?: Partial<HistoryFilters>) => {
@@ -35,6 +55,23 @@ export default function DeploymentHistoryTable({ deployments, pagination, onQuer
   const total = pagination?.total ?? deployments.length
   const canPrev = offset > 0
   const canNext = Boolean(pagination?.has_more)
+  const selectedSet = new Set(selectedIds)
+  const selectableDeployments = deployments.filter(canDeleteDeployment)
+  const allPageSelected = selectableDeployments.length > 0 && selectableDeployments.every((d) => selectedSet.has(d.id))
+  const toggleOne = (deploymentId: string, checked: boolean) => {
+    const next = new Set(selectedIds)
+    if (checked) next.add(deploymentId)
+    else next.delete(deploymentId)
+    onSelectionChange?.(Array.from(next))
+  }
+  const togglePage = (checked: boolean) => {
+    const next = new Set(selectedIds)
+    selectableDeployments.forEach((d) => {
+      if (checked) next.add(d.id)
+      else next.delete(d.id)
+    })
+    onSelectionChange?.(Array.from(next))
+  }
 
   return (
     <div className="card">
@@ -44,6 +81,10 @@ export default function DeploymentHistoryTable({ deployments, pagination, onQuer
           <p style={{ margin: '6px 0 0', color: 'var(--text-muted)', fontSize: '13px' }}>支持按应用、环境、状态和操作者筛选；操作按钮只复用参数，不会直接重新执行。</p>
         </div>
         <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>共 {total} 条，当前 {offset + 1}-{Math.min(offset + deployments.length, total)}</div>
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginBottom: '12px' }}>
+        <button className="btn btn-danger" disabled={!selectedIds.length} onClick={onDeleteSelected}>批量删除 ({selectedIds.length})</button>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '8px', marginBottom: '12px' }}>
@@ -73,6 +114,15 @@ export default function DeploymentHistoryTable({ deployments, pagination, onQuer
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-strong)', textAlign: 'left' }}>
+              <th style={{ padding: '8px', color: 'var(--text-secondary)', width: '32px' }}>
+                <input
+                  type="checkbox"
+                  aria-label="选择当前页部署历史"
+                  checked={allPageSelected}
+                  disabled={!selectableDeployments.length}
+                  onChange={(e) => togglePage(e.target.checked)}
+                />
+              </th>
               <th style={{ padding: '8px', color: 'var(--text-secondary)' }}>ID</th>
               <th style={{ padding: '8px', color: 'var(--text-secondary)' }}>系统/服务</th>
               <th style={{ padding: '8px', color: 'var(--text-secondary)' }}>环境</th>
@@ -87,6 +137,15 @@ export default function DeploymentHistoryTable({ deployments, pagination, onQuer
           <tbody>
             {deployments.map((d) => (
               <tr key={d.id} style={{ borderBottom: '1px solid var(--bg-surface)' }}>
+                <td style={{ padding: '8px' }}>
+                  <input
+                    type="checkbox"
+                    aria-label={`选择部署历史 ${d.id}`}
+                    checked={selectedSet.has(d.id)}
+                    disabled={!canDeleteDeployment(d)}
+                    onChange={(e) => toggleOne(d.id, e.target.checked)}
+                  />
+                </td>
                 <td style={{ padding: '8px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>{d.id?.slice(0, 8)}</td>
                 <td style={{ padding: '8px' }}><strong>{d.system || '-'}</strong><div style={{ color: 'var(--text-muted)' }}>{d.service || '-'}</div></td>
                 <td style={{ padding: '8px' }}>
@@ -103,12 +162,13 @@ export default function DeploymentHistoryTable({ deployments, pagination, onQuer
                     <button className="btn" onClick={() => onViewLogs(d)} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', padding: '2px 8px', fontSize: '12px' }}>详情</button>
                     {onViewReport && <button className="btn" onClick={() => onViewReport(d)} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', padding: '2px 8px', fontSize: '12px' }}>报告</button>}
                     {onReuse && <button className="btn" onClick={() => onReuse(d)} style={{ background: 'var(--action-soft)', color: 'var(--text-primary)', padding: '2px 8px', fontSize: '12px' }}>复用</button>}
+                    {onDelete && <button className="btn btn-danger" disabled={!canDeleteDeployment(d)} onClick={() => onDelete(d)} style={{ padding: '2px 8px', fontSize: '12px' }}>删除</button>}
                   </div>
                 </td>
               </tr>
             ))}
             {deployments.length === 0 && (
-              <tr><td colSpan={9} style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)' }}>暂无部署记录</td></tr>
+              <tr><td colSpan={10} style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)' }}>暂无部署记录</td></tr>
             )}
           </tbody>
         </table>

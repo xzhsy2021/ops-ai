@@ -1,9 +1,15 @@
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+import os
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.db.models import Deployment, DeployTask, DeployLog, SqlQueryHistory, CleanupJob, OperationJob
+from app.db.models import CleanupJobBatch, CleanupJobEvent, Deployment, DeployTask, DeployLog, SqlQueryHistory, CleanupJob, OperationJob
+from app.deploy.history import delete_deployment_rows
+
+
+STALE_OPERATION_JOB_HOURS = max(1, int(os.getenv("OPS_STALE_OPERATION_JOB_HOURS", "2") or "2"))
 
 
 def _normalize_status(kind: str, status: str) -> str:
@@ -19,6 +25,65 @@ def _normalize_status(kind: str, status: str) -> str:
     if raw in ("cancelled", "canceled", "paused"):
         return raw
     return raw
+
+
+def _is_active_runtime_status(kind: str, status: str) -> bool:
+    normalized = _normalize_status(kind, status)
+    return normalized in {"running", "pending", "queued"} or str(status or "").lower() in {"queued", "pending_approval"}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def reconcile_stale_operation_jobs(db: Session, *, now: Optional[datetime] = None, max_age_hours: Optional[int] = None) -> int:
+    current = now or _now()
+    cutoff = current - timedelta(hours=max(1, int(max_age_hours or STALE_OPERATION_JOB_HOURS)))
+    stale_statuses = ("queued", "running", "retrying")
+    rows = (
+        db.query(OperationJob)
+        .filter(OperationJob.status.in_(stale_statuses))
+        .filter(OperationJob.updated_at < cutoff)
+        .limit(200)
+        .all()
+    )
+    for row in rows:
+        previous = row.status or "unknown"
+        row.status = "failed"
+        row.progress = 100
+        row.error_message = row.error_message or f"Stale operation job auto-failed after {STALE_OPERATION_JOB_HOURS}h without worker heartbeat"
+        if not row.finished_at:
+            row.finished_at = current
+        row.updated_at = current
+        result = dict(row.result_json or {})
+        result.setdefault("stale", True)
+        result.setdefault("previous_status", previous)
+        row.result_json = result
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def _clean_runtime_task_items(items: Iterable[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    cleaned: List[Tuple[str, str]] = []
+    seen = set()
+    for raw in items or []:
+        kind = str((raw or {}).get("kind") or "").strip().lower()
+        item_id = str((raw or {}).get("id") or "").strip()
+        if kind in ("mcp_tool", "job", "mcp"):
+            kind = "tool"
+        if not kind or not item_id:
+            continue
+        key = (kind, item_id)
+        if key in seen:
+            continue
+        cleaned.append(key)
+        seen.add(key)
+    return cleaned
+
+
+def runtime_tasks_delete_confirm_text(items: Iterable[Dict[str, Any]]) -> str:
+    return f"DELETE TASKS {len(_clean_runtime_task_items(items))}"
 
 
 def _iso(value):
@@ -184,6 +249,7 @@ def list_runtime_jobs(
             jobs.append(runtime_job_to_dict("cleanup", item))
 
     if not kind or kind in ("tool", "mcp_tool", "job"):
+        reconcile_stale_operation_jobs(db)
         q = db.query(OperationJob)
         if status:
             q = q.filter(OperationJob.status == status)
@@ -274,6 +340,93 @@ def get_runtime_job_detail(
             result["result"] = item.result_json or {}
             result["error_message"] = item.error_message or ""
     return result
+
+
+def delete_runtime_tasks(
+    db: Session,
+    items: Iterable[Dict[str, Any]],
+    *,
+    confirm_text: str,
+    actor: str = "",
+    force: bool = False,
+) -> Dict[str, Any]:
+    cleaned = _clean_runtime_task_items(items)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="items is required")
+    if len(cleaned) > 200:
+        raise HTTPException(status_code=400, detail="Cannot delete more than 200 tasks at once")
+
+    expected = runtime_tasks_delete_confirm_text({"kind": kind, "id": item_id} for kind, item_id in cleaned)
+    if str(confirm_text or "").strip() != expected:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "code": "CONFIRMATION_REQUIRED",
+                "message": "Task deletion requires confirmation text",
+                "expected_confirm_text": expected,
+            },
+        )
+
+    rows: Dict[Tuple[str, str], Any] = {}
+    missing: List[Dict[str, str]] = []
+    active: List[Dict[str, str]] = []
+    grouped: Dict[str, List[str]] = {"deploy": [], "sql": [], "cleanup": [], "tool": []}
+
+    for kind, item_id in cleaned:
+        if kind == "deploy":
+            row = db.query(Deployment).filter(Deployment.id == item_id).first()
+        elif kind == "sql":
+            row = db.query(SqlQueryHistory).filter(SqlQueryHistory.id == item_id).first()
+        elif kind == "cleanup":
+            row = db.query(CleanupJob).filter(CleanupJob.id == item_id).first()
+        elif kind == "tool":
+            row = db.query(OperationJob).filter(OperationJob.id == item_id).first()
+        else:
+            row = None
+
+        if not row:
+            missing.append({"kind": kind, "id": item_id})
+            continue
+        rows[(kind, item_id)] = row
+        if _is_active_runtime_status(kind, getattr(row, "status", "")):
+            active.append({"kind": kind, "id": item_id, "status": getattr(row, "status", "") or ""})
+        grouped.setdefault(kind, []).append(item_id)
+
+    if missing:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND", "missing": missing})
+    if active and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TASK_ACTIVE",
+                "message": "Running, pending or queued tasks cannot be deleted",
+                "active": active,
+            },
+        )
+
+    deleted: Dict[str, int] = {}
+    if grouped.get("deploy"):
+        deployment_deleted = delete_deployment_rows(db, grouped["deploy"])
+        deleted.update(deployment_deleted)
+        deleted["deploy"] = deployment_deleted.get("deployments", 0)
+    if grouped.get("sql"):
+        deleted["sql"] = db.query(SqlQueryHistory).filter(SqlQueryHistory.id.in_(grouped["sql"])).delete(synchronize_session=False)
+    if grouped.get("cleanup"):
+        cleanup_ids = grouped["cleanup"]
+        deleted["cleanup_job_events"] = db.query(CleanupJobEvent).filter(CleanupJobEvent.job_id.in_(cleanup_ids)).delete(synchronize_session=False)
+        deleted["cleanup_job_batches"] = db.query(CleanupJobBatch).filter(CleanupJobBatch.job_id.in_(cleanup_ids)).delete(synchronize_session=False)
+        deleted["cleanup"] = db.query(CleanupJob).filter(CleanupJob.id.in_(cleanup_ids)).delete(synchronize_session=False)
+    if grouped.get("tool"):
+        deleted["tool"] = db.query(OperationJob).filter(OperationJob.id.in_(grouped["tool"])).delete(synchronize_session=False)
+    db.commit()
+
+    return {
+        "items": [{"kind": kind, "id": item_id} for kind, item_id in cleaned],
+        "confirm_text": expected,
+        "force": bool(force),
+        "actor": actor,
+        "deleted": deleted,
+    }
 
 
 def list_runtime_job_summary(db: Session) -> Dict[str, Any]:

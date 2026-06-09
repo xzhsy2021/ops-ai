@@ -5296,14 +5296,14 @@ html[data-zen='true'] .app-main {
   color: var(--text-muted);
   font-size: 12px;
 }
-.profile-confirm-text {
-  overflow: hidden;
-  padding: 7px 9px;
-  border-radius: 6px;
-  background: var(--bg-page);
-  color: var(--text-strong);
+.profile-confirm-hint {
+  padding: 7px 10px;
+  border: 1px solid var(--success-border, rgba(34, 197, 94, .28));
+  border-radius: 999px;
+  background: var(--success-surface, rgba(34, 197, 94, .1));
+  color: var(--success, #16a34a);
   font-size: 12px;
-  text-overflow: ellipsis;
+  font-weight: 700;
   white-space: nowrap;
 }
 

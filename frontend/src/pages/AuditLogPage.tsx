@@ -10,8 +10,47 @@ function formatTime(value?: string) {
   try { return new Date(value).toLocaleString() } catch { return value }
 }
 
+function AuditPageControls({
+  total,
+  pageSize,
+  offset,
+  onOffsetChange,
+  onPageSizeChange,
+}: {
+  total: number
+  pageSize: number
+  offset: number
+  onOffsetChange: (next: number) => void
+  onPageSizeChange: (next: number) => void
+}) {
+  const safeTotal = Math.max(0, Number(total || 0))
+  const safePageSize = Math.max(1, Number(pageSize || 100))
+  const safeOffset = Math.max(0, Number(offset || 0))
+  const page = Math.floor(safeOffset / safePageSize) + 1
+  const pages = Math.max(1, Math.ceil(safeTotal / safePageSize))
+  return (
+    <div className="pagination-bar">
+      <div className="pagination-info">第 {page}/{pages} 页 · 共 {safeTotal} 条</div>
+      <div className="pagination-controls">
+        <label className="pagination-size-label">每页
+          <select value={safePageSize} onChange={(e) => onPageSizeChange(Number(e.target.value))}>
+            {[50, 100, 200, 500].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(0)}>首页</button>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(Math.max(0, safeOffset - safePageSize))}>上一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safePageSize >= safeTotal} onClick={() => onOffsetChange(safeOffset + safePageSize)}>下一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safePageSize >= safeTotal} onClick={() => onOffsetChange(Math.max(0, (pages - 1) * safePageSize))}>末页</button>
+      </div>
+    </div>
+  )
+}
+
 export default function AuditLogPage() {
   const [items, setItems] = useState<any[]>([])
+  const [total, setTotal] = useState(0)
+  const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(100)
   const [queryState, setQueryState] = useUrlQueryState({ action: '' })
   const action = queryState.action
   const setAction = (v: string) => setQueryState({ action: v })
@@ -31,8 +70,9 @@ export default function AuditLogPage() {
     setLoading(true)
     setError('')
     try {
-      const res: any = await auditLog.list({ limit: 300, action: action || undefined })
+      const res: any = await auditLog.list({ limit: pageSize, offset, action: action || undefined })
       setItems(res.data?.items || [])
+      setTotal(Number(res.data?.total || 0))
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -100,7 +140,8 @@ export default function AuditLogPage() {
   }
 
 
-  useEffect(() => { load(); loadRetention(); loadOperationChains() }, [])
+  useEffect(() => { loadRetention(); loadOperationChains() }, [])
+  useEffect(() => { load() }, [offset, pageSize, action])
 
   return (
     <div className="page-container">
@@ -108,7 +149,7 @@ export default function AuditLogPage() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="form-grid">
           <label>动作关键字
-            <input value={action} onChange={(e) => setAction(e.target.value)} placeholder="如 deploy / sql / maintenance" />
+            <input value={action} onChange={(e) => { setAction(e.target.value); setOffset(0) }} placeholder="如 deploy / sql / maintenance" />
           </label>
           <div style={{ display: 'flex', alignItems: 'end' }}><button className="btn" onClick={load}>筛选</button></div>
         </div>
@@ -243,6 +284,13 @@ export default function AuditLogPage() {
           </table>
         </div>
       )}
+      <AuditPageControls
+        total={total}
+        pageSize={pageSize}
+        offset={offset}
+        onOffsetChange={setOffset}
+        onPageSizeChange={(next) => { setPageSize(next); setOffset(0) }}
+      />
 
       <RiskConfirmDialog
         open={cleanupDialogOpen}

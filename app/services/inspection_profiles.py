@@ -289,7 +289,7 @@ def build_confirmation(profile: Dict[str, Any], resolved: Dict[str, Any]) -> Dic
         "fingerprint": fingerprint,
         "target_count": count,
         "mode": "copy",
-        "description": "复制该短语确认本次巡检目标、巡检项和执行参数。",
+        "description": "请完整复制确认短语后再执行。该短语绑定本次目标服务器、巡检项和执行参数；目标或配置变化后需重新预览并使用新的确认短语。",
     }
 
 

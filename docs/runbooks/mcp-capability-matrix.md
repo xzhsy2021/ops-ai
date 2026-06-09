@@ -93,6 +93,7 @@ Notes:
 
 - `ops.inspection.run_servers_batch` accepts `server_ids`, `groups`, `group`, and `all_servers`, then merges targets.
 - `ops.inspection.profile.retry_issues` keeps the selected profile categories and runtime knobs, but replaces targets with servers that still have OPEN / PROCESSING inspection issues.
+- UI one-click confirmation only changes the browser workflow. AI agents must keep using the preview-first MCP flow: read `confirmation.confirm_text` from `ops.inspection.profile.preview` or `ops.inspection.profile.retry_issues`, get explicit user approval, then pass that exact value as `confirm_text` to the execution call.
 - Category values must use full uppercase codes such as `LOGIN_SECURITY`, `ACCOUNT_SECURITY`, `PROCESS_PORT`, `DISK_USAGE`, and `BACKUP`.
 - Servers with `inspectable=false` or `status != online` are skipped by default; pass `skip_disabled=false` only when debugging.
 

@@ -8,7 +8,13 @@ from app.api.helpers import api_response, audit
 from app.db import get_db, DeploymentRepository, DeployLogRepository
 from app.core.auth_v2 import require_auth
 from app.deploy.report import deployment_report_payload, deployment_report_markdown as build_deployment_report_markdown
-from app.deploy.history import deployment_list_payload
+from app.deploy.history import (
+    delete_deployment_histories,
+    delete_deployment_history,
+    deployment_delete_batch_confirm_text,
+    deployment_delete_confirm_text,
+    deployment_list_payload,
+)
 from app.deploy.logs import deployment_logs_payload, deployment_tasks_payload
 from app.deploy.logs import _compute_deployment_logs_etag
 from app.deploy.locks import acquire_deployment_locks, release_deployment_locks, list_deployment_locks_payload
@@ -54,6 +60,51 @@ async def list_deployments_v2(
 async def deployment_report_json(deployment_id: str, request: Request, db: Session = Depends(get_db)):
     require_auth(request, db)
     return api_response(data=deployment_report_payload(deployment_id, db))
+
+
+@history_router.post("/deployments/delete")
+async def delete_deployment_histories_api(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    data = await request.json()
+    deployment_ids = data.get("deployment_ids") or []
+    confirm_text = str(data.get("confirm_text") or "")
+    force = bool(data.get("force", False))
+    result = delete_deployment_histories(
+        db,
+        deployment_ids,
+        confirm_text=confirm_text,
+        actor=user.get("username") or "",
+        force=force,
+    )
+    audit(
+        "deploy.history.delete_many",
+        "deployment",
+        ",".join(result.get("deployment_ids", [])),
+        f"user={user.get('username')} force={force} expected={deployment_delete_batch_confirm_text(deployment_ids)} deleted={result.get('deleted')}",
+    )
+    return api_response(data=result, message="Deployment histories deleted")
+
+
+@history_router.delete("/deployments/{deployment_id}")
+async def delete_deployment_history_api(deployment_id: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    confirm_text = str((data or {}).get("confirm_text") or "")
+    force = bool((data or {}).get("force", False))
+    result = delete_deployment_history(
+        db,
+        deployment_id,
+        confirm_text=confirm_text,
+        actor=user.get("username") or "",
+        force=force,
+    )
+    audit(
+        "deploy.history.delete",
+        "deployment",
+        deployment_id,
+        f"user={user.get('username')} force={force} expected={deployment_delete_confirm_text(deployment_id)} deleted={result.get('deleted')}",
+    )
+    return api_response(data=result, message="Deployment history deleted")
 
 
 @history_router.get("/deployments/{deployment_id}/report.md")

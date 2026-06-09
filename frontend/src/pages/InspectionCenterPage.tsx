@@ -984,8 +984,7 @@ export default function InspectionCenterPage() {
                     <strong>{profilePreviewData.profile?.name || profilePreviewData.profile_id}</strong>
                     <span>目标 {profilePreviewData.eligible_count || 0} 台，跳过 {profilePreviewData.skipped_count || 0} 台，过滤 {profilePreviewData.filtered_count || 0} 台。</span>
                   </div>
-                  <code className="profile-confirm-text">{profilePreviewData.confirmation?.confirm_text || '-'}</code>
-                  <button className="btn btn-subtle" type="button" onClick={() => void navigator.clipboard?.writeText(profilePreviewData.confirmation?.confirm_text || '')}>复制短语</button>
+                  <span className="profile-confirm-hint">一键确认已就绪，无需手动输入字符串。</span>
                 </div>
               )}
             </div>
@@ -1647,7 +1646,7 @@ export default function InspectionCenterPage() {
       <RiskConfirmDialog
         open={profileConfirmOpen}
         title={profileRunMode === 'issue_retry' ? '确认复巡未关闭风险' : '确认执行巡检方案'}
-        description={profileRunMode === 'issue_retry' ? '仅复巡当前未关闭风险问题关联的服务器。确认短语会随目标和参数变化。' : '请核对目标数量、巡检项和确认短语。确认短语会随目标和参数变化。'}
+        description={profileRunMode === 'issue_retry' ? '仅复巡当前未关闭风险问题关联的服务器。请核对目标数量和巡检项，无需手动输入字符串。' : '请核对目标数量和巡检项，确认后将自动使用本次预览生成的确认短语。'}
         target={profilePreviewData?.profile?.name || profilePreviewData?.profile_id || '-'}
         confirmText={profilePreviewData?.confirmation?.confirm_text || ''}
         value={profileConfirmValue}
@@ -1664,7 +1663,8 @@ export default function InspectionCenterPage() {
         ]}
         confirmButtonLabel={running ? '执行中...' : '确认并执行'}
         confirmDisabled={running || !profilePreviewData?.confirmation?.confirm_text}
-        confirmMode="type"
+        confirmMode="one-click"
+        showConfirmTextInOneClick={false}
       />
     </div>
   )

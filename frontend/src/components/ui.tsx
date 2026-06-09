@@ -131,6 +131,7 @@ export function RiskConfirmDialog({
   confirmButtonLabel = '确认执行',
   confirmDisabled = false,
   confirmMode = 'type',
+  showConfirmTextInOneClick = true,
 }: {
   open: boolean
   title: string
@@ -150,6 +151,7 @@ export function RiskConfirmDialog({
   confirmButtonLabel?: string
   confirmDisabled?: boolean
   confirmMode?: 'type' | 'one-click'
+  showConfirmTextInOneClick?: boolean
 }) {
   if (!open) return null
   const reasonReady = !reasonRequired || Boolean((reason || '').trim())
@@ -185,7 +187,7 @@ export function RiskConfirmDialog({
           <div className="risk-confirm-oneclick-note">
             <strong>一键确认模式</strong>
             <span>请核对影响对象和风险信息。当前页面采用快捷确认，无需手动输入确认短语。</span>
-            {confirmText && <code>{confirmText}</code>}
+            {showConfirmTextInOneClick && confirmText && <code>{confirmText}</code>}
           </div>
         )}
         <div className="risk-confirm-actions">

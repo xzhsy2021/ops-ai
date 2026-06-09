@@ -161,6 +161,9 @@ def test_mcp_runbook_uses_current_tool_names_and_covers_tier_tools():
     assert "ops.tier.run_now" in text
     assert "ops.notif_route.upsert" in text
     assert "ops.cascade.upsert" in text
+    assert "AI agents must keep using" in text
+    assert "confirmation.confirm_text" in text
+    assert "UI one-click confirmation" in text
 
 
 def test_runtime_source_of_truth_matches_current_system_service_routes():

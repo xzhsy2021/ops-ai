@@ -39,6 +39,10 @@ class DbExecutePayload(BaseModel):
     reason: Optional[str] = Field(default="", max_length=1000)
 
 
+class DeleteDbExportsPayload(BaseModel):
+    export_ids: list[str] = Field(default_factory=list, max_length=200)
+
+
 def _operator_from_user(user: Dict[str, Any]) -> str:
     return str(user.get("username") or user.get("id") or "anonymous")
 
@@ -158,9 +162,9 @@ def export_db_query(payload: DbExportPayload, request: Request, db: Session = De
 
 
 @router.get("/exports")
-def list_db_exports(request: Request, limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
+def list_db_exports(request: Request, limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
     require_auth(request, db)
-    return api_response(data=DbQueryExportService(db).list_exports(limit=limit))
+    return api_response(data=DbQueryExportService(db).list_exports(limit=limit, offset=offset))
 
 
 @router.get("/exports/{export_id}")
@@ -184,3 +188,11 @@ def delete_db_export(export_id: str, request: Request, db: Session = Depends(get
     result = DbQueryExportService(db).delete_export(export_id)
     audit("db.query.export.delete", "db_export", export_id, f"user={_operator_from_user(user)}")
     return api_response(data=result, message="DB export deleted")
+
+
+@router.post("/exports/delete")
+def delete_db_exports(payload: DeleteDbExportsPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    result = DbQueryExportService(db).delete_exports(payload.export_ids)
+    audit("db.query.export.delete_many", "db_export", ",".join(result.get("export_ids") or []), f"user={_operator_from_user(user)} deleted={result.get('deleted')}")
+    return api_response(data=result, message="DB exports deleted")

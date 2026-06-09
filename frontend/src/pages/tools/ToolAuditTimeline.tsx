@@ -24,9 +24,15 @@ type AuditEntry = {
 export function ToolAuditTimeline({
   entries,
   loading,
+  selectedIds = [],
+  onToggle,
+  onToggleAll,
 }: {
   entries: AuditEntry[]
   loading?: boolean
+  selectedIds?: string[]
+  onToggle?: (id: string, checked: boolean) => void
+  onToggleAll?: (ids: string[], checked: boolean) => void
 }) {
   const [riskFilter, setRiskFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -40,6 +46,8 @@ export function ToolAuditTimeline({
     }
     return true
   })
+  const selectableIds = filtered.map((entry) => entry.id).filter(Boolean) as string[]
+  const allVisibleSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.includes(id))
 
   return (
     <div className="card" style={{ display: 'grid', gap: 12 }}>
@@ -48,6 +56,12 @@ export function ToolAuditTimeline({
           <h2>审计时间线</h2>
           <span>{entries.length} 条记录，当前筛选 {filtered.length} 条</span>
         </div>
+        {onToggleAll && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 13 }}>
+            <input type="checkbox" checked={allVisibleSelected} onChange={(e) => onToggleAll(selectableIds, e.target.checked)} />
+            选择当前筛选
+          </label>
+        )}
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <input
@@ -75,6 +89,15 @@ export function ToolAuditTimeline({
         {!loading && filtered.length === 0 && <div style={{ padding: 24, color: 'var(--text-muted)', textAlign: 'center' }}>暂无审计记录</div>}
         {filtered.map((entry, i) => (
           <div key={entry.id || i} className="timeline-item">
+            {entry.id && onToggle && (
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(entry.id)}
+                onChange={(e) => onToggle(entry.id!, e.target.checked)}
+                aria-label={`选择调用记录 ${entry.tool || entry.id}`}
+                style={{ float: 'right' }}
+              />
+            )}
             <strong>{entry.tool || '-'}</strong>
             <small>
               <span>{entry.created_at ? new Date(entry.created_at).toLocaleString() : '-'}</span>

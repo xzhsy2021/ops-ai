@@ -75,6 +75,41 @@ function JsonBlock({ value, small = true }: { value: any; small?: boolean }) {
   return <pre className={`code-block ${small ? 'small' : ''}`}>{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre>
 }
 
+function ToolRecordPagination({
+  total,
+  limit,
+  offset,
+  onOffsetChange,
+  onPageSizeChange,
+}: {
+  total: number
+  limit: number
+  offset: number
+  onOffsetChange: (next: number) => void
+  onPageSizeChange: (next: number) => void
+}) {
+  const safeTotal = Math.max(0, Number(total || 0))
+  const safeLimit = Math.max(1, Number(limit || 20))
+  const safeOffset = Math.max(0, Number(offset || 0))
+  const page = Math.floor(safeOffset / safeLimit) + 1
+  const pages = Math.max(1, Math.ceil(safeTotal / safeLimit))
+
+  return (
+    <div className="pagination-bar">
+      <div className="pagination-info">第 {page}/{pages} 页 · 共 {safeTotal} 条</div>
+      <div className="pagination-controls">
+        <label className="pagination-size-label">每页
+          <select value={safeLimit} onChange={(e) => onPageSizeChange(Number(e.target.value))}>
+            {[10, 20, 50].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(Math.max(0, safeOffset - safeLimit))}>上一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safeLimit >= safeTotal} onClick={() => onOffsetChange(safeOffset + safeLimit)}>下一页</button>
+      </div>
+    </div>
+  )
+}
+
 export default function ToolAccessPage() {
   const addMessage = useNotificationStore((s) => s.addMessage)
   const notify = (m: { type: 'success' | 'error' | 'info'; text: string }) => addMessage(m.text, m.type)
@@ -105,6 +140,16 @@ export default function ToolAccessPage() {
   const [riskConfirmValue, setRiskConfirmValue] = useState('')
   const [revokeCandidate, setRevokeCandidate] = useState<any>(null)
   const [deleteCandidate, setDeleteCandidate] = useState<any>(null)
+  const [callTotal, setCallTotal] = useState(0)
+  const [callOffset, setCallOffset] = useState(0)
+  const [callPageSize, setCallPageSize] = useState(20)
+  const [planTotal, setPlanTotal] = useState(0)
+  const [planOffset, setPlanOffset] = useState(0)
+  const [planPageSize, setPlanPageSize] = useState(20)
+  const [selectedCallIds, setSelectedCallIds] = useState<string[]>([])
+  const [selectedPlanIds, setSelectedPlanIds] = useState<string[]>([])
+  const [deleteToolRecordsOpen, setDeleteToolRecordsOpen] = useState(false)
+  const [deletingToolRecords, setDeletingToolRecords] = useState(false)
 
   const loadInitial = async () => {
     setLoading(true)
@@ -156,11 +201,25 @@ export default function ToolAccessPage() {
         setSettings(d.settings || settings)
       } else if (tab === 'audit') {
         const [callsRes, plansRes] = await Promise.allSettled([
-          capabilityTools.calls({ limit: 30 }),
-          capabilityTools.plans({ limit: 20 }),
+          capabilityTools.calls({ limit: callPageSize, offset: callOffset }),
+          capabilityTools.plans({ limit: planPageSize, offset: planOffset }),
         ])
-        if (callsRes.status === 'fulfilled') setCalls(getData(callsRes.value) || [])
-        if (plansRes.status === 'fulfilled') setPlans(getData(plansRes.value) || [])
+        if (callsRes.status === 'fulfilled') {
+          const data = getData(callsRes.value) || {}
+          const nextCalls = Array.isArray(data) ? data : (data.items || [])
+          setCalls(nextCalls)
+          setCallTotal(Number(data.total || nextCalls.length || 0))
+          const visibleIds = new Set(nextCalls.map((item: any) => String(item.id)))
+          setSelectedCallIds((prev) => prev.filter((id) => visibleIds.has(id)))
+        }
+        if (plansRes.status === 'fulfilled') {
+          const data = getData(plansRes.value) || {}
+          const nextPlans = Array.isArray(data) ? data : (data.items || [])
+          setPlans(nextPlans)
+          setPlanTotal(Number(data.total || nextPlans.length || 0))
+          const visibleIds = new Set(nextPlans.map((item: any) => String(item.id)))
+          setSelectedPlanIds((prev) => prev.filter((id) => visibleIds.has(id)))
+        }
       }
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
@@ -174,7 +233,7 @@ export default function ToolAccessPage() {
   }
 
   useEffect(() => { loadInitial() }, [])
-  useEffect(() => { loadTabData(activeTab) }, [activeTab])
+  useEffect(() => { loadTabData(activeTab) }, [activeTab, callOffset, callPageSize, planOffset, planPageSize])
 
   const categories = useMemo(() => {
     const fromCaps = capabilities?.categories || []
@@ -280,6 +339,41 @@ export default function ToolAccessPage() {
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
       setDeleteCandidate(null)
+    }
+  }
+
+  function toggleCallSelection(id: string, checked: boolean) {
+    setSelectedCallIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id))
+  }
+
+  function togglePlanSelection(id: string, checked: boolean) {
+    setSelectedPlanIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id))
+  }
+
+  function toggleVisibleCalls(ids: string[], checked: boolean) {
+    setSelectedCallIds((prev) => checked ? Array.from(new Set([...prev, ...ids])) : prev.filter((id) => !ids.includes(id)))
+  }
+
+  function toggleVisiblePlans(ids: string[], checked: boolean) {
+    setSelectedPlanIds((prev) => checked ? Array.from(new Set([...prev, ...ids])) : prev.filter((id) => !ids.includes(id)))
+  }
+
+  const selectedToolRecordCount = selectedCallIds.length + selectedPlanIds.length
+
+  const deleteSelectedToolRecords = async () => {
+    if (!selectedToolRecordCount) return
+    setDeletingToolRecords(true)
+    try {
+      await capabilityTools.deleteRecords({ call_ids: selectedCallIds, plan_ids: selectedPlanIds })
+      notify({ type: 'success', text: `已删除 ${selectedToolRecordCount} 条工具审计记录` })
+      setSelectedCallIds([])
+      setSelectedPlanIds([])
+      setDeleteToolRecordsOpen(false)
+      await loadTabData('audit')
+    } catch (e: any) {
+      notify({ type: 'error', text: String(e) })
+    } finally {
+      setDeletingToolRecords(false)
     }
   }
 
@@ -624,28 +718,68 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
 
       {activeTab === 'audit' && (
         <section className="tool-tab-panel">
+          <div className="card" style={{ marginBottom: 12 }}>
+            <div className="card-header">
+              <div>
+                <h2>工具审计记录</h2>
+                <span>调用记录和操作计划均支持分页查看；活跃计划默认受后端保护，不会被误删。</span>
+              </div>
+              <button className="btn btn-danger" disabled={!isAdmin || selectedToolRecordCount === 0 || deletingToolRecords} onClick={() => setDeleteToolRecordsOpen(true)}>
+                批量删除 ({selectedToolRecordCount})
+              </button>
+            </div>
+          </div>
           <div className="grid-2">
-            <ToolAuditTimeline
-              entries={calls.map((c: any) => ({
-                id: c.id,
-                tool: c.tool_name || c.tool,
-                risk: c.risk_level || c.risk,
-                created_at: c.created_at,
-                caller: c.caller || c.owner || '-',
-                source: c.source || 'HTTP',
-                status: c.status,
-                duration_ms: c.duration_ms,
-                args_summary: c.args_summary,
-                result_summary: c.blocked_reason || c.related_deployment_id || c.related_plan_id || c.result_summary,
-              }))}
-              loading={loading}
-            />
+            <div style={{ display: 'grid', gap: 10 }}>
+              <ToolAuditTimeline
+                entries={calls.map((c: any) => ({
+                  id: c.id,
+                  tool: c.tool_name || c.tool,
+                  risk: c.risk_level || c.risk,
+                  created_at: c.created_at,
+                  caller: c.caller || c.owner || '-',
+                  source: c.source || 'HTTP',
+                  status: c.status,
+                  duration_ms: c.duration_ms,
+                  args_summary: c.args_summary,
+                  result_summary: c.blocked_reason || c.related_deployment_id || c.related_plan_id || c.result_summary,
+                }))}
+                loading={loading}
+                selectedIds={selectedCallIds}
+                onToggle={toggleCallSelection}
+                onToggleAll={toggleVisibleCalls}
+              />
+              <ToolRecordPagination
+                total={callTotal}
+                limit={callPageSize}
+                offset={callOffset}
+                onOffsetChange={setCallOffset}
+                onPageSizeChange={(next) => { setCallPageSize(next); setCallOffset(0) }}
+              />
+            </div>
             <div className="card">
-              <div className="card-header"><h2>操作计划</h2><span>发布计划 / 配置变更计划</span></div>
+              <div className="card-header">
+                <div><h2>操作计划</h2><span>发布计划 / 配置变更计划</span></div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={plans.length > 0 && plans.every((p) => selectedPlanIds.includes(String(p.id)))}
+                    onChange={(e) => toggleVisiblePlans(plans.map((p) => String(p.id)), e.target.checked)}
+                  />
+                  选择当前页
+                </label>
+              </div>
               <div className="timeline-list">
-                {plans.map((p) => <div className="timeline-item" key={p.id}><strong>{p.plan_type} · {p.status}</strong><small>{p.system}/{p.service}/{p.environment} · {p.created_at}</small><p>{p.confirm_text || p.related_deployment_id || p.id}</p></div>)}
+                {plans.map((p) => <div className="timeline-item" key={p.id}><input type="checkbox" checked={selectedPlanIds.includes(String(p.id))} onChange={(e) => togglePlanSelection(String(p.id), e.target.checked)} aria-label={`选择计划 ${p.id}`} style={{ float: 'right' }} /><strong>{p.plan_type} · {p.status}</strong><small>{p.system}/{p.service}/{p.environment} · {p.created_at}</small><p>{p.confirm_text || p.related_deployment_id || p.id}</p></div>)}
                 {plans.length === 0 && <div className="empty-cell">暂无计划</div>}
               </div>
+              <ToolRecordPagination
+                total={planTotal}
+                limit={planPageSize}
+                offset={planOffset}
+                onOffsetChange={setPlanOffset}
+                onPageSizeChange={(next) => { setPlanPageSize(next); setPlanOffset(0) }}
+              />
             </div>
           </div>
         </section>
@@ -684,6 +818,16 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
           </span>
         </div>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={deleteToolRecordsOpen}
+        title="批量删除工具审计记录"
+        description={`确认删除选中的 ${selectedCallIds.length} 条调用记录和 ${selectedPlanIds.length} 条操作计划？运行中计划会被后端拒绝删除。`}
+        danger
+        confirmLabel={deletingToolRecords ? '删除中...' : '批量删除'}
+        onCancel={() => setDeleteToolRecordsOpen(false)}
+        onConfirm={deleteSelectedToolRecords}
+      />
 
       <RiskConfirmDialog
         open={riskConfirmOpen}

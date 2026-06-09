@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, File, Form
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.helpers import api_response, audit
@@ -93,6 +93,12 @@ class ToolPolicyPreviewPayload(BaseModel):
 
 class UpdateSettingsPayload(BaseModel):
     settings: Dict[str, Any]
+
+
+class DeleteToolRecordsPayload(BaseModel):
+    call_ids: List[str] = Field(default_factory=list, max_length=200)
+    plan_ids: List[str] = Field(default_factory=list, max_length=200)
+    force: bool = False
 
 
 def _utcnow():
@@ -639,58 +645,47 @@ def purge_token(token_id: str, request: Request, db: Session = Depends(get_db)):
 
 
 @tools_router.get("/calls")
-def list_tool_call_logs(request: Request, response: Response, limit: int = 100, tool: str = "", status: str = "", since_id: str = "", db: Session = Depends(get_db)):
+def list_tool_call_logs(request: Request, response: Response, limit: int = 100, offset: int = 0, tool: str = "", status: str = "", since_id: str = "", db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    q = db.query(ToolCallLog)
-    if not user.get("is_admin"):
-        q = q.filter((ToolCallLog.username == user.get("username")) | (ToolCallLog.token_owner == user.get("username")))
-    if tool:
-        q = q.filter(ToolCallLog.tool_name == tool)
-    if status:
-        q = q.filter(ToolCallLog.status == status)
-    if since_id:
-        q = q.filter(ToolCallLog.id < since_id)
-    rows = q.order_by(ToolCallLog.created_at.desc()).limit(min(max(limit, 1), 500)).all()
+    from app.services.tool_records import list_tool_call_logs as list_records
+
+    data = list_records(db, limit=limit, offset=offset, tool=tool, status=status, since_id=since_id, user=user)
     from app.api.helpers import compute_list_etag, check_etag_not_modified
-    etag = compute_list_etag(rows, "call_logs")
+    etag = compute_list_etag(data.get("items") or [], "call_logs")
     not_modified = check_etag_not_modified(request, etag)
     if not_modified:
         return not_modified
     response.headers["ETag"] = etag
-    return api_response(data=[
-        {
-            "id": r.id,
-            "tool_name": r.tool_name,
-            "client_name": r.client_name,
-            "token_owner": r.token_owner,
-            "username": r.username,
-            "input_args": r.input_args,
-            "result_preview": r.result_preview,
-            "status": r.status,
-            "risk_level": r.risk_level,
-            "blocked_reason": r.blocked_reason,
-            "related_plan_id": r.related_plan_id,
-            "related_deployment_id": r.related_deployment_id,
-            "related_job_id": r.related_job_id,
-            "duration_ms": r.duration_ms,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r in rows
-    ])
+    return api_response(data=data)
 
 
 @tools_router.get("/plans")
-def list_tool_plans(request: Request, limit: int = 100, plan_type: str = "", status: str = "", db: Session = Depends(get_db)):
+def list_tool_plans(request: Request, limit: int = 100, offset: int = 0, plan_type: str = "", status: str = "", db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    q = db.query(ToolPlan)
-    if not user.get("is_admin"):
-        q = q.filter(ToolPlan.created_by == user.get("username"))
-    if plan_type:
-        q = q.filter(ToolPlan.plan_type == plan_type)
-    if status:
-        q = q.filter(ToolPlan.status == status)
-    rows = q.order_by(ToolPlan.created_at.desc()).limit(min(max(limit, 1), 500)).all()
-    return api_response(data=[_plan_to_dict(x) for x in rows])
+    from app.services.tool_records import list_tool_plans as list_records
+
+    return api_response(data=list_records(db, limit=limit, offset=offset, plan_type=plan_type, status=status, user=user))
+
+
+@tools_router.post("/records/delete")
+def delete_tool_records(payload: DeleteToolRecordsPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_admin(request, db)
+    from app.services.tool_records import delete_tool_records as delete_records
+
+    result = delete_records(
+        db,
+        call_ids=payload.call_ids,
+        plan_ids=payload.plan_ids,
+        actor=user.get("username") or "",
+        force=payload.force,
+    )
+    audit(
+        "tool.records.delete_many",
+        "tool_records",
+        f"calls={len(result.get('call_ids') or [])},plans={len(result.get('plan_ids') or [])}",
+        f"user={user.get('username')} force={payload.force} deleted={result.get('deleted')}",
+    )
+    return api_response(data=result, message="Tool records deleted")
 
 
 @tools_router.get("/plans/{plan_id}")

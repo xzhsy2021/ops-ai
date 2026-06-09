@@ -855,10 +855,13 @@ class DbQueryExportService:
         self.db.refresh(row)
         return {"export": _report_to_dict(row), "query_preview": {"columns": columns, "row_count": len(rows), "masked_columns": metadata.get("sensitive_columns_masked")}}
 
-    def list_exports(self, *, limit: int = 100) -> Dict[str, Any]:
+    def list_exports(self, *, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
         limit = max(1, min(int(limit or 100), 500))
-        rows = self.db.query(ReportArtifact).filter(ReportArtifact.report_type == "db_query_export").order_by(ReportArtifact.created_at.desc()).limit(limit).all()
-        return {"items": [_report_to_dict(r) for r in rows], "total": len(rows), "formats": sorted(EXPORT_FORMATS)}
+        offset = max(0, int(offset or 0))
+        q = self.db.query(ReportArtifact).filter(ReportArtifact.report_type == "db_query_export")
+        total = q.count()
+        rows = q.order_by(ReportArtifact.created_at.desc()).offset(offset).limit(limit).all()
+        return {"items": [_report_to_dict(r) for r in rows], "total": total, "limit": limit, "offset": offset, "formats": sorted(EXPORT_FORMATS)}
 
     def get_export(self, export_id: str) -> Dict[str, Any]:
         return _report_to_dict(self._get_export_row(export_id))
@@ -884,15 +887,47 @@ class DbQueryExportService:
         return path
 
     def delete_export(self, export_id: str) -> Dict[str, Any]:
-        row = self._get_export_row(export_id)
-        try:
-            path = self.download_path(export_id)
-            path.unlink(missing_ok=True)
-        except HTTPException:
-            pass
-        self.db.delete(row)
+        result = self.delete_exports([export_id])
+        return {"id": export_id, "deleted": bool(result.get("deleted")), **result}
+
+    def delete_exports(self, export_ids: List[str]) -> Dict[str, Any]:
+        ids: List[str] = []
+        seen = set()
+        for raw in export_ids or []:
+            export_id = str(raw or "").strip()
+            if export_id and export_id not in seen:
+                seen.add(export_id)
+                ids.append(export_id)
+        if not ids:
+            raise HTTPException(status_code=400, detail="export_ids is required")
+        if len(ids) > 200:
+            raise HTTPException(status_code=400, detail="Cannot delete more than 200 exports at once")
+        rows = self.db.query(ReportArtifact).filter(ReportArtifact.id.in_(ids), ReportArtifact.report_type == "db_query_export").all()
+        by_id = {row.id: row for row in rows}
+        missing = [export_id for export_id in ids if export_id not in by_id]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"DB export not found: {', '.join(missing[:5])}")
+        deleted_files = 0
+        skipped_files: List[str] = []
+        for export_id in ids:
+            row = by_id[export_id]
+            try:
+                path = self.download_path(export_id)
+                path.unlink(missing_ok=True)
+                deleted_files += 1
+            except HTTPException as exc:
+                if exc.status_code not in {404}:
+                    skipped_files.append(export_id)
+            except Exception:
+                skipped_files.append(export_id)
+            self.db.delete(row)
         self.db.commit()
-        return {"id": export_id, "deleted": True}
+        return {
+            "export_ids": ids,
+            "deleted": len(ids),
+            "deleted_files": deleted_files,
+            "skipped_files": skipped_files,
+        }
 
 
 def export_media_type(fmt: str) -> str:

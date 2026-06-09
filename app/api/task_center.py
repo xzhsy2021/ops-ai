@@ -16,7 +16,7 @@ from app.db import get_db
 from app.config.audit import load_audit_logs
 from app.core.rbac import explain_operation_risk
 from app.services.audit_chain import build_operation_chain, list_operation_chains
-from app.domain.runtime import count_runtime_jobs, list_runtime_jobs, get_runtime_job_detail
+from app.domain.runtime import count_runtime_jobs, delete_runtime_tasks, list_runtime_jobs, get_runtime_job_detail, reconcile_stale_operation_jobs
 
 router = APIRouter(prefix="/api/v2/tasks", tags=["任务中心"])
 audit_router = APIRouter(prefix="/api/v2/audit", tags=["审计"])
@@ -27,6 +27,8 @@ async def list_tasks(request: Request, status: str = "", kind: str = "", limit: 
     user = require_auth(request, db)
     limit = max(1, min(limit, 500))
     offset = max(0, int(offset or 0))
+    if not kind or kind in ("tool", "mcp_tool", "job", "mcp"):
+        reconcile_stale_operation_jobs(db)
     total = count_runtime_jobs(db, status=status, kind=kind)
     tasks = list_runtime_jobs(db, status=status, kind=kind, limit=limit, offset=offset)
     for task in tasks:
@@ -35,6 +37,44 @@ async def list_tasks(request: Request, status: str = "", kind: str = "", limit: 
             task["detail"]["risk"] = explain_operation_risk("deploy", d.get("environment"), d.get("system"))
     audit("tasks.list", "task_center", kind or "all", f"user={user.get('username')} status={status} limit={limit} offset={offset}")
     return api_response(data={"items": tasks, "total": total, "limit": limit, "offset": offset, "statuses": ["queued", "pending", "running", "success", "failed", "cancelled", "paused"]})
+
+
+@router.post("/delete")
+async def delete_tasks(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    data = await request.json()
+    items = data.get("items") or []
+    confirm_text = str(data.get("confirm_text") or "")
+    force = bool(data.get("force", False))
+    result = delete_runtime_tasks(db, items, confirm_text=confirm_text, actor=user.get("username") or "", force=force)
+    audit(
+        "tasks.delete_many",
+        "task_center",
+        ",".join(f"{item.get('kind')}:{item.get('id')}" for item in result.get("items", [])),
+        f"user={user.get('username')} force={force} deleted={result.get('deleted')}",
+    )
+    return api_response(data=result, message="Tasks deleted")
+
+
+@router.delete("/{kind}/{item_id}")
+async def delete_task(kind: str, item_id: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    force = bool((data or {}).get("force", False))
+    result = delete_runtime_tasks(
+        db,
+        [{"kind": kind, "id": item_id}],
+        confirm_text=str((data or {}).get("confirm_text") or ""),
+        actor=user.get("username") or "",
+        force=force,
+    )
+    audit(
+        "tasks.delete",
+        "task_center",
+        f"{kind}:{item_id}",
+        f"user={user.get('username')} force={force} deleted={result.get('deleted')}",
+    )
+    return api_response(data=result, message="Task deleted")
 
 
 @router.get("/{kind}/{item_id}")
@@ -104,9 +144,11 @@ async def get_audit_operation_chain_by_ref(
 
 
 @audit_router.get("")
-async def list_audit(request: Request, response: Response, limit: int = 200, action: str = "", since_id: str = "", db: Session = Depends(get_db)):
+async def list_audit(request: Request, response: Response, limit: int = 200, offset: int = 0, action: str = "", since_id: str = "", db: Session = Depends(get_db)):
     require_admin(request, db)
-    rows = load_audit_logs(max(1, min(limit, 1000)))
+    limit = max(1, min(limit, 1000))
+    offset = max(0, int(offset or 0))
+    rows = load_audit_logs(5000)
     if action:
         rows = [r for r in rows if action.lower() in (r.get("action") or "").lower()]
     if since_id:
@@ -115,13 +157,15 @@ async def list_audit(request: Request, response: Response, limit: int = 200, act
             rows = [r for r in rows if int(r.get("id", 0)) < sid]
         except (ValueError, TypeError):
             pass
+    total = len(rows)
+    rows = rows[offset:offset + limit]
     from app.api.helpers import compute_list_etag, check_etag_not_modified
     etag = compute_list_etag(rows, "audit")
     not_modified = check_etag_not_modified(request, etag)
     if not_modified:
         return not_modified
     response.headers["ETag"] = etag
-    return api_response(data={"items": rows, "total": len(rows)})
+    return api_response(data={"items": rows, "total": total, "limit": limit, "offset": offset})
 
 
 @audit_router.get("/export")

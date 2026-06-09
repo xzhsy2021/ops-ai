@@ -75,6 +75,9 @@ export default function DeployPage() {
   const [deployments, setDeployments] = useState<DeploymentRecord[]>([])
   const [deploymentPagination, setDeploymentPagination] = useState<any>(null)
   const [selectedReport, setSelectedReport] = useState<DeploymentReport | null>(null)
+  const [deleteHistoryTargets, setDeleteHistoryTargets] = useState<DeploymentRecord[]>([])
+  const [selectedDeploymentIds, setSelectedDeploymentIds] = useState<string[]>([])
+  const [deletingHistory, setDeletingHistory] = useState(false)
   const [activeTab, setActiveTab] = useState<'deploy' | 'history'>('deploy')
   const {
     retentionPolicy,
@@ -251,6 +254,37 @@ export default function DeployPage() {
     setDeploymentId(d.id)
     setStatus(d.status)
     setActiveTab('deploy')
+  }
+
+  const openDeleteSelectedDeploymentHistory = () => {
+    const selected = deployments.filter((item) => selectedDeploymentIds.includes(item.id))
+    if (selected.length) setDeleteHistoryTargets(selected)
+  }
+
+  const confirmDeleteDeploymentHistory = async () => {
+    if (!deleteHistoryTargets.length) return
+    setDeletingHistory(true)
+    try {
+      const ids = deleteHistoryTargets.map((item) => item.id).filter(Boolean)
+      if (ids.length === 1) {
+        await deployment.deleteHistory(ids[0], { confirm_text: `DELETE DEPLOYMENT ${ids[0]}` })
+      } else {
+        await deployment.deleteHistoryBatch({ deployment_ids: ids, confirm_text: `DELETE DEPLOYMENTS ${ids.length}` })
+      }
+      setDeleteHistoryTargets([])
+      setSelectedDeploymentIds((prev) => prev.filter((id) => !ids.includes(id)))
+      if (deploymentId && ids.includes(deploymentId)) {
+        resetRunState('idle')
+        setSelectedReport(null)
+      }
+      const pagination = await loadDeployments({ offset: deploymentPagination?.offset || 0, limit: deploymentPagination?.limit || 50 })
+      setDeploymentPagination(pagination)
+      notify('部署历史已删除', 'success')
+    } catch (e: any) {
+      notify(typeof e === 'string' ? e : e?.message || '删除部署历史失败', 'error')
+    } finally {
+      setDeletingHistory(false)
+    }
   }
 
 
@@ -441,7 +475,13 @@ export default function DeployPage() {
           <DeploymentHistoryTable
             deployments={deployments}
             pagination={deploymentPagination}
-            onQuery={(filters) => loadDeployments(filters).then(setDeploymentPagination)}
+            selectedIds={selectedDeploymentIds}
+            onSelectionChange={setSelectedDeploymentIds}
+            onDeleteSelected={openDeleteSelectedDeploymentHistory}
+            onQuery={(filters) => {
+              setSelectedDeploymentIds([])
+              return loadDeployments(filters).then(setDeploymentPagination)
+            }}
             onRollback={handleRollback}
             onReuse={(d) => {
               setSystem(d.system || '')
@@ -459,6 +499,7 @@ export default function DeployPage() {
             onViewLogs={(d) => {
               openHistoricalDeployment(d, true)
             }}
+            onDelete={(deploymentRecord) => setDeleteHistoryTargets([deploymentRecord])}
           />
         </>
       )}
@@ -504,6 +545,28 @@ export default function DeployPage() {
           { label: '当前状态', value: status || '-' },
         ]}
         confirmButtonLabel="确认终止"
+        confirmMode="one-click"
+      />
+
+      <RiskConfirmDialog
+        open={deleteHistoryTargets.length > 0}
+        title={deleteHistoryTargets.length > 1 ? '确认批量删除部署历史' : '确认删除部署历史'}
+        description="将删除部署记录及关联任务、日志、步骤和分发明细；不会删除发布包文件或审计日志。运行中的部署不可删除。"
+        target={deleteHistoryTargets.length > 1 ? `已选择 ${deleteHistoryTargets.length} 条部署历史` : (deleteHistoryTargets[0] ? `${deleteHistoryTargets[0].system || '-'} / ${deleteHistoryTargets[0].service || '-'} / ${deleteHistoryTargets[0].id}` : '-')}
+        confirmText={deleteHistoryTargets.length > 1 ? `DELETE DEPLOYMENTS ${deleteHistoryTargets.length}` : `DELETE DEPLOYMENT ${deleteHistoryTargets[0]?.id || ''}`}
+        value=""
+        onValueChange={() => {}}
+        onCancel={() => { if (!deletingHistory) setDeleteHistoryTargets([]) }}
+        onConfirm={confirmDeleteDeploymentHistory}
+        riskLevel="high"
+        details={[
+          { label: '数量', value: String(deleteHistoryTargets.length) },
+          { label: '环境', value: deleteHistoryTargets.length > 1 ? Array.from(new Set(deleteHistoryTargets.map((item) => item.environment || '-'))).join(', ') : (deleteHistoryTargets[0]?.environment || '-') },
+          { label: '状态', value: deleteHistoryTargets.length > 1 ? Array.from(new Set(deleteHistoryTargets.map((item) => item.status || '-'))).join(', ') : (deleteHistoryTargets[0]?.status || '-') },
+          { label: '版本', value: deleteHistoryTargets.length > 1 ? deleteHistoryTargets.map((item) => item.version || item.id).slice(0, 5).join(', ') : (deleteHistoryTargets[0]?.version || '-') },
+        ]}
+        confirmButtonLabel={deletingHistory ? '删除中...' : '确认删除'}
+        confirmDisabled={deletingHistory}
         confirmMode="one-click"
       />
 

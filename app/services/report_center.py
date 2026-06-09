@@ -1166,6 +1166,49 @@ def get_report(db: Session, report_id: str) -> ReportArtifact:
     return row
 
 
+def delete_reports(db: Session, report_ids: List[str], *, actor: str = "") -> Dict[str, Any]:
+    ids: List[str] = []
+    seen = set()
+    for raw in report_ids or []:
+        report_id = str(raw or "").strip()
+        if report_id and report_id not in seen:
+            seen.add(report_id)
+            ids.append(report_id)
+    if not ids:
+        raise HTTPException(status_code=400, detail="report_ids is required")
+    if len(ids) > 200:
+        raise HTTPException(status_code=400, detail="Cannot delete more than 200 reports at once")
+
+    rows = db.query(ReportArtifact).filter(ReportArtifact.id.in_(ids)).all()
+    by_id = {row.id: row for row in rows}
+    missing = [report_id for report_id in ids if report_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Report not found: {', '.join(missing[:5])}")
+
+    deleted_files = 0
+    skipped_files: List[str] = []
+    for report_id in ids:
+        row = by_id[report_id]
+        try:
+            path = report_download_path(row)
+            path.unlink(missing_ok=True)
+            deleted_files += 1
+        except HTTPException as exc:
+            if exc.status_code not in {404}:
+                skipped_files.append(report_id)
+        except Exception:
+            skipped_files.append(report_id)
+        db.delete(row)
+    db.commit()
+    return {
+        "report_ids": ids,
+        "deleted": len(ids),
+        "deleted_files": deleted_files,
+        "skipped_files": skipped_files,
+        "actor": actor or "",
+    }
+
+
 
 def generate_report_from_payload(
     db: Session,

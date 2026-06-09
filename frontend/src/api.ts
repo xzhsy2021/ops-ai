@@ -211,6 +211,8 @@ export const deployment = {
   reportMarkdownUrl: (deploymentId: string) => `${getBaseURL()}/deploy/deployments/${encodeURIComponent(deploymentId)}/report.md`,
   retry: (deploymentId: string, data?: any) => api.post(`/deploy/deployments/${deploymentId}/retry`, data || {}),
   cancel: (deploymentId: string) => api.post(`/deploy/deployments/${deploymentId}/cancel`),
+  deleteHistory: (deploymentId: string, data: { confirm_text: string; force?: boolean }) => api.delete(`/deploy/deployments/${encodeURIComponent(deploymentId)}`, { data }),
+  deleteHistoryBatch: (data: { deployment_ids: string[]; confirm_text: string; force?: boolean }) => api.post('/deploy/deployments/delete', data),
   tasks: (deploymentId: string) => api.get(`/deploy/deployments/${deploymentId}/tasks`),
   retention: () => api.get('/deploy/retention'),
   updateRetention: (data: any) => api.put('/deploy/retention', data),
@@ -434,10 +436,12 @@ export default api
 export const taskCenter = {
   list: (params?: { status?: string; kind?: string; limit?: number; offset?: number }) => api.get('/tasks', { params }),
   detail: (kind: string, id: string) => api.get(`/tasks/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`),
+  delete: (kind: string, id: string, data: { confirm_text: string; force?: boolean }) => api.delete(`/tasks/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { data }),
+  deleteMany: (data: { items: { kind: string; id: string }[]; confirm_text: string; force?: boolean }) => api.post('/tasks/delete', data),
 }
 
 export const auditLog = {
-  list: (params?: { limit?: number; action?: string }) => api.get('/audit', { params }),
+  list: (params?: { limit?: number; offset?: number; action?: string }) => api.get('/audit', { params }),
   operationChains: (params?: { limit?: number; kind?: string; status?: string; risk?: string }) => api.get('/audit/operation-chains', { params }),
   operationChain: (chainId: string) => api.get(`/audit/operation-chains/${encodeURIComponent(chainId)}`),
   exportUrl: (params?: { limit?: number; action?: string }) => {
@@ -468,8 +472,9 @@ export const capabilityTools = {
   updateToken: (id: string, data: any) => api.patch(`/tools/tokens/${encodeURIComponent(id)}`, data),
   revokeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}`),
   purgeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}/purge`),
-  calls: (params?: { limit?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
-  plans: (params?: { limit?: number; plan_type?: string; status?: string }) => api.get('/tools/plans', { params }),
+  calls: (params?: { limit?: number; offset?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
+  plans: (params?: { limit?: number; offset?: number; plan_type?: string; status?: string }) => api.get('/tools/plans', { params }),
+  deleteRecords: (data: { call_ids?: string[]; plan_ids?: string[]; force?: boolean }) => api.post('/tools/records/delete', data),
   plan: (id: string) => api.get(`/tools/plans/${encodeURIComponent(id)}`),
   mcpManifest: () => cachedGet('mcp.manifest', 60000, () => api.get('/mcp/manifest')),
   mcpResources: () => cachedGet('mcp.resources', 60000, () => api.get('/mcp/resources')),
@@ -487,6 +492,7 @@ export const reports = {
   operationChainExportUrl: (chainId: string, format = 'json') => `${getBaseURL()}/reports/operation-chain/export?chain_id=${encodeURIComponent(chainId)}&format=${encodeURIComponent(format)}`,
   update: (id: string, data: { title?: string; status?: string; summary?: string }) => api.patch(`/reports/${encodeURIComponent(id)}`, data),
   delete: (id: string) => api.delete(`/reports/${encodeURIComponent(id)}`),
+  deleteMany: (data: { report_ids: string[] }) => api.post('/reports/delete', data),
 }
 
 export const dbTools = {
@@ -494,10 +500,11 @@ export const dbTools = {
   schema: (tableName: string, params?: { connection_id?: string; database_name?: string }) => api.get(`/db/tables/${encodeURIComponent(tableName)}/schema`, { params }),
   query: (data: { sql: string; connection_id?: string; database_name?: string; limit?: number; timeout_seconds?: number }) => api.post('/db/query', data),
   exportQuery: (data: { sql: string; format?: string; filename_hint?: string; table_name?: string; connection_id?: string; database_name?: string; limit?: number; timeout_seconds?: number }) => api.post('/db/query/export', data),
-  exports: (params?: { limit?: number }) => api.get('/db/exports', { params }),
+  exports: (params?: { limit?: number; offset?: number }) => api.get('/db/exports', { params }),
   exportDetail: (id: string) => api.get(`/db/exports/${encodeURIComponent(id)}`),
   downloadUrl: (id: string) => `${getBaseURL()}/db/exports/${encodeURIComponent(id)}/download`,
   deleteExport: (id: string) => api.delete(`/db/exports/${encodeURIComponent(id)}`),
+  deleteExports: (data: { export_ids: string[] }) => api.post('/db/exports/delete', data),
   previewExecute: (data: { sql: string; connection_id?: string; database_name?: string; max_affected_rows?: number; preview_level?: 'fast' | 'standard' | 'full' }) => api.post('/db/execute/preview', data),
   execute: (data: { sql: string; connection_id?: string; database_name?: string; max_affected_rows?: number; confirm_text?: string; reason?: string }) => api.post('/db/execute', data),
   executeHistory: (params?: { connection_id?: string; status?: string; statement_type?: string; limit?: number; offset?: number }) => api.get('/db/execute/history', { params }),
@@ -596,7 +603,7 @@ export const inspection = {
 export const mcpAi = {
   tools: (params?: { category?: string; risk?: string; include_schema?: boolean; limit?: number; cursor?: number }) => api.get('/tools', { params }),
   toolDetail: (name: string) => api.get(`/tools/detail/${encodeURIComponent(name)}`),
-  toolCalls: (params?: { limit?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
+  toolCalls: (params?: { limit?: number; offset?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
   resources: () => api.get('/mcp/resources'),
   readResource: (uri: string) => api.post('/mcp/resources/read', { uri }),
   workflow: (tool: string, arguments_: Record<string, any>) => api.post('/tools/call', { tool, arguments: arguments_ }),

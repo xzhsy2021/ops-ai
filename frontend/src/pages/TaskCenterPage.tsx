@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { deployment, taskCenter } from '../api'
 import { ROUTES } from '../routes'
-import { EmptyState, PageHeader, StatusBadge, FavoriteButton } from '../components/ui'
+import { EmptyState, PageHeader, StatusBadge, FavoriteButton, RiskConfirmDialog } from '../components/ui'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 
 type TaskItem = {
@@ -46,6 +46,10 @@ function formatDuration(value?: number) {
 function isLiveStatus(value?: string) {
   const status = String(value || '').toLowerCase()
   return ['queued', 'pending', 'pending_approval', 'draft', 'submitted', 'running', 'executing'].includes(status)
+}
+
+function taskKey(item: Pick<TaskItem, 'kind' | 'id'>) {
+  return `${item.kind}:${item.id}`
 }
 
 function timeSummary(item: TaskItem) {
@@ -104,6 +108,9 @@ export default function TaskCenterPage() {
   const [selected, setSelected] = useState<any>(null)
   const [error, setError] = useState('')
   const [actionMsg, setActionMsg] = useState('')
+  const [selectedTaskKeys, setSelectedTaskKeys] = useState<string[]>([])
+  const [pendingTaskDeleteItems, setPendingTaskDeleteItems] = useState<TaskItem[]>([])
+  const [deletingTasks, setDeletingTasks] = useState(false)
 
   const stats = useMemo(() => {
     const result = { total, running: 0, failed: 0, pending: 0 }
@@ -128,13 +135,20 @@ export default function TaskCenterPage() {
     return [...items].sort((a, b) => priority(a) - priority(b) || timestamp(b) - timestamp(a))
   }, [items])
 
+  const selectedTaskKeySet = useMemo(() => new Set(selectedTaskKeys), [selectedTaskKeys])
+  const selectableItems = useMemo(() => sortedItems.filter((item) => !isLiveStatus(item.status)), [sortedItems])
+  const allPageTasksSelected = selectableItems.length > 0 && selectableItems.every((item) => selectedTaskKeySet.has(taskKey(item)))
+
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const res: any = await taskCenter.list({ kind: kind || undefined, status: status || undefined, limit: pageSize, offset })
-      setItems(res.data?.items || [])
+      const nextItems = res.data?.items || []
+      setItems(nextItems)
       setTotal(Number(res.data?.total || 0))
+      const visibleKeys = new Set(nextItems.map((item: TaskItem) => taskKey(item)))
+      setSelectedTaskKeys((prev) => prev.filter((key) => visibleKeys.has(key)))
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -160,6 +174,61 @@ export default function TaskCenterPage() {
       setSelected(res.data)
     } catch (e: any) {
       setSelected({ error: e?.message || String(e) })
+    }
+  }
+
+  function toggleTaskSelection(item: TaskItem, checked: boolean) {
+    const key = taskKey(item)
+    setSelectedTaskKeys((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(key)
+      else next.delete(key)
+      return Array.from(next)
+    })
+  }
+
+  function togglePageTaskSelection(checked: boolean) {
+    const pageKeys = selectableItems.map(taskKey)
+    setSelectedTaskKeys((prev) => {
+      const next = new Set(prev)
+      pageKeys.forEach((key) => {
+        if (checked) next.add(key)
+        else next.delete(key)
+      })
+      return Array.from(next)
+    })
+  }
+
+  function openDeleteSelectedTasks() {
+    const selectedItems = sortedItems.filter((item) => selectedTaskKeySet.has(taskKey(item)) && !isLiveStatus(item.status))
+    if (selectedItems.length) setPendingTaskDeleteItems(selectedItems)
+  }
+
+  async function confirmDeleteTasks() {
+    if (!pendingTaskDeleteItems.length) return
+    setDeletingTasks(true)
+    try {
+      const itemsToDelete = pendingTaskDeleteItems.map((item) => ({ kind: item.kind, id: item.id }))
+      const confirm_text = `DELETE TASKS ${itemsToDelete.length}`
+      if (itemsToDelete.length === 1) {
+        const only = itemsToDelete[0]
+        await taskCenter.delete(only.kind, only.id, { confirm_text })
+      } else {
+        await taskCenter.deleteMany({ items: itemsToDelete, confirm_text })
+      }
+      const deletedKeys = new Set(itemsToDelete.map((item) => taskKey(item)))
+      setSelectedTaskKeys((prev) => prev.filter((key) => !deletedKeys.has(key)))
+      setPendingTaskDeleteItems([])
+      setSelected((current: any) => {
+        if (!current?.kind || !current?.id) return current
+        return deletedKeys.has(taskKey(current)) ? null : current
+      })
+      setActionMsg(`已删除 ${itemsToDelete.length} 个任务`)
+      await load()
+    } catch (e: any) {
+      setActionMsg(typeof e === 'string' ? e : e?.message || '删除任务失败')
+    } finally {
+      setDeletingTasks(false)
     }
   }
 
@@ -195,6 +264,7 @@ export default function TaskCenterPage() {
           <span><strong>{stats.pending}</strong> 本页待处理</span>
         </div>
         <div className="task-center-filters">
+          <button className="btn btn-danger" disabled={!selectedTaskKeys.length} onClick={openDeleteSelectedTasks}>批量删除 ({selectedTaskKeys.length})</button>
           <label>类型
             <select value={kind} onChange={(e) => { setKind(e.target.value); setOffset(0) }}>
               <option value="">全部</option>
@@ -226,12 +296,13 @@ export default function TaskCenterPage() {
       {!items.length && !loading ? <EmptyState title="暂无任务" description="执行发布、SQL、清理或 MCP/工具任务后会在这里统一展示。" /> : (
         <div className="card table-card task-center-content">
           <table className="data-table">
-            <thead><tr><th>类型</th><th>标题</th><th>状态</th><th>风险</th><th>目标</th><th>操作人</th><th>时间</th><th>操作</th></tr></thead>
+            <thead><tr><th><input type="checkbox" aria-label="选择当前页任务" checked={allPageTasksSelected} disabled={!selectableItems.length} onChange={(e) => togglePageTaskSelection(e.target.checked)} /></th><th>类型</th><th>标题</th><th>状态</th><th>风险</th><th>目标</th><th>操作人</th><th>时间</th><th>操作</th></tr></thead>
             <tbody>
               {sortedItems.map((item) => {
                 const times = timeSummary(item)
                 return (
                 <tr key={`${item.kind}-${item.id}`} className={[isLiveStatus(item.status) ? 'task-row-live' : '', ['failed', 'error'].includes(String(item.status || '').toLowerCase()) ? 'task-row-failed' : ''].filter(Boolean).join(' ') || undefined}>
+                  <td><input type="checkbox" aria-label={`选择任务 ${item.title}`} checked={selectedTaskKeySet.has(taskKey(item))} disabled={isLiveStatus(item.status)} onChange={(e) => toggleTaskSelection(item, e.target.checked)} /></td>
                   <td>{KIND_LABEL[item.kind] || item.kind}</td>
                   <td>{item.title}</td>
                   <td><StatusBadge value={item.status} /></td>
@@ -249,6 +320,7 @@ export default function TaskCenterPage() {
                     <button className="btn small" onClick={() => openDetail(item)}>详情</button>
                     {item.kind === 'deploy' && ['failed', 'success', 'cancelled'].includes(item.status) && <button className="btn small" onClick={() => retryDeploy(item)}>重试</button>}
                     {item.kind === 'deploy' && <a className="btn small" href={deployment.reportTextUrl(item.id)} target="_blank" rel="noreferrer">报告</a>}
+                    <button className="btn small btn-danger" disabled={isLiveStatus(item.status)} onClick={() => setPendingTaskDeleteItems([item])}>删除</button>
                   </td>
                 </tr>
                 )
@@ -263,6 +335,28 @@ export default function TaskCenterPage() {
         offset={offset}
         onOffsetChange={setOffset}
         onPageSizeChange={(next) => { setPageSize(next); setOffset(0) }}
+      />
+
+      <RiskConfirmDialog
+        open={pendingTaskDeleteItems.length > 0}
+        title={pendingTaskDeleteItems.length > 1 ? '确认批量删除任务' : '确认删除任务'}
+        description="将删除任务中心记录及其关联运行数据。运行中、排队中或待审批任务不可删除。"
+        target={pendingTaskDeleteItems.length > 1 ? `已选择 ${pendingTaskDeleteItems.length} 个任务` : (pendingTaskDeleteItems[0] ? `${KIND_LABEL[pendingTaskDeleteItems[0].kind] || pendingTaskDeleteItems[0].kind} / ${pendingTaskDeleteItems[0].title}` : '-')}
+        confirmText={`DELETE TASKS ${pendingTaskDeleteItems.length}`}
+        value=""
+        onValueChange={() => {}}
+        onCancel={() => { if (!deletingTasks) setPendingTaskDeleteItems([]) }}
+        onConfirm={confirmDeleteTasks}
+        riskLevel="high"
+        details={[
+          { label: '数量', value: String(pendingTaskDeleteItems.length) },
+          { label: '类型', value: Array.from(new Set(pendingTaskDeleteItems.map((item) => KIND_LABEL[item.kind] || item.kind))).join(', ') || '-' },
+          { label: '状态', value: Array.from(new Set(pendingTaskDeleteItems.map((item) => item.status || '-'))).join(', ') || '-' },
+          { label: '目标', value: pendingTaskDeleteItems.map((item) => item.target || item.id).slice(0, 5).join(', ') || '-' },
+        ]}
+        confirmButtonLabel={deletingTasks ? '删除中...' : '确认删除'}
+        confirmDisabled={deletingTasks}
+        confirmMode="one-click"
       />
 
       {selected && (

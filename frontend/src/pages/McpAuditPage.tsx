@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { capabilityTools } from '../api'
 import ToolRiskTag from '../components/ToolRiskTag'
 
@@ -16,6 +16,7 @@ const PAGE_SIZES = [20, 50, 100]
 
 export default function McpAuditPage() {
   const [items, setItems] = useState<any[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [page, setPage] = useState(1)
@@ -30,24 +31,26 @@ export default function McpAuditPage() {
     try {
       const res: any = await capabilityTools.calls({
         limit: pageSize,
+        offset: (page - 1) * pageSize,
         tool: filterTool || undefined,
         status: filterStatus || undefined,
       })
       const data = res?.data || res
       const result = data?.items || data?.result || data
       setItems(Array.isArray(result) ? result : [])
+      setTotal(Number(data?.total || 0))
     } catch (e: any) {
       setError(e?.message || String(e))
       setItems([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
-  }, [pageSize, filterTool, filterStatus])
+  }, [page, pageSize, filterTool, filterStatus])
 
   useEffect(() => { load() }, [load])
 
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize))
-  const paged = items.slice((page - 1) * pageSize, page * pageSize)
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   function toggleExpand(id: string) {
     setExpandedId((prev) => (prev === id ? null : id))
@@ -98,10 +101,10 @@ export default function McpAuditPage() {
             </tr>
           </thead>
           <tbody>
-            {paged.map((x) => {
+            {items.map((x) => {
               const expanded = expandedId === x.id
               return (
-                <>
+                <Fragment key={x.id}>
                   <tr key={x.id} style={{ cursor: 'pointer' }} onClick={() => toggleExpand(x.id)}>
                     <td style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                       {expanded ? '▼' : '▶'}
@@ -157,24 +160,24 @@ export default function McpAuditPage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               )
             })}
-            {!paged.length && !loading && (
+            {!items.length && !loading && (
               <tr><td colSpan={7} style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 24 }}>暂无调用记录</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
-      {items.length > 0 && (
+      {total > 0 && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>每页</span>
             <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1) }}>
               {PAGE_SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
-            <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>共 {items.length} 条</span>
+            <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>共 {total} 条</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button className="btn small" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>

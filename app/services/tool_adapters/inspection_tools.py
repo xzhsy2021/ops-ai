@@ -616,6 +616,7 @@ def preview_servers_batch(args: Dict[str, Any], ctx, db):
             "group": {"type": "string", "description": "单分组快捷字段，等同 groups=[group]。"},
             "categories": {"type": "array", "items": {"type": "string"}, "description": "巡检分类编码列表：LOGIN_SECURITY / ACCOUNT_SECURITY / COMMAND_HISTORY / PROCESS_PORT / FIREWALL / DISK / SERVICE_STATUS / BACKUP"},
             "concurrency": {"type": "integer", "minimum": 1, "maximum": 20},
+            "batch_size": {"type": "integer", "minimum": 1, "maximum": 20},
             "all_servers": {"type": "boolean"},
             "skip_disabled": {"type": "boolean"},
             "command_timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300},

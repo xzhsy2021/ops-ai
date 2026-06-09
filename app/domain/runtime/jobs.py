@@ -43,15 +43,19 @@ def reconcile_stale_operation_jobs(db: Session, *, now: Optional[datetime] = Non
     rows = (
         db.query(OperationJob)
         .filter(OperationJob.status.in_(stale_statuses))
-        .filter(OperationJob.updated_at < cutoff)
         .limit(200)
         .all()
     )
+    rows = [
+        row for row in rows
+        if (row.updated_at or row.started_at or row.created_at or current) < cutoff
+    ]
     for row in rows:
         previous = row.status or "unknown"
         row.status = "failed"
         row.progress = 100
-        row.error_message = row.error_message or f"Stale operation job auto-failed after {STALE_OPERATION_JOB_HOURS}h without worker heartbeat"
+        max_age = max(1, int(max_age_hours or STALE_OPERATION_JOB_HOURS))
+        row.error_message = row.error_message or f"Stale operation job auto-failed after {max_age}h without worker heartbeat"
         if not row.finished_at:
             row.finished_at = current
         row.updated_at = current

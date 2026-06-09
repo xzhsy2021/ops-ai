@@ -59,6 +59,45 @@ def test_high_risk_tool_call_is_queued_as_unified_job(tmp_path, monkeypatch):
         engine.dispose()
 
 
+def test_high_risk_tool_worker_updates_job_to_terminal_status(tmp_path, monkeypatch):
+    from app.services.tool_context import ToolContext
+    from app.services.tool_policy import save_capability_settings
+    from app.services.tool_registry import register_builtin_tools, registry
+    import app.services.job_service as job_service
+    from app.services.job_service import get_operation_job
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    try:
+        monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "backups"))
+        monkeypatch.setattr(job_service, "SessionLocal", Session)
+        monkeypatch.setattr(job_service, "start_job_worker", lambda job_id: job_service._execute_tool_job(job_id))
+        save_capability_settings(db, {
+            "enabled": True,
+            "http_tools_enabled": True,
+            "read_only": False,
+            "allow_backup_write": True,
+            "allow_high_risk_tools": True,
+            "allow_critical_risk_tools": False,
+            "require_confirmation": True,
+            "taskize_high_risk_tools": True,
+        })
+        register_builtin_tools()
+        ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+
+        result = registry.call(db, "ops.delete_backup", {"file": "missing.db", "confirm_text": "DELETE missing.db"}, ctx)
+
+        job = get_operation_job(db, result["job_id"])
+        assert job is not None
+        assert job["status"] == "failed"
+        assert job["progress"] == 100
+        assert job["finished_at"]
+        assert job["error_message"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_job_read_tools_are_registered(tmp_path):
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import register_builtin_tools, registry

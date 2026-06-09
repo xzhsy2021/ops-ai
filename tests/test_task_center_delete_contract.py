@@ -144,6 +144,42 @@ def test_list_runtime_jobs_marks_stale_operation_jobs_failed(sqlite_session):
     assert recent.finished_at is None
 
 
+def test_stale_operation_reconcile_uses_created_at_when_updated_at_missing(sqlite_session):
+    from datetime import timedelta
+
+    from app.db.models import OperationJob
+    from app.domain.runtime.jobs import reconcile_stale_operation_jobs
+
+    db = sqlite_session
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stale_at = now - timedelta(hours=3)
+    db.add(OperationJob(
+        id="job_no_heartbeat",
+        title="Tool no heartbeat",
+        source_tool="ops.inspection.run_servers_batch",
+        status="running",
+        progress=35,
+        operator="alice",
+        request_json={"tool": "ops.inspection.run_servers_batch", "arguments": {"groups": ["crypto"]}},
+        created_at=stale_at,
+        started_at=stale_at,
+        updated_at=stale_at,
+    ))
+    db.commit()
+    db.query(OperationJob).filter_by(id="job_no_heartbeat").update({"updated_at": None})
+    db.commit()
+
+    reconciled = reconcile_stale_operation_jobs(db, now=now, max_age_hours=2)
+
+    row = db.query(OperationJob).filter_by(id="job_no_heartbeat").one()
+    assert reconciled == 1
+    assert row.status == "failed"
+    assert row.progress == 100
+    assert row.finished_at is not None
+    assert row.result_json["stale"] is True
+    assert row.result_json["previous_status"] == "running"
+
+
 def test_task_center_frontend_exposes_single_and_batch_delete_actions():
     page = open("frontend/src/pages/TaskCenterPage.tsx", encoding="utf-8").read()
     api = open("frontend/src/api.ts", encoding="utf-8").read()

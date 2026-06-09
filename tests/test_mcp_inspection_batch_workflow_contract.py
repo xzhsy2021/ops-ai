@@ -125,6 +125,35 @@ def test_batch_run_requires_preview_confirmation_not_generic_phrase(monkeypatch,
         engine.dispose()
 
 
+def test_preview_next_action_arguments_match_run_servers_batch_schema(monkeypatch, tmp_path):
+    from app.services.tool_adapters import inspection_tools
+    from app.services.tool_registry import register_builtin_tools, registry
+    from app.services.tool_schema import validate_schema
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    _inventory(monkeypatch)
+    ctx = SimpleNamespace(username="ai-agent", token_owner="")
+    try:
+        register_builtin_tools()
+        preview = inspection_tools.preview_servers_batch({
+            "groups": ["crypto"],
+            "categories": ["DISK"],
+            "concurrency": 4,
+            "batch_size": 8,
+        }, ctx, db)
+
+        action_args = preview["next_actions"][0]["arguments"]
+        tool = registry.get("ops.inspection.run_servers_batch")
+        normalized = validate_schema(action_args, tool.input_schema)
+
+        assert normalized["batch_size"] == 8
+        assert normalized["confirm_text"] == preview["confirmation"]["confirm_text"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_mcp_docs_prefer_preview_first_batch_inspection_flow():
     examples = open("docs/runbooks/AI_TOOL_MCP_EXAMPLES.md", encoding="utf-8").read()
     matrix = open("docs/runbooks/mcp-capability-matrix.md", encoding="utf-8").read()

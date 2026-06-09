@@ -95,6 +95,7 @@ def db_query_readonly_tool(args, ctx, db):
     write=False,
     requires_confirmation=False,
     data_sensitivity="sensitive",
+    streamable=True,
     keywords=["导出", "CSV", "Excel", "下载", "export", "xlsx", "json", "markdown", "导出数据", "下载数据", "导出CSV", "导出Excel"],
     input_schema={
         "type": "object",
@@ -112,9 +113,11 @@ def db_query_readonly_tool(args, ctx, db):
         "additionalProperties": False,
     },
 )
-def db_export_query_result_tool(args, ctx, db):
+def db_export_query_result_tool(args, ctx, db, stream_callback=None):
     actor = getattr(ctx, "username", "") or getattr(ctx, "token_owner", "") or "tool"
-    return DbQueryExportService(db).export_query_result(
+    if stream_callback:
+        stream_callback({"event": "chunk", "data": {"stage": "export_started", "format": args.get("format") or "csv"}})
+    result = DbQueryExportService(db).export_query_result(
         sql=args.get("sql") or "",
         fmt=args.get("format") or "csv",
         operator=actor,
@@ -125,6 +128,10 @@ def db_export_query_result_tool(args, ctx, db):
         limit=args.get("limit") or 100,
         timeout_seconds=args.get("timeout_seconds") or 30,
     )
+    if stream_callback:
+        export_info = result.get("export") if isinstance(result, dict) else {}
+        stream_callback({"event": "chunk", "data": {"stage": "export_ready", "export_id": (export_info or {}).get("id"), "format": (export_info or {}).get("format")}})
+    return result
 
 
 @registry.register(

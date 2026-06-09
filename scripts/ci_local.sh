@@ -39,6 +39,9 @@ FOCUSED_TESTS=(
   tests/test_cleanup_start_plan.py
   tests/test_rollback_health.py
   tests/test_release_switch_and_rollback.py
+  tests/test_mcp_contract_sync.py
+  tests/test_tool_token_templates_contract.py
+  tests/test_frontend_tooling_contract.py
 )
 EXISTING_TESTS=()
 for test_file in "${FOCUSED_TESTS[@]}"; do

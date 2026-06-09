@@ -16,23 +16,25 @@ from app.db import get_db
 from app.config.audit import load_audit_logs
 from app.core.rbac import explain_operation_risk
 from app.services.audit_chain import build_operation_chain, list_operation_chains
-from app.domain.runtime import list_runtime_jobs, get_runtime_job_detail
+from app.domain.runtime import count_runtime_jobs, list_runtime_jobs, get_runtime_job_detail
 
 router = APIRouter(prefix="/api/v2/tasks", tags=["任务中心"])
 audit_router = APIRouter(prefix="/api/v2/audit", tags=["审计"])
 
 
 @router.get("")
-async def list_tasks(request: Request, status: str = "", kind: str = "", limit: int = 100, db: Session = Depends(get_db)):
+async def list_tasks(request: Request, status: str = "", kind: str = "", limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
     user = require_auth(request, db)
     limit = max(1, min(limit, 500))
-    tasks = list_runtime_jobs(db, status=status, kind=kind, limit=limit)
+    offset = max(0, int(offset or 0))
+    total = count_runtime_jobs(db, status=status, kind=kind)
+    tasks = list_runtime_jobs(db, status=status, kind=kind, limit=limit, offset=offset)
     for task in tasks:
         if task["kind"] == "deploy":
             d = task.get("detail") or {}
             task["detail"]["risk"] = explain_operation_risk("deploy", d.get("environment"), d.get("system"))
-    audit("tasks.list", "task_center", kind or "all", f"user={user.get('username')} status={status}")
-    return api_response(data={"items": tasks, "total": len(tasks), "statuses": ["queued", "pending", "running", "success", "failed", "cancelled", "paused"]})
+    audit("tasks.list", "task_center", kind or "all", f"user={user.get('username')} status={status} limit={limit} offset={offset}")
+    return api_response(data={"items": tasks, "total": total, "limit": limit, "offset": offset, "statuses": ["queued", "pending", "running", "success", "failed", "cancelled", "paused"]})
 
 
 @router.get("/{kind}/{item_id}")

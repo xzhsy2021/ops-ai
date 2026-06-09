@@ -6,33 +6,54 @@ from fastapi import HTTPException
 from app.db.repository import ConfigRepository
 from app.services.tool_context import ToolContext
 
+# Default capability settings.
+#
+# These defaults are tuned for an MCP/AI client that talks to OPS for routine
+# inspection / health-check / read-only diagnostic work. The settings favor
+# "just works" for the common Path-A inspection flow (ops.inspection.run_*) and
+# the Path-B single-shot probes (ops.check_disk, ops.check_process, ...).
+#
+# Anything that can mutate production state (deploy execute, prod deploy,
+# server write, config write, backup write/restore, package write/cleanup,
+# runtime cleanup, db write) still defaults to False and must be explicitly
+# enabled by an admin. Token-level allow_write / allow_prod remains the second
+# gate. This is the same belt-and-suspenders pattern we had before, but with
+# the read-side defaults relaxed to match what AI/MCP clients actually need.
 DEFAULT_CAPABILITY_SETTINGS = {
     "enabled": True,
     "ops_mode": "lightweight_single_project",
     "agent_runtime_enabled": False,
     "http_tools_enabled": True,
-    "mcp_enabled": False,
-    "read_only": True,
-    "allow_deploy_plan": True,
-    "allow_deploy_execute": False,
-    "allow_prod_deploy": False,
-    "allow_rollback": False,
-    "allow_config_write": False,
-    "allow_backup_write": False,
-    "allow_backup_restore": False,
-    "allow_server_read": False,
-    "allow_server_write": False,
-    "allow_package_write": False,
-    "allow_package_cleanup": False,
-    "allow_runtime_cleanup": False,
-    "allow_db_read_tools": True,
-    "allow_db_export_tools": True,
-    "allow_db_write_tools": True,
-    "allow_high_risk_tools": True,
-    "allow_critical_risk_tools": False,
-    "require_confirmation": True,
-    "taskize_high_risk_tools": True,
-    "strict_prod_confirmation": True,
+    "mcp_enabled": True,                       # MCP is the standard transport for AI clients
+    "read_only": False,                        # Path A inspection.run_* is write=True; flip default
+    "allow_deploy_plan": True,                 # safe: plan/preview only, never executes
+    "allow_deploy_execute": False,             # production-grade gate, keep closed
+    "allow_prod_deploy": False,                # production-grade gate, keep closed
+    "allow_rollback": False,                   # destructive, requires admin + confirmation
+    "allow_config_write": False,               # destructive, keep closed
+    "allow_backup_write": False,               # high risk, keep closed by default
+    "allow_backup_restore": False,             # critical risk, keep closed
+    "allow_server_read": True,                 # Path B probes (check_disk / check_process / ...) need this
+    "allow_server_write": False,               # destructive, keep closed
+    "allow_package_write": False,              # destructive (uploads, retention), keep closed
+    "allow_package_cleanup": False,            # destructive, keep closed
+    "allow_runtime_cleanup": False,            # destructive, keep closed
+    "allow_db_read_tools": True,               # safe SELECT for diagnostics
+    "allow_db_export_tools": True,             # safe export to report center
+    "allow_db_write_tools": False,             # DML/UPDATE/INSERT, must be admin-enabled
+    "allow_high_risk_tools": True,             # Path A inspection.run_* is high risk
+    "allow_critical_risk_tools": True,         # some inspection ops + connection delete are critical
+    "allow_ai_token_to_run_inspection_execute": True,
+    # When True, an AI/MCP tool-token is allowed to call inspection_execute tools
+    # (ops.inspection.run_server / run_servers_batch / run_project / run_combined)
+    # provided the second-layer confirm_text gate (enforce_risk_policy) passes.
+    # When False, the old behavior is restored: tool_token gets 403 on these tools
+    # and inspection must be triggered from a web session / admin. Other write
+    # tools (deploy, rollback, config_write, db_write, ...) are NOT affected by
+    # this switch and stay blocked for tool_token regardless.
+    "require_confirmation": True,              # 2nd-layer: human confirm_text phrase
+    "taskize_high_risk_tools": True,           # 3rd-layer: queue as OperationJob
+    "strict_prod_confirmation": True,          # 4th-layer: prod env requires extra phrase
     "token_expire_days": 90,
 }
 
@@ -97,6 +118,8 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
         raise HTTPException(status_code=403, detail="Capability Server is disabled")
     if not settings.get("http_tools_enabled", True):
         raise HTTPException(status_code=403, detail="HTTP tools are disabled")
+    if tool_def.category == "agent" and not settings.get("agent_runtime_enabled", False):
+        raise HTTPException(status_code=403, detail="Agent runtime tools are disabled in lightweight mode")
 
     for scope in tool_def.scopes:
         if not ctx.has_scope(scope):
@@ -110,11 +133,26 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
 
     # AI/MCP tool-token calls must not directly execute tools that require human approval.
     # They may call dedicated plan/preview/approval-request tools instead.
+    #
+    # EXCEPTION: inspection_execute tools are an explicit, scoped carve-out. The
+    # intent of the inspection flow is "AI proposes a run, user types
+    # CONFIRM ops.inspection.run_server, AI then calls the tool with that
+    # confirm_text". The second-layer `enforce_risk_policy` (below) is the
+    # real gate that verifies the confirm_text — so the first-layer hard
+    # block here is redundant and blocks the entire flow. We still keep the
+    # hard block for every other requires_human_approval=True / high-risk
+    # write tool, so deploy / rollback / config_write / db_write / etc. stay
+    # admin-only.
     if getattr(ctx, "auth_type", "") == "tool_token" and (
         getattr(tool_def, "requires_human_approval", False)
         or (getattr(tool_def, "write", False) and str(getattr(tool_def, "risk", "low")).lower() in {"high", "critical"})
     ):
-        raise HTTPException(status_code=403, detail="This tool requires human approval and cannot be executed directly by AI/MCP token")
+        is_inspection_execute = (
+            getattr(tool_def, "category", "") == "inspection_execute"
+            and settings.get("allow_ai_token_to_run_inspection_execute", True)
+        )
+        if not is_inspection_execute:
+            raise HTTPException(status_code=403, detail="This tool requires human approval and cannot be executed directly by AI/MCP token")
 
     if tool_def.category == "deploy_plan" and not settings.get("allow_deploy_plan", True):
         raise HTTPException(status_code=403, detail="Deploy plan tools are disabled")

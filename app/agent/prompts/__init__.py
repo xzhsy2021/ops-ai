@@ -9,6 +9,7 @@ PROMPT_META: Dict[str, Dict[str, str]] = {
     "release_plan": {"title": "发布计划", "category": "deploy", "description": "分析发布请求并生成结构化的发布计划"},
     "diagnostic_triage": {"title": "诊断分流", "category": "diagnostics", "description": "分析系统状态并识别问题"},
     "db_workflow": {"title": "数据库工作流", "category": "database", "description": "引导安全的数据库操作流程"},
+    "inspection_workflow": {"title": "巡检工作流", "category": "inspection", "description": "服务器巡检流程，默认走 A 路径（系统巡检），B 路径（单点探测）仅作补充"},
 }
 
 

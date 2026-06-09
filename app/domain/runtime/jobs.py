@@ -155,40 +155,73 @@ def list_runtime_jobs(
     status: str = "",
     kind: str = "",
     limit: int = 100,
+    offset: int = 0,
 ) -> List[Dict[str, Any]]:
     limit = max(1, min(limit, 500))
+    offset = max(0, int(offset or 0))
+    fetch_limit = max(1, min(offset + limit, 500))
     jobs: List[Dict[str, Any]] = []
 
     if not kind or kind == "deploy":
         q = db.query(Deployment)
         if status:
             q = q.filter(Deployment.status == status)
-        for item in q.order_by(Deployment.started_at.desc()).limit(limit).all():
+        for item in q.order_by(Deployment.started_at.desc()).limit(fetch_limit).all():
             jobs.append(runtime_job_to_dict("deploy", item))
 
     if not kind or kind == "sql":
         q = db.query(SqlQueryHistory)
         if status:
             q = q.filter(SqlQueryHistory.status == status)
-        for item in q.order_by(SqlQueryHistory.created_at.desc()).limit(limit).all():
+        for item in q.order_by(SqlQueryHistory.created_at.desc()).limit(fetch_limit).all():
             jobs.append(runtime_job_to_dict("sql", item))
 
     if not kind or kind == "cleanup":
         q = db.query(CleanupJob)
         if status:
             q = q.filter(CleanupJob.status == status)
-        for item in q.order_by(CleanupJob.created_at.desc()).limit(limit).all():
+        for item in q.order_by(CleanupJob.created_at.desc()).limit(fetch_limit).all():
             jobs.append(runtime_job_to_dict("cleanup", item))
 
     if not kind or kind in ("tool", "mcp_tool", "job"):
         q = db.query(OperationJob)
         if status:
             q = q.filter(OperationJob.status == status)
-        for item in q.order_by(OperationJob.created_at.desc()).limit(limit).all():
+        for item in q.order_by(OperationJob.created_at.desc()).limit(fetch_limit).all():
             jobs.append(runtime_job_to_dict("tool", item))
 
     jobs.sort(key=lambda x: x.get("started_at") or "", reverse=True)
-    return jobs[:limit]
+    return jobs[offset:offset + limit]
+
+
+def count_runtime_jobs(
+    db: Session,
+    *,
+    status: str = "",
+    kind: str = "",
+) -> int:
+    total = 0
+    if not kind or kind == "deploy":
+        q = db.query(Deployment)
+        if status:
+            q = q.filter(Deployment.status == status)
+        total += q.count()
+    if not kind or kind == "sql":
+        q = db.query(SqlQueryHistory)
+        if status:
+            q = q.filter(SqlQueryHistory.status == status)
+        total += q.count()
+    if not kind or kind == "cleanup":
+        q = db.query(CleanupJob)
+        if status:
+            q = q.filter(CleanupJob.status == status)
+        total += q.count()
+    if not kind or kind in ("tool", "mcp_tool", "job"):
+        q = db.query(OperationJob)
+        if status:
+            q = q.filter(OperationJob.status == status)
+        total += q.count()
+    return total
 
 
 def get_runtime_job(

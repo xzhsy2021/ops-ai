@@ -62,6 +62,8 @@ def register_exception_handlers(app):
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
+        if exc.status_code == 304:
+            return Response(status_code=304, headers=exc.headers or {})
         detail = ""
         if isinstance(exc.detail, str):
             detail = exc.detail

@@ -54,8 +54,50 @@ function timeSummary(item: TaskItem) {
   return { start, finish, duration: formatDuration(item.duration_ms) }
 }
 
+function TaskPagination({
+  total,
+  pageSize,
+  offset,
+  onOffsetChange,
+  onPageSizeChange,
+}: {
+  total: number
+  pageSize: number
+  offset: number
+  onOffsetChange: (next: number) => void
+  onPageSizeChange: (next: number) => void
+}) {
+  const safeTotal = Math.max(0, Number(total || 0))
+  const safePageSize = Math.max(1, Number(pageSize || 20))
+  const safeOffset = Math.max(0, Number(offset || 0))
+  const page = Math.floor(safeOffset / safePageSize) + 1
+  const pages = Math.max(1, Math.ceil(safeTotal / safePageSize))
+  const from = safeTotal === 0 ? 0 : safeOffset + 1
+  const to = Math.min(safeOffset + safePageSize, safeTotal)
+
+  return (
+    <div className="pagination-bar">
+      <span className="pagination-info">第 {page}/{pages} 页 · 显示 {from}-{to} / 共 {safeTotal} 条</span>
+      <div className="pagination-controls">
+        <label className="pagination-size-label">每页
+          <select value={safePageSize} onChange={(e) => onPageSizeChange(Number(e.target.value))}>
+            {[10, 20, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(0)}>首页</button>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(Math.max(0, safeOffset - safePageSize))}>上一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safePageSize >= safeTotal} onClick={() => onOffsetChange(safeOffset + safePageSize)}>下一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safePageSize >= safeTotal} onClick={() => onOffsetChange(Math.max(0, (pages - 1) * safePageSize))}>末页</button>
+      </div>
+    </div>
+  )
+}
+
 export default function TaskCenterPage() {
   const [items, setItems] = useState<TaskItem[]>([])
+  const [total, setTotal] = useState(0)
+  const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(20)
   const [loading, setLoading] = useState(false)
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState('')
@@ -64,7 +106,7 @@ export default function TaskCenterPage() {
   const [actionMsg, setActionMsg] = useState('')
 
   const stats = useMemo(() => {
-    const result = { total: items.length, running: 0, failed: 0, pending: 0 }
+    const result = { total, running: 0, failed: 0, pending: 0 }
     items.forEach((item) => {
       const s = (item.status || '').toLowerCase()
       if (['running', 'executing'].includes(s)) result.running += 1
@@ -72,7 +114,7 @@ export default function TaskCenterPage() {
       if (['queued', 'pending', 'pending_approval', 'draft', 'submitted'].includes(s)) result.pending += 1
     })
     return result
-  }, [items])
+  }, [items, total])
 
   const sortedItems = useMemo(() => {
     const priority = (item: TaskItem) => {
@@ -90,14 +132,15 @@ export default function TaskCenterPage() {
     setLoading(true)
     setError('')
     try {
-      const res: any = await taskCenter.list({ kind: kind || undefined, status: status || undefined, limit: 200 })
+      const res: any = await taskCenter.list({ kind: kind || undefined, status: status || undefined, limit: pageSize, offset })
       setItems(res.data?.items || [])
+      setTotal(Number(res.data?.total || 0))
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
       setLoading(false)
     }
-  }, [kind, status])
+  }, [kind, status, pageSize, offset])
 
   async function retryDeploy(item: TaskItem) {
     if (item.kind !== 'deploy') return
@@ -144,17 +187,16 @@ export default function TaskCenterPage() {
         actions={<div className="task-header-actions" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><FavoriteButton url={ROUTES.tasks} label="任务中心" category="tasks" /><Link className="btn btn-subtle" to={ROUTES.audit}>审计日志</Link><Link className="btn btn-subtle" to={ROUTES.reports}>报告中心</Link><span className={`auto-refresh-pill ${hasLiveItems ? 'active' : ''}`}>{hasLiveItems ? '自动刷新中' : '空闲'}</span><button className="btn primary" onClick={load} disabled={loading}>{loading ? '刷新中...' : '刷新'}</button></div>}
       />
 
-      <div className="grid-4" style={{ marginBottom: 16 }}>
-        <div className="stat-card"><div className="stat-label">总任务</div><div className="stat-value">{stats.total}</div></div>
-        <div className="stat-card"><div className="stat-label">运行中</div><div className="stat-value">{stats.running}</div></div>
-        <div className="stat-card"><div className="stat-label">失败</div><div className="stat-value">{stats.failed}</div></div>
-        <div className="stat-card"><div className="stat-label">待处理</div><div className="stat-value">{stats.pending}</div></div>
-      </div>
-
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="form-grid">
+      <div className="task-center-toolbar">
+        <div className="task-center-summary">
+          <span><strong>{stats.total}</strong> 总任务</span>
+          <span><strong>{stats.running}</strong> 本页运行</span>
+          <span><strong>{stats.failed}</strong> 本页失败</span>
+          <span><strong>{stats.pending}</strong> 本页待处理</span>
+        </div>
+        <div className="task-center-filters">
           <label>类型
-            <select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <select value={kind} onChange={(e) => { setKind(e.target.value); setOffset(0) }}>
               <option value="">全部</option>
               <option value="deploy">发布</option>
               <option value="sql">SQL</option>
@@ -166,7 +208,7 @@ export default function TaskCenterPage() {
             </select>
           </label>
           <label>状态
-            <select value={status} onChange={(e) => setStatus(e.target.value)}>
+            <select value={status} onChange={(e) => { setStatus(e.target.value); setOffset(0) }}>
               <option value="">全部</option>
               <option value="queued">排队中</option>
               <option value="running">运行中</option>
@@ -175,14 +217,14 @@ export default function TaskCenterPage() {
               <option value="pending_approval">待审批</option>
             </select>
           </label>
-          <div style={{ display: 'flex', alignItems: 'end' }}><button className="btn" onClick={load}>筛选</button></div>
+          <button className="btn" onClick={load}>筛选</button>
         </div>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
       {actionMsg && <div className="alert">{actionMsg}</div>}
       {!items.length && !loading ? <EmptyState title="暂无任务" description="执行发布、SQL、清理或 MCP/工具任务后会在这里统一展示。" /> : (
-        <div className="card table-card">
+        <div className="card table-card task-center-content">
           <table className="data-table">
             <thead><tr><th>类型</th><th>标题</th><th>状态</th><th>风险</th><th>目标</th><th>操作人</th><th>时间</th><th>操作</th></tr></thead>
             <tbody>
@@ -215,6 +257,13 @@ export default function TaskCenterPage() {
           </table>
         </div>
       )}
+      <TaskPagination
+        total={total}
+        pageSize={pageSize}
+        offset={offset}
+        onOffsetChange={setOffset}
+        onPageSizeChange={(next) => { setPageSize(next); setOffset(0) }}
+      />
 
       {selected && (
         <div className="card" style={{ marginTop: 16 }}>

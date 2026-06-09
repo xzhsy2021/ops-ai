@@ -108,15 +108,21 @@ def get_recent_errors_tool(args: Dict[str, Any], ctx, db):
     scopes=["ops:read"],
     risk="low",
     category="read",
+    streamable=True,
     input_schema={"type": "object", "properties": {}, "additionalProperties": False},
 )
-def export_diagnostics_report_tool(args: Dict[str, Any], ctx, db):
+def export_diagnostics_report_tool(args: Dict[str, Any], ctx, db, stream_callback=None):
     from app.services.diagnostics import build_diagnostics_report
+    if stream_callback:
+        stream_callback({"event": "chunk", "data": {"stage": "diagnostics_started"}})
     report = build_diagnostics_report(db)
-    return {
+    result = {
         "summary": "diagnostics report generated",
         "schema_version": report.get("schema_version"),
         "generated_at": report.get("generated_at"),
         "status": (report.get("diagnostics") or {}).get("status"),
         "report": report,
     }
+    if stream_callback:
+        stream_callback({"event": "chunk", "data": {"stage": "diagnostics_ready", "status": result.get("status")}})
+    return result

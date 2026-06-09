@@ -25,12 +25,20 @@ const riskPolicy = fs.readFileSync(path.join(root, 'app', 'services', 'risk_poli
 const jobService = fs.readFileSync(path.join(root, 'app', 'services', 'job_service.py'), 'utf8')
 const jobTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'job_tools.py'), 'utf8')
 const taskCenterApi = fs.readFileSync(path.join(root, 'app', 'api', 'task_center.py'), 'utf8')
+const runtimeJobs = fs.readFileSync(path.join(root, 'app', 'domain', 'runtime', 'jobs.py'), 'utf8')
 const toolAccessPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'ToolAccessPage.tsx'), 'utf8')
 const backupActions = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'maintenance', 'useMaintenanceBackupActions.ts'), 'utf8')
+const toolsApi = fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8')
+const mcpCapabilityService = fs.readFileSync(path.join(root, 'app', 'services', 'mcp_capability_service.py'), 'utf8')
+const mcpCapabilitySurface = `${toolsApi}\n${mcpCapabilityService}`
 
 const releasePlanService = fs.readFileSync(path.join(root, 'app', 'services', 'release_plan.py'), 'utf8')
 const releasePlanPanel = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'deploy', 'ReleasePlanPanel.tsx'), 'utf8')
 const deployApiV2 = fs.readFileSync(path.join(root, 'app', 'api', 'deploy_v2.py'), 'utf8')
+const deployPlansApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy', 'plans.py'), 'utf8')
+const deployPrecheckApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy', 'precheck.py'), 'utf8')
+const deployExecutionsApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy', 'executions.py'), 'utf8')
+const deployApiRoutes = [deployApiV2, deployPlansApi, deployPrecheckApi, deployExecutionsApi].join('\n')
 const frontendApi = fs.readFileSync(path.join(root, 'frontend', 'src', 'api.ts'), 'utf8')
 const auditChainService = fs.readFileSync(path.join(root, 'app', 'services', 'audit_chain.py'), 'utf8')
 const auditTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'audit_tools.py'), 'utf8')
@@ -54,7 +62,7 @@ for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/
 
 const requiredRoutes = [
   '/', '/dashboard', '/login', '/deploy', '/system', '/system/status', '/system/diagnostics',
-  '/servers', '/apps', '/tasks', '/task-center', '/maintenance', '/files', '/pipelines', '/audit', '/reports', '/database', '/tools',
+  '/servers', '/systems', '/tasks', '/task-center', '/maintenance', '/files', '/pipelines', '/audit', '/reports', '/database', '/tools',
 ]
 const failures = []
 
@@ -129,7 +137,7 @@ for (const marker of ['RiskDecision', 'enforce_risk_policy', 'CONFIRMATION_REQUI
 for (const marker of ['allow_high_risk_tools', 'allow_critical_risk_tools', 'risk_policy']) {
   if (!toolPolicy.includes(marker)) failures.push(`Iter34 tool policy marker missing: ${marker}`)
 }
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('/risk-policy')) failures.push('tools risk-policy API missing')
+if (!toolsApi.includes('/risk-policy')) failures.push('tools risk-policy API missing')
 if (!toolAccessPage.includes('riskPolicy') || !toolAccessPage.includes('allow_critical_risk_tools')) failures.push('ToolAccessPage risk policy integration missing')
 if (!backupActions.includes('pendingRiskAction') || !backupActions.includes('RESTORE ${file}') || !backupActions.includes('DELETE ${file}')) failures.push('Backup risk action dialog integration missing')
 
@@ -144,7 +152,7 @@ for (const toolName of ['ops.list_jobs', 'ops.get_job_status']) {
 }
 if (!riskPolicy.includes('taskize_high_risk_tools') || !riskPolicy.includes('must_create_job')) failures.push('Iter35 risk policy taskization marker missing')
 if (!toolPolicy.includes('taskize_high_risk_tools')) failures.push('Iter35 tool policy taskize setting missing')
-if (!taskCenterApi.includes('OperationJob') || !taskCenterApi.includes('"tool"')) failures.push('Task center OperationJob integration missing')
+if (!runtimeJobs.includes('OperationJob') || !runtimeJobs.includes('"tool"') || !taskCenterApi.includes('list_tasks')) failures.push('Task center OperationJob integration missing')
 if (!fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'TaskCenterPage.tsx'), 'utf8').includes('工具任务')) failures.push('TaskCenterPage tool job UI marker missing')
 
 
@@ -156,7 +164,7 @@ for (const toolName of ['ops.list_deploy_plans', 'ops.get_deploy_plan', 'ops.gen
   if (!deployTools.includes(toolName)) failures.push(`Iter36 MCP deploy orchestration tool missing: ${toolName}`)
 }
 for (const marker of ['/tool-plans', '/rollback-readiness']) {
-  if (!deployApiV2.includes(marker)) failures.push(`Iter36 deploy orchestration API marker missing: ${marker}`)
+  if (!deployApiRoutes.includes(marker)) failures.push(`Iter36 deploy orchestration API marker missing: ${marker}`)
 }
 if (!releasePlanPanel.includes('发布计划与 MCP 编排') || !releasePlanPanel.includes('quality_gates') || !releasePlanPanel.includes('mcp_flow')) failures.push('ReleasePlanPanel MCP orchestration UI marker missing')
 if (!frontendApi.includes('toolPlans') || !frontendApi.includes('toolPlanRunbook') || !frontendApi.includes('rollbackReadiness')) failures.push('frontend deploy API release plan methods missing')
@@ -171,7 +179,7 @@ if (!aiTools.includes('ops.analyze_diagnostics') || !aiTools.includes('ai_read')
 if (!fs.readFileSync(path.join(root, 'app', 'services', 'tool_registry.py'), 'utf8').includes('ai_tools')) failures.push('Iter37 tool registry ai_tools import missing')
 if (!diagnosticsPage.includes('AI 诊断助手') || !diagnosticsPage.includes('safe_mcp_toolchain') || !diagnosticsPage.includes('aiDiagnostics')) failures.push('Iter37 diagnostics page AI assistant UI missing')
 if (!frontendApi.includes('aiDiagnostics')) failures.push('Iter37 frontend API aiDiagnostics method missing')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops_diagnostic_triage')) failures.push('Iter37 MCP diagnostic triage prompt missing')
+if (!mcpCapabilitySurface.includes('ops_diagnostic_triage')) failures.push('Iter37 MCP diagnostic triage prompt missing')
 
 
 
@@ -186,8 +194,8 @@ for (const marker of ['/operation-chains', 'build_operation_chain', 'list_operat
 }
 if (!auditPage.includes('MCP / AI 操作链路回放') || !auditPage.includes('operationChains') || !auditPage.includes('operationChain')) failures.push('AuditLogPage operation chain replay UI missing')
 if (!frontendApi.includes('operationChains') || !frontendApi.includes('operationChain')) failures.push('frontend audit API operation chain methods missing')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops_operation_replay')) failures.push('Iter38 MCP operation replay prompt missing')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops://operation-chains')) failures.push('Iter38 MCP operation chains resource missing')
+if (!mcpCapabilitySurface.includes('ops_operation_replay')) failures.push('Iter38 MCP operation replay prompt missing')
+if (!mcpCapabilitySurface.includes('ops://operation-chains')) failures.push('Iter38 MCP operation chains resource missing')
 
 
 
@@ -202,8 +210,8 @@ for (const marker of ['/generate', '/summary', '/operation-chain/export']) {
 }
 if (!reportPage.includes('报告中心') || !reportPage.includes('generateType') || !reportPage.includes('operation_chain')) failures.push('Iter39 ReportCenterPage UI marker missing')
 if (!frontendApi.includes('export const reports') || !frontendApi.includes('downloadUrl')) failures.push('frontend report API methods missing')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops://reports')) failures.push('Iter39 MCP reports resource missing')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops_report_brief')) failures.push('Iter39 MCP report prompt missing')
+if (!mcpCapabilitySurface.includes('ops://reports')) failures.push('Iter39 MCP reports resource missing')
+if (!mcpCapabilitySurface.includes('ops_report_brief')) failures.push('Iter39 MCP report prompt missing')
 
 
 for (const toolName of ['ops.db.list_tables', 'ops.db.describe_table', 'ops.db.query_readonly', 'ops.db.export_query_result', 'ops.db.list_exports', 'ops.db.get_export']) {
@@ -218,8 +226,8 @@ for (const marker of ['/query/export', '/exports/{export_id}/download', 'export_
 if (!frontendApi.includes('export const dbTools') || !frontendApi.includes('/db/query/export')) failures.push('frontend dbTools API methods missing')
 if (!databasePage.includes('数据库查询与多格式导出') || !databasePage.includes('FORMAT_OPTIONS') || !databasePage.includes('exportQuery')) failures.push('DatabaseToolsPage export UI missing')
 if (!reportCenterService.includes('db_query_export')) failures.push('Report Center must include db_query_export type')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops://db/exports')) failures.push('Iter40 MCP db exports resource missing')
-if (!fs.readFileSync(path.join(root, 'app', 'api', 'tools.py'), 'utf8').includes('ops_db_export_request')) failures.push('Iter40 MCP db export prompt missing')
+if (!mcpCapabilitySurface.includes('ops://db/exports')) failures.push('Iter40 MCP db exports resource missing')
+if (!mcpCapabilitySurface.includes('ops_db_export_request')) failures.push('Iter40 MCP db export prompt missing')
 
 for (const marker of ['DashboardClock', 'useCurrentTime', '当前时间']) {
   if (!dashboardPage.includes(marker)) failures.push(`Iter41a dashboard clock marker missing: ${marker}`)

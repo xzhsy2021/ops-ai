@@ -43,6 +43,16 @@ function cachedGet(key: string, ttlMs: number, getter: () => Promise<any>) {
   return value
 }
 
+function clearCachedGet(prefix?: string) {
+  if (!prefix) {
+    ttlCache.clear()
+    return
+  }
+  for (const key of Array.from(ttlCache.keys())) {
+    if (key.startsWith(prefix)) ttlCache.delete(key)
+  }
+}
+
 function stableKey(prefix: string, params?: Record<string, any>) {
   const entries = Object.entries(params || {}).filter(([, value]) => value !== undefined && value !== null && value !== '')
   entries.sort(([a], [b]) => a.localeCompare(b))
@@ -421,7 +431,7 @@ export const pipelineBinding = {
 export default api
 
 export const taskCenter = {
-  list: (params?: { status?: string; kind?: string; limit?: number }) => api.get('/tasks', { params }),
+  list: (params?: { status?: string; kind?: string; limit?: number; offset?: number }) => api.get('/tasks', { params }),
   detail: (kind: string, id: string) => api.get(`/tasks/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`),
 }
 
@@ -438,17 +448,25 @@ export const auditLog = {
 }
 
 export const capabilityTools = {
+  clearCache: () => {
+    clearCachedGet('tools.')
+    clearCachedGet('mcp.')
+    clearCachedGet('capability.')
+  },
   list: (params?: { category?: string; risk?: string; include_disabled?: boolean; include_schema?: boolean; limit?: number; cursor?: number; format?: string }) => cachedGet(stableKey('tools.list', params), 60000, () => api.get('/tools', { params })),
   detail: (name: string) => api.get(`/tools/detail/${encodeURIComponent(name)}`),
   capabilities: (params?: { category?: string; include_disabled?: boolean; include_schema?: boolean; limit?: number; cursor?: number; format?: string }) => cachedGet(stableKey('tools.capabilities', params), 60000, () => api.get('/capabilities', { params })),
   riskPolicy: () => cachedGet('tools.riskPolicy', 60000, () => api.get('/tools/risk-policy')),
+  policyPreview: (data: any) => api.post('/tools/policy-preview', data),
   call: (tool: string, args?: Record<string, any>) => api.post('/tools/call', { tool, arguments: args || {} }),
   settings: () => api.get('/tools/settings'),
   updateSettings: (settings: Record<string, any>) => api.put('/tools/settings', { settings }),
   tokens: () => api.get('/tools/tokens'),
+  tokenTemplates: () => cachedGet('tools.tokenTemplates', 60000, () => api.get('/tools/token-templates')),
   createToken: (data: any) => api.post('/tools/tokens', data),
   updateToken: (id: string, data: any) => api.patch(`/tools/tokens/${encodeURIComponent(id)}`, data),
   revokeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}`),
+  purgeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}/purge`),
   calls: (params?: { limit?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
   plans: (params?: { limit?: number; plan_type?: string; status?: string }) => api.get('/tools/plans', { params }),
   plan: (id: string) => api.get(`/tools/plans/${encodeURIComponent(id)}`),
@@ -501,6 +519,9 @@ export const inspection = {
   servers: () => api.get('/inspection/servers'),
   serverGroups: () => api.get('/inspection/server-groups'),
   projects: () => api.get('/inspection/projects'),
+  profiles: () => api.get('/inspection/profiles'),
+  profilePreview: (data: { profile_id: string }) => api.post('/inspection/profiles/preview', data),
+  profileRun: (data: { profile_id: string; confirm_text: string; expected_count?: number; fingerprint?: string }) => api.post('/inspection/profiles/run', data),
   runServer: (data: { server_id: string; categories?: string[]; generate_report?: boolean }) => api.post(`/inspection/servers/${encodeURIComponent(data.server_id)}/run`, data),
   startServer: (data: { server_id: string; categories?: string[] }) => api.post(`/inspection/servers/${encodeURIComponent(data.server_id)}/start`, data),
   runServersBatch: (data: { server_ids?: string[]; groups?: string[]; group?: string; categories?: string[]; generate_report?: boolean; concurrency?: number; batch_size?: number; command_timeout_seconds?: number; run_timeout_seconds?: number; skip_disabled?: boolean; all_servers?: boolean }) => {
@@ -556,7 +577,7 @@ export const inspection = {
   relations: (params?: { project_id?: string }) => api.get('/inspection/project-server-relations', { params }),
   saveRelation: (data: any) => api.post('/inspection/project-server-relations', data),
   updateRelation: (relationId: string, data: any) => api.patch(`/inspection/project-server-relations/${encodeURIComponent(relationId)}`, data),
-  issues: (params?: { scope_type?: string; risk_level?: string; status?: string; server_id?: string; project_id?: string; limit?: number }) => api.get('/inspection/issues', { params }),
+  issues: (params?: { scope_type?: string; risk_level?: string; status?: string; server_id?: string; project_id?: string; limit?: number; offset?: number }) => api.get('/inspection/issues', { params }),
   updateIssue: (issueId: string, data: { status?: string; owner_id?: string; suggestion?: string }) => api.patch(`/inspection/issues/${encodeURIComponent(issueId)}`, data),
   // 巡检项目配置管理（可选/可编辑/可调整）
   listItemConfigs: (scopeType: string = 'SERVER') => api.get('/inspection/item-configs', { params: { scope_type: scopeType } }),

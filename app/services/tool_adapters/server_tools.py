@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from fastapi import HTTPException
 
-from config_manager import get_server_by_name
+from config_manager import get_server_by_name, resolve_server
 from app.domain.inventory.services import InventoryReadService
 from app.services.tool_registry import registry
 
@@ -25,10 +25,44 @@ def get_service_config(params: dict, ctx, db):
     return config
 
 
-def _connect(server_name: str):
-    srv = get_server_by_name(server_name)
+def _resolve_server_or_404(server_key: str):
+    """Resolve a server by name / host / full UUID / short UUID prefix.
+
+    Returns the decrypted server dict. Raises 404 with a helpful hint
+    when nothing matches.
+    """
+    if not server_key:
+        raise HTTPException(status_code=404, detail="Server not found: <empty>")
+    srv = resolve_server(server_key)
     if not srv:
-        raise HTTPException(status_code=404, detail=f"Server not found: {server_name}")
+        # Friendly hint: surface a couple of nearby names so callers can
+        # recover from typos without spelunking through the inventory.
+        hint = ""
+        try:
+            from config_manager import get_all_servers
+            all_servers = get_all_servers() or []
+            sample = [s.get("name") for s in all_servers[:5] if s.get("name")]
+            if sample:
+                hint = f" Sample names: {', '.join(sample)}."
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=404,
+            detail=f"Server not found: {server_key}. "
+                   f"Pass a server name, host, full UUID, or short UUID prefix.{hint}",
+        )
+    return srv
+
+
+def _connect(server_key: str):
+    """Connect to a server, accepting name / host / full UUID / short UUID prefix.
+
+    Backward compatible: the previous signature accepted only a server name
+    via ``get_server_by_name``. We now try multiple identifiers so that Path
+    B (single-shot probes) stays usable as a fallback when callers pass the
+    UUID returned by ``/api/v2/servers``.
+    """
+    srv = _resolve_server_or_404(server_key)
     from ssh_client import create_ssh_client
     ssh = create_ssh_client(srv)
     ssh.connect()
@@ -102,7 +136,18 @@ def check_process(args, ctx, db):
     try:
         cmd = f"ps -ef | grep -v grep | grep -E {shlex.quote(str(keyword))} | head -20"
         code, out, err = ssh.exec(cmd, timeout=15)
-        return {"server": args.get("server"), "keyword": keyword, "exit_code": code, "stdout": out, "stderr": err}
+        # BUG #6 修复：ps | grep | head 管道最终 exit_code 由 head 决定，
+        # 即使没有匹配项也是 0。空 stdout + exit 0 必须归一为"未找到"。
+        found = bool((out or "").strip())
+        return {
+            "server": args.get("server"),
+            "keyword": keyword,
+            "exit_code": 0 if found else 1,
+            "found": found,
+            "process_count": len([ln for ln in (out or "").splitlines() if ln.strip()]),
+            "stdout": out,
+            "stderr": err,
+        }
     finally:
         ssh.close()
 

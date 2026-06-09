@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 # - server 读路径:get_all_servers / get_server_by_name → ServerRepository
 # - config_kv["servers"] 不再被这些函数写入;保留其历史数据作为只读回退已不再需要。
 #
-# 注:get_jump_host_by_name 仍读 config_kv["jump_hosts"],因为尚无 JumpHost 表。
-# 后续 Phase(3.x)将引入 JumpHost 模型,把跳板机也迁到 DB。
+# Phase 3.g SSOT migration:
+# - jump host 读路径:get_jump_host_by_name → JumpHostRepository (DB 表)
+# - config_kv["jump_hosts"] 仍可存在为只读 legacy 桶,save_config 写入时会打 deprecation 警告
 
 _SECRET_FIELDS = ("password", "key_content")
 _REDACTED = "********"
@@ -186,6 +187,97 @@ def get_server_by_name(name: str, db=None) -> Optional[Dict[str, Any]]:
             db.close()
 
 
+def get_server_by_id(server_id: str, db=None) -> Optional[Dict[str, Any]]:
+    """Return a single server by its primary-key UUID (decrypted), or None."""
+    from app.db.repository import ServerRepository
+
+    db, owns = _open_session(db)
+    try:
+        repo = ServerRepository(db)
+        row = repo.get_by_id(server_id)
+        return _server_row_to_dict(row)
+    finally:
+        if owns:
+            db.close()
+
+
+_HEX_SHORT_RE = __import__("re").compile(r"^[0-9a-fA-F]{1,32}$")
+
+
+def resolve_server(key: Optional[str], db=None) -> Optional[Dict[str, Any]]:
+    """Resolve a server by ANY identifier (name / host / full UUID / short UUID prefix).
+
+    Why this exists
+    ---------------
+    Path A (`ops.inspection.*`) is the primary inspection entry point; it accepts
+    server name / UUID / host interchangeably through `inspection_center`. But
+    Path B (single-shot probes like `ops.check_disk`, `ops.run_health_check`,
+    `ops.check_process`) used to fall back to `get_server_by_name`, which
+    failed whenever callers passed the UUID they got from
+    `/api/v2/servers` (whose `id` field is the DB primary key, not the name).
+
+    This helper closes the gap so Path B remains a usable fallback. It tries
+    multiple lookup strategies in order:
+
+    1. Exact ``name`` match (config_kv legacy + DB name column).
+    2. Exact ``id`` (UUID) match.
+    3. Short-prefix UUID match — if the caller passed a hex string of 4-32
+       characters that uniquely matches the start of a row's ``id``.
+    4. Exact ``host`` match.
+
+    Returns the server dict (with the canonical name preserved) or ``None``.
+    """
+    if not key:
+        return None
+    wanted = str(key).strip()
+    if not wanted:
+        return None
+
+    # 1) name match (highest priority — preserves existing Path B behavior)
+    srv = get_server_by_name(wanted, db=db)
+    if srv:
+        return srv
+
+    # 2) exact UUID match
+    if _HEX_SHORT_RE.match(wanted) and len(wanted) >= 8:
+        srv = get_server_by_id(wanted, db=db)
+        if srv:
+            return srv
+
+    # 3) short-prefix UUID match — only meaningful for short hex strings
+    if _HEX_SHORT_RE.match(wanted) and 4 <= len(wanted) < 32:
+        try:
+            db_session, owns = _open_session(db)
+            try:
+                from app.db.models import Server
+                rows = (
+                    db_session.query(Server)
+                    .filter(Server.id.like(f"{wanted}%"))
+                    .all()
+                )
+                if len(rows) == 1:
+                    return _server_row_to_dict(rows[0])
+                if len(rows) > 1:
+                    # ambiguous — let the caller disambiguate by full UUID or name
+                    return None
+            finally:
+                if owns:
+                    db_session.close()
+        except Exception:
+            pass
+
+    # 4) host match
+    try:
+        all_servers = get_all_servers(db=db)
+    except Exception:
+        all_servers = []
+    for srv in all_servers or []:
+        if str(srv.get("host") or "").strip() == wanted:
+            return srv
+    return None
+
+
+
 # ─── Public write API (Phase 3a SSOT: DB) ────────────────────────────────────
 
 
@@ -303,13 +395,31 @@ def delete_server(name: str, db=None) -> bool:
 
 
 def get_jump_host_by_name(name: str) -> Optional[Dict[str, Any]]:
-    # TODO(Phase 3.x): 引入 JumpHost 模型后,迁移到 DB 读取。
-    from app.config.repository import load_config
-    jump_hosts = load_config().get("jump_hosts", [])
-    for jh in jump_hosts:
-        if jh.get("name") == name:
-            return decrypt_server_secrets(jh)
-    return None
+    """Phase 3.g: read jump host metadata from the `jump_hosts` table.
+
+    Returns a plain dict (decrypted) so SSH clients can consume the
+    connection parameters without depending on the ORM layer. Returns
+    None when no jump host with this name exists.
+    """
+    from app.db import SessionLocal
+    from app.db.repository import JumpHostRepository
+    if not name:
+        return None
+    with SessionLocal() as db:
+        row = JumpHostRepository(db).get_by_name(name)
+        if row is None:
+            return None
+        return {
+            "name": row.name,
+            "host": row.host,
+            "port": row.port,
+            "user": row.user,
+            "username": row.user,
+            "key": row.key,
+            "key_content": row.key_content,
+            "password": row.password,
+            "status": row.status,
+        }
 
 
 def resolve_jump_host_config(server_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:

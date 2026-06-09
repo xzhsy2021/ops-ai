@@ -1,4 +1,5 @@
 from app.domain.runtime.jobs import (
+    count_runtime_jobs,
     list_runtime_jobs,
     get_runtime_job,
     get_runtime_job_detail,
@@ -7,6 +8,7 @@ from app.domain.runtime.jobs import (
 )
 
 __all__ = [
+    "count_runtime_jobs",
     "list_runtime_jobs",
     "get_runtime_job",
     "get_runtime_job_detail",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.helpers import api_response, audit
 from app.core.auth_v2 import require_admin, require_auth
 from app.db import get_db
+from app.db.models import ReportArtifact
 from app.services.db_query_export import export_media_type
 from app.services.report_center import (
     generate_report,
@@ -137,15 +138,79 @@ def reports_update(report_id: str, payload: UpdateReportPayload, request: Reques
 
 
 @router.get("/{report_id}/download")
-def reports_download(report_id: str, request: Request, db: Session = Depends(get_db)):
+def reports_download(
+    report_id: str,
+    request: Request,
+    as_format: str = Query(
+        "md",
+        alias="as",
+        description="目标格式：md/json/csv/xlsx；找不到则降级到该报告的原始 format",
+    ),
+    db: Session = Depends(get_db),
+):
+    """以 attachment 方式下载报告文件（Content-Disposition: attachment）。"""
     require_auth(request, db)
-    row = get_report(db, report_id)
+    row = _resolve_report(db, report_id, as_format)
     path = report_download_path(row)
     media_type = export_media_type(row.format)
-    # HTML files should be displayed inline in the browser, not downloaded
-    if row.format == "html":
-        return FileResponse(str(path), media_type=media_type)
-    return FileResponse(str(path), media_type=media_type, filename=path.name)
+    return FileResponse(
+        str(path),
+        media_type=media_type,
+        filename=path.name,
+        content_disposition_type="attachment",
+    )
+
+
+@router.get("/{report_id}/view")
+def reports_view(
+    report_id: str,
+    request: Request,
+    as_format: str = Query(
+        "html",
+        alias="as",
+        description="目标格式：html/md/json/sql；找不到则降级到该报告的原始 format",
+    ),
+    db: Session = Depends(get_db),
+):
+    """在线查看报告（Content-Disposition: inline；浏览器内嵌显示而非下载）。
+
+    与 /download 的区别：
+    - HTML / MD  / JSON  / SQL  → 浏览器直接渲染（HTML/MD 友好，JSON 树形）
+    - CSV / XLSX              → 浏览器尝试内嵌；不支持时自动降级为下载
+    """
+    require_auth(request, db)
+    row = _resolve_report(db, report_id, as_format)
+    path = report_download_path(row)
+    media_type = export_media_type(row.format)
+    # 非浏览器友好格式显式标注 inline，让前端能拦截并提示用户改用 /download
+    fallback = row.format in {"csv", "xlsx"}
+    return FileResponse(
+        str(path),
+        media_type=media_type,
+        filename=path.name,
+        content_disposition_type="inline" if not fallback else "attachment",
+    )
+
+
+def _resolve_report(db, report_id: str, desired_format: str):
+    """按 (report_type, target_id, format) 找同源兄弟报告，找不到则降级到原 report_id。"""
+    row = get_report(db, report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found")
+    desired = (desired_format or "").lower().strip()
+    if not desired or desired == row.format:
+        return row
+    # 在同 (report_type, target_id) 下找兄弟
+    sibling = db.query(ReportArtifact).filter(
+        ReportArtifact.report_type == row.report_type,
+        ReportArtifact.target_id == row.target_id,
+        ReportArtifact.format == desired,
+        ReportArtifact.status == "ready",
+    ).order_by(ReportArtifact.created_at.desc()).first()
+    if sibling:
+        return sibling
+    # 降级：返回原 row，前端用 ?as=xxx 找不到时自动 fallback
+    return row
 
 
 @router.delete("/{report_id}")

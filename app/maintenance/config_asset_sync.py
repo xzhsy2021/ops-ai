@@ -40,8 +40,11 @@ def _json_safe(value: Any) -> Any:
 
 
 def _iter_config_servers(config: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    # Phase 3.g: jump_hosts no longer treated as Server rows.  The jump_hosts
+    # list-of-dicts in config_kv is read-only legacy; the SSOT is now the
+    # `jump_hosts` table, populated via JumpHostRepository / /api/v2/jump-hosts.
     seen: set[str] = set()
-    for source_name, items in (("servers", config.get("servers")), ("jump_hosts", config.get("jump_hosts"))):
+    for source_name, items in (("servers", config.get("servers")),):
         for raw in _as_list(items):
             if not isinstance(raw, dict):
                 continue
@@ -57,8 +60,6 @@ def _iter_config_servers(config: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
                 continue
             seen.add(key)
             item["name"] = name
-            if source_name == "jump_hosts" and not item.get("group"):
-                item["group"] = "jump-host"
             yield item
 
 

@@ -1,104 +1,104 @@
 # OPS Command Center v2.1.8
 
-本项目是面向小团队内部使用的本地运维控制台，提供服务发布、服务器资产、文件管理、系统维护、数据库工作台、审计报告和 AI Agent/MCP 工具接入能力。
+OPS Command Center is a local operations console for small internal teams. It provides service release, server assets, file management, system maintenance, database workbench, audit/reporting, and AI Agent/MCP tool access.
 
-当前版本为团队稳定运行优化版，目标不是继续扩展审计或报告主线，而是提升新人启动、单进程运行、本地资源治理和排错效率。
+The current baseline focuses on stable local operation, single-process deployment, resource governance, and practical troubleshooting. It does not introduce external queues, multi-tenant architecture, or large framework migrations.
 
-## 推荐启动方式
+## Recommended Startup
 
-### Windows
-
-生产单进程模式：
+Windows:
 
 ```bat
 start_prod.bat
-```
-
-开发模式：
-
-```bat
 start_dev.bat
-```
-
-诊断模式：
-
-```bat
 start_diag.bat
 ```
 
-### Linux / macOS
-
-生产单进程模式：
+Linux/macOS:
 
 ```bash
 ./start_prod.sh
-```
-
-开发模式：
-
-```bash
 ./start_dev.sh
-```
-
-诊断模式：
-
-```bash
 ./start_diag.sh
 ```
 
-默认访问：
+Default URL:
 
 ```text
 http://localhost:8000
 ```
 
+## Current Capabilities
 
-## v2.1.8 本地运行稳定性
+- System, service, and server asset management.
+- Deployment precheck, execution, history, and rollback planning.
+- File center and server file workbench.
+- Unified task center for high-risk and long-running jobs.
+- System status, installation diagnostics, database backup, and restore support.
+- Database workbench for read-only query, controlled SQL/DML execution, connection config, cleanup, and local OPS DB export.
+- Audit logs and report center.
+- Inspection center with Path A inspection runs, issues, reports, item config, and three-tier DAILY/WEEKLY/MONTHLY schedules.
+- HTTP Tool API and MCP-compatible access.
+- Risk policy, confirmation text, taskization, and audit fallback for high-risk operations.
 
-本版本新增启动前自检和本地资源面板：
+## AI / MCP Safety Baseline
 
-- `scripts/preflight_start_check.py`：检查 Python、Node/npm、frontend/dist、依赖声明、APP_DATA_DIR、SQLite 和端口占用。
-- `start_prod.*`：生产单进程入口，启动前自动进行 preflight 检查。
-- `start_dev.*`：开发模式入口，保留 Vite + FastAPI 双进程调试方式。
-- `start_diag.*`：只执行诊断，不启动服务。
-- 维护页新增“本地资源”面板，展示 SQLite、日志、上传包、备份、报告和 runtime 临时文件占用，并支持“扫描 → 预览 → 一键确认 → 清理”。
-- 单进程模式下 `/assets/*` 使用长缓存，SPA 页面保持 `no-cache`，避免旧页面长期缓存。
+- Low-risk read tools may be auto-called when token scopes allow them.
+- Path A inspection execution tools can be called by AI/MCP tool tokens only after the user provides exact `confirm_text`; calls still go through backend risk policy, task center, and audit.
+- Agent runtime tools (`ops.agent.*`) are hidden by default unless `agent_runtime_enabled=true`.
+- Deploy execution, rollback, destructive deletes, terminal dangerous commands, config write, package cleanup, runtime cleanup, and database DML remain gated by scopes, capability settings, and human confirmation.
+- DML should use `ops.db.preview_dml` -> `ops.db.execute_dml`.
 
-## 当前稳定能力
+Recommended inspection assistant token:
 
-- 服务、服务器资产管理
-- 发布预检、发布执行、发布历史、回滚计划
-- 文件中心与服务器文件工作台
-- 统一任务中心与轻量轮询
-- 系统状态、安装诊断、数据库备份与恢复
-- 统一数据库工作台：业务库只读查询、SQL 执行、连接配置、数据清理、本地 OPS 库导出
-- 审计日志、基础报告中心
-- MCP Streamable HTTP / HTTP Tool 双入口
-- 高风险操作一键确认与后端风险策略兜底
+```json
+{
+  "description": "Routine MCP inspection assistant",
+  "scopes": ["ops:read", "ops:write"],
+  "allow_write": true,
+  "allow_prod": false,
+  "expires_in_days": 90
+}
+```
 
-## 数据库受控执行边界
+Set `expires_in_days` to `0` only for reviewed non-expiring tokens. The token description is persisted and returned by the Tool Token API so operators can see why a token exists.
 
-当前版本恢复数据库执行能力，但不开放无保护写入。数据库工作台包含：
+Use a separate, explicitly reviewed admin token for deploy execution, rollback, DB write, package cleanup, and schedule administration.
 
-- 业务库 SELECT / SHOW / DESCRIBE / EXPLAIN / WITH 查询
-- SQL 执行 fast / standard / full 分级预检与一键确认执行
-- DML 执行后自动生成验证 SQL，可回填到只读查询页
-- 数据清理 Dry Run、复核、分批执行、暂停与继续
-- 本地 OPS 库查询、导出和维护
+## Local Artifact Cleanup
 
-写操作统一走“SQL 执行”或“数据清理”入口。后端会强制限制单语句、WHERE 条件、最大影响行数，并拦截 DDL、权限变更、锁表、多语句和长耗时函数。业务库是否能执行写操作取决于连接账号权限；生产连接建议使用最小权限维护账号。
+One-shot inspection/debug files in the repository root are not product artifacts. Preview and clean them with:
 
-## 团队使用建议
+```bash
+python scripts/cleanup_stale_artifacts.py --json
+python scripts/cleanup_stale_artifacts.py --apply --json
+```
 
-1. 先在“系统状态”页确认备份、磁盘、Worker 和前端构建状态。
-2. 数据库能力统一从“数据库”入口进入，不再从维护页分散操作。
-3. AI Agent 默认只开放低风险只读工具；发布、删除、终端危险命令必须走确认。数据库写操作必须走 SQL 执行或数据清理流程，先预检、再一键确认；DML 工具优先使用 `ops.db.preview_dml` → `ops.db.execute_dml` 两阶段。
-4. 发布前先做预检；生产发布和回滚建议保留人工确认。
-5. 每次升级前执行 `scripts/backup_before_upgrade.*`，并保留最近可用备份。
+The cleanup script only matches known transient patterns such as root `inspect_report_*.md`, `inspect_out*.txt`, `token_debug*.txt`, `logs/*.log`, and `scripts/_*.json`.
 
-## 回归检查
+## Database Execution Boundary
 
-无依赖快速检查：
+The database workbench supports:
+
+- Business DB `SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN` / `WITH` queries.
+- Fast / standard / full precheck levels for controlled SQL execution.
+- DML verification SQL generation after execution.
+- Cleanup dry run, review, batch execution, pause, and resume.
+- Local OPS DB query/export/maintenance.
+
+Write operations must go through the SQL execution or cleanup workflows. The backend enforces single-statement execution, `WHERE` constraints, max affected rows, and blocks DDL, privilege changes, locking statements, multi-statement payloads, and long-running functions where applicable.
+
+## Team Usage
+
+1. Check system status before upgrades: backup, disk, worker, and frontend build state.
+2. Enter database functions from the Database page; do not split write paths across maintenance pages.
+3. For inspection requests, prefer Path A tools such as `ops.inspection.run_servers_batch`, not one-off server probes.
+4. Precheck before release. Production release and rollback should keep human confirmation enabled.
+5. Run `scripts/backup_before_upgrade.*` before each upgrade and keep the most recent usable backup.
+
+## Verification
+
+Fast local check:
 
 ```bash
 python -m compileall -q app scripts main.py config_manager.py ssh_client.py
@@ -106,7 +106,7 @@ node scripts/frontend_syntax_check.js
 node scripts/frontend_route_check.js
 ```
 
-完整检查：
+Full check:
 
 ```bash
 cd frontend && npm ci && npm run typecheck && npm run build
@@ -115,6 +115,15 @@ pip install -r requirements.txt
 python -m pytest tests -q
 ```
 
-## 封板说明
+For MCP/tooling-only changes, also run:
 
-本版本建议作为内部实际使用基线。后续只建议接受安全修复、阻断型 Bug 修复和小范围体验修补；不建议在当前基线上继续引入外部队列、复杂权限、多租户或大型框架迁移。
+```bash
+python -m pytest tests/test_mcp_contract_sync.py -q
+python -c "import main"
+```
+
+## Documentation
+
+- Runtime routes and API mounts: `docs/plans/2026-05-01-runtime-source-of-truth.md`
+- MCP/HTTP tool matrix: `docs/runbooks/mcp-capability-matrix.md`
+- Current plans index: `docs/plans/README.md`

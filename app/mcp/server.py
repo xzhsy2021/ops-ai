@@ -29,6 +29,17 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Tuple
 
+from app.services.mcp_capability_service import (
+    MCP_ALIAS_TO_TOOL,
+    ascii_only,
+    from_mcp_tool_name,
+    mcp_prompt_get,
+    mcp_prompts_list,
+    mcp_resources_list,
+    mcp_tool_payload,
+    to_mcp_tool_name,
+)
+
 BASE_URL = os.getenv("OPS_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 TOKEN = os.getenv("OPS_TOOL_TOKEN", "")
 SERVER_NAME = "ops-capability-server"
@@ -50,7 +61,6 @@ SAFE_TOOL_NAMES = os.getenv("OPS_MCP_SAFE_TOOL_NAMES", "1").lower() not in {"0",
 # the original Chinese descriptions. Set OPS_MCP_ASCII_DESCRIPTIONS=0 for clients
 # that render UTF-8 descriptions correctly.
 ASCII_DESCRIPTIONS = os.getenv("OPS_MCP_ASCII_DESCRIPTIONS", "1").lower() not in {"0", "false", "no", "off"}
-MCP_ALIAS_TO_TOOL: Dict[str, str] = {}
 
 ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     # ── Capability Discovery ──
@@ -122,12 +132,15 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.create_config_change_plan": "Create a configuration change plan with diff. This does not apply changes. 中文: 创建配置变更计划/配置变更方案.",
     "ops.apply_config_change_plan": "Apply an approved configuration change plan. Requires confirmation and policy approval. 中文: 应用配置变更/修改配置.",
 
-    # ── Server Runtime Operations ──
-    "ops.check_disk": "Check disk usage on allowed servers through OPS server tools. 中文: 检查磁盘/磁盘使用率/磁盘空间.",
-    "ops.check_process": "Check whether a service process is running on allowed servers. 中文: 检查进程/服务是否运行/进程状态.",
-    "ops.list_service_directory": "List files in an allowed service directory. Does not modify files. 中文: 查看服务目录/列出文件.",
-    "ops.tail_service_log": "Read recent lines from an allowed service log path. 中文: 查看服务日志/读取日志尾行.",
-    "ops.run_health_check": "Run configured health checks for a service or deployment target. 中文: 运行健康检查/服务健康检测.",
+    # ── Server Runtime Operations (Path B — 单点探针，仅作补充) ──
+    # 本组工具走单次 SSH 探测：单台、单指标、不写 inspection_runs。
+    # 仅当用户明确「就查一下磁盘」「这个进程在不在」「看一下日志尾」
+    # 或者 Path A 被阻断时使用。批量巡检请走 Path A (ops.inspection.*)。
+    "ops.check_disk": "【路径 B 补充】Check disk usage on allowed servers through OPS server tools. 中文: 检查磁盘/磁盘使用率/磁盘空间. — 单点探针，不替代系统巡检。",
+    "ops.check_process": "【路径 B 补充】Check whether a service process is running on allowed servers. 中文: 检查进程/服务是否运行/进程状态. — 单点探针，不替代系统巡检。",
+    "ops.list_service_directory": "【路径 B 补充】List files in an allowed service directory. Does not modify files. 中文: 查看服务目录/列出文件.",
+    "ops.tail_service_log": "【路径 B 补充】Read recent lines from an allowed service log path. 中文: 查看服务日志/读取日志尾行.",
+    "ops.run_health_check": "【路径 B 补充】Run configured health checks for a service or deployment target. 中文: 运行健康检查/服务健康检测.",
 
     # ── Audit & History ──
     "ops.list_audit_logs": "List audit logs with filters. 中文: 查看审计日志/操作审计/操作记录.",
@@ -167,25 +180,29 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     # ── Server Groups ──
     "ops.list_server_groups": "List server groups with member counts. Use when user asks 'what groups exist' or 'list server groups'. 中文: 查看服务器分组/分组列表.",
 
-    # ── Inspection Tools ──
-    "ops.inspection.list_runs": "List inspection run records for servers or projects. Use when user asks 'recent inspections' or 'inspection history'. 中文: 查看巡检记录/巡检历史.",
-    "ops.inspection.get_run": "Get detailed inspection run results by run_id. 中文: 查看巡检详情/巡检结果.",
-    "ops.inspection.list_issues": "List inspection issues/risks with filters. Use when user asks 'what issues were found' or 'list risks'. 中文: 查看巡检问题/风险列表.",
-    "ops.inspection.get_issue": "Get one inspection issue detail by issue_id. 中文: 查看巡检问题详情/风险详情.",
-    "ops.inspection.generate_report": "Generate an inspection report from one or more runs. 中文: 生成巡检报告/巡检报告.",
-    "ops.inspection.summarize_run": "Summarize an inspection run in FIRE structure (Findings, Impact, Recommendations, Evidence). 中文: 巡检摘要/巡检总结.",
-    "ops.inspection.run_server": "Run an inspection on a single server. High risk; requires confirmation. 中文: 执行服务器巡检/巡检服务器.",
-    "ops.inspection.run_servers_batch": "Run inspections on multiple servers in batch. High risk; requires confirmation. 中文: 批量巡检服务器/批量巡检.",
-    "ops.inspection.run_project": "Run an inspection for a project. High risk; requires confirmation. 中文: 执行项目巡检/巡检项目.",
-    "ops.inspection.run_combined": "Run a combined project inspection. High risk; requires confirmation. 中文: 执行综合巡检/项目综合巡检.",
-    "ops.inspection.list_item_configs": "List inspection item configurations. 中文: 查看巡检项配置/巡检配置列表.",
-    "ops.inspection.get_item_config": "Get one inspection item configuration detail. 中文: 查看巡检项配置详情.",
-    "ops.inspection.update_item_config": "Update an inspection item configuration. Medium risk. 中文: 更新巡检项配置/修改巡检配置.",
-    "ops.inspection.toggle_item_config": "Enable or disable an inspection item. Medium risk; requires confirmation. 中文: 启用禁用巡检项/切换巡检项.",
-    "ops.inspection.update_item_rules": "Update rules associated with an inspection item. Medium risk. 中文: 更新巡检规则/修改巡检规则.",
-    "ops.inspection.get_run_raw_output": "Get raw output data from an inspection run. 中文: 查看巡检原始输出/巡检原始数据.",
-    "ops.inspection.delete_runs": "Delete inspection run records. High risk; requires confirmation. 中文: 删除巡检记录/清理巡检历史.",
-    "ops.inspection.delete_issue": "Delete an inspection issue. Medium risk; requires confirmation. 中文: 删除巡检问题/清理巡检问题.",
+    # ── Inspection Tools (Path A — PRIMARY, default for "巡检" requests) ──
+    # 任何「巡检/检查服务器/合规检查」请求应优先调用本组工具，
+    # 它们会创建 inspection_runs + inspection_reports + audit_logs 完整记录，
+    # 并跑 9 大类内置规则（ACCOUNT_SECURITY / DISK_USAGE / PROCESS_PORT / FIREWALL /
+    # LOGIN_SECURITY / COMMAND_HISTORY / MEMORY / SERVICE_STATUS / BACKUP）。
+    "ops.inspection.list_runs": "【路径 A 主】List inspection run records for servers or projects. Use when user asks 'recent inspections' or 'inspection history'. 中文: 查看巡检记录/巡检历史.",
+    "ops.inspection.get_run": "【路径 A 主】Get detailed inspection run results by run_id. 中文: 查看巡检详情/巡检结果.",
+    "ops.inspection.list_issues": "【路径 A 主】List inspection issues/risks with filters. Use when user asks 'what issues were found' or 'list risks'. 中文: 查看巡检问题/风险列表.",
+    "ops.inspection.get_issue": "【路径 A 主】Get one inspection issue detail by issue_id. 中文: 查看巡检问题详情/风险详情.",
+    "ops.inspection.generate_report": "【路径 A 主】Generate an inspection report from one or more runs. 中文: 生成巡检报告/巡检报告.",
+    "ops.inspection.summarize_run": "【路径 A 主】Summarize an inspection run in FIRE structure (Findings, Impact, Recommendations, Evidence). 中文: 巡检摘要/巡检总结.",
+    "ops.inspection.run_server": "【路径 A 主】PRIMARY PATH A. Run an inspection on a single server. High risk; requires confirmation. 中文: 执行服务器巡检/巡检服务器. — 用户提到「巡检」时默认选我。",
+    "ops.inspection.run_servers_batch": "【路径 A 主 · 批量首选】PRIMARY PATH A. Run inspections on multiple servers in batch. High risk; requires confirmation. 中文: 批量巡检服务器/批量巡检. — 用户提到「批量巡检」「巡检一组服务器」时默认选我。",
+    "ops.inspection.run_project": "【路径 A 主】PRIMARY PATH A. Run an inspection for a project. High risk; requires confirmation. 中文: 执行项目巡检/巡检项目.",
+    "ops.inspection.run_combined": "【路径 A 主】PRIMARY PATH A. Run a combined project inspection. High risk; requires confirmation. 中文: 执行综合巡检/项目综合巡检.",
+    "ops.inspection.list_item_configs": "【路径 A 主】List inspection item configurations. 中文: 查看巡检项配置/巡检配置列表.",
+    "ops.inspection.get_item_config": "【路径 A 主】Get one inspection item configuration detail. 中文: 查看巡检项配置详情.",
+    "ops.inspection.update_item_config": "【路径 A 主】Update an inspection item configuration. Medium risk. 中文: 更新巡检项配置/修改巡检配置.",
+    "ops.inspection.toggle_item_config": "【路径 A 主】Enable or disable an inspection item. Medium risk; requires confirmation. 中文: 启用禁用巡检项/切换巡检项.",
+    "ops.inspection.update_item_rules": "【路径 A 主】Update rules associated with an inspection item. Medium risk. 中文: 更新巡检规则/修改巡检规则.",
+    "ops.inspection.get_run_raw_output": "【路径 A 主】Get raw output data from an inspection run. 中文: 查看巡检原始输出/巡检原始数据.",
+    "ops.inspection.delete_runs": "【路径 A 主】Delete inspection run records. High risk; requires confirmation. 中文: 删除巡检记录/清理巡检历史.",
+    "ops.inspection.delete_issue": "【路径 A 主】Delete an inspection issue. Medium risk; requires confirmation. 中文: 删除巡检问题/清理巡检问题.",
 
     # ── Risk Management ──
     "ops.risk.list": "List open risk issues with filters. Use when user asks 'what risks exist' or 'list open risks'. 中文: 查看风险列表/风险问题.",
@@ -271,30 +288,34 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.create_pipeline": "Create a new deployment pipeline. High risk; requires human approval. 中文: 创建Pipeline/新增流程.",
     "ops.update_pipeline": "Update pipeline configuration. High risk; requires human approval. 中文: 更新Pipeline/修改流程.",
     "ops.delete_pipeline": "Delete a pipeline. Critical risk; requires human approval and confirm_text. 中文: 删除Pipeline/移除流程.",
+
+    # ── Inspection Tier Schedule (3-tier DAILY/WEEKLY/MONTHLY, DB-driven) ──
+    # 配置存储在 DB（inspection_tier_schedules / inspection_notification_routes /
+    # inspection_cascade_policies），不再依赖 yaml。同一目标服务器池，
+    # 真正区分三级的是 categories 巡检项组合。
+    "ops.tier.list": "List 3-tier inspection schedules (DAILY/WEEKLY/MONTHLY) stored in DB. Returns cron, categories, thresholds, retention, last_run info. Read-only. 中文: 查询三级巡检调度/日周月配置.",
+    "ops.tier.upsert": "Create or update a 3-tier inspection schedule by name. DB single source. High risk; requires admin + human approval. 中文: 新建/更新三级巡检调度.",
+    "ops.tier.delete": "Soft-delete a 3-tier inspection schedule (sets enabled=False). High risk; requires admin + human approval. 中文: 禁用三级巡检调度.",
+    "ops.notif_route.list": "List inspection notification routes (severity -> channels/recipients/SLA). Read-only. 中文: 查询巡检通知路由.",
+    "ops.notif_route.upsert": "Create or update a notification route by (severity, tier). High risk; requires admin + human approval. 中文: 新建/更新通知路由.",
+    "ops.cascade.list": "List cross-tier cascade policies (high_count -> trigger_monthly, etc). Read-only. 中文: 查询跨级联策略.",
+    "ops.cascade.upsert": "Create or update a cascade policy by name. High risk; requires admin + human approval. 中文: 新建/更新跨级联策略.",
+    "ops.tier.run_now": "Trigger a 3-tier inspection immediately, bypassing cron. Returns path A run_id. High risk; requires admin + human approval. 中文: 立即触发一次三级巡检.",
+    "ops.tier.approve": "Unlock a tier that requires_approval (e.g. MONTHLY first run). High risk; requires admin + human approval. 中文: 审批解锁月巡检.",
+    "ops.tier.history": "Query historical inspection runs for a specific tier (DAILY/WEEKLY/MONTHLY). Read-only. 中文: 查三级巡检历史/日周月执行记录.",
 }
 
 
 def _to_mcp_tool_name(name: str) -> str:
-    if not SAFE_TOOL_NAMES:
-        return name
-    alias = re.sub(r"[^A-Za-z0-9_-]", "_", str(name or "")).strip("_")
-    if not alias:
-        alias = "ops_tool"
-    MCP_ALIAS_TO_TOOL[alias] = name
-    return alias
+    return to_mcp_tool_name(name)
 
 
 
 
 def _ascii_only(value: Any, fallback: str = "") -> str:
-    text = str(value or fallback or "")
     if not ASCII_DESCRIPTIONS:
-        return text
-    # Keep only printable ASCII so Windows clients that mis-render UTF-8 do not
-    # display mojibake. Collapse whitespace to keep tool lists compact.
-    text = re.sub(r"[^\x20-\x7E]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text or fallback
+        return str(value or fallback or "")
+    return ascii_only(value, fallback)
 
 
 def _english_tool_description(tool: Dict[str, Any], original_name: str, alias: str) -> str:
@@ -310,35 +331,11 @@ def _english_tool_description(tool: Dict[str, Any], original_name: str, alias: s
     return _ascii_only(description, fallback=f"OPS tool {alias}")
 
 def _from_mcp_tool_name(name: str) -> str:
-    if name in MCP_ALIAS_TO_TOOL:
-        return MCP_ALIAS_TO_TOOL[name]
-    if SAFE_TOOL_NAMES and isinstance(name, str):
-        # Common fallback for aliases like ops_list_services. Only replace the
-        # first underscore so service names containing underscores remain intact.
-        if name.startswith("ops_"):
-            candidate = "ops." + name[len("ops_"): ]
-            return candidate
-    return name
+    return from_mcp_tool_name(name)
 
 
 def _mcp_tool_payload(tool: Dict[str, Any]) -> Dict[str, Any]:
-    payload = dict(tool or {})
-    original = str(payload.get("name") or "")
-    alias = _to_mcp_tool_name(original)
-    payload["name"] = alias
-    payload["description"] = _english_tool_description(payload, original, alias)
-    annotations = dict(payload.get("annotations") or {})
-    # Keep UI-visible annotation fields ASCII as well. Some clients prefer
-    # annotations.title over description in the MCP management page.
-    annotations["title"] = _ascii_only(annotations.get("title"), fallback=alias) if not ASCII_DESCRIPTIONS else alias
-    if alias != original:
-        annotations["ops.originalToolName"] = original
-    if ASCII_DESCRIPTIONS:
-        for key, value in list(annotations.items()):
-            if isinstance(value, str):
-                annotations[key] = _ascii_only(value, fallback=alias if key == "title" else "")
-    payload["annotations"] = annotations
-    return payload
+    return mcp_tool_payload(tool, ENGLISH_TOOL_DESCRIPTIONS)
 
 
 def _log(message: str):
@@ -378,6 +375,61 @@ def _request(method: str, path: str, data=None, etag: str | None = None):
         raise RuntimeError(f"HTTP {exc.code}: {detail}")
     except Exception as exc:
         raise RuntimeError(f"Cannot reach OPS API at {BASE_URL}: {exc}")
+
+
+def _request_sse(method: str, path: str, data=None) -> Dict[str, Any]:
+    body = None if data is None else json.dumps(data, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(BASE_URL + path, data=body, method=method)
+    req.add_header("Accept", "text/event-stream, application/json")
+    req.add_header("Content-Type", "application/json")
+    if TOKEN:
+        req.add_header("Authorization", "Bearer " + TOKEN)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(text).get("detail") or text
+        except Exception:
+            detail = text
+        raise RuntimeError(f"HTTP {exc.code}: {detail}")
+    except Exception as exc:
+        raise RuntimeError(f"Cannot reach OPS API at {BASE_URL}: {exc}")
+
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        return json.loads(stripped)
+
+    events = []
+    event_type = "message"
+    data_lines = []
+    for line in raw.splitlines():
+        if not line.strip():
+            if data_lines:
+                data_text = "\n".join(data_lines)
+                try:
+                    event_data = json.loads(data_text)
+                except Exception:
+                    event_data = data_text
+                events.append({"event": event_type, "data": event_data})
+            event_type = "message"
+            data_lines = []
+            continue
+        if line.startswith("event:"):
+            event_type = line.split(":", 1)[1].strip() or "message"
+        elif line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].lstrip())
+    if data_lines:
+        data_text = "\n".join(data_lines)
+        try:
+            event_data = json.loads(data_text)
+        except Exception:
+            event_data = data_text
+        events.append({"event": event_type, "data": event_data})
+
+    done = next((item.get("data") for item in reversed(events) if item.get("event") == "done"), {})
+    return {"events": events, "data": done}
 
 
 def _diagnostic_tool(error: str = "") -> Dict[str, Any]:
@@ -432,7 +484,13 @@ def _tools_for_mcp(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     except Exception as exc:
         err = str(exc)
         _log(err)
-        return {"tools": [_diagnostic_tool(err), _local_package_inspect_tool(err), _local_release_prepare_tool(err)]}
+        return {
+            "tools": [_diagnostic_tool(err), _local_package_inspect_tool(err), _local_release_prepare_tool(err)],
+            "offline": True,
+            "error": err,
+            "base_url": BASE_URL,
+            "token_present": bool(TOKEN),
+        }
 
 
 def _safe_multipart_filename(name: str) -> str:
@@ -657,7 +715,7 @@ def _call_tool_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
         "content": [
             {"type": "text", "text": json.dumps(data, ensure_ascii=False, default=str, indent=2)}
         ],
-        "isError": not bool(data.get("ok", True)) if isinstance(data, dict) else False,
+        "isError": not bool((data.get("result") or {}).get("ok", True)) if isinstance(data, dict) else False,
     }
 
 
@@ -665,7 +723,11 @@ def _call_tool_stream_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
     tool_name = _from_mcp_tool_name(params.get("name") or params.get("tool"))
     args = params.get("arguments") or {}
     try:
-        data = _request("POST", "/api/v2/tools/call/stream", {"tool": tool_name, "arguments": args}).get("data", {})
+        stream_result = _request_sse("POST", "/api/v2/tools/call/stream", {"tool": tool_name, "arguments": args})
+        data = {
+            "stream": stream_result.get("events") or [],
+            "result": stream_result.get("data") or {},
+        }
     except Exception as exc:
         return _call_tool_for_mcp(params)
     return {
@@ -677,11 +739,7 @@ def _call_tool_stream_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resources_for_mcp() -> Dict[str, Any]:
-    try:
-        return _request("GET", "/api/v2/mcp/resources").get("data", {})
-    except Exception as exc:
-        _log(str(exc))
-        return {"resources": []}
+    return mcp_resources_list()
 
 
 def _offline_resource_text(uri: str, error: str) -> str:
@@ -721,31 +779,31 @@ def _read_resource_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _prompts_for_mcp() -> Dict[str, Any]:
-    try:
-        return _request("GET", "/api/v2/mcp/prompts").get("data", {})
-    except Exception as exc:
-        _log(str(exc))
-        return {"prompts": []}
+    return mcp_prompts_list()
 
 
 def _get_prompt_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
+    return mcp_prompt_get(params)
+
+
+def _manifest_for_mcp() -> Dict[str, Any]:
     try:
-        return _request("POST", "/api/v2/mcp/prompts/get", params).get("data", {})
+        return _request("GET", "/api/v2/mcp/manifest").get("data", {})
     except Exception as exc:
         err = str(exc)
         _log(err)
-        name = str((params or {}).get("name") or "ops_offline_help")
-        text = (
-            "OPS backend is currently unavailable, so live prompts cannot be loaded. "
-            f"Requested prompt: {name}. Base URL: {BASE_URL}. "
-            "Start the OPS backend, verify OPS_BASE_URL, and pass OPS_TOOL_TOKEN. "
-            f"Connection error: {err}"
-        )
+        fallback_tools = _tools_for_mcp({})
         return {
-            "description": name,
-            "messages": [
-                {"role": "user", "content": {"type": "text", "text": text}}
-            ],
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION,
+            "transport": "stdio-jsonrpc",
+            "offline": True,
+            "error": err,
+            "base_url": BASE_URL,
+            "token_present": bool(TOKEN),
+            "resources": mcp_resources_list().get("resources", []),
+            "prompts": mcp_prompts_list().get("prompts", []),
+            "tools": fallback_tools.get("tools", []),
         }
 
 
@@ -787,7 +845,7 @@ def handle(msg: Dict[str, Any]) -> Dict[str, Any] | None:
         elif method == "prompts/get":
             result = _get_prompt_for_mcp(params)
         elif method == "manifest":  # backwards compatible helper
-            result = _request("GET", "/api/v2/mcp/manifest").get("data", {})
+            result = _manifest_for_mcp()
         else:
             raise ValueError(f"Unsupported method: {method}")
         return {"jsonrpc": "2.0", "id": mid, "result": result}

@@ -315,6 +315,7 @@ from app.api.deploy_v2 import deploy_v2_router, pipeline_v2_router, resource_v2_
 from app.api.auth_v2 import auth_v2_router
 from app.api.groups import groups_v2_router
 from app.api.servers import servers_v2_router
+from app.api.jump_hosts import jump_hosts_v2_router
 from app.api.config import admin_ops_router
 from app.api.terminal import terminal_ws_router
 from app.api.sftp import sftp_router
@@ -333,7 +334,7 @@ from app.api.v2.status import router as status_aggregate_router
 _v2_routers = [
     deploy_v2_router, pipeline_v2_router, resource_v2_router,
     auth_v2_router, groups_v2_router,
-    servers_v2_router, admin_ops_router, sftp_router,
+    servers_v2_router, jump_hosts_v2_router, admin_ops_router, sftp_router,
     maintenance_router, task_center_router, audit_router, tools_router, mcp_router, capabilities_router, system_router, reports_router, inspection_router, db_tools_router, dashboard_router, mcp_gateway_router, status_aggregate_router, ai_analysis_router,
 ]
 _v2_routers_ws = [

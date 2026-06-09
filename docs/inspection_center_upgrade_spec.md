@@ -198,7 +198,7 @@ CREATE TABLE inspection_item_rules (
 |--------|------|
 | ops.inspection.list_item_configs | 获取巡检项目配置 |
 | ops.inspection.update_item_config | 更新巡检项目配置 |
-| ops.inspection.get_raw_output | 获取巡检原始输出 |
+| ops.inspection.get_run_raw_output | 获取巡检原始输出 |
 
 #### 2.5.2 修改MCP工具
 
@@ -302,9 +302,9 @@ CREATE TABLE inspection_item_rules (
 | --- | --- | --- |
 | `ops.list_servers` | server_read | low |
 | `ops.list_server_groups` | server_read | low |
-| `ops.inspection.overview` / `categories` / `item_configs` / `update_item_config` / `toggle_item` / `reorder_items` / `item_rules` / `update_item_rules` | inspection_read | low |
+| `ops.inspection.overview` / `categories` / `list_item_configs` / `get_item_config` / `update_item_config` / `toggle_item_config` / `update_item_rules` | inspection_read / write | low / medium |
 | `ops.inspection.run_server` / `run_servers_batch` | inspection_execute | **high**（需用户确认） |
-| `ops.inspection.get_run` / `get_raw_output` / `list_runs` / `list_issues` / `update_issue` / `delete_runs` / `delete_issue` / `generate_report` | inspection_read / write | low / medium |
+| `ops.inspection.get_run` / `get_run_raw_output` / `list_runs` / `list_issues` / `update_issue` / `delete_runs` / `delete_issue` / `generate_report` | inspection_read / write | low / medium |
 
 ### 6.5 已知限制 / 后续
 

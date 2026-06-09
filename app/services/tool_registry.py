@@ -157,6 +157,7 @@ def _default_output_schema() -> Dict[str, Any]:
 class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, ToolDefinition] = {}
+        self._capability_revision = 0
 
     def register(
         self,
@@ -280,14 +281,21 @@ class ToolRegistry:
 
     def capability_version(self, db=None, ctx=None) -> str:
         now_ts = datetime.now(timezone.utc).timestamp()
-        bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
-        cache_key = f"{bucket}:{getattr(ctx, 'token_id', '')}:{getattr(ctx, 'auth_type', '')}"
+        cache_key = (
+            f"rev:{self._capability_revision}:"
+            f"{getattr(ctx, 'token_id', '')}:"
+            f"{getattr(ctx, 'auth_type', '')}:"
+            f"{','.join(getattr(ctx, 'scopes', []) or [])}:"
+            f"{bool(getattr(ctx, 'allow_write', False))}:"
+            f"{bool(getattr(ctx, 'allow_prod', False))}:"
+            f"{bool(getattr(ctx, 'is_admin', False))}"
+        )
         if hasattr(self, '_cap_version_cache') and self._cap_version_cache.get('key') == cache_key:
             cached_at = self._cap_version_cache.get('ts', 0)
             if now_ts - cached_at < 60:
                 return self._cap_version_cache['version']
         payload = {
-            "generated_at_bucket": bucket,
+            "revision": self._capability_revision,
             "tools": [self._tools[k].to_public_dict(include_schema=True) for k in sorted(self._tools.keys())],
         }
         if db is not None:
@@ -310,8 +318,12 @@ class ToolRegistry:
         self._cap_version_cache = {"key": cache_key, "ts": now_ts, "version": version}
         return version
 
-    def invalidate_capability_cache(self):
+    def clear_capability_cache(self):
         self._cap_version_cache = {}
+
+    def invalidate_capability_cache(self):
+        self._capability_revision = int(getattr(self, "_capability_revision", 0) or 0) + 1
+        self.clear_capability_cache()
 
     def describe_capabilities(
         self,
@@ -579,7 +591,7 @@ def ensure_builtin_registered():
     with _builtin_lock:
         if _builtin_registered:
             return registry
-        from app.services.tool_adapters import deploy_tools, file_tools, server_tools, audit_tools, config_tools, capability_tools, runtime_tools, diagnostic_tools, backup_tools, job_tools, ai_tools, report_tools, db_tools, inspection_tools, risk_tools, agent_tools, log_tools, workflow_tools, ai_analysis_tools, connection_tools, ssh_key_tools, pipeline_tools  # noqa: F401
+        from app.services.tool_adapters import deploy_tools, file_tools, server_tools, audit_tools, config_tools, capability_tools, runtime_tools, diagnostic_tools, backup_tools, job_tools, ai_tools, report_tools, db_tools, inspection_tools, risk_tools, agent_tools, log_tools, workflow_tools, ai_analysis_tools, connection_tools, ssh_key_tools, pipeline_tools, tier_tools  # noqa: F401
         _builtin_registered = True
         registry.invalidate_capability_cache()
         return registry

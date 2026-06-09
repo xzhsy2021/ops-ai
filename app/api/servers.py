@@ -3,6 +3,7 @@ import time
 import logging
 import shlex
 from contextlib import contextmanager
+from typing import Dict
 from fastapi import APIRouter, HTTPException, Request, Depends
 from sqlalchemy.orm import Session
 from config_manager import save_server, delete_server
@@ -10,6 +11,8 @@ from app.domain.inventory import inventory
 from app.config.servers import redact_server_secrets
 from app.api.helpers import api_response, audit
 from app.db import get_db
+from app.db.models import Server
+from app.db.repository import ServerGroupRepository
 from app.core.auth_v2 import require_auth, require_admin
 from app.core.command_security import validate_command, sanitize_command_output
 from app.services.remote_access import build_audit_context, format_audit_detail, get_hop_summary
@@ -125,50 +128,110 @@ def server_ops_health(request: Request, name: str, force: bool = False, db: Sess
 
 @servers_v2_router.get("/groups/list")
 def list_server_groups_v2(request: Request, db: Session = Depends(get_db)):
+    """Phase 3h: SSOT migration for the sidebar group list.
+
+    Reads from the `server_groups` table (DB is canonical) instead of deriving
+    from legacy `inventory.list_servers()`. Counts per group are computed from
+    `servers.metadata_json` (`$.group`).
+    """
     require_auth(request, db)
-    servers = inventory.list_servers()
-    groups: dict = {}
-    for srv in servers:
-        g = srv.get("group", "")
-        if g not in groups:
-            groups[g] = []
-        groups[g].append(srv.get("name"))
+    repo = ServerGroupRepository(db)
+
+    # Per-group server counts from the DB SSOT.
+    rows = (
+        db.query(Server.metadata_json)
+        .filter(Server.metadata_json.isnot(None))
+        .all()
+    )
+    import json
+    counts: Dict[str, int] = {}
+    for (meta_raw,) in rows:
+        meta = meta_raw if isinstance(meta_raw, dict) else (json.loads(meta_raw) if meta_raw else {})
+        g = (meta or {}).get("group") or ""
+        if g:
+            counts[g] = counts.get(g, 0) + 1
+
+    # Build response from the SSOT table (so empty groups are still listed).
     result = []
-    for gname, server_names in groups.items():
+    for g in repo.list_all():
         result.append({
-            "name": gname or "未分组",
-            "is_default": not gname,
-            "server_count": len(server_names),
-            "server_names": server_names,
+            "name": g.name,
+            "display_name": g.display_name or g.name,
+            "description": g.description,
+            "is_default": False,
+            "server_count": counts.get(g.name, 0),
+            "server_names": g.server_names or [],
         })
     result.sort(key=lambda x: (x["is_default"], x["name"]))
-    return api_response(data=result)
+    # Ungrouped bucket = servers whose `metadata_json.group` is missing/empty.
+    from sqlalchemy import func, or_
+    json_extract = func.json_extract
+    g_expr = json_extract(Server.metadata_json, "$.group")
+    ungrouped_count = (
+        db.query(Server)
+        .filter(
+            or_(
+                Server.metadata_json.is_(None),
+                g_expr.is_(None),
+                g_expr == "",
+            )
+        )
+        .count()
+    )
+    return api_response(data=result + [{
+        "name": "未分组",
+        "display_name": "未分组",
+        "description": None,
+        "is_default": True,
+        "server_count": ungrouped_count,
+        "server_names": [],
+    }])
 
 
 @servers_v2_router.post("/groups/create")
 async def create_server_group(request: Request, db: Session = Depends(get_db)):
+    """Phase 3i: also write to the `server_groups` DB table (SSOT).
+
+    Legacy behaviour cleared: this endpoint no longer operates on KV only.
+    """
     require_admin(request, db)
     data = await request.json()
     group_name = (data.get("name") or "").strip()
+    display_name = (data.get("display_name") or group_name).strip() or group_name
     if not group_name:
         raise HTTPException(status_code=400, detail="name is required")
+
+    repo = ServerGroupRepository(db)
+    existed = repo.get_by_name(group_name) is not None
+    if not existed:
+        repo.create(
+            name=group_name,
+            display_name=display_name,
+            description=data.get("description") or "",
+            server_names=[],
+        )
+
+    # Legacy KV mirror: ensure the bucket is consistent for older readers.
     servers = inventory.list_servers()
-    existing = any(s.get("group") == group_name for s in servers)
+    kv_existed = any(s.get("group") == group_name for s in servers)
     audit("server.create_group", "server", group_name,
-          f"user={request.state.username} exists={existing}")
-    return api_response(data={"name": group_name, "existed": existing})
+          f"user={request.state.username} existed={existed} kv_existed={kv_existed}")
+    return api_response(data={"name": group_name, "existed": existed})
 
 
 @servers_v2_router.post("/groups/assign")
 async def assign_server_group(request: Request, db: Session = Depends(get_db)):
+    """Phase 3i: also write to `servers.metadata_json.group` and the
+    `server_groups.server_names` JSON column (SSOT)."""
     require_admin(request, db)
     data = await request.json()
     server_names = data.get("server_names", [])
-    group = data.get("group", "")
+    group = (data.get("group") or "").strip()
     if not server_names and not group:
         raise HTTPException(status_code=400, detail="server_names or group is required")
     updated = []
     failed = []
+    from app.db.models import Server
     for name in server_names:
         srv = inventory.get_server(name)
         if not srv:
@@ -179,6 +242,26 @@ async def assign_server_group(request: Request, db: Session = Depends(get_db)):
             updated.append(name)
         else:
             failed.append({"name": name, "error": "save failed"})
+
+    # Sync server_groups.server_names for the target group (DB SSOT).
+    if group:
+        g = ServerGroupRepository(db).get_by_name(group)
+        if g is not None:
+            current = set(g.server_names or [])
+            current.update(server_names)
+            g.server_names = sorted(current)
+            ServerGroupRepository(db).update(g)
+        # And remove from any other group these servers used to belong to.
+        affected = set(server_names)
+        for other in ServerGroupRepository(db).list_all():
+            if other.name == group:
+                continue
+            if not other.server_names:
+                continue
+            if any(n in affected for n in other.server_names):
+                other.server_names = [n for n in (other.server_names or []) if n not in affected]
+                ServerGroupRepository(db).update(other)
+
     audit("server.assign_group", "server", ",".join(server_names),
           f"user={request.state.username} group={group or '(未分组)'}")
     return api_response(data={"updated": updated, "failed": failed})
@@ -186,12 +269,16 @@ async def assign_server_group(request: Request, db: Session = Depends(get_db)):
 
 @servers_v2_router.post("/groups/rename")
 async def rename_server_group(request: Request, db: Session = Depends(get_db)):
+    """Phase 3i: also rename the `server_groups` DB row + rewrite all
+    `servers.metadata_json.group` references (SSOT)."""
     require_admin(request, db)
     data = await request.json()
     old_name = (data.get("old_name") or "").strip()
     new_name = (data.get("new_name") or "").strip()
     if not old_name or not new_name:
         raise HTTPException(status_code=400, detail="old_name and new_name are required")
+
+    # 1) Legacy KV mirror (for old readers)
     servers = inventory.list_servers()
     existing_conflict = any(srv.get("group") == new_name and srv.get("group") != old_name for srv in servers)
     if existing_conflict:
@@ -202,18 +289,49 @@ async def rename_server_group(request: Request, db: Session = Depends(get_db)):
             srv["group"] = new_name
             if save_server(srv):
                 updated += 1
+
+    # 2) DB SSOT: rename the `server_groups` row
+    repo = ServerGroupRepository(db)
+    g = repo.get_by_name(old_name)
+    if g is not None:
+        g.name = new_name
+        repo.update(g)
+
+    # 3) DB SSOT: rewrite metadata_json.group on every server that pointed
+    # at the old name (covers servers not touched by save_server above).
+    from app.db.models import Server
+    from sqlalchemy import or_, func
+    g_expr = func.json_extract(Server.metadata_json, "$.group")
+    rows = db.query(Server).filter(g_expr == old_name).all()
+    for s in rows:
+        meta = s.metadata_json if isinstance(s.metadata_json, dict) else {}
+        meta = dict(meta or {})
+        meta["group"] = new_name
+        s.metadata_json = meta
+    if rows:
+        db.commit()
+
     audit("server.rename_group", "server", old_name,
-          f"user={request.state.username} new_name={new_name} affected={updated}")
-    return api_response(data={"updated": updated})
+          f"user={request.state.username} new_name={new_name} affected={updated} meta_rewrite={len(rows)}")
+    return api_response(data={"updated": updated, "meta_rewrite": len(rows)})
 
 
 @servers_v2_router.post("/groups/delete")
 async def delete_server_group(request: Request, db: Session = Depends(get_db)):
+    """Phase 3i fix: also delete the `server_groups` DB row (SSOT).
+
+    Bug before fix: this endpoint only cleared `servers[*].group` in the
+    Server table but never removed the corresponding `server_groups` row.
+    Since the sidebar reads from the `server_groups` table, the group
+    remained visible to the user despite the "success" toast.
+    """
     require_admin(request, db)
     data = await request.json()
     group_name = (data.get("name") or "").strip()
     if not group_name:
         raise HTTPException(status_code=400, detail="name is required")
+
+    # 1) Clear group field on every server that has it (legacy KV mirror)
     servers = inventory.list_servers()
     updated = 0
     for srv in servers:
@@ -221,9 +339,54 @@ async def delete_server_group(request: Request, db: Session = Depends(get_db)):
             srv["group"] = ""
             if save_server(srv):
                 updated += 1
+
+    # 2) Also clear metadata_json.group for the same servers (DB SSOT
+    #    mirror, in case the save_server pass above missed any rows).
+    from app.db.models import Server
+    from sqlalchemy import or_, func
+    g_expr = func.json_extract(Server.metadata_json, "$.group")
+    rows = db.query(Server).filter(g_expr == group_name).all()
+    for s in rows:
+        meta = s.metadata_json if isinstance(s.metadata_json, dict) else {}
+        meta = dict(meta or {})
+        meta["group"] = ""
+        s.metadata_json = meta
+    if rows:
+        db.commit()
+
+    # 3) Delete the server_groups row itself (the actual bug fix)
+    repo = ServerGroupRepository(db)
+    g = repo.get_by_name(group_name)
+    deleted = False
+    if g is not None:
+        deleted = repo.delete(g.id)
+
+    # 4) Clean the legacy KV `systems` entry so inventory_reconcile
+    #    doesn't see a stale only_in_kv drift for this group.
+    try:
+        from app.config.repository import _load_config_unsafe, save_config
+        cfg = _load_config_unsafe()
+        systems = cfg.get("systems") or {}
+        if group_name in systems:
+            systems.pop(group_name, None)
+            cfg["systems"] = systems
+            save_config(cfg)
+            kv_cleaned = True
+        else:
+            kv_cleaned = False
+    except Exception as exc:  # pragma: no cover - best-effort
+        kv_cleaned = False
+        logger.warning("delete_server_group: KV cleanup failed for %r: %s", group_name, exc)
+
     audit("server.delete_group", "server", group_name,
-          f"user={request.state.username} cleared={updated}")
-    return api_response(data={"updated": updated})
+          f"user={request.state.username} cleared={updated} "
+          f"meta_rewrite={len(rows)} row_deleted={deleted} kv_cleaned={kv_cleaned}")
+    return api_response(data={
+        "updated": updated,
+        "meta_rewrite": len(rows),
+        "row_deleted": deleted,
+        "kv_cleaned": kv_cleaned,
+    })
 
 
 @servers_v2_router.put("/batch")
@@ -394,12 +557,18 @@ async def create_server_v2(request: Request, db: Session = Depends(get_db)):
     return api_response(data=redact_server_secrets(server), message=f"Server '{name}' created")
 
 
-@servers_v2_router.get("/{name}")
-def get_server_v2(request: Request, name: str, db: Session = Depends(get_db)):
+@servers_v2_router.get("/{id_or_name}")
+def get_server_v2(request: Request, id_or_name: str, db: Session = Depends(get_db)):
+    """Fetch one server.
+
+    The path parameter accepts **any** server identifier — display name, host,
+    full UUID, or short UUID prefix — so callers can paste the ``id`` returned
+    by ``GET /api/v2/servers`` directly without looking up the name first.
+    """
     require_auth(request, db)
-    srv = inventory.get_server(name)
+    srv = inventory.get_server(id_or_name)
     if not srv:
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+        raise HTTPException(status_code=404, detail=f"Server '{id_or_name}' not found")
     result = dict(srv)
     hop_context = get_hop_summary(srv)
     result["hop_context"] = hop_context

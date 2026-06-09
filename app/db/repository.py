@@ -12,6 +12,7 @@ from .models import (
     ConfigKV, DeploymentRecord, AuditRecord,
     DeploymentServerTask, DeploymentStepTask, DeploymentPackageDistribution,
     DeploymentLockRecord, NotificationEvent,
+    JumpHost,
 )
 
 logger = logging.getLogger(__name__)
@@ -570,6 +571,93 @@ class ServerGroupRepository:
             self.db.commit()
             return True
         return False
+
+
+def _encrypt_jump_host_fields(jh: JumpHost) -> JumpHost:
+    """Encrypt password / key_content on the row in place (Phase 3.g)."""
+    from app.core.secret_store import encrypt_secret
+    if getattr(jh, "password", None):
+        jh.password = encrypt_secret(jh.password)
+    if getattr(jh, "key_content", None):
+        jh.key_content = encrypt_secret(jh.key_content)
+    return jh
+
+
+def _decrypt_jump_host_copy(jh: Optional[JumpHost]) -> Optional[JumpHost]:
+    """Return a detached copy with secrets decrypted in-memory."""
+    if jh is None:
+        return None
+    from app.core.secret_store import decrypt_secret
+    detached = copy(jh)
+    if getattr(detached, "password", None):
+        detached.password = decrypt_secret(detached.password)
+    if getattr(detached, "key_content", None):
+        detached.key_content = decrypt_secret(detached.key_content)
+    return detached
+
+
+class JumpHostRepository:
+    """Phase 3.g SSOT CRUD for the `jump_hosts` table.
+
+    Mirrors ServerRepository's secret handling: writes encrypt password /
+    key_content; reads return a detached copy with secrets decrypted so SSH
+    clients can consume ORM attributes directly.
+    """
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_by_id(self, jh_id: str) -> Optional[JumpHost]:
+        return _decrypt_jump_host_copy(self.db.query(JumpHost).filter(JumpHost.id == jh_id).first())
+
+    def get_by_name(self, name: str) -> Optional[JumpHost]:
+        return _decrypt_jump_host_copy(self.db.query(JumpHost).filter(JumpHost.name == name).first())
+
+    def list_all(self) -> List[JumpHost]:
+        return [_decrypt_jump_host_copy(jh) for jh in self.db.query(JumpHost).order_by(JumpHost.name).all()]
+
+    def list_names(self) -> List[str]:
+        return [r[0] for r in self.db.query(JumpHost.name).order_by(JumpHost.name).all()]
+
+    def create(self, name: str, host: str, port: int = 22, user: str = "root",
+               key: str = "~/.ssh/id_rsa", key_content: str = None, password: str = None,
+               status: str = "online", description: str = None, tags: list = None) -> JumpHost:
+        jh = JumpHost(
+            name=name, host=host, port=port, user=user,
+            key=key, key_content=key_content, password=password,
+            status=status or "online", description=description, tags=tags or [],
+        )
+        _encrypt_jump_host_fields(jh)
+        self.db.add(jh)
+        self.db.commit()
+        self.db.refresh(jh)
+        return _decrypt_jump_host_copy(jh)
+
+    def update(self, jh_id: str, **fields) -> Optional[JumpHost]:
+        persisted = self.db.query(JumpHost).filter(JumpHost.id == jh_id).first()
+        if not persisted:
+            return None
+        for key, value in fields.items():
+            if hasattr(persisted, key) and value is not None:
+                setattr(persisted, key, value)
+        _encrypt_jump_host_fields(persisted)
+        self.db.commit()
+        self.db.refresh(persisted)
+        return _decrypt_jump_host_copy(persisted)
+
+    def delete(self, jh_id: str) -> bool:
+        jh = self.db.query(JumpHost).filter(JumpHost.id == jh_id).first()
+        if jh:
+            self.db.delete(jh)
+            self.db.commit()
+            return True
+        return False
+
+    def count_referencing_servers(self, name: str) -> int:
+        """Number of Server rows that reference this jump host by name.
+
+        Used by the API to refuse deletion of a still-referenced bastion.
+        """
+        return self.db.query(Server).filter(Server.jump_host == name).count()
 
 
 class ConfigRepository:

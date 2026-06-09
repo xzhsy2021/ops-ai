@@ -184,3 +184,69 @@ def test_profile_mcp_run_handler_returns_preview_when_missing_confirmation(monke
     finally:
         db.close()
         engine.dispose()
+
+
+def test_profile_http_routes_list_preview_and_run(monkeypatch, tmp_path):
+    from app.api import inspection as inspection_api
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    _inventory(
+        monkeypatch,
+        [
+            {"id": "uuid-a", "name": "test-a", "host": "1.1.1.1", "group": "crypto", "status": "online"},
+            {"id": "uuid-b", "name": "test-b", "host": "1.1.1.2", "group": "crypto", "status": "online"},
+        ],
+    )
+    monkeypatch.setattr(inspection_api, "require_auth", lambda request, db_arg: {"username": "alice"})
+
+    def _fake_batch(db_arg, **kwargs):
+        return {
+            "summary": "done",
+            "eligible": 2,
+            "success": 2,
+            "failed": 0,
+            "runs": [{"id": "run-a", "status": "COMPLETED"}, {"id": "run-b", "status": "COMPLETED"}],
+            "results": [],
+            "errors": [],
+        }
+
+    def _fake_report(db_arg, run_ids, **kwargs):
+        return {"report": {"id": "report-a", "title": kwargs.get("title")}}
+
+    try:
+        listed = inspection_api.profiles(SimpleNamespace(), db=db)
+        assert listed["data"]["total"] >= 4
+
+        preview_resp = inspection_api.profile_preview({"profile_id": "crypto-test-daily"}, SimpleNamespace(), db=db)
+        preview = preview_resp["data"]
+        assert preview["eligible_count"] == 2
+        confirm_text = preview["confirmation"]["confirm_text"]
+
+        with (
+            patch("app.services.inspection_center.run_servers_batch_inspection", _fake_batch),
+            patch("app.services.inspection_center.generate_report_for_runs", _fake_report),
+        ):
+            run_resp = inspection_api.profile_run({"profile_id": "crypto-test-daily", "confirm_text": confirm_text}, SimpleNamespace(), db=db)
+
+        assert run_resp["data"]["run_ids"] == ["run-a", "run-b"]
+        assert run_resp["data"]["report"]["id"] == "report-a"
+        assert run_resp["message"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_profile_frontend_contract_exposes_preview_confirmation_workflow():
+    page = open("frontend/src/pages/InspectionCenterPage.tsx", encoding="utf-8").read()
+    api = open("frontend/src/api.ts", encoding="utf-8").read()
+    css = open("frontend/src/index.css", encoding="utf-8").read()
+
+    assert "profiles: () => api.get('/inspection/profiles')" in api
+    assert "profilePreview: (data: { profile_id: string }) => api.post('/inspection/profiles/preview'" in api
+    assert "profileRun: (data: { profile_id: string; confirm_text: string; expected_count?: number; fingerprint?: string }) => api.post('/inspection/profiles/run'" in api
+    assert "profilePreview" in page
+    assert "runInspectionProfile" in page
+    assert "profile-confirm-text" in page
+    assert "RiskConfirmDialog" in page
+    assert ".inspection-profile-strip" in css

@@ -12,8 +12,16 @@ class InventoryReadService:
         return get_all_servers()
 
     def get_server(self, name: str) -> Optional[Dict[str, Any]]:
-        from app.config.servers import get_server_by_name
-        return get_server_by_name(name)
+        """Resolve a server by name / host / UUID.
+
+        Kept the legacy ``name`` parameter name for API stability, but the
+        implementation now accepts any server identifier (full UUID, short
+        UUID prefix, or exact host) in addition to a name. This makes
+        inventory lookups consistent with the rest of the tool surface and
+        lets Path B single-shot probes reach the right SSH target.
+        """
+        from app.config.servers import resolve_server
+        return resolve_server(name)
 
     def list_systems(self) -> Dict[str, Any]:
         from app.config.systems import get_all_systems

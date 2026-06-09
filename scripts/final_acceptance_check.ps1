@@ -18,7 +18,10 @@ try {
   Write-Host "[warn] MCP smoke skipped or failed; check dependencies and runtime configuration"
 }
 
-Write-Host "[5/5] Dependency-aware optional checks"
+Write-Host "[5/6] MCP/tooling contract tests"
+python -m pytest tests/test_mcp_contract_sync.py tests/test_tool_token_templates_contract.py tests/test_frontend_tooling_contract.py -q
+
+Write-Host "[6/6] Dependency-aware optional checks"
 if (Test-Path "frontend/node_modules") {
   Push-Location frontend
   npm run typecheck

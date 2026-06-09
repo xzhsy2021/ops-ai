@@ -1,55 +1,54 @@
-# AI 自动发现 OPS 可用能力
+# AI Capability Discovery
 
-本轮实现目标：让不同大模型客户端接入 OPS 后，无需写死提示词或工具列表，可以自动发现当前 Token 可用能力。
+Updated: 2026-06-08
 
-## 核心入口
+This runbook explains how AI/MCP clients discover the OPS capabilities that are actually available for the current token/session.
 
-### HTTP 能力清单
+## HTTP Capability Entry
 
 ```http
 GET /api/v2/capabilities
 Authorization: Bearer <OPS_TOOL_TOKEN>
 ```
 
-返回内容包括：
+The response includes:
 
-- `server.capability_version`：能力版本，工具/权限/开关变化后会变化
-- `auth`：当前 Token/会话身份和 scopes
-- `features`：当前能力开关
-- `tools`：当前上下文可调用工具
-- `pagination`：分页信息
-- `categories`：工具分类
-- `policies`：确认、生产、shell 等安全策略
-- `resources`：MCP resources
-- `prompts`：MCP prompts
+- `server.capability_version`: cache invalidation key for tool/policy/scope changes.
+- `auth`: current token/session identity and scopes.
+- `features`: current capability switches.
+- `tools`: tools available in the current context.
+- `pagination`: cursor/limit data.
+- `categories`: tool categories.
+- `policies`: confirmation, production, shell, and risk policy notes.
+- `resources`: MCP resources.
+- `prompts`: MCP prompts.
 
-### HTTP 工具列表
+## HTTP Tool List
 
 ```http
-GET /api/v2/tools?category=deploy_plan&include_schema=true&limit=100
+GET /api/v2/tools?category=inspection&include_schema=true&limit=100
 Authorization: Bearer <OPS_TOOL_TOKEN>
 ```
 
-支持参数：
+Useful parameters:
 
-- `category`：按分类过滤
-- `risk`：按风险过滤
-- `include_disabled`：显示被策略禁用或权限不足的能力及原因
-- `include_schema`：是否返回输入/输出 schema
-- `limit` / `cursor`：分页
-- `format`：`native` / `mcp` / `openai` / `anthropic`
+- `category`: filter by tool category.
+- `risk`: filter by risk level.
+- `include_disabled`: include blocked tools and blocking reasons.
+- `include_schema`: include input/output schema.
+- `limit` / `cursor`: pagination.
+- `format`: `native`, `mcp`, `openai`, or `anthropic`.
 
-### 工具详情
+## Tool Detail
 
 ```http
-GET /api/v2/tools/detail/ops.create_deploy_plan
+GET /api/v2/tools/detail/ops.inspection.run_servers_batch
+Authorization: Bearer <OPS_TOOL_TOKEN>
 ```
 
-返回工具描述、输入输出 schema、风险等级、权限要求、当前上下文是否可用及阻断原因。
+Tool detail includes description, input/output schema, risk, scopes, current availability, and blocking reason when unavailable.
 
-## 模型兼容格式
-
-`/api/v2/tools` 支持多种输出格式：
+## Model-Compatible Formats
 
 ```http
 GET /api/v2/tools?format=native
@@ -58,16 +57,16 @@ GET /api/v2/tools?format=openai
 GET /api/v2/tools?format=anthropic
 ```
 
-用途：
+Use:
 
-- `native`：OPS 原生工具目录，适合前端和自研 Agent
-- `mcp`：MCP tools/list 兼容格式
-- `openai`：OpenAI tools/function calling 兼容格式
-- `anthropic`：Claude tools 兼容格式
+- `native`: OPS-native catalog for frontend and custom agents.
+- `mcp`: MCP `tools/list` compatible shape.
+- `openai`: OpenAI tools/function-calling compatible shape.
+- `anthropic`: Claude tools compatible shape.
 
-## MCP 自动发现
+## MCP Discovery
 
-`scripts/mcp-server.bat` / `scripts/mcp-server.sh` 启动的 MCP bridge，其 `initialize` 响应已声明：
+The stdio bridge started by `scripts/mcp-server.bat` or `scripts/mcp-server.sh` declares:
 
 ```json
 {
@@ -79,7 +78,7 @@ GET /api/v2/tools?format=anthropic
 }
 ```
 
-MCP 客户端应在连接后调用：
+Recommended client startup:
 
 ```text
 initialize
@@ -88,70 +87,100 @@ resources/list
 prompts/list
 ```
 
-`tools/list` 支持 `cursor` 分页，返回 `nextCursor`。
+`tools/list` supports `cursor` pagination and returns `nextCursor`.
 
-## 兼容普通工具调用的能力发现
+For stdio clients, `resources/list` and `prompts/list` are served from the local
+capability service and stay available while the OPS backend is offline.
+If `tools/list` cannot reach the backend, it returns `offline=true`, an `error`
+message, and the local fallback tools `ops_connection_status`,
+`ops_inspect_local_package`, and `ops_prepare_release_from_local_package`.
+The backwards-compatible stdio `manifest` method follows the same offline
+pattern and includes local resources, prompts, and fallback tools instead of
+returning a JSON-RPC error.
 
-新增工具：
+MCP tool names are MCP-safe aliases. Replace dots with underscores:
 
-```text
-ops.describe_capabilities
-```
+- HTTP Tool API: `ops.describe_capabilities`
+- MCP JSON-RPC: `ops_describe_capabilities`
+- HTTP Tool API: `ops.inspection.run_servers_batch`
+- MCP JSON-RPC: `ops_inspection_run_servers_batch`
 
-不支持 MCP 的 Agent 可以先调用这个工具获取可用能力，例如：
+## Capability Discovery Tool
+
+Agents that do not use MCP can call the HTTP tool:
 
 ```json
 {
   "tool": "ops.describe_capabilities",
   "arguments": {
-    "category": "deploy_plan",
+    "category": "inspection",
     "include_schema": true,
     "limit": 100
   }
 }
 ```
 
-## 安全原则
+MCP clients call the alias:
 
-AI 自动发现到的是“当前 Token 真正可用的能力”，不是 OPS 后端注册的所有工具。
-
-过滤顺序：
-
-```text
-Tool Registry 全量工具
-→ 系统能力开关
-→ Token scopes
-→ 用户角色
-→ 工具风险策略
-→ 返回当前可用工具
+```json
+{
+  "name": "ops_describe_capabilities",
+  "arguments": {
+    "category": "inspection",
+    "include_schema": true,
+    "limit": 100
+  }
+}
 ```
 
-如需排查禁用原因，可在管理员页面或 HTTP 参数中启用：
+## Streaming Results
+
+Large-payload tools can be called through:
+
+```http
+POST /api/v2/tools/call/stream
+```
+
+MCP clients that support the OPS private extension can use:
+
+```text
+tools/call.stream
+```
+
+Current streamable tools:
+
+- `ops.db.export_query_result`
+- `ops.get_deployment_logs`
+- `ops.export_diagnostics_report`
+
+## Security Principles
+
+Capability discovery returns what the current token/session can actually use, not every registered backend tool.
+
+Filtering order:
+
+```text
+Tool Registry
+-> capability settings
+-> token scopes
+-> user role
+-> risk policy
+-> currently available tools
+```
+
+To troubleshoot blocked tools:
 
 ```http
 GET /api/v2/tools?include_disabled=true
+Authorization: Bearer <OPS_TOOL_TOKEN>
 ```
 
-## 前端 Capability Explorer
+## Recommended Agent Flow
 
-`AI 工具` 页面新增 Capability Explorer：
-
-- 展示 `capability_version`
-- 展示当前 Token/会话可用能力
-- 按分类、风险、关键词过滤
-- 查看工具详情、input schema、output schema
-- 生成 HTTP 调用示例
-- 显示被禁用工具的阻断原因
-
-## 推荐客户端流程
-
-```text
-1. 读取 /api/v2/capabilities 或 MCP tools/list
-2. 选择匹配用户意图的工具
-3. 调用只读工具获取真实系统、服务、服务器、包信息
-4. 创建发布计划或配置变更计划
-5. 预检或展示 diff
-6. 高风险操作要求用户确认
-7. 调用执行工具
-8. 根据返回的 next_actions 和 audit_id 继续跟踪
-```
+1. Read `/api/v2/capabilities` or MCP `tools/list`.
+2. Choose a tool that matches user intent and current policy.
+3. Prefer read tools to gather real systems, services, servers, packages, and inspection state.
+4. For inspection, prefer Path A `ops.inspection.*` tools.
+5. For high-risk operations, ask the user for the exact backend confirmation text.
+6. Call the execution tool only after confirmation.
+7. Follow returned `next_actions`, task ids, and audit ids.

@@ -364,6 +364,13 @@ MIGRATIONS: List[Dict[str, str]] = [
         "sql": "ALTER TABLE deployment_server_tasks ADD COLUMN updated_at DATETIME",
     },
     {
+        "version": "053_014_deployment_server_tasks_duration_ms",
+        "name": "Add duration ms to deployment server tasks",
+        "table": "deployment_server_tasks",
+        "column": "duration_ms",
+        "sql": "ALTER TABLE deployment_server_tasks ADD COLUMN duration_ms INTEGER DEFAULT 0",
+    },
+    {
         "version": "053_009_deployment_step_tasks_sort_order",
         "name": "Add sort order to deployment step tasks",
         "table": "deployment_step_tasks",
@@ -376,6 +383,13 @@ MIGRATIONS: List[Dict[str, str]] = [
         "table": "deployment_step_tasks",
         "column": "updated_at",
         "sql": "ALTER TABLE deployment_step_tasks ADD COLUMN updated_at DATETIME",
+    },
+    {
+        "version": "053_015_deployment_step_tasks_duration_ms",
+        "name": "Add duration ms to deployment step tasks",
+        "table": "deployment_step_tasks",
+        "column": "duration_ms",
+        "sql": "ALTER TABLE deployment_step_tasks ADD COLUMN duration_ms INTEGER DEFAULT 0",
     },
     {
         "version": "053_013_deployment_step_tasks_captured_config",
@@ -744,6 +758,112 @@ MIGRATIONS: List[Dict[str, str]] = [
         "column": "metadata_json",
         "sql": "ALTER TABLE server_groups ADD COLUMN metadata_json JSON",
     },
+    {
+        "version": "080_003_jump_hosts",
+        "name": "Create jump_hosts table for Phase 3.g SSOT migration",
+        "table": "jump_hosts",
+        "sql": """CREATE TABLE IF NOT EXISTS jump_hosts (
+            id VARCHAR(32) PRIMARY KEY,
+            name VARCHAR(64) UNIQUE NOT NULL,
+            host VARCHAR(255) NOT NULL,
+            port INTEGER DEFAULT 22,
+            "user" VARCHAR(64) DEFAULT 'root',
+            key VARCHAR(255) DEFAULT '~/.ssh/id_rsa',
+            key_content TEXT,
+            password TEXT,
+            status VARCHAR(24) DEFAULT 'online',
+            description TEXT,
+            tags JSON DEFAULT '[]',
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        # 修复 ToolToken ETag 缓存陷阱：之前没有 updated_at，ETag 仅基于 id+created_at，
+        # PATCH 修改 scopes/allow_write/prod 后 ETag 不变，浏览器/axios 拿到 304 后回放旧数据，
+        # 导致前端看似"保存成功，再次编辑又没权限了"。
+        "version": "080_004_tool_tokens_updated_at",
+        "name": "Add updated_at to tool_tokens for correct ETag/304 invalidation",
+        "table": "tool_tokens",
+        "column": "updated_at",
+        "sql": "ALTER TABLE tool_tokens ADD COLUMN updated_at DATETIME",
+    },
+    {
+        # 日/周/月三级巡检调度表：把 3j 设计落库。
+        # tier: DAILY / WEEKLY / MONTHLY / MANUAL
+        # next_run_at: 下一次应执行时间（worker 轮询这个字段）
+        # last_run_at / last_run_id: 上次执行情况，用于断点续跑和告警去重
+        "version": "080_005_inspection_tier_schedules",
+        "name": "Create inspection_tier_schedules for 3-tier (daily/weekly/monthly) inspection",
+        "table": "inspection_tier_schedules",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_tier_schedules (
+            id VARCHAR(32) PRIMARY KEY,
+            name VARCHAR(128) UNIQUE NOT NULL,
+            tier VARCHAR(16) NOT NULL,
+            cron_expression VARCHAR(64) NOT NULL,
+            timezone VARCHAR(64) DEFAULT 'Asia/Shanghai',
+            enabled BOOLEAN DEFAULT 1,
+            timeout_minutes INTEGER DEFAULT 60,
+            concurrency INTEGER DEFAULT 3,
+            target_filter JSON DEFAULT '{}',
+            categories JSON DEFAULT '[]',
+            thresholds JSON DEFAULT '{}',
+            notification JSON DEFAULT '{}',
+            retention JSON DEFAULT '{}',
+            report JSON DEFAULT '{}',
+            require_approval BOOLEAN DEFAULT 0,
+            next_run_at DATETIME,
+            last_run_at DATETIME,
+            last_run_id VARCHAR(32),
+            last_status VARCHAR(24),
+            last_error TEXT,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        # 巡检"通知路由"表：把 severity → channels/recipients/SLA 落库，
+        # 而不是写死在 yaml 里，方便运行时改。
+        "version": "080_006_inspection_notification_routes",
+        "name": "Create inspection_notification_routes for severity-based routing",
+        "table": "inspection_notification_routes",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_notification_routes (
+            id VARCHAR(32) PRIMARY KEY,
+            severity VARCHAR(16) NOT NULL,
+            tier VARCHAR(16),
+            channels JSON DEFAULT '[]',
+            recipients JSON DEFAULT '[]',
+            sla_minutes INTEGER,
+            enabled BOOLEAN DEFAULT 1,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        # 静默期 + 跨级联策略：避免轰炸 + 高危自动升级
+        "version": "080_007_inspection_silence_and_cascade",
+        "name": "Create inspection_silence_and_cascade policies",
+        "table": "inspection_cascade_policies",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_cascade_policies (
+            id VARCHAR(32) PRIMARY KEY,
+            name VARCHAR(128) UNIQUE NOT NULL,
+            trigger_type VARCHAR(32) NOT NULL,
+            trigger_config JSON DEFAULT '{}',
+            action VARCHAR(64) NOT NULL,
+            action_config JSON DEFAULT '{}',
+            enabled BOOLEAN DEFAULT 1,
+            last_triggered_at DATETIME,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "080_012_tool_tokens_description",
+        "name": "Add operator-facing description to tool_tokens",
+        "table": "tool_tokens",
+        "column": "description",
+        "sql": "ALTER TABLE tool_tokens ADD COLUMN description TEXT",
+    },
 
 ]
 
@@ -815,16 +935,32 @@ def run_schema_migrations(engine) -> List[str]:
 
 
 def migrate_read_only_default():
-    """确保 read_only 默认值变更后存量部署不受影响"""
+    """Backfill missing capability_server switches for existing deployments.
+
+    Only keys that are absent in the stored config are filled in with the
+    current DEFAULT_CAPABILITY_SETTINGS. Existing user values are preserved
+    so an admin who intentionally enabled a stricter mode is not overridden.
+    This is the same belt-and-suspenders migration we use elsewhere: the
+    goal is "no 403 just because a new key was added in code", not "rewrite
+    admin choices".
+    """
     try:
         from config_manager import load_config, save_config
+        from app.services.tool_policy import DEFAULT_CAPABILITY_SETTINGS
         config = load_config()
         if "capability_server" not in config:
             return
         caps = config["capability_server"]
-        if isinstance(caps, dict) and "read_only" not in caps:
-            caps["read_only"] = False
+        if not isinstance(caps, dict):
+            return
+        changed = False
+        for key, default in DEFAULT_CAPABILITY_SETTINGS.items():
+            if key not in caps:
+                caps[key] = default
+                changed = True
+        if changed:
             save_config(config)
-            logger.info("Applied read_only default migration: set read_only=False for existing deployment")
+            logger.info("Backfilled capability_server defaults for keys: %s",
+                        [k for k in DEFAULT_CAPABILITY_SETTINGS if k in caps and caps[k] == DEFAULT_CAPABILITY_SETTINGS[k]])
     except Exception:
-        logger.exception("Failed to apply read_only default migration")
+        logger.exception("Failed to apply capability_server default backfill")

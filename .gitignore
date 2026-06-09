@@ -23,6 +23,8 @@ frontend/node_modules/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+# 根目录 DB 误产物(脚本 cwd 错位时偶发,目前是 0 字节空文件)
+/ops.db
 data/*.log
 data/logs/
 data/runtime/
@@ -36,11 +38,24 @@ data/_*.txt
 
 dist/
 
+# Root-level local inspection/debug artifacts
+/capabilities_*.txt
+/debug_out.txt
+/inspect_out*.txt
+/inspect_report_*.md
+/passwd_debug.txt
+/raw_out.txt
+/token_debug*.txt
+/_inspect_crypto_*.log
+/_verify_*.log
+/logs/
+
 # Phase 3f 临时调试脚本(本地 / 一次性 / 烟测)
 # 命名约定:以 _ 开头的脚本/文件一律不入仓
 scripts/_*.py
 scripts/_*.txt
 scripts/_*.md
+scripts/_*.json
 tests/_*.py
 tests/_tmp_*.py
 tests/_apply_*.py

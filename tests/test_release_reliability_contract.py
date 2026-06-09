@@ -398,6 +398,8 @@ def test_runtime_task_tables_are_migrated_for_deployment_history(tmp_path):
         assert "task_id" in server_cols
         assert "task_id" in step_cols
         assert "task_id" in dist_cols
+        assert "duration_ms" in server_cols
+        assert "duration_ms" in step_cols
         assert "reused" in dist_cols
         assert "duration_ms" in dist_cols
         assert "updated_at" in dist_cols

@@ -2,11 +2,17 @@
 const fs = require('fs');
 const path = require('path');
 let ts;
+const frontendNodeModules = path.join(process.cwd(), 'frontend', 'node_modules');
+const requireFromFrontend = require('module').createRequire(path.join(frontendNodeModules, 'typescript', 'package.json'));
 try {
   ts = require('typescript');
 } catch (err) {
-  console.log('[frontend] typescript module not available, skip syntax check');
-  process.exit(0);
+  try {
+    ts = requireFromFrontend('typescript');
+  } catch (frontendErr) {
+    console.log('[frontend] typescript module not available, skip syntax check');
+    process.exit(0);
+  }
 }
 
 const roots = [path.join(process.cwd(), 'frontend', 'src')];

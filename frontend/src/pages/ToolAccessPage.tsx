@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { capabilityTools } from '../api'
-import { useNotificationStore } from '../store'
+import { useAuthStore, useNotificationStore } from '../store'
 import { ROUTES } from '../routes'
 import { ConfirmDialog, RiskConfirmDialog, Skeleton, StatusBadge, PageHeader, FavoriteButton } from '../components/ui'
 import { ToolCatalogPanel } from './tools/ToolCatalogPanel'
-import { ToolDetailDrawer } from './tools/ToolDetailDrawer'
 import { ToolAuditTimeline } from './tools/ToolAuditTimeline'
 import { ToolPlaygroundPanel } from './tools/ToolPlaygroundPanel'
 import { ToolOverviewPanel } from './tools/ToolOverviewPanel'
@@ -25,12 +24,37 @@ const TAB_ITEMS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'audit', label: '审计与计划', hint: '调用记录、操作计划' },
 ]
 
+// Frontend fallback for capability switches when the backend has not yet
+// returned any value. Mirrors `app/services/tool_policy.py::DEFAULT_CAPABILITY_SETTINGS`.
+// Read-side switches default to true (MCP/AI friendly), destructive switches
+// default to false (admin must opt in).
 const CAPABILITY_DEFAULTS: Record<string, boolean> = {
+  enabled: true,
+  http_tools_enabled: true,
+  mcp_enabled: true,
+  read_only: false,
+  allow_deploy_plan: true,
+  allow_deploy_execute: false,
+  allow_prod_deploy: false,
+  allow_rollback: false,
+  allow_config_write: false,
+  allow_backup_write: false,
+  allow_backup_restore: false,
+  allow_server_read: true,
+  allow_server_write: false,
+  allow_package_write: false,
+  allow_package_cleanup: false,
+  allow_runtime_cleanup: false,
   allow_db_read_tools: true,
   allow_db_export_tools: true,
-  allow_db_write_tools: true,
-  agent_runtime_enabled: false,
+  allow_db_write_tools: false,
+  allow_high_risk_tools: true,
+  allow_critical_risk_tools: true,
+  allow_ai_token_to_run_inspection_execute: true,
+  require_confirmation: true,
+  taskize_high_risk_tools: true,
   strict_prod_confirmation: true,
+  agent_runtime_enabled: false,
 }
 
 function getData(res: any) {
@@ -54,10 +78,13 @@ function JsonBlock({ value, small = true }: { value: any; small?: boolean }) {
 export default function ToolAccessPage() {
   const addMessage = useNotificationStore((s) => s.addMessage)
   const notify = (m: { type: 'success' | 'error' | 'info'; text: string }) => addMessage(m.text, m.type)
+  const { user } = useAuthStore()
+  const isAdmin = Boolean(user?.is_admin)
   const [loading, setLoading] = useState(false)
   const [tools, setTools] = useState<ToolInfo[]>([])
   const [settings, setSettings] = useState<Record<string, any>>({})
   const [tokens, setTokens] = useState<any[]>([])
+  const [tokenTemplates, setTokenTemplates] = useState<any[]>([])
   const [calls, setCalls] = useState<any[]>([])
   const [plans, setPlans] = useState<any[]>([])
   const [manifest, setManifest] = useState<any>(null)
@@ -66,7 +93,6 @@ export default function ToolAccessPage() {
   const [createdToken, setCreatedToken] = useState('')
   const [selectedTool, setSelectedTool] = useState<ToolInfo | null>(null)
   const [toolDetail, setToolDetail] = useState<any>(null)
-  const [catalogDrawerOpen, setCatalogDrawerOpen] = useState(false)
   const [sampleTool, setSampleTool] = useState('ops.describe_capabilities')
   const [sampleArgs, setSampleArgs] = useState(`{
   "include_schema": false,
@@ -78,24 +104,22 @@ export default function ToolAccessPage() {
   const [riskConfirmOpen, setRiskConfirmOpen] = useState(false)
   const [riskConfirmValue, setRiskConfirmValue] = useState('')
   const [revokeCandidate, setRevokeCandidate] = useState<any>(null)
+  const [deleteCandidate, setDeleteCandidate] = useState<any>(null)
 
-  const loadAll = async () => {
+  const loadInitial = async () => {
     setLoading(true)
     try {
       const params = {
         include_disabled: true,
-        include_schema: true,
+        include_schema: false,
         limit: 300,
       }
-      const [listRes, capRes, settingsRes, tokensRes, callsRes, plansRes, manifestRes, riskPolicyRes] = await Promise.allSettled([
+      const [listRes, capRes, settingsRes, tokensRes, tokenTemplateRes] = await Promise.allSettled([
         capabilityTools.list(params),
-        capabilityTools.capabilities({ include_disabled: true, include_schema: true, limit: 300 }),
+        capabilityTools.capabilities({ include_disabled: true, include_schema: false, limit: 300 }),
         capabilityTools.settings(),
         capabilityTools.tokens(),
-        capabilityTools.calls({ limit: 30 }),
-        capabilityTools.plans({ limit: 20 }),
-        capabilityTools.mcpManifest(),
-        capabilityTools.riskPolicy(),
+        capabilityTools.tokenTemplates(),
       ])
       if (listRes.status === 'fulfilled') {
         const d = getData(listRes.value)
@@ -108,10 +132,7 @@ export default function ToolAccessPage() {
         if (s && Object.keys(s).length > 0) setSettings(s)
       }
       if (tokensRes.status === 'fulfilled') setTokens(getData(tokensRes.value) || [])
-      if (callsRes.status === 'fulfilled') setCalls(getData(callsRes.value) || [])
-      if (plansRes.status === 'fulfilled') setPlans(getData(plansRes.value) || [])
-      if (manifestRes.status === 'fulfilled') setManifest(getData(manifestRes.value))
-      if (riskPolicyRes.status === 'fulfilled') setRiskPolicy(getData(riskPolicyRes.value))
+      if (tokenTemplateRes.status === 'fulfilled') setTokenTemplates(getData(tokenTemplateRes.value)?.templates || [])
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
     } finally {
@@ -119,7 +140,41 @@ export default function ToolAccessPage() {
     }
   }
 
-  useEffect(() => { loadAll() }, [])
+  const loadTabData = async (tab: TabKey) => {
+    try {
+      if (tab === 'overview') {
+        const [manifestRes, riskPolicyRes] = await Promise.allSettled([
+          capabilityTools.mcpManifest(),
+          capabilityTools.riskPolicy(),
+        ])
+        if (manifestRes.status === 'fulfilled') setManifest(getData(manifestRes.value))
+        if (riskPolicyRes.status === 'fulfilled') setRiskPolicy(getData(riskPolicyRes.value))
+      } else if (tab === 'catalog') {
+        const res = await capabilityTools.list({ include_disabled: true, include_schema: true, limit: 300 })
+        const d = getData(res)
+        setTools(d.tools || [])
+        setSettings(d.settings || settings)
+      } else if (tab === 'audit') {
+        const [callsRes, plansRes] = await Promise.allSettled([
+          capabilityTools.calls({ limit: 30 }),
+          capabilityTools.plans({ limit: 20 }),
+        ])
+        if (callsRes.status === 'fulfilled') setCalls(getData(callsRes.value) || [])
+        if (plansRes.status === 'fulfilled') setPlans(getData(plansRes.value) || [])
+      }
+    } catch (e: any) {
+      notify({ type: 'error', text: String(e) })
+    }
+  }
+
+  const refreshAll = async () => {
+    capabilityTools.clearCache()
+    await loadInitial()
+    await loadTabData(activeTab)
+  }
+
+  useEffect(() => { loadInitial() }, [])
+  useEffect(() => { loadTabData(activeTab) }, [activeTab])
 
   const categories = useMemo(() => {
     const fromCaps = capabilities?.categories || []
@@ -168,7 +223,7 @@ export default function ToolAccessPage() {
       setSampleResult(getData(res))
       setRiskConfirmOpen(false)
       setRiskConfirmValue('')
-      await loadAll()
+      await loadTabData(activeTab)
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
     }
@@ -192,11 +247,12 @@ export default function ToolAccessPage() {
         }
       }
       setSettings(normalized)
+      capabilityTools.clearCache()
       notify({ type: 'success', text: '工具接入设置已保存' })
     } catch (e: any) {
       // 失败时回滚到加载最新状态
       notify({ type: 'error', text: String(e) })
-      await loadAll()
+      await refreshAll()
     }
   }
 
@@ -204,12 +260,26 @@ export default function ToolAccessPage() {
   const revokeToken = async (token: any) => {
     try {
       await capabilityTools.revokeToken(token.id)
+      capabilityTools.clearCache()
       notify({ type: 'success', text: 'Token 已撤销' })
       setRevokeCandidate(null)
-      await loadAll()
+      await refreshAll()
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
       setRevokeCandidate(null)
+    }
+  }
+
+  const purgeToken = async (token: any) => {
+    try {
+      await capabilityTools.purgeToken(token.id)
+      capabilityTools.clearCache()
+      notify({ type: 'success', text: `Token「${token.name}」已从数据库删除` })
+      setDeleteCandidate(null)
+      await refreshAll()
+    } catch (e: any) {
+      notify({ type: 'error', text: String(e) })
+      setDeleteCandidate(null)
     }
   }
 
@@ -224,7 +294,7 @@ export default function ToolAccessPage() {
         actions={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <FavoriteButton url={ROUTES.tools} label="AI 工具接入" category="tools" />
-            <button className="btn btn-primary" onClick={loadAll} disabled={loading}>{loading ? '刷新中...' : '刷新能力'}</button>
+            <button className="btn btn-primary" onClick={refreshAll} disabled={loading}>{loading ? '刷新中...' : '刷新能力'}</button>
           </div>
         }
       />
@@ -296,6 +366,7 @@ export default function ToolAccessPage() {
                       { key: 'taskize_high_risk_tools', label: '任务化高风险', desc: '将高风险转为任务执行' },
                       { key: 'allow_high_risk_tools', label: '允许高风险', desc: '开放高风险工具调用' },
                       { key: 'allow_critical_risk_tools', label: '允许危险级', desc: '开放危险级工具调用' },
+                      { key: 'allow_ai_token_to_run_inspection_execute', label: 'AI token 可跑巡检', desc: '允许 AI/MCP tool-token 跑 Path A 巡检（带 confirm_text 二次确认）' },
                     ],
                   },
                   {
@@ -393,6 +464,11 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               <div className="helper-strip">
                 <span>提示</span>
                 <p>只读查询与发布计划可直接通过 Token 调用；发布执行、回滚、配置变更等高风险工具仍需服务端策略允许并通过确认。</p>
+                <p style={{ marginTop: 6 }}>
+                  <strong>推荐 Token 配置：</strong>
+                  scopes 至少包含 <code>["ops:read", "ops:write"]</code>，allow_write=true。
+                  <code>ops.inspection.run_*</code> 内部是 write=True（要建 inspection_runs），只给 <code>ops:read</code> 会 403。
+                </p>
               </div>
             }
           />
@@ -424,7 +500,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
             tokens={tokens.map((t: any) => ({
               id: t.id,
               name: t.name,
-              description: t.owner,
+              description: t.description || '',
               status: t.status || (t.revoked_at ? 'revoked' : 'active'),
               created_at: t.created_at,
               last_used_at: t.last_used_at,
@@ -437,6 +513,8 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               masked_value: t.token_prefix ? `${t.token_prefix}...` : undefined,
             }))}
             loading={loading}
+            canDelete={isAdmin}
+            tokenTemplates={tokenTemplates}
             onGenerate={async (data) => {
               setCreatedToken('')
               const res = await capabilityTools.createToken({
@@ -449,18 +527,28 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               })
               const d = getData(res)
               setCreatedToken(d.token || '')
+              capabilityTools.clearCache()
               notify({ type: 'success', text: 'Token 已创建，请立即复制保存' })
-              await loadAll()
+              await refreshAll()
             }}
             onUpdate={async (tokenId, data) => {
               await capabilityTools.updateToken(tokenId, data)
+              capabilityTools.clearCache()
               notify({ type: 'success', text: 'Token 权限已更新' })
-              await loadAll()
+              await refreshAll()
             }}
-            onRevoke={async (tokenId) => {
+            onRevoke={(tokenId) => {
                const token = tokens.find((t: any) => t.id === tokenId)
                setRevokeCandidate(token || { id: tokenId, name: tokenId })
              }}
+            onDelete={(tokenId) => {
+               const token = tokens.find((t: any) => t.id === tokenId)
+               setDeleteCandidate(token || { id: tokenId, name: tokenId })
+             }}
+            onPreviewPolicy={async (data) => {
+              const res = await capabilityTools.policyPreview(data)
+              return getData(res)
+            }}
           />
           {createdToken && (
             <div className="alert alert-warning" style={{ marginTop: 12 }}>
@@ -478,19 +566,13 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               tools={tools}
               categories={categories}
               loading={loading}
+              selectedToolName={selectedTool?.name}
+              toolDetail={toolDetail}
               onSelectTool={(tool) => {
                 selectTool(tool)
-                setCatalogDrawerOpen(true)
               }}
-            />
-            <ToolDetailDrawer
-              open={catalogDrawerOpen}
-              tool={selectedTool}
-              toolDetail={toolDetail}
-              onClose={() => setCatalogDrawerOpen(false)}
-              onOpenPlayground={() => {
-                setCatalogDrawerOpen(false)
-                setSampleTool(selectedTool?.name || '')
+              onOpenPlayground={(tool) => {
+                setSampleTool(tool.name)
                 setActiveTab('playground')
               }}
             />
@@ -517,7 +599,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                   const parsed = JSON.parse(argsStr)
                   const res = await capabilityTools.call(toolName, parsed)
                   const data = getData(res)
-                  await loadAll()
+                  await loadTabData(activeTab)
                   return {
                     result: JSON.stringify(data?.result || data, null, 2),
                     error: data?.error || '',
@@ -576,11 +658,30 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
         danger
         confirmLabel="撤销"
         onCancel={() => setRevokeCandidate(null)}
-        onConfirm={() => { if (revokeCandidate) void revokeToken(revokeCandidate.id) }}
+        onConfirm={() => { if (revokeCandidate) void revokeToken(revokeCandidate) }}
       >
         <div className="token-revoke-summary">
           <strong>{revokeCandidate?.name}</strong>
           <span>{revokeCandidate?.owner} · {(revokeCandidate?.scopes || []).join(', ')}</span>
+        </div>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={Boolean(deleteCandidate)}
+        title="永久删除 Tool Token"
+        description="将从数据库物理删除该 Token（不可恢复），相关审计记录会保留。仅管理员可执行此操作。"
+        danger
+        confirmLabel="确认删除"
+        onCancel={() => setDeleteCandidate(null)}
+        onConfirm={() => { if (deleteCandidate) void purgeToken(deleteCandidate) }}
+      >
+        <div className="token-revoke-summary">
+          <strong>{deleteCandidate?.name}</strong>
+          <span>
+            {deleteCandidate?.owner} · {(deleteCandidate?.scopes || []).join(', ')}
+            {deleteCandidate?.allow_write && <em style={{ color: 'var(--text-warning)', marginLeft: 6 }}>· 允许写</em>}
+            {deleteCandidate?.allow_prod && <em style={{ color: 'var(--text-danger)', marginLeft: 6 }}>· 允许生产</em>}
+          </span>
         </div>
       </ConfirmDialog>
 

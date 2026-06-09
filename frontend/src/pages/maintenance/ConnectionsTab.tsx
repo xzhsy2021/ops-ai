@@ -188,7 +188,7 @@ function ConnectionEditDrawer({
     </div>
   )
 
-  const drawerStyle: CSSProperties = anchorRect
+  const drawerStyle: CSSProperties | undefined = anchorRect
     ? {
         width: 720,
         maxWidth: '95vw',
@@ -203,7 +203,7 @@ function ConnectionEditDrawer({
       }
     : undefined
 
-  const drawerWrapperStyle: CSSProperties = anchorRect
+  const drawerWrapperStyle: CSSProperties | undefined = anchorRect
     ? {
         position: 'fixed',
         inset: 0,
@@ -543,7 +543,6 @@ export default function ConnectionsTab(props: ConnectionsTabProps) {
 
   // 分页计算
   const totalConn = props.filteredConnections.length
-  const totalConnPages = Math.max(1, Math.ceil(totalConn / connPageSize))
   const connPageItems = props.filteredConnections.slice((connPage - 1) * connPageSize, connPage * connPageSize)
 
   // 搜索/筛选变化时重置到第一页

@@ -17,6 +17,45 @@ function formatBytes(value?: number) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
+function PageControls({
+  total,
+  pageSize,
+  offset,
+  onOffsetChange,
+  onPageSizeChange,
+}: {
+  total: number
+  pageSize: number
+  offset: number
+  onOffsetChange: (next: number) => void
+  onPageSizeChange: (next: number) => void
+}) {
+  const safeTotal = Math.max(0, Number(total || 0))
+  const safePageSize = Math.max(1, Number(pageSize || 20))
+  const safeOffset = Math.max(0, Number(offset || 0))
+  const page = Math.floor(safeOffset / safePageSize) + 1
+  const pages = Math.max(1, Math.ceil(safeTotal / safePageSize))
+  const from = safeTotal === 0 ? 0 : safeOffset + 1
+  const to = Math.min(safeOffset + safePageSize, safeTotal)
+
+  return (
+    <div className="pagination-bar">
+      <div className="pagination-info">第 {page}/{pages} 页 · 显示 {from}-{to} / 共 {safeTotal} 条</div>
+      <div className="pagination-controls">
+        <label className="pagination-size-label">每页
+          <select value={safePageSize} onChange={(e) => onPageSizeChange(Number(e.target.value))}>
+            {[10, 20, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(0)}>首页</button>
+        <button className="pagination-btn" disabled={safeOffset <= 0} onClick={() => onOffsetChange(Math.max(0, safeOffset - safePageSize))}>上一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safePageSize >= safeTotal} onClick={() => onOffsetChange(safeOffset + safePageSize)}>下一页</button>
+        <button className="pagination-btn" disabled={safeOffset + safePageSize >= safeTotal} onClick={() => onOffsetChange(Math.max(0, (pages - 1) * safePageSize))}>末页</button>
+      </div>
+    </div>
+  )
+}
+
 const TYPE_LABELS: Record<string, string> = {
   diagnostics: '系统诊断',
   ai_diagnostics: 'AI 诊断',
@@ -28,6 +67,9 @@ const TYPE_LABELS: Record<string, string> = {
 
 export default function ReportCenterPage() {
   const [items, setItems] = useState<any[]>([])
+  const [total, setTotal] = useState(0)
+  const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(20)
   const [summary, setSummary] = useState<any>({})
   const [types, setTypes] = useState<Record<string, any>>({})
   const [reportType, setReportType] = useState('')
@@ -51,11 +93,12 @@ export default function ReportCenterPage() {
     setError('')
     try {
       const [listRes, summaryRes, typesRes]: any[] = await Promise.all([
-        reports.list({ report_type: reportType || undefined, limit: 200 }),
+        reports.list({ report_type: reportType || undefined, limit: pageSize, offset }),
         reports.summary(),
         reports.types(),
       ])
       setItems(listRes.data?.items || [])
+      setTotal(Number(listRes.data?.total || 0))
       setSummary(summaryRes.data || {})
       setTypes(typesRes.data?.types || {})
     } catch (e: any) {
@@ -122,8 +165,7 @@ export default function ReportCenterPage() {
     }
   }
 
-  useEffect(() => { load() }, [])
-  useEffect(() => { load() }, [reportType])
+  useEffect(() => { load() }, [reportType, offset, pageSize])
 
   const selectedType = types[generateType] || {}
   const requiresTarget = ['operation_chain', 'deployment'].includes(generateType)
@@ -202,7 +244,7 @@ export default function ReportCenterPage() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="form-grid" style={{ gridTemplateColumns: 'minmax(220px, 320px) auto' }}>
           <label>筛选类型
-            <select value={reportType} onChange={(e) => setReportType(e.target.value)}>
+            <select value={reportType} onChange={(e) => { setReportType(e.target.value); setOffset(0) }}>
               <option value="">全部报告</option>
               {Object.keys(types).length ? Object.keys(types).map((key) => <option key={key} value={key}>{TYPE_LABELS[key] || key}</option>) : Object.keys(TYPE_LABELS).map((key) => <option key={key} value={key}>{TYPE_LABELS[key]}</option>)}
             </select>
@@ -238,6 +280,13 @@ export default function ReportCenterPage() {
           </table>
         </div>
       )}
+      <PageControls
+        total={total}
+        pageSize={pageSize}
+        offset={offset}
+        onOffsetChange={setOffset}
+        onPageSizeChange={(next) => { setPageSize(next); setOffset(0) }}
+      />
       <ConfirmDialog
         open={Boolean(editTarget)}
         title="更新报告信息"

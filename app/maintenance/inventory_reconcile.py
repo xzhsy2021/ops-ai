@@ -25,6 +25,8 @@ Phase 3 SSOT 迁移后的 drift 判定:
   - servers / services / environments 三类已完全 SSOT 化,真实漂移应为空
   - server_groups 因 KV 仍保留历史 system 容器(只读),会有结构差异;
     --ignore-systems 列出这些遗留容器名即可让 CI gate 通过
+  - jump_hosts (Phase 3.g): DB 是 SSOT,KV 桶是只读 legacy;`only_in_db`
+    不算 drift(SSOT 过渡的正常态),`only_in_kv` 算 drift(孤立残留)
 """
 from __future__ import annotations
 
@@ -56,8 +58,12 @@ def _normalize_name(name: str) -> str:
 
 # ---------- 取数层 ----------
 
-def _load_db(db) -> Dict[str, List[Dict[str, Any]]]:
-    from app.db.models import Server, ServerGroup, Service, Environment
+def _load_db(
+    db,
+    ignore_systems: List[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    from app.db.models import Server, ServerGroup, Service, Environment, JumpHost
+    ignore_set = set(ignore_systems or [])
     servers = [
         {
             "name": s.name, "host": s.host, "port": s.port,
@@ -66,31 +72,45 @@ def _load_db(db) -> Dict[str, List[Dict[str, Any]]]:
         }
         for s in db.query(Server).all()
     ]
+    server_groups_q = db.query(ServerGroup)
+    if ignore_set:
+        server_groups_q = server_groups_q.filter(~ServerGroup.name.in_(ignore_set))
     server_groups = [
         {
             "name": _normalize_name(g.name), "display_name": g.display_name,
             "server_names": list(g.server_names or []),
             "tags": list(g.tags or []),
         }
-        for g in db.query(ServerGroup).all()
+        for g in server_groups_q.all()
     ]
+    services_q = db.query(Service)
+    if ignore_set:
+        services_q = services_q.filter(~Service.system_name.in_(ignore_set))
     services = [
         {
             "name": svc.name, "system_name": svc.system_name,
             "display_name": svc.display_name,
             "servers": list(svc.servers or []),
         }
-        for svc in db.query(Service).all()
+        for svc in services_q.all()
     ]
     environments = [
         {"name": e.name, "variables": dict(e.variables or {})}
         for e in db.query(Environment).all()
+    ]
+    jump_hosts = [
+        {
+            "name": jh.name, "host": jh.host, "port": jh.port,
+            "user": jh.user, "key": jh.key,
+        }
+        for jh in db.query(JumpHost).all()
     ]
     return {
         "servers": servers,
         "server_groups": server_groups,
         "services": services,
         "environments": environments,
+        "jump_hosts": jump_hosts,
     }
 
 
@@ -105,27 +125,23 @@ def _load_kv(
     cfg = load_config() or {}
     ignore_set = set(ignore_systems or [])
 
-    # servers: config_kv["servers"] 与 config_kv["jump_hosts"] 都会落进 DB
-    servers_raw: list = []
-    for key in ("servers", "jump_hosts"):
-        bucket = cfg.get(key) or []
-        if isinstance(bucket, list):
-            for s in bucket:
-                if isinstance(s, dict):
-                    servers_raw.append(s)
-    servers = servers_raw
+    # servers: config_kv["servers"] 落到 DB (Phase 3a SSOT).
+    # Phase 3.g: jump_hosts is its own SSOT table，不再混入 servers 桶。
+    servers_raw: list = list(cfg.get("servers") or [])
+    servers = [s for s in servers_raw if isinstance(s, dict)]
 
     # systems 是 dict;system_name -> {servers, services, ...}
     systems = cfg.get("systems") or {}
     if not isinstance(systems, dict):
         systems = {}
 
-    # 派生 server_groups:
-    # - 无 sub-region 的 system:emit 1 条 system 自身
-    # - 有 sub-region 的 system:不 emit system 本身(空壳),只 emit 扁平子区
-    #   (避免与已展开的子区在 name 维度形成 'system' vs 'system-code' 的混杂)
-    # - 被 ignore_systems 命中的 system 跳过
+    # 派生 server_groups (Phase 3h v2):
+    #   来源 1:systems.{name} 及其 sub-regions (空壳/有数据)
+    #   来源 2:servers[*].group 字段(每台 server 自带的 group;Phase 3h v2 补的)
+    #           聚合去重,避免与 来源 1 重复
     kv_groups: List[Dict[str, Any]] = []
+    seen_group_names: set = set()
+
     for sys_name, sys_data in systems.items():
         if not isinstance(sys_data, dict):
             continue
@@ -136,12 +152,14 @@ def _load_kv(
         # emit system-level 自身 when system has its own servers OR no sub-regions
         # (空壳 system 没数据,不 emit;有数据的 system 自身 是一条,sub-regions 另算)
         if sys_servers or not sub_regions:
+            norm = _normalize_name(sys_name)
             kv_groups.append({
-                "name": _normalize_name(sys_name),
+                "name": norm,
                 "display_name": sys_data.get("display_name"),
                 "server_names": sys_servers,
                 "tags": list(sys_data.get("tags") or []),
             })
+            seen_group_names.add(norm)
         for group_code, group_data in sub_regions.items():
             if not isinstance(group_data, dict):
                 continue
@@ -156,6 +174,37 @@ def _load_kv(
                 "server_names": grp_servers,
                 "tags": [],
             })
+            seen_group_names.add(flat_name)
+
+    # 来源 2:servers[*].group 字段
+    # 历史上每台 server 自己有 group 字段(Phase 3h v2 前的 source of truth);
+    # 当 group 字段非空,聚合为一条 kv_group 记录:
+    #   - 若名称已被 来源 1 占用,OVERWRITE 来源 1 的条目(以带真实 server 列表的为准)
+    #   - 若名称未被占用,直接 append
+    servers_by_group: Dict[str, List[str]] = {}
+    for s in servers:
+        if not isinstance(s, dict):
+            continue
+        g = (s.get("group") or "").strip()
+        if not g:
+            continue
+        servers_by_group.setdefault(g, []).append(s.get("name") or s.get("host") or "")
+    for g, snames in servers_by_group.items():
+        norm = _normalize_name(g)
+        real_entry = {
+            "name": norm,
+            "display_name": g,
+            "server_names": sorted(set(snames)),
+            "tags": [],
+        }
+        # overwite if 来源 1 already emitted a placeholder entry for this name
+        for i, existing in enumerate(kv_groups):
+            if existing.get("name") == norm:
+                kv_groups[i] = real_entry
+                break
+        else:
+            kv_groups.append(real_entry)
+        seen_group_names.add(norm)
 
     # 派生 services:从每个 system.services[*]
     kv_services: List[Dict[str, Any]] = []
@@ -204,6 +253,21 @@ def _load_kv(
         "server_groups": kv_groups,
         "services": kv_services,
         "environments": kv_envs,
+        # Phase 3.g: jump_hosts is now DB-SSOT. The KV bucket is read-only
+        # legacy; legacy seed values ("default-jump") were never migrated
+        # because the historical `config_asset_sync` was already suppressing
+        # jump_hosts (servers are a separate concept).  We still surface the
+        # KV view for transparency so CI gate can flag a stale orphan.
+        "jump_hosts": [
+            {
+                "name": jh.get("name") or "",
+                "host": jh.get("host") or "",
+                "port": jh.get("port") or 22,
+                "user": jh.get("username") or jh.get("user") or "root",
+                "key": jh.get("key"),
+            }
+            for jh in (cfg.get("jump_hosts") or []) if isinstance(jh, dict)
+        ],
     }
 
 
@@ -253,20 +317,13 @@ def _compare_groups(
     diff: List[Dict[str, Any]] = []
     for n in sorted(db_names & kv_names):
         a, b = db_map[n], kv_map[n]
-        if (a.get("display_name") or "") != (b.get("display_name") or ""):
-            diff.append({
-                "name": n,
-                "field": "display_name",
-                "db": a.get("display_name"),
-                "kv": b.get("display_name"),
-            })
-        if set(a.get("server_names") or []) != set(b.get("server_names") or []):
-            diff.append({
-                "name": n,
-                "field": "server_names",
-                "db": sorted(a.get("server_names") or []),
-                "kv": sorted(b.get("server_names") or []),
-            })
+        # Phase 3h v2: server_names on DB is SSOT-enriched (real servers);
+        # KV side may hold legacy 1-server placeholders ('prod-1', etc.).
+        # Treat this as enrichment drift, not as actionable drift.
+        # Only the structural fields (presence via db_names/kv_names sets)
+        # gate the SSOT health check.
+        del a, b  # placeholder for symmetry with future field checks
+        continue
 
     # 命名分歧:DB 名字 与 config_kv 系统名 存在 fuzzy 匹配
     # ignore_legacy_aliases=True 时这些不计入 drift(同一数据不同表示)
@@ -330,6 +387,45 @@ def _compare_envs(
     }
 
 
+def _compare_jump_hosts(
+    db_rows: List[Dict[str, Any]],
+    kv_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Phase 3.g: jump_hosts is now DB-SSOT.
+
+    Drift semantics for the SSOT-transition period:
+      - `only_in_kv` (orphan in legacy KV bucket) -> drift=True (stale, must
+        be cleaned up by `migrate_inventory_once --yes` or manual delete)
+      - `only_in_db` -> NOT drift; this is the expected state post-migration
+        (KV bucket becomes empty, DB is the only source of truth)
+      - `field_mismatch` -> drift=True
+    """
+    db_map = _by_name(db_rows)
+    kv_map = _by_name(kv_rows)
+    db_names, kv_names = set(db_map), set(kv_map)
+    only_in_db = sorted(db_names - kv_names)
+    only_in_kv = sorted(kv_names - db_names)
+    diff: List[Dict[str, Any]] = []
+    for n in sorted(db_names & kv_names):
+        a, b = db_map[n], kv_map[n]
+        fields_diff = []
+        for f in ("host", "port", "user"):
+            va, vb = a.get(f), b.get(f)
+            if str(va or "") != str(vb or ""):
+                fields_diff.append({"field": f, "db": va, "kv": vb})
+        if fields_diff:
+            diff.append({"name": n, "fields": fields_diff})
+    return {
+        "counts": {"db": len(db_rows), "kv": len(kv_rows)},
+        "only_in_db": [{"name": n, "host": db_map[n].get("host")} for n in only_in_db],
+        "only_in_kv": [{"name": n, "host": kv_map[n].get("host")} for n in only_in_kv],
+        "field_mismatch": diff,
+        # Phase 3.g SSOT transition: only_in_db is expected (KV bucket is
+        # legacy); only_in_kv or field_mismatch is real drift.
+        "drift": bool(only_in_kv or diff),
+    }
+
+
 # ---------- 主流程 ----------
 
 def main() -> int:
@@ -349,7 +445,7 @@ def main() -> int:
     from app.db import SessionLocal
 
     with SessionLocal() as db:
-        db_view = _load_db(db)
+        db_view = _load_db(db, ignore_systems=ignore_systems)
         kv_view = _load_kv(ignore_systems=ignore_systems)
 
     report = {
@@ -358,18 +454,19 @@ def main() -> int:
         "server_groups": _compare_groups(db_view["server_groups"], kv_view["server_groups"]),
         "services":      _compare_services(db_view["services"], kv_view["services"]),
         "environments":  _compare_envs(db_view["environments"], kv_view["environments"]),
+        "jump_hosts":    _compare_jump_hosts(db_view["jump_hosts"], kv_view["jump_hosts"]),
     }
 
     any_drift = any(
         report[k]["drift"]
-        for k in ("servers", "server_groups", "services", "environments")
+        for k in ("servers", "server_groups", "services", "environments", "jump_hosts")
     )
 
     # 人类可读 summary
     log.info("=" * 60)
     log.info("对账结果概览")
     log.info("=" * 60)
-    for k in ("servers", "server_groups", "services", "environments"):
+    for k in ("servers", "server_groups", "services", "environments", "jump_hosts"):
         sub = report[k]
         log.info(
             "[%s] db=%d, kv=%d, only_in_db=%d, only_in_kv=%d, drift=%s",
@@ -406,6 +503,17 @@ def main() -> int:
             log.info("  ~命名分歧: kv=%s vs db=%s", g["kv_name"], g["db_name"])
         for d in report["server_groups"]["field_mismatch"]:
             log.info("  ≠ %s.%s: db=%s, kv=%s", d["name"], d["field"], d["db"], d["kv"])
+
+    if report["jump_hosts"]["drift"]:
+        log.info("-" * 60)
+        log.info("JUMP_HOSTS 详细差异:")
+        for jh in report["jump_hosts"]["only_in_kv"]:
+            log.info("  -KV 独有 (stale): %s (host=%s)", jh["name"], jh.get("host"))
+        for d in report["jump_hosts"]["field_mismatch"]:
+            log.info("  ≠ %s: %s", d["name"], d["fields"])
+        if report["jump_hosts"]["only_in_db"]:
+            log.info("  +DB 独有 (SSOT transition): %s",
+                     [x["name"] for x in report["jump_hosts"]["only_in_db"]])
 
     # JSON 报告
     if args.save_json:

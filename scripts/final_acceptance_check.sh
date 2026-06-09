@@ -15,7 +15,10 @@ node scripts/frontend_route_check.js
 echo "[4/5] MCP local package smoke"
 python3 scripts/mcp_local_package_smoke.py || echo "[warn] MCP smoke skipped or failed; check dependencies and runtime configuration"
 
-echo "[5/5] Dependency-aware optional checks"
+echo "[5/6] MCP/tooling contract tests"
+python3 -m pytest tests/test_mcp_contract_sync.py tests/test_tool_token_templates_contract.py tests/test_frontend_tooling_contract.py -q
+
+echo "[6/6] Dependency-aware optional checks"
 if [ -d frontend/node_modules ]; then
   (cd frontend && npm run typecheck && npm run build)
 else

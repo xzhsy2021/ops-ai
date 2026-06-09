@@ -164,6 +164,22 @@ def save_config(config: Dict[str, Any]) -> bool:
                 "Stack trace:\n%s",
                 "".join(traceback.format_stack(limit=6)),
             )
+    # Phase 3.g SSOT guard: 'jump_hosts' key in config is read-only legacy
+    # after the JumpHost table became SSOT. Detect & warn when callers attempt
+    # to mutate it; CRUD must go through JumpHostRepository / /api/v2/jump-hosts.
+    if "jump_hosts" in config:
+        try:
+            current_jh = _load_config_unsafe().get("jump_hosts", [])
+        except Exception:
+            current_jh = []
+        if config.get("jump_hosts") != current_jh:
+            import traceback
+            logger.warning(
+                "Phase 3.g: 'jump_hosts' key in config is read-only legacy. "
+                "Diff detected (callers should use JumpHostRepository). "
+                "Stack trace:\n%s",
+                "".join(traceback.format_stack(limit=6)),
+            )
     with _save_lock:
         # Re-load latest version and merge to avoid lost-update from concurrent writes
         current = _load_config_unsafe()

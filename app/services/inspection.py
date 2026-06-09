@@ -600,7 +600,7 @@ def inspection_run_detail(db: Session, run_id: str) -> Dict[str, Any]:
     return {"run": _run_to_dict(run), "items": [_item_to_dict(x) for x in items], "issues": [_issue_to_dict(x) for x in issues]}
 
 
-def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", status: str = "", server_id: str = "", project_id: str = "", limit: int = 200) -> Dict[str, Any]:
+def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", status: str = "", server_id: str = "", project_id: str = "", limit: int = 200, offset: int = 0) -> Dict[str, Any]:
     q = db.query(InspectionIssue)
     if scope_type:
         q = q.filter(InspectionIssue.scope_type == scope_type.upper())
@@ -612,8 +612,11 @@ def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", stat
         q = q.filter(InspectionIssue.server_id == server_id)
     if project_id:
         q = q.filter(InspectionIssue.project_id == project_id)
-    rows = q.order_by(InspectionIssue.created_at.desc()).limit(max(1, min(limit, 500))).all()
-    return {"items": [_issue_to_dict(x) for x in rows], "total": len(rows)}
+    limit = max(1, min(int(limit or 200), 500))
+    offset = max(0, int(offset or 0))
+    total = q.count()
+    rows = q.order_by(InspectionIssue.created_at.desc()).offset(offset).limit(limit).all()
+    return {"items": [_issue_to_dict(x) for x in rows], "total": total, "limit": limit, "offset": offset}
 
 
 def update_issue(db: Session, issue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:

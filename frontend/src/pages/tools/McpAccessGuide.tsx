@@ -102,7 +102,7 @@ function buildExamples(server: McpServerConfig | undefined, baseUrl?: string): G
       {
         title: 'JSON-RPC tools/call',
         language: 'bash',
-        content: `curl -X POST "${mcpUrl}" \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <填入 Tool Token>" \\\n  -d '${prettyJson({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'ops.describe_capabilities', arguments: { include_schema: false, limit: 20 } } })}'`,
+        content: `curl -X POST "${mcpUrl}" \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <填入 Tool Token>" \\\n  -d '${prettyJson({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'ops_describe_capabilities', arguments: { include_schema: false, limit: 20 } } })}'`,
       },
     ]
   }

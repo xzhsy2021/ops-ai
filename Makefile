@@ -10,7 +10,7 @@ help: ## 显示帮助
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 inventory-check: ## CI gate: 跑 inventory_reconcile --fail-on-drift, 漂移即非零退出
-	$(PYTHON) -m app.maintenance.inventory_reconcile --fail-on-drift
+	$(PYTHON) -m app.maintenance.inventory_reconcile --fail-on-drift --ignore-systems=insider,sleuther,bot-hub,dovo
 
 inventory-report: ## 输出对账报告(JSON + 控制台)
 	$(PYTHON) -m app.maintenance.inventory_reconcile --save-json

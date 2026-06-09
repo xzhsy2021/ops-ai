@@ -9,6 +9,7 @@ import asyncio
 import logging
 import time
 import threading
+import sys
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
@@ -41,6 +42,13 @@ from app.deploy.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _compat_value(name: str, default: Any) -> Any:
+    deploy_v2 = sys.modules.get("app.api.deploy_v2")
+    if deploy_v2 is not None and hasattr(deploy_v2, name):
+        return getattr(deploy_v2, name)
+    return default
 
 __all__ = [
     "logger",
@@ -1335,7 +1343,8 @@ def _get_log_db():
             except Exception:
                 pass
             _log_db_session = None
-    _log_db_session = SessionLocal()
+    session_factory = _compat_value("SessionLocal", SessionLocal)
+    _log_db_session = session_factory()
     return _log_db_session
 
 
@@ -1389,8 +1398,10 @@ class _DeployLogBuffer:
 
     def _write(self, rows: List[Dict[str, Any]]) -> None:
         with self._write_lock:
-            db = _get_log_db()
-            DeployLogRepository(db).create_many(rows)
+            get_log_db = _compat_value("_get_log_db", _get_log_db)
+            repo_cls = _compat_value("DeployLogRepository", DeployLogRepository)
+            db = get_log_db()
+            repo_cls(db).create_many(rows)
 
 
 _log_buffer = _DeployLogBuffer()
@@ -1448,7 +1459,8 @@ async def _run_pipeline_task_one_server(
         if _task_cancel_requested(db, task_id):
             return (server_name, False, "canceled")
 
-        runtime_repo = DeploymentRuntimeRepository(db)
+        runtime_repo_cls = _compat_value("DeploymentRuntimeRepository", DeploymentRuntimeRepository)
+        runtime_repo = runtime_repo_cls(db)
         server_task = runtime_repo.create_server_task(deployment_id, task_id, server_name)
         runtime_repo.update_server_task(server_task.id, "running", f"开始服务器发布 ({idx}/{total_servers})")
         _log_to_db(task_id, "info", f"开始服务器发布: {server_name} ({idx}/{total_servers})", f"server:{server_name}", deployment_id)
@@ -1460,7 +1472,8 @@ async def _run_pipeline_task_one_server(
             return (server_name, False, f"服务器未找到: {server_name}")
 
         loop = asyncio.get_event_loop()
-        ssh = await loop.run_in_executor(None, lambda: _connect_ssh(srv))
+        connect_ssh = _compat_value("_connect_ssh", _connect_ssh)
+        ssh = await loop.run_in_executor(None, lambda: connect_ssh(srv))
 
         if not ssh:
             msg = f"SSH connect failed: {server_name}"
@@ -1468,16 +1481,18 @@ async def _run_pipeline_task_one_server(
             _log_to_db(task_id, "error", f"SSH 连接失败: {server_name}", f"server:{server_name}", deployment_id)
             return (server_name, False, msg)
 
-        variables = _merge_release_variables(req, db)
+        merge_release_variables = _compat_value("_merge_release_variables", _merge_release_variables)
+        variables = merge_release_variables(req, db)
         try:
-            _distribute_package_to_server(task_id, deployment_id, req, ssh, server_name, variables, steps, db)
+            distribute_package = _compat_value("_distribute_package_to_server", _distribute_package_to_server)
+            distribute_package(task_id, deployment_id, req, ssh, server_name, variables, steps, db)
         except Exception as e:
             runtime_repo.update_server_task(server_task.id, "failed", f"发布包分发失败: {e}")
             _log_to_db(task_id, "error", f"发布包分发失败: {server_name}: {e}", f"package:{server_name}", deployment_id)
             return (server_name, False, f"发布包分发失败: {e}")
 
         def _step_callback(event: str, step_name: str, step_type: str, message: str = "", step_task_id: str = None, config: Dict[str, Any] = None):
-            repo = DeploymentRuntimeRepository(db)
+            repo = runtime_repo_cls(db)
             if event == "start":
                 captured = None
                 if config is not None:
@@ -1492,7 +1507,8 @@ async def _run_pipeline_task_one_server(
                 repo.update_step_task(step_task_id, status, message)
             return step_task_id
 
-        engine = PipelineEngine(
+        engine_cls = _compat_value("PipelineEngine", PipelineEngine)
+        engine = engine_cls(
             log_callback=lambda tid, lvl, msg, sn="": _log_to_db(tid, lvl, msg, sn, deployment_id),
             step_callback=_step_callback,
             cancel_checker=lambda: _task_cancel_requested(db, task_id),
@@ -1526,7 +1542,8 @@ async def _run_pipeline_task_one_server(
         return (server_name, True, "")
     except Exception as e:
         logger.exception("Deploy task failed on %s", server_name)
-        runtime_repo = DeploymentRuntimeRepository(db)
+        runtime_repo_cls = _compat_value("DeploymentRuntimeRepository", DeploymentRuntimeRepository)
+        runtime_repo = runtime_repo_cls(db)
         if server_task:
             runtime_repo.update_server_task(server_task.id, "failed", str(e))
         _log_to_db(task_id, "error", f"部署异常: {server_name}: {e}", f"server:{server_name}", deployment_id)
@@ -1542,9 +1559,13 @@ async def _run_pipeline_task_one_server(
 
 
 async def _run_pipeline_task(task_id: str, deployment_id: str, req: DeployRequest, steps: List[Dict[str, Any]]):
-    db = SessionLocal()
-    task_repo = DeployTaskRepository(db)
-    DeploymentRepository(db).update_status(deployment_id, "running")
+    session_factory = _compat_value("SessionLocal", SessionLocal)
+    task_repo_cls = _compat_value("DeployTaskRepository", DeployTaskRepository)
+    deployment_repo_cls = _compat_value("DeploymentRepository", DeploymentRepository)
+    runtime_repo_cls = _compat_value("DeploymentRuntimeRepository", DeploymentRuntimeRepository)
+    db = session_factory()
+    task_repo = task_repo_cls(db)
+    deployment_repo_cls(db).update_status(deployment_id, "running")
     try:
         from app.deploy.stream import publish_status
         publish_status(deployment_id, task_id, "running")
@@ -1565,7 +1586,7 @@ async def _run_pipeline_task(task_id: str, deployment_id: str, req: DeployReques
                 if _task_cancel_requested(db, task_id):
                     _log_to_db(task_id, "warning", "发布已取消，停止后续服务器", "cancel", deployment_id)
                     task_repo.update_status(task_id, "canceled", result="Canceled by operator")
-                    DeploymentRepository(db).update_status(deployment_id, "canceled", "Canceled by operator")
+                    deployment_repo_cls(db).update_status(deployment_id, "canceled", "Canceled by operator")
                     return
 
                 srv_result = await _run_pipeline_task_one_server(
@@ -1576,7 +1597,7 @@ async def _run_pipeline_task(task_id: str, deployment_id: str, req: DeployReques
                 if not ok:
                     if err == "canceled":
                         task_repo.update_status(task_id, "canceled", result="Canceled by operator")
-                        DeploymentRepository(db).update_status(deployment_id, "canceled", "Canceled by operator")
+                        deployment_repo_cls(db).update_status(deployment_id, "canceled", "Canceled by operator")
                         return
                     break
 
@@ -1598,13 +1619,13 @@ async def _run_pipeline_task(task_id: str, deployment_id: str, req: DeployReques
         for wave_idx, wave in enumerate(waves):
             if wave_aborted or cancel_event.is_set() or _task_cancel_requested(db, task_id):
                 for remaining_srv in wave:
-                    runtime_repo = DeploymentRuntimeRepository(db)
+                    runtime_repo = runtime_repo_cls(db)
                     st = runtime_repo.create_server_task(deployment_id, task_id, remaining_srv)
                     runtime_repo.update_server_task(st.id, "skipped", "前序wave失败，跳过")
                     all_results.append((remaining_srv, False, "skipped"))
                 for later_wave in waves[wave_idx + 1:]:
                     for remaining_srv in later_wave:
-                        runtime_repo = DeploymentRuntimeRepository(db)
+                        runtime_repo = runtime_repo_cls(db)
                         st = runtime_repo.create_server_task(deployment_id, task_id, remaining_srv)
                         runtime_repo.update_server_task(st.id, "skipped", "前序wave失败，跳过")
                         all_results.append((remaining_srv, False, "skipped"))
@@ -1646,11 +1667,13 @@ async def _run_pipeline_task(task_id: str, deployment_id: str, req: DeployReques
 
 
 def _finalize_deployment_status(db: Session, task_id: str, deployment_id: str, task_repo, all_success: bool, fail_fast: bool, results: List[tuple]):
+    deployment_repo_cls = _compat_value("DeploymentRepository", DeploymentRepository)
+    send_release_notification = _compat_value("_send_release_notification", _send_release_notification)
     if _task_cancel_requested(db, task_id):
         task_repo.update_status(task_id, "canceled", result="Canceled by operator")
-        DeploymentRepository(db).update_status(deployment_id, "canceled", "Canceled by operator")
-        deployment = DeploymentRepository(db).get_by_id(deployment_id)
-        _send_release_notification("deploy.canceled", deployment, {"task_id": task_id}, db)
+        deployment_repo_cls(db).update_status(deployment_id, "canceled", "Canceled by operator")
+        deployment = deployment_repo_cls(db).get_by_id(deployment_id)
+        send_release_notification("deploy.canceled", deployment, {"task_id": task_id}, db)
         try:
             from app.deploy.stream import publish_done
             publish_done(deployment_id, "canceled")
@@ -1660,9 +1683,9 @@ def _finalize_deployment_status(db: Session, task_id: str, deployment_id: str, t
 
     if all_success:
         task_repo.update_status(task_id, "success")
-        DeploymentRepository(db).update_status(deployment_id, "success")
-        deployment = DeploymentRepository(db).get_by_id(deployment_id)
-        _send_release_notification("deploy.success", deployment, {"task_id": task_id}, db)
+        deployment_repo_cls(db).update_status(deployment_id, "success")
+        deployment = deployment_repo_cls(db).get_by_id(deployment_id)
+        send_release_notification("deploy.success", deployment, {"task_id": task_id}, db)
         try:
             from app.deploy.stream import publish_done
             publish_done(deployment_id, "success")
@@ -1683,11 +1706,13 @@ def _finalize_deployment_status(db: Session, task_id: str, deployment_id: str, t
     else:
         final_status = "success"
 
-    task_repo.update_status(task_id, final_status, result=f"success={success_count} failed={fail_count} skipped={skipped_count}")
-    DeploymentRepository(db).update_status(deployment_id, final_status, f"success={success_count} failed={fail_count} skipped={skipped_count}")
-    deployment = DeploymentRepository(db).get_by_id(deployment_id)
+    summary = f"success={success_count} failed={fail_count} skipped={skipped_count}"
+    result_message = "Deployment failed" if final_status == "failed" else summary
+    task_repo.update_status(task_id, final_status, result=result_message)
+    deployment_repo_cls(db).update_status(deployment_id, final_status, result_message)
+    deployment = deployment_repo_cls(db).get_by_id(deployment_id)
     notif_type = "deploy.success" if final_status == "success" else "deploy.partial_failed" if final_status == "partial_failed" else "deploy.failed"
-    _send_release_notification(notif_type, deployment, {"task_id": task_id}, db)
+    send_release_notification(notif_type, deployment, {"task_id": task_id}, db)
     try:
         from app.deploy.stream import publish_done
         publish_done(deployment_id, final_status)
@@ -1731,10 +1756,13 @@ async def _deploy_worker_loop():
     """
     idle_sleep = max(1.0, float(os.getenv("TASK_IDLE_POLL_SECONDS", "15")))
     active_sleep = max(0.5, float(os.getenv("TASK_ACTIVE_POLL_SECONDS", "2")))
+    session_factory = _compat_value("SessionLocal", SessionLocal)
+    task_repo_cls = _compat_value("DeployTaskRepository", DeployTaskRepository)
+    deployment_repo_cls = _compat_value("DeploymentRepository", DeploymentRepository)
     while True:
-        db = SessionLocal()
+        db = session_factory()
         try:
-            task = DeployTaskRepository(db).next_pending()
+            task = task_repo_cls(db).next_pending()
             if not task:
                 db.close()
                 await asyncio.sleep(idle_sleep)
@@ -1744,29 +1772,39 @@ async def _deploy_worker_loop():
             _flush_deploy_logs()
             db.close()
             if payload.get("action") == "rollback":
-                await _run_rollback_task(task.id, task.deployment_id or "", payload)
+                run_rollback_task = _compat_value("_run_rollback_task", _run_rollback_task)
+                await run_rollback_task(task.id, task.deployment_id or "", payload)
                 continue
             invalid_reason = _invalid_worker_payload_reason(payload)
             if invalid_reason:
-                err_db = SessionLocal()
+                err_db = session_factory()
                 try:
-                    DeployTaskRepository(err_db).update_status(task.id, "failed", result=invalid_reason)
+                    task_repo_cls(err_db).update_status(task.id, "failed", result=invalid_reason)
                     if task.deployment_id:
-                        DeploymentRepository(err_db).update_status(task.deployment_id, "failed", invalid_reason)
+                        deployment_repo_cls(err_db).update_status(task.deployment_id, "failed", invalid_reason)
                 finally:
                     err_db.close()
                 continue
             req = DeployRequest(**(payload.get("request") or {}))
             steps = payload.get("steps") or []
-            await _run_pipeline_task(task.id, task.deployment_id or "", req, steps)
+            run_pipeline_task = _compat_value("_run_pipeline_task", _run_pipeline_task)
+            await run_pipeline_task(task.id, task.deployment_id or "", req, steps)
+        except StopAsyncIteration:
+            try:
+                if 'db' in locals():
+                    db.close()
+            except Exception:
+                pass
+            _flush_deploy_logs()
+            raise
         except Exception as e:
             logger.exception("Deploy worker error")
             try:
-                err_db = SessionLocal()
+                err_db = session_factory()
                 if 'task' in locals() and task:
-                    DeployTaskRepository(err_db).update_status(task.id, "failed", result=str(e))
+                    task_repo_cls(err_db).update_status(task.id, "failed", result=str(e))
                     if task.deployment_id:
-                        DeploymentRepository(err_db).update_status(task.deployment_id, "failed", str(e))
+                        deployment_repo_cls(err_db).update_status(task.deployment_id, "failed", str(e))
                 err_db.close()
             except Exception:
                 logger.exception("Failed to mark worker task failed")

@@ -160,6 +160,38 @@ class ServerGroup(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class JumpHost(Base):
+    """跳板机 (bastion) — Phase 3.g SSOT migration.
+
+    Replaces config_kv["jump_hosts"] list-of-dicts. The `servers.jump_host`
+    column continues to hold the *name* of a JumpHost (string reference);
+    full connection metadata (host/port/user/key/key_content/password) lives
+    here and is resolved on demand by get_jump_host_by_name().
+
+    The same SSH target may exist in BOTH the `servers` and `jump_hosts`
+    tables — e.g. the `tiaobanji` server is both an SSH target itself and a
+    bastion that other servers route through. Keeping them in separate
+    tables avoids forcing the same row to satisfy two slightly different
+    shapes (server has group/description/tags/...; jump host is connection-
+    only).
+    """
+    __tablename__ = "jump_hosts"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    name = Column(String(64), unique=True, nullable=False, index=True)
+    host = Column(String(255), nullable=False)
+    port = Column(Integer, default=22)
+    user = Column(String(64), default="root")
+    key = Column(String(255), default="~/.ssh/id_rsa")
+    key_content = Column(Text, nullable=True)  # encrypted at rest
+    password = Column(Text, nullable=True)     # encrypted at rest
+    status = Column(String(24), default="online", index=True)
+    description = Column(Text, nullable=True)
+    tags = Column(JSON, default=list)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class CommandExecutionLog(Base):
     """命令执行历史记录"""
     __tablename__ = "command_execution_logs"
@@ -345,10 +377,12 @@ class ToolToken(Base):
     token_hash = Column(String(128), unique=True, nullable=False, index=True)
     token_prefix = Column(String(32), nullable=True)
     owner = Column(String(128), nullable=False, index=True)
+    description = Column(Text, nullable=True)
     scopes = Column(JSON, default=list)
     allow_write = Column(Boolean, default=False)
     allow_prod = Column(Boolean, default=False)
     created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
@@ -929,3 +963,84 @@ class InspectionBaseline(Base):
     active = Column(Boolean, default=True, index=True)
     created_by = Column(String(128), nullable=True, index=True)
     created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+# ──────────────────────────────────────────────────────────────────
+# 日/周/月三级巡检配置（DB 单源；不再使用 yaml）
+# ──────────────────────────────────────────────────────────────────
+
+class InspectionTierSchedule(Base):
+    """三级巡检调度主表（DAILY / WEEKLY / MONTHLY）。
+
+    设计要点：
+    - 目标统一为"全量服务器"，不在此处做 server/group 过滤；
+      真正区分三级的是 `categories` 字段（巡检项组合）。
+    - `target_filter` 字段保留以兼容旧数据；dispatcher 忽略。
+    - `require_approval=True` 的 tier（默认 MONTHLY）首跑前需走
+      `ops.tier.approve` 解锁。
+    """
+    __tablename__ = "inspection_tier_schedules"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    tier = Column(String(16), nullable=False, index=True)  # DAILY / WEEKLY / MONTHLY
+    cron_expression = Column(String(64), nullable=False)
+    timezone = Column(String(64), default="Asia/Shanghai")
+    enabled = Column(Boolean, default=True, index=True)
+    timeout_minutes = Column(Integer, default=60)
+    concurrency = Column(Integer, default=3)
+    target_filter = Column(JSON, default=dict)        # 兼容字段，dispatcher 忽略
+    categories = Column(JSON, default=list)           # 该级要跑的巡检项 code
+    thresholds = Column(JSON, default=dict)           # {score_fail_below, high_issue_count, ...}
+    notification = Column(JSON, default=dict)         # {on_success, on_failure, channels, recipients, ...}
+    retention = Column(JSON, default=dict)            # {runs_keep_days, reports_keep_days, ...}
+    report = Column(JSON, default=dict)               # {format, include_passed_items, ...}
+    require_approval = Column(Boolean, default=False, index=True)
+    next_run_at = Column(DateTime, nullable=True, index=True)
+    last_run_at = Column(DateTime, nullable=True, index=True)
+    last_run_id = Column(String(32), nullable=True, index=True)
+    last_status = Column(String(24), nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionNotificationRoute(Base):
+    """巡检结果通知路由：severity → channels/recipients/SLA。
+
+    - severity: high / medium / low / pass
+    - tier: 可选，用于覆盖默认（如 MONTHLY 全部走主管通道）
+    """
+    __tablename__ = "inspection_notification_routes"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    severity = Column(String(16), nullable=False, index=True)
+    tier = Column(String(16), nullable=True, index=True)
+    channels = Column(JSON, default=list)             # ["feishu", "sms", "email", "phone", "jira", "audit-system"]
+    recipients = Column(JSON, default=list)           # ["oncall@ops.local", "feishu:#oncall", ...]
+    sla_minutes = Column(Integer, nullable=True)
+    enabled = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionCascadePolicy(Base):
+    """跨级联策略：高危/分数骤降 → 自动触发升级巡检或告警。
+
+    - trigger_type: "high_count" / "score_drop" / "manual"
+    - trigger_config: 触发条件（窗口、阈值）
+    - action: "trigger_monthly" / "trigger_weekly" / "alert_director" / "open_jira"
+    - action_config: 动作参数
+    """
+    __tablename__ = "inspection_cascade_policies"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    trigger_type = Column(String(32), nullable=False, index=True)
+    trigger_config = Column(JSON, default=dict)
+    action = Column(String(64), nullable=False)
+    action_config = Column(JSON, default=dict)
+    enabled = Column(Boolean, default=True, index=True)
+    last_triggered_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)

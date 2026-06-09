@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { inspection, reports } from '../api'
 import { ROUTES } from '../routes'
-import { EmptyState, FavoriteButton, PageHeader, RiskBadge, StatusBadge } from '../components/ui'
+import { EmptyState, FavoriteButton, PageHeader, RiskBadge, RiskConfirmDialog, StatusBadge } from '../components/ui'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -174,6 +174,10 @@ export default function InspectionCenterPage() {
   const [itemConfigEditor, setItemConfigEditor] = useState<{ open: boolean; item: any }>({ open: false, item: null })
   const [runDetailRaw, setRunDetailRaw] = useState<{ open: boolean; runId: string; items: any[] }>({ open: false, runId: '', items: [] })
   const [servers, setServers] = useState<any[]>([])
+  const [inspectionProfiles, setInspectionProfiles] = useState<any[]>([])
+  const [profilePreviewData, setProfilePreviewData] = useState<any>(null)
+  const [profileConfirmOpen, setProfileConfirmOpen] = useState(false)
+  const [profileConfirmValue, setProfileConfirmValue] = useState('')
   const [projects, setProjects] = useState<any[]>([])
   const [runs, setRuns] = useState<any[]>([])
   const [runsTotal, setRunsTotal] = useState(0)
@@ -188,6 +192,9 @@ export default function InspectionCenterPage() {
   const [reportPageSize, setReportPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [ledgerPeriod, setLedgerPeriod] = useState('daily')
   const [issues, setIssues] = useState<any[]>([])
+  const [issuesTotal, setIssuesTotal] = useState(0)
+  const [issueOffset, setIssueOffset] = useState(0)
+  const [issuePageSize, setIssuePageSize] = useState(DEFAULT_PAGE_SIZE)
   const [rules, setRules] = useState<any[]>([])
   const [rulesTotal, setRulesTotal] = useState(0)
   const [ruleOffset, setRuleOffset] = useState(0)
@@ -232,14 +239,15 @@ export default function InspectionCenterPage() {
     setLoading(true)
     setError('')
     try {
-      const [ov, cat, srv, prj, runRes, ledgerRes, issueRes, ruleRes, reportRes, itemCfgRes]: any[] = await Promise.all([
+      const [ov, cat, srv, prj, profileRes, runRes, ledgerRes, issueRes, ruleRes, reportRes, itemCfgRes]: any[] = await Promise.all([
         inspection.overview(),
         inspection.categories(),
         inspection.servers(),
         inspection.projects(),
+        inspection.profiles(),
         inspection.runs({ limit: runPageSize, offset: runOffset }),
         inspection.ledger({ period: ledgerPeriod, limit: ledgerPageSize, offset: ledgerOffset }),
-        inspection.issues({ status: issueFilter || undefined, limit: 50 }),
+        inspection.issues({ status: issueFilter || undefined, limit: issuePageSize, offset: issueOffset }),
         inspection.rules({ keyword: ruleFilter || undefined, scope_type: ruleScopeFilter || undefined, risk_level: ruleRiskFilter || undefined, limit: rulePageSize, offset: ruleOffset }),
         reports.list({ report_type: 'inspection', limit: reportPageSize, offset: reportOffset }),
         inspection.listItemConfigs('SERVER'),
@@ -252,10 +260,12 @@ export default function InspectionCenterPage() {
       setCategories(catData)
       setServers(srvItems)
       setProjects(prjItems)
+      setInspectionProfiles(profileRes.data?.items || [])
       setRuns(runRes.data?.items || [])
       setRunsTotal(Number(runRes.data?.total || 0))
       setLedgerData(ledgerRes.data || { summary: {}, items: [] })
       setIssues(issueRes.data?.items || [])
+      setIssuesTotal(Number(issueRes.data?.total || 0))
       setRules(ruleRes.data?.items || [])
       setRulesTotal(Number(ruleRes.data?.total || 0))
       setInspectionReports(reportRes.data?.items || [])
@@ -300,8 +310,9 @@ export default function InspectionCenterPage() {
   }
 
   async function reloadIssues() {
-    const res: any = await inspection.issues({ status: issueFilter || undefined, limit: 100 })
+    const res: any = await inspection.issues({ status: issueFilter || undefined, limit: issuePageSize, offset: issueOffset })
     setIssues(res.data?.items || [])
+    setIssuesTotal(Number(res.data?.total || 0))
   }
 
   async function reloadRules(nextOffset = ruleOffset) {
@@ -419,6 +430,51 @@ export default function InspectionCenterPage() {
       // 单击分组触发的巡检在成功后保留 selectedGroups 以便再次点击
       // 但是 running 标志必须重置，否则按钮一直显示"巡检中..."
     }
+  }
+
+  async function previewInspectionProfile(profileId: string) {
+    if (!profileId) return
+    setRunning(true); setError(''); setMessage('')
+    try {
+      const res: any = await inspection.profilePreview({ profile_id: profileId })
+      setProfilePreviewData(res.data)
+      setProfileConfirmValue('')
+      setProfileConfirmOpen(true)
+      setMessage(res.data?.summary || '巡检方案预览已生成，请确认后执行。')
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setRunning(false) }
+  }
+
+  async function runInspectionProfile() {
+    const preview = profilePreviewData || {}
+    const profileId = preview.profile?.id || preview.profile_id
+    const confirmation = preview.confirmation || {}
+    if (!profileId) return setError('巡检方案不存在，请重新预览。')
+    const confirmText = (profileConfirmValue.trim() || confirmation.confirm_text || '').trim()
+    setRunning(true); setError(''); setMessage('')
+    try {
+      const res: any = await inspection.profileRun({
+        profile_id: profileId,
+        confirm_text: confirmText,
+        expected_count: Number(confirmation.target_count || preview.eligible_count || 0),
+        fingerprint: confirmation.fingerprint || '',
+      })
+      const runIds = res.data?.run_ids || []
+      if (runIds.length > 0) setActiveRunIds(runIds)
+      if (runIds[0]) {
+        const detail: any = await inspection.runDetail(runIds[0])
+        setCurrentResult(detail.data)
+      } else {
+        setCurrentResult(res.data)
+      }
+      setProfileConfirmOpen(false)
+      setProfilePreviewData(null)
+      setProfileConfirmValue('')
+      setTab('runs')
+      setMessage(res.data?.summary || '巡检方案已执行，报告生成后可在报告中心查看。')
+      await Promise.all([reloadRuns('SERVER'), reloadInspectionReports(), reloadLedger()])
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setRunning(false) }
   }
 
   function buildRuleForm(rule?: any) {
@@ -730,7 +786,7 @@ export default function InspectionCenterPage() {
   }
 
   useEffect(() => { loadBase() }, [])
-  useEffect(() => { reloadIssues().catch(() => undefined) }, [issueFilter])
+  useEffect(() => { reloadIssues().catch(() => undefined) }, [issueFilter, issueOffset, issuePageSize])
   useEffect(() => { reloadRules().catch(() => undefined) }, [ruleFilter, ruleScopeFilter, ruleRiskFilter, ruleOffset, rulePageSize])
   useEffect(() => { reloadRuns().catch(() => undefined) }, [runFilter, runOffset, runPageSize])
   useEffect(() => { reloadProjectRelations().catch(() => undefined) }, [projectId])
@@ -876,6 +932,42 @@ export default function InspectionCenterPage() {
           </div>
 
           {/* 1. 4 项统计 */}
+          {inspectionProfiles.length > 0 && (
+            <div className="inspection-profile-strip">
+              <div className="inspection-profile-strip-head">
+                <strong>常用巡检方案</strong>
+                <span className="muted">先预览目标和确认短语，再执行批量巡检。</span>
+              </div>
+              <div className="inspection-profile-grid">
+                {inspectionProfiles.map((profile: any) => (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    className="inspection-profile-card"
+                    disabled={running || profile.enabled === false}
+                    onClick={() => previewInspectionProfile(profile.id)}
+                  >
+                    <span className="inspection-profile-title">{profile.name || profile.id}</span>
+                    <span className="inspection-profile-desc">{profile.description || profile.id}</span>
+                    <span className="inspection-profile-meta">
+                      {(profile.categories || []).length} 项 · 并发 {profile.concurrency || '-'} · 批量 {profile.batch_size || '-'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {profilePreviewData && (
+                <div className="inspection-profile-preview">
+                  <div>
+                    <strong>{profilePreviewData.profile?.name || profilePreviewData.profile_id}</strong>
+                    <span>目标 {profilePreviewData.eligible_count || 0} 台，跳过 {profilePreviewData.skipped_count || 0} 台，过滤 {profilePreviewData.filtered_count || 0} 台。</span>
+                  </div>
+                  <code className="profile-confirm-text">{profilePreviewData.confirmation?.confirm_text || '-'}</code>
+                  <button className="btn btn-subtle" type="button" onClick={() => void navigator.clipboard?.writeText(profilePreviewData.confirmation?.confirm_text || '')}>复制短语</button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="inspection-stats-row">
             <div className="stat-card">
               <span className="stat-icon">⬡</span>
@@ -1153,7 +1245,7 @@ export default function InspectionCenterPage() {
               <label>范围 <select value={runFilter} onChange={(e) => { setRunFilter(e.target.value); setRunOffset(0); setSelectedRunIds([]) }}><option value="">全部</option><option value="SERVER">服务器</option><option value="PROJECT">项目</option><option value="PROJECT_COMBINED">综合</option></select></label>
             </div>
           </div>
-          {runs.length === 0 ? <EmptyState title="暂无巡检记录" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={runs.length > 0 && runs.every((r: any) => selectedRunIds.includes(r.id))} onChange={(e) => setSelectedRunIds(e.target.checked ? runs.map((r: any) => r.id) : [])} /></th><th>时间</th><th>范围</th><th>对象</th><th>评分</th><th>风险</th><th>状态</th><th>操作</th></tr></thead><tbody>{runs.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedRunIds.includes(r.id)} onChange={(e) => toggleRunSelection(r.id, e.target.checked)} /></td><td>{formatTime(r.created_at)}</td><td>{r.scope_type}</td><td>{r.project_id || r.server_id || '-'}</td><td><span className={`status-badge status-badge--${scoreTone(r.score)}`}>{r.score}</span></td><td>{r.high_count}/{r.medium_count}/{r.low_count}</td><td><StatusBadge value={r.status} /></td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(r.id).then((res: any) => { setCurrentResult(res.data); const st = res.data?.run?.status; if (st === 'RUNNING' || st === 'PENDING') setActiveRunIds((prev) => Array.from(new Set([...prev, r.id]))); })}>详情</button><button className="btn btn-subtle" onClick={() => openRunDetailRaw(r.id)}>原始数据</button>{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/download`} target="_blank" rel="noreferrer">查看报告</a>}<button className="btn btn-danger" onClick={() => deleteInspectionRuns([r.id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={runsTotal} limit={runPageSize} offset={runOffset} onChange={setRunOffset} onPageSizeChange={setRunPageSize} /></>}
+          {runs.length === 0 ? <EmptyState title="暂无巡检记录" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={runs.length > 0 && runs.every((r: any) => selectedRunIds.includes(r.id))} onChange={(e) => setSelectedRunIds(e.target.checked ? runs.map((r: any) => r.id) : [])} /></th><th>时间</th><th>范围</th><th>对象</th><th>评分</th><th>风险</th><th>状态</th><th>操作</th></tr></thead><tbody>{runs.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedRunIds.includes(r.id)} onChange={(e) => toggleRunSelection(r.id, e.target.checked)} /></td><td>{formatTime(r.created_at)}</td><td>{r.scope_type}</td><td>{r.project_id || r.server_id || '-'}</td><td><span className={`status-badge status-badge--${scoreTone(r.score)}`}>{r.score}</span></td><td>{r.high_count}/{r.medium_count}/{r.low_count}</td><td><StatusBadge value={r.status} /></td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(r.id).then((res: any) => { setCurrentResult(res.data); const st = res.data?.run?.status; if (st === 'RUNNING' || st === 'PENDING') setActiveRunIds((prev) => Array.from(new Set([...prev, r.id]))); })}>详情</button><button className="btn btn-subtle" onClick={() => openRunDetailRaw(r.id)}>原始数据</button>{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/view?as=html`} target="_blank" rel="noreferrer">查看报告</a>}{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/download?as=md`} target="_blank" rel="noreferrer" download>下载</a>}<button className="btn btn-danger" onClick={() => deleteInspectionRuns([r.id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={runsTotal} limit={runPageSize} offset={runOffset} onChange={setRunOffset} onPageSizeChange={setRunPageSize} /></>}
           {currentResult && <div className="mini-card" style={{ marginTop: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <strong>当前详情：{currentResult.run?.summary || currentResult.summary || '-'}</strong>
@@ -1177,44 +1269,59 @@ export default function InspectionCenterPage() {
 
       {tab === 'ledger' && (
         <section className="panel-card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="inspection-ledger-header">
             <div>
               <h2>巡检台账与报表</h2>
-              <p className="muted">按巡检方案保留每日台账、每周报表、月度安全报告口径，沉淀巡检记录、风险统计和整改闭环。台账来源于巡检记录，删除台账历史会同步删除对应巡检记录。</p>
+              <p className="muted">巡检报表作为主内容展示，台账统计、周期筛选和口径说明保留在辅助区，便于审阅与归档。</p>
             </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <label>周期 <select value={ledgerPeriod} onChange={(e) => { setLedgerPeriod(e.target.value); setLedgerOffset(0); setSelectedLedgerRunIds([]); reloadLedger(e.target.value, 0) }}><option value="daily">每日台账</option><option value="weekly">每周报表</option><option value="monthly">月度报告</option></select></label>
-              <button className="btn btn-subtle" onClick={() => reloadLedger()}>刷新台账</button>
-              <button className="btn primary" onClick={() => generatePeriodicInspectionReport(ledgerPeriod)}>生成{ledgerPeriod === 'daily' ? '每日台账' : ledgerPeriod === 'weekly' ? '每周报表' : '月度报告'}</button>
-              <button className="btn btn-danger" disabled={selectedLedgerRunIds.length === 0} onClick={() => deleteInspectionRuns(selectedLedgerRunIds)}>删除选中台账（{selectedLedgerRunIds.length}）</button>
-              <button className="btn btn-danger" disabled={Number(ledgerData.total || 0) === 0} onClick={deleteLedgerHistoryByPeriod}>删除当前周期历史</button>
-            </div>
+            <button className="btn primary" onClick={() => generatePeriodicInspectionReport(ledgerPeriod)}>生成{ledgerPeriod === 'daily' ? '每日台账' : ledgerPeriod === 'weekly' ? '每周报表' : '月度报告'}</button>
           </div>
-          <div className="stats-grid" style={{ marginTop: 12 }}>
-            <div className="stat-card"><span>巡检记录</span><strong>{ledgerData.summary?.run_count || 0}</strong><small>当前周期</small></div>
-            <div className="stat-card"><span>平均评分</span><strong>{ledgerData.summary?.avg_score || 0}</strong><small>安全评分</small></div>
-            <div className="stat-card"><span>高 / 中 / 低</span><strong>{ledgerData.summary?.high_count || 0}/{ledgerData.summary?.medium_count || 0}/{ledgerData.summary?.low_count || 0}</strong><small>风险数量</small></div>
-            <div className="stat-card"><span>未闭环</span><strong>{ledgerData.summary?.open_issue_count || 0}</strong><small>OPEN + PROCESSING</small></div>
-          </div>
-          {(ledgerData.items || []).length === 0 ? <EmptyState title="暂无台账记录" description="执行巡检后会自动沉淀到台账中，可生成每日/每周/月度报表。" /> : <><div className="table-scroll" style={{ marginTop: 12 }}><table className="data-table"><thead><tr><th><input type="checkbox" checked={(ledgerData.items || []).length > 0 && (ledgerData.items || []).every((row: any) => selectedLedgerRunIds.includes(row.run_id))} onChange={(e) => setSelectedLedgerRunIds(e.target.checked ? (ledgerData.items || []).map((row: any) => row.run_id) : [])} /></th><th>时间</th><th>范围</th><th>对象</th><th>状态</th><th>评分</th><th>巡检项</th><th>高/中/低</th><th>未闭环</th><th>报告</th><th>操作</th></tr></thead><tbody>{(ledgerData.items || []).map((row: any) => <tr key={row.run_id}><td><input type="checkbox" checked={selectedLedgerRunIds.includes(row.run_id)} onChange={(e) => toggleLedgerRunSelection(row.run_id, e.target.checked)} /></td><td>{formatTime(row.inspection_time)}</td><td>{row.scope_type}</td><td>{row.target}</td><td><StatusBadge value={row.status} /></td><td><span className={`status-badge status-badge--${scoreTone(row.score)}`}>{row.score}</span></td><td>{row.item_count}</td><td>{row.high_count}/{row.medium_count}/{row.low_count}</td><td>{row.open_issue_count}</td><td>{row.report_id || '-'}</td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(row.run_id).then((res: any) => { setCurrentResult(res.data); setTab('runs') })}>查看详情</button><button className="btn btn-danger" onClick={() => deleteInspectionRuns([row.run_id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={Number(ledgerData.total || 0)} limit={ledgerPageSize} offset={ledgerOffset} onChange={setLedgerOffset} onPageSizeChange={setLedgerPageSize} /></>}
-
-          <div className="mini-card" style={{ marginTop: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <strong>巡检报表</strong>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button className="btn btn-subtle" onClick={() => reloadInspectionReports()}>刷新报表</button>
-                <button className="btn btn-danger" disabled={selectedReportIds.length === 0} onClick={() => deleteInspectionReports(selectedReportIds)}>删除选中报表（{selectedReportIds.length}）</button>
+          <div className="inspection-ledger-layout">
+            <div className="inspection-report-primary">
+              <div className="section-toolbar">
+                <div>
+                  <strong>巡检报表</strong>
+                  <p className="muted">生成单次、合并或周期巡检报告后在这里分页展示和归档。</p>
+                </div>
+                <div className="section-actions">
+                  <button className="btn btn-subtle" onClick={() => reloadInspectionReports()}>刷新报表</button>
+                  <button className="btn btn-danger" disabled={selectedReportIds.length === 0} onClick={() => deleteInspectionReports(selectedReportIds)}>删除选中报表（{selectedReportIds.length}）</button>
+                </div>
               </div>
+              {inspectionReports.length === 0 ? <EmptyState title="暂无巡检报表" description="生成单次/合并/周期巡检报告后会在这里分页展示。" /> : <><div className="table-scroll" style={{ marginTop: 8 }}><table className="data-table"><thead><tr><th><input type="checkbox" checked={inspectionReports.length > 0 && inspectionReports.every((r: any) => selectedReportIds.includes(r.id))} onChange={(e) => setSelectedReportIds(e.target.checked ? inspectionReports.map((r: any) => r.id) : [])} /></th><th>生成时间</th><th>标题</th><th>对象</th><th>格式</th><th>大小</th><th>状态</th><th>操作</th></tr></thead><tbody>{inspectionReports.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedReportIds.includes(r.id)} onChange={(e) => toggleReportSelection(r.id, e.target.checked)} /></td><td>{formatTime(r.created_at || r.generated_at)}</td><td>{r.title || r.id}</td><td>{r.target_id || '-'}</td><td>{r.format || '-'}</td><td>{r.size_bytes ? `${Math.ceil(Number(r.size_bytes) / 1024)} KB` : '-'}</td><td><StatusBadge value={r.status || 'ready'} /></td><td><button className="btn btn-danger" onClick={() => deleteInspectionReports([r.id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={inspectionReportsTotal} limit={reportPageSize} offset={reportOffset} onChange={setReportOffset} onPageSizeChange={setReportPageSize} /></>}
             </div>
-            {inspectionReports.length === 0 ? <EmptyState title="暂无巡检报表" description="生成单次/合并/周期巡检报告后会在这里分页展示。" /> : <><div className="table-scroll" style={{ marginTop: 8 }}><table className="data-table"><thead><tr><th><input type="checkbox" checked={inspectionReports.length > 0 && inspectionReports.every((r: any) => selectedReportIds.includes(r.id))} onChange={(e) => setSelectedReportIds(e.target.checked ? inspectionReports.map((r: any) => r.id) : [])} /></th><th>生成时间</th><th>标题</th><th>对象</th><th>格式</th><th>大小</th><th>状态</th><th>操作</th></tr></thead><tbody>{inspectionReports.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedReportIds.includes(r.id)} onChange={(e) => toggleReportSelection(r.id, e.target.checked)} /></td><td>{formatTime(r.created_at || r.generated_at)}</td><td>{r.title || r.id}</td><td>{r.target_id || '-'}</td><td>{r.format || '-'}</td><td>{r.size_bytes ? `${Math.ceil(Number(r.size_bytes) / 1024)} KB` : '-'}</td><td><StatusBadge value={r.status || 'ready'} /></td><td><button className="btn btn-danger" onClick={() => deleteInspectionReports([r.id])}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={inspectionReportsTotal} limit={reportPageSize} offset={reportOffset} onChange={setReportOffset} onPageSizeChange={setReportPageSize} /></>}
-          </div>
-          <div className="mini-card" style={{ marginTop: 12 }}>
-            <strong>报表口径</strong>
-            <ul className="muted" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-              <li>每日台账：登录异常、命令高危操作、接口异常、服务状态、备份任务执行异常，无风险也保留正常记录。</li>
-              <li>每周报表：汇总程序文件、配置文件、白名单、端口、权限、备份文件检查结果和整改进度。</li>
-              <li>月度报告：复盘当月安全风险、入侵尝试、漏洞问题、整改情况，并输出规则优化建议。</li>
-            </ul>
+
+            <aside className="inspection-ledger-aside">
+              <div className="mini-card">
+                <div className="section-toolbar compact">
+                  <strong>台账筛选</strong>
+                  <button className="btn btn-subtle" onClick={() => reloadLedger()}>刷新</button>
+                </div>
+                <label>周期 <select value={ledgerPeriod} onChange={(e) => { setLedgerPeriod(e.target.value); setLedgerOffset(0); setSelectedLedgerRunIds([]); reloadLedger(e.target.value, 0) }}><option value="daily">每日台账</option><option value="weekly">每周报表</option><option value="monthly">月度报告</option></select></label>
+                <div className="ledger-metric-grid">
+                  <span>记录 <strong>{ledgerData.summary?.run_count || 0}</strong></span>
+                  <span>评分 <strong>{ledgerData.summary?.avg_score || 0}</strong></span>
+                  <span>高/中/低 <strong>{ledgerData.summary?.high_count || 0}/{ledgerData.summary?.medium_count || 0}/{ledgerData.summary?.low_count || 0}</strong></span>
+                  <span>未闭环 <strong>{ledgerData.summary?.open_issue_count || 0}</strong></span>
+                </div>
+                <div className="section-actions">
+                  <button className="btn btn-danger" disabled={selectedLedgerRunIds.length === 0} onClick={() => deleteInspectionRuns(selectedLedgerRunIds)}>删除选中台账（{selectedLedgerRunIds.length}）</button>
+                  <button className="btn btn-danger" disabled={Number(ledgerData.total || 0) === 0} onClick={deleteLedgerHistoryByPeriod}>删除当前周期历史</button>
+                </div>
+              </div>
+              <div className="mini-card">
+                <strong>台账记录</strong>
+                {(ledgerData.items || []).length === 0 ? <EmptyState title="暂无台账记录" description="执行巡检后会自动沉淀到台账中。" /> : <><div className="table-scroll" style={{ marginTop: 8 }}><table className="data-table data-table--compact"><thead><tr><th><input type="checkbox" checked={(ledgerData.items || []).length > 0 && (ledgerData.items || []).every((row: any) => selectedLedgerRunIds.includes(row.run_id))} onChange={(e) => setSelectedLedgerRunIds(e.target.checked ? (ledgerData.items || []).map((row: any) => row.run_id) : [])} /></th><th>时间</th><th>对象</th><th>评分</th><th>风险</th><th>操作</th></tr></thead><tbody>{(ledgerData.items || []).map((row: any) => <tr key={row.run_id}><td><input type="checkbox" checked={selectedLedgerRunIds.includes(row.run_id)} onChange={(e) => toggleLedgerRunSelection(row.run_id, e.target.checked)} /></td><td>{formatTime(row.inspection_time)}</td><td>{row.target}</td><td><span className={`status-badge status-badge--${scoreTone(row.score)}`}>{row.score}</span></td><td>{row.high_count}/{row.medium_count}/{row.low_count}</td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(row.run_id).then((res: any) => { setCurrentResult(res.data); setTab('runs') })}>详情</button></td></tr>)}</tbody></table></div><PaginationControls total={Number(ledgerData.total || 0)} limit={ledgerPageSize} offset={ledgerOffset} onChange={setLedgerOffset} onPageSizeChange={setLedgerPageSize} /></>}
+              </div>
+              <div className="mini-card">
+                <strong>报表口径</strong>
+                <ul className="muted" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                  <li>每日台账：登录异常、命令高危操作、接口异常、服务状态、备份任务执行异常，无风险也保留正常记录。</li>
+                  <li>每周报表：汇总程序文件、配置文件、白名单、端口、权限、备份文件检查结果和整改进度。</li>
+                  <li>月度报告：复盘当月安全风险、入侵尝试、漏洞问题、整改情况，并输出规则优化建议。</li>
+                </ul>
+              </div>
+            </aside>
           </div>
         </section>
       )}
@@ -1224,12 +1331,12 @@ export default function InspectionCenterPage() {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
             <h2>风险问题</h2>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <label>状态 <select value={issueFilter} onChange={(e) => setIssueFilter(e.target.value)}><option value="">全部</option><option value="OPEN">待处理</option><option value="PROCESSING">处理中</option><option value="FIXED">已修复</option><option value="VERIFIED">已验证</option><option value="IGNORED">已忽略</option></select></label>
+              <label>状态 <select value={issueFilter} onChange={(e) => { setIssueFilter(e.target.value); setIssueOffset(0) }}><option value="">全部</option><option value="OPEN">待处理</option><option value="PROCESSING">处理中</option><option value="FIXED">已修复</option><option value="VERIFIED">已验证</option><option value="IGNORED">已忽略</option></select></label>
               <button className="btn btn-danger" disabled={selectedIssueIds.length === 0} onClick={() => deleteIssues(selectedIssueIds)}>删除选中（{selectedIssueIds.length}）</button>
               <button className="btn btn-subtle" disabled={selectedIssueIds.length === 0} onClick={() => setSelectedIssueIds([])}>清空选择</button>
             </div>
           </div>
-          {issues.length === 0 ? <EmptyState title="暂无风险问题" description="巡检发现的高/中/低风险会进入这里进行闭环。" /> : <div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={issues.length > 0 && issues.every((i) => selectedIssueIds.includes(i.id))} onChange={(e) => setSelectedIssueIds(e.target.checked ? issues.map((i) => i.id) : [])} /></th><th>等级</th><th>标题</th><th>对象</th><th>描述</th><th>状态</th><th>操作</th></tr></thead><tbody>{issues.map((i) => <tr key={i.id}><td><input type="checkbox" checked={selectedIssueIds.includes(i.id)} onChange={(e) => setSelectedIssueIds((prev) => e.target.checked ? Array.from(new Set([...prev, i.id])) : prev.filter((x) => x !== i.id))} /></td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.title}</td><td>{i.project_id || i.server_id || '-'}</td><td>{i.description}</td><td><StatusBadge value={i.status} /></td><td><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'PROCESSING')}>处理中</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'FIXED')}>已修复</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'VERIFIED')}>已验证</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'IGNORED')}>忽略</button><button className="btn btn-danger" onClick={() => deleteIssue(i.id)}>删除</button></td></tr>)}</tbody></table></div>}
+          {issues.length === 0 ? <EmptyState title="暂无风险问题" description="巡检发现的高/中/低风险会进入这里进行闭环。" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={issues.length > 0 && issues.every((i) => selectedIssueIds.includes(i.id))} onChange={(e) => setSelectedIssueIds(e.target.checked ? issues.map((i) => i.id) : [])} /></th><th>等级</th><th>标题</th><th>对象</th><th>描述</th><th>状态</th><th>操作</th></tr></thead><tbody>{issues.map((i) => <tr key={i.id}><td><input type="checkbox" checked={selectedIssueIds.includes(i.id)} onChange={(e) => setSelectedIssueIds((prev) => e.target.checked ? Array.from(new Set([...prev, i.id])) : prev.filter((x) => x !== i.id))} /></td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.title}</td><td>{i.project_id || i.server_id || '-'}</td><td>{i.description}</td><td><StatusBadge value={i.status} /></td><td><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'PROCESSING')}>处理中</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'FIXED')}>已修复</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'VERIFIED')}>已验证</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'IGNORED')}>忽略</button><button className="btn btn-danger" onClick={() => deleteIssue(i.id)}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={issuesTotal} limit={issuePageSize} offset={issueOffset} onChange={setIssueOffset} onPageSizeChange={(next) => { setIssuePageSize(next); setIssueOffset(0) }} /></>}
         </section>
       )}
 
@@ -1513,6 +1620,28 @@ export default function InspectionCenterPage() {
           onClose={() => setRunDetailRaw({ open: false, runId: '', items: [] })}
         />
       )}
+
+      <RiskConfirmDialog
+        open={profileConfirmOpen}
+        title="确认执行巡检方案"
+        description="请核对目标数量、巡检项和确认短语。确认短语会随目标和参数变化。"
+        target={profilePreviewData?.profile?.name || profilePreviewData?.profile_id || '-'}
+        confirmText={profilePreviewData?.confirmation?.confirm_text || ''}
+        value={profileConfirmValue}
+        onValueChange={setProfileConfirmValue}
+        onCancel={() => { setProfileConfirmOpen(false); setProfileConfirmValue('') }}
+        onConfirm={runInspectionProfile}
+        riskLevel="high"
+        details={[
+          { label: '目标服务器', value: `${profilePreviewData?.eligible_count || 0} 台` },
+          { label: '跳过/过滤', value: `${profilePreviewData?.skipped_count || 0} / ${profilePreviewData?.filtered_count || 0}` },
+          { label: '巡检项', value: Array.isArray(profilePreviewData?.categories) ? profilePreviewData.categories.join(', ') : '-' },
+          { label: '并发/批量', value: `${profilePreviewData?.concurrency || '-'} / ${profilePreviewData?.batch_size || '-'}` },
+        ]}
+        confirmButtonLabel={running ? '执行中...' : '确认并执行'}
+        confirmDisabled={running || !profilePreviewData?.confirmation?.confirm_text}
+        confirmMode="type"
+      />
     </div>
   )
 }

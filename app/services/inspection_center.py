@@ -64,7 +64,16 @@ PROJECT_CATEGORIES = [
 
 SERVER_RULE_COMMANDS: Dict[str, str] = {
     "LOGIN_SECURITY": """# 登录安全巡检（只读）\nlast -n 80\nlastb -n 80\n# CentOS/RHEL 登录安全日志\ntail -n 200 /var/log/secure 2>/dev/null || true\n# Ubuntu/Debian 登录安全日志\ntail -n 200 /var/log/auth.log 2>/dev/null || true\n# 判定要点：陌生 IP、连续失败登录、root 远程登录、非工作时间登录。""",
-    "ACCOUNT_SECURITY": """# 账号安全巡检（只读）\ncat /etc/passwd\ngrep 'x:0' /etc/passwd\nawk -F: '($7 ~ /(bash|sh)$/){print $1,$3,$6,$7}' /etc/passwd\n# 判定要点：陌生账号、UID=0 特权账号、可登录账号、闲置账号。""",
+    "ACCOUNT_SECURITY": """# 账号安全巡检（只读）
+echo '---PASSWD---'
+cat /etc/passwd 2>/dev/null | head -200
+echo '---UID0---'
+grep 'x:0:' /etc/passwd 2>/dev/null || true
+echo '---SHADOW---'
+(cat /etc/shadow 2>/dev/null | head -200 || echo 'PERMISSION_DENIED')
+echo '---SHADOW_ERR---'
+(cat /etc/shadow 2>/dev/null >/dev/null 2>&1 && echo 'OK' || echo 'ERR')
+# 判定要点：陌生账号、UID=0 特权账号、可登录账号、闲置账号。""",
     "COMMAND_HISTORY": """# 命令日志巡检（只读）\nls -la /root/.bash_history /home/*/.bash_history 2>/dev/null || true\nfind /root /home -maxdepth 2 -name '.bash_history' -type f -print -exec tail -n 120 {} \\; 2>/dev/null || true\n# 高危命令关键词：rm -rf、chmod 777、chown、wget、curl、scp、ftp、history -c、mysql、redis-cli、kill。""",
     "PROCESS_PORT": """# 进程端口巡检（只读）\nps -eo pid,ppid,user,pcpu,pmem,etime,cmd --sort=-pcpu | head -n 60\nss -ntulp 2>/dev/null || netstat -ntulp 2>/dev/null || netstat -an | grep LISTEN\n# 判定要点：未知进程、高占用、挖矿特征、未知监听端口、高危端口外网暴露。""",
     "FIREWALL": """# 防火墙巡检（只读）\nsystemctl is-active firewalld 2>/dev/null || true\nfirewall-cmd --list-all 2>/dev/null || true\niptables -S 2>/dev/null || true\nufw status verbose 2>/dev/null || true\n# 判定要点：防火墙关闭、全局放行、高危端口放行、黑白名单冲突。""",
@@ -3274,9 +3283,12 @@ def list_servers() -> List[Dict[str, Any]]:
     items = []
     for srv in inventory.list_servers():
         status = _server_status(srv)
+        name = srv.get("name") or srv.get("host") or srv.get("id")
+        asset_id = srv.get("id") or name
         items.append({
-            "id": srv.get("name"),
-            "name": srv.get("name"),
+            "id": asset_id,
+            "asset_id": asset_id,
+            "name": name,
             "host": srv.get("host"),
             "ip": srv.get("host"),
             "group": srv.get("group") or "",
@@ -3320,7 +3332,7 @@ def resolve_servers_for_inspection(server_ids: Optional[List[str]] = None, *, al
     servers = list_servers()
     by_key: Dict[str, Dict[str, Any]] = {}
     for srv in servers:
-        for key in {srv.get("id"), srv.get("name"), srv.get("host"), srv.get("ip")}:
+        for key in {srv.get("id"), srv.get("asset_id"), srv.get("name"), srv.get("host"), srv.get("ip")}:
             if key:
                 by_key[str(key)] = srv
     requested_raw = [str(x or "").strip() for x in (server_ids or []) if str(x or "").strip()]
@@ -3331,7 +3343,7 @@ def resolve_servers_for_inspection(server_ids: Optional[List[str]] = None, *, al
         servers = [s for s in servers if str(s.get("group") or "").strip().lower() in normalized_groups]
         by_key = {}
         for srv in servers:
-            for key in {srv.get("id"), srv.get("name"), srv.get("host"), srv.get("ip")}:
+            for key in {srv.get("id"), srv.get("asset_id"), srv.get("name"), srv.get("host"), srv.get("ip")}:
                 if key:
                     by_key[str(key)] = srv
     if all_servers or not requested_raw or any(x in {"__ALL__", "ALL", "*"} for x in requested_raw):
@@ -3354,7 +3366,7 @@ def resolve_servers_for_inspection(server_ids: Optional[List[str]] = None, *, al
         if skip_disabled and not _is_server_inspectable(srv):
             skipped.append({"server_id": sid, "name": srv.get("name"), "host": srv.get("host"), "status": status, "reason": f"服务器状态为{_server_status_label(status)}，已自动跳过。"})
             continue
-        normalized_id = str(srv.get("id") or srv.get("name") or sid)
+        normalized_id = str(srv.get("name") or srv.get("host") or srv.get("id") or sid)
         if normalized_id not in eligible_ids:
             eligible_ids.append(normalized_id)
             eligible.append(srv)
@@ -4255,7 +4267,7 @@ def inspection_run_detail(db: Session, run_id: str) -> Dict[str, Any]:
     return {"run": _run_to_dict(run), "items": [_item_to_dict(x) for x in items], "issues": [_issue_to_dict(x) for x in issues], "logs": [_item_log_dict(x) for x in items]}
 
 
-def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", status: str = "", server_id: str = "", project_id: str = "", limit: int = 200) -> Dict[str, Any]:
+def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", status: str = "", server_id: str = "", project_id: str = "", limit: int = 200, offset: int = 0) -> Dict[str, Any]:
     q = db.query(InspectionIssue)
     if scope_type:
         q = q.filter(InspectionIssue.scope_type == scope_type.upper())
@@ -4267,8 +4279,11 @@ def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", stat
         q = q.filter(InspectionIssue.server_id == server_id)
     if project_id:
         q = q.filter(InspectionIssue.project_id == project_id)
-    rows = q.order_by(InspectionIssue.created_at.desc()).limit(max(1, min(limit, 500))).all()
-    return {"items": [_issue_to_dict(x) for x in rows], "total": len(rows)}
+    limit = max(1, min(int(limit or 200), 500))
+    offset = max(0, int(offset or 0))
+    total = q.count()
+    rows = q.order_by(InspectionIssue.created_at.desc()).offset(offset).limit(limit).all()
+    return {"items": [_issue_to_dict(x) for x in rows], "total": total, "limit": limit, "offset": offset}
 
 
 def update_issue(db: Session, issue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:

@@ -95,6 +95,13 @@ class PeriodicReportPayload(BaseModel):
     title: str = ""
 
 
+class InspectionProfilePayload(BaseModel):
+    profile_id: str = Field(default="")
+    confirm_text: str = Field(default="")
+    expected_count: Optional[int] = None
+    fingerprint: str = Field(default="")
+
+
 class ProjectRelationPayload(BaseModel):
     id: Optional[str] = None
     project_id: Optional[str] = None
@@ -251,6 +258,46 @@ def server_groups(request: Request, db: Session = Depends(get_db)):
 def projects(request: Request, db: Session = Depends(get_db)):
     require_auth(request, db)
     return api_response(data=svc.list_projects_with_relations(db))
+
+
+@router.get("/profiles")
+def profiles(request: Request, include_disabled: bool = False, db: Session = Depends(get_db)):
+    require_auth(request, db)
+    from app.services.inspection_profiles import list_profiles
+
+    return api_response(data=list_profiles(db, include_disabled=include_disabled))
+
+
+@router.post("/profiles/preview")
+def profile_preview(payload: Any = Body(default_factory=dict), request: Request = None, db: Session = Depends(get_db)):
+    require_auth(request, db)
+    data = _payload_dict(payload)
+    profile_id = str(data.get("profile_id") or data.get("profileId") or "").strip()
+    if not profile_id:
+        raise HTTPException(status_code=400, detail="profile_id is required")
+    from app.services.inspection_profiles import preview_profile
+
+    result = preview_profile(db, profile_id)
+    return api_response(data=result, message=result.get("summary") or "巡检方案预览已生成")
+
+
+@router.post("/profiles/run")
+def profile_run(payload: Any = Body(default_factory=dict), request: Request = None, db: Session = Depends(get_db)):
+    user = require_auth(request, db)
+    data = _payload_dict(payload)
+    profile_id = str(data.get("profile_id") or data.get("profileId") or "").strip()
+    if not profile_id:
+        raise HTTPException(status_code=400, detail="profile_id is required")
+    from app.services.inspection_profiles import run_profile
+
+    result = run_profile(
+        db,
+        profile_id,
+        confirm_text=str(data.get("confirm_text") or data.get("confirmText") or ""),
+        created_by=user.get("username") or "",
+    )
+    audit("inspection.profile.run", "inspection", profile_id, f"user={user.get('username')} success={result.get('success')} failed={result.get('failed')} report={result.get('report', {}).get('id') if isinstance(result.get('report'), dict) else ''}")
+    return api_response(data=result, message=result.get("summary") or "巡检方案执行完成")
 
 
 @router.get("/project-server-relations")
@@ -489,9 +536,9 @@ def run_report(run_id: str, payload: GenerateReportPayload, request: Request, db
 
 
 @router.get("/issues")
-def issues(request: Request, scope_type: str = "", risk_level: str = "", status: str = "", server_id: str = "", project_id: str = "", limit: int = 200, db: Session = Depends(get_db)):
+def issues(request: Request, scope_type: str = "", risk_level: str = "", status: str = "", server_id: str = "", project_id: str = "", limit: int = 200, offset: int = 0, db: Session = Depends(get_db)):
     require_auth(request, db)
-    return api_response(data=svc.list_issues(db, scope_type=scope_type, risk_level=risk_level, status=status, server_id=server_id, project_id=project_id, limit=limit))
+    return api_response(data=svc.list_issues(db, scope_type=scope_type, risk_level=risk_level, status=status, server_id=server_id, project_id=project_id, limit=limit, offset=offset))
 
 
 @router.get("/issues/{issue_id}")

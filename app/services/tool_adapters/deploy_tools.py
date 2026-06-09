@@ -705,6 +705,7 @@ def get_deployment_tasks(args, ctx, db):
     name="ops.get_deployment_logs",
     description="查询发布单日志，默认返回最近 200 行。",
     scopes=["ops:read"],
+    streamable=True,
     input_schema={
         "type": "object",
         "properties": {"deployment_id": {"type": "string"}, "limit": {"type": "integer"}, "level": {"type": "string"}},
@@ -712,7 +713,7 @@ def get_deployment_tasks(args, ctx, db):
         "additionalProperties": False,
     },
 )
-def get_deployment_logs(args, ctx, db):
+def get_deployment_logs(args, ctx, db, stream_callback=None):
     deployment_id = args.get("deployment_id")
     limit = min(max(int(args.get("limit") or 200), 1), 1000)
     payload = deployment_logs_payload(db, deployment_id, include_task_id=False, limit=limit)
@@ -723,6 +724,9 @@ def get_deployment_logs(args, ctx, db):
         {"time": x.get("created_at"), "level": x.get("level"), "step_name": x.get("step_name"), "message": x.get("message")}
         for x in logs
     ]
+    if stream_callback:
+        for row in rows:
+            stream_callback({"event": "chunk", "data": row})
     return tool_result(
         data={"deployment_id": deployment_id, "logs": rows, "limit": limit, "count": len(rows)},
         summary=f"返回最近 {len(rows)} 行发布日志",

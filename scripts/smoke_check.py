@@ -121,7 +121,7 @@ def main() -> int:
 
     page_routes = [
         "/", "/dashboard", "/login", "/deploy", "/system", "/system/status",
-        "/system/diagnostics", "/servers", "/apps", "/tasks", "/task-center",
+        "/system/diagnostics", "/servers", "/systems", "/tasks", "/task-center",
         "/maintenance", "/files", "/pipelines", "/audit", "/reports", "/database", "/tools",
     ]
     for route in page_routes:

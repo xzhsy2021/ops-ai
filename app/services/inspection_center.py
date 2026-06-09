@@ -3340,7 +3340,7 @@ def resolve_servers_for_inspection(server_ids: Optional[List[str]] = None, *, al
     group_filtered = False
     if normalized_groups:
         group_filtered = True
-        servers = [s for s in servers if str(s.get("group") or "").strip().lower() in normalized_groups]
+        servers = [s for s in servers if str(s.get("group") or s.get("env") or "").strip().lower() in normalized_groups]
         by_key = {}
         for srv in servers:
             for key in {srv.get("id"), srv.get("asset_id"), srv.get("name"), srv.get("host"), srv.get("ip")}:

@@ -189,7 +189,8 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.inspection.get_run": "【路径 A 主】Get detailed inspection run results by run_id. 中文: 查看巡检详情/巡检结果.",
     "ops.inspection.list_issues": "【路径 A 主】List inspection issues/risks with filters. Use when user asks 'what issues were found' or 'list risks'. 中文: 查看巡检问题/风险列表.",
     "ops.inspection.get_issue": "【路径 A 主】Get one inspection issue detail by issue_id. 中文: 查看巡检问题详情/风险详情.",
-    "ops.inspection.generate_report": "【路径 A 主】Generate an inspection report from one or more runs. 中文: 生成巡检报告/巡检报告.",
+    "ops.inspection.generate_report": "【路径 A 主】Generate an inspection report from one run. 中文: 生成巡检报告/单次巡检报告.",
+    "ops.inspection.generate_report_for_runs": "【路径 A 主】Generate one merged inspection report from multiple run ids. Use after batch or grouped inspections. 中文: 生成巡检合并报告/批量巡检报告.",
     "ops.inspection.summarize_run": "【路径 A 主】Summarize an inspection run in FIRE structure (Findings, Impact, Recommendations, Evidence). 中文: 巡检摘要/巡检总结.",
     "ops.inspection.run_server": "【路径 A 主】PRIMARY PATH A. Run an inspection on a single server. High risk; requires confirmation. 中文: 执行服务器巡检/巡检服务器. — 用户提到「巡检」时默认选我。",
     "ops.inspection.run_servers_batch": "【路径 A 主 · 批量首选】PRIMARY PATH A. Run inspections on multiple servers in batch. High risk; requires confirmation. 中文: 批量巡检服务器/批量巡检. — 用户提到「批量巡检」「巡检一组服务器」时默认选我。",
@@ -237,6 +238,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.agent.health_check": "Check if agent functionality is enabled. Currently disabled. 中文: Agent健康检查/Agent功能状态.",
 
     # ── Workflow Tools ──
+    "ops.workflow.inspect": "Natural-language first inspection workflow. Use for requests like all servers, grouped batch inspection, inspection report, or routine server inspection. Preview first; execution stays delegated to audited inspection tools. 中文: 自然语言巡检/全量分组巡检/巡检报告工作流.",
     "ops.workflow.generate_project_health_brief": "Generate a lightweight project health brief using read-only tools. Low risk. 中文: 项目健康分析/项目状态简报.",
     "ops.workflow.analyze_failed_deploy": "Analyze a failed deployment using logs, diagnostics, and risk data. Medium risk. 中文: 发布失败分析/部署失败分析.",
     "ops.workflow.inspect_project_security": "Inspect project security posture using inspection and risk data. Medium risk. 中文: 项目安全巡检分析/安全评估.",

@@ -305,6 +305,41 @@ def generate_report(args: Dict[str, Any], ctx, db):
 
 
 @registry.register(
+    name="ops.inspection.generate_report_for_runs",
+    title="生成巡检合并报告",
+    description="基于多条巡检记录生成一个报告中心制品，适合批量/分组巡检完成后汇总分析。",
+    scopes=["ops:read", "audit:read"],
+    risk="low",
+    category="inspection",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=False,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.inspection.run_servers_batch", "ops.inspection.get_run", "ops.inspection.list_issues"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "run_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "format": {"type": "string", "enum": ["json", "md"]},
+            "title": {"type": "string"},
+        },
+        "required": ["run_ids"],
+        "additionalProperties": False,
+    },
+)
+def generate_report_for_runs(args: Dict[str, Any], ctx, db):
+    from app.services.inspection_center import generate_report_for_runs as svc_generate_report_for_runs
+    return svc_generate_report_for_runs(
+        db,
+        args.get("run_ids") or [],
+        fmt=args.get("format") or "md",
+        title=args.get("title") or "",
+        created_by=_actor(ctx),
+    )
+
+
+@registry.register(
     name="ops.inspection.summarize_run",
     title="总结巡检结果",
     description="将巡检记录转换为 AI 可使用的 facts/inferences/recommendations/evidence 结构。",

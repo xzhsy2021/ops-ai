@@ -95,6 +95,29 @@ Content-Type: application/json
 
 ## Inspection Execution Example
 
+For a natural-language all-server grouped inspection, prefer the workflow tool:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "method": "tools/call",
+  "params": {
+    "name": "ops_workflow_inspect",
+    "arguments": {
+      "request": "巡检全部服务器，数量较多，按分组分批巡检，分析并输出巡检报告",
+      "concurrency": 4,
+      "batch_size": 8,
+      "generate_report": true
+    }
+  }
+}
+```
+
+If the response is `mode=grouped_preview`, follow its per-group `next_actions`.
+After all groups finish, collect all returned `run_ids` and call
+`ops_inspection_generate_report_for_runs` to create one merged report.
+
 For grouped or large-batch inspection, preview first. The preview returns the
 resolved targets, skipped servers, batch plan, and a short Chinese confirmation
 phrase such as `确认巡检 <fingerprint>`. Use that exact phrase after the user

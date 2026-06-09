@@ -154,6 +154,30 @@ def test_preview_next_action_arguments_match_run_servers_batch_schema(monkeypatc
         engine.dispose()
 
 
+def test_batch_preview_group_filter_accepts_env_when_group_missing(monkeypatch, tmp_path):
+    from app.services.tool_adapters import inspection_tools
+
+    def _list_servers(self):
+        return [
+            {"id": "srv-env-a", "name": "prod-a", "host": "10.1.0.1", "env": "prod", "status": "online"},
+            {"id": "srv-env-b", "name": "test-b", "host": "10.1.0.2", "env": "test", "status": "online"},
+        ]
+
+    monkeypatch.setattr("app.domain.inventory.services.InventoryReadService.list_servers", _list_servers)
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = SimpleNamespace(username="ai-agent", token_owner="")
+    try:
+        preview = inspection_tools.preview_servers_batch({"groups": ["prod"]}, ctx, db)
+
+        assert preview["eligible_count"] == 1
+        assert preview["eligible_ids"] == ["prod-a"]
+        assert preview["skipped_count"] == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_mcp_docs_prefer_preview_first_batch_inspection_flow():
     examples = open("docs/runbooks/AI_TOOL_MCP_EXAMPLES.md", encoding="utf-8").read()
     matrix = open("docs/runbooks/mcp-capability-matrix.md", encoding="utf-8").read()

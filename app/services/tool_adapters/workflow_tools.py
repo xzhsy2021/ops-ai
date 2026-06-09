@@ -29,6 +29,24 @@ def _unwrap_tool_result(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {"value": value}
 
 
+def _request_contains(request: str, words: List[str]) -> bool:
+    lowered = (request or "").lower()
+    return any(word and word.lower() in lowered for word in words)
+
+
+def _infer_all_servers(request: str, args: Dict[str, Any]) -> bool:
+    if "all_servers" in args:
+        return bool(args.get("all_servers"))
+    return _request_contains(request, ["全部服务器", "所有服务器", "全量服务器", "全服务器", "全部机器", "所有机器", "all servers"])
+
+
+def _infer_grouped(request: str, args: Dict[str, Any]) -> bool:
+    for key in ["grouped", "group_by", "group_by_group"]:
+        if key in args:
+            return bool(args.get(key))
+    return _request_contains(request, ["按分组", "分组分批", "分组巡检", "by group", "grouped"])
+
+
 def _infer_inspection_groups(request: str, explicit_groups: Any, group: Any = "") -> List[str]:
     groups = _as_list(explicit_groups)
     groups.extend(_as_list(group))
@@ -56,12 +74,86 @@ def _inspection_payload(args: Dict[str, Any], *, include_execution_fields: bool)
     for key in ["all_servers", "skip_disabled"]:
         if key in args:
             payload[key] = bool(args.get(key))
+    if not server_ids and not groups and _infer_all_servers(request, args):
+        payload["all_servers"] = True
     if include_execution_fields:
         if args.get("generate_report") is not None:
             payload["generate_report"] = bool(args.get("generate_report"))
         if args.get("confirm_text"):
             payload["confirm_text"] = str(args.get("confirm_text") or "")
     return payload
+
+
+def _preview_group_name(item: Dict[str, Any]) -> str:
+    for key in ["group", "env", "group_name", "server_group"]:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return "未分组"
+
+
+def _preview_server_name(item: Dict[str, Any]) -> str:
+    for key in ["name", "server_id", "host", "ip", "id", "asset_id"]:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _build_grouped_plan(preview: Dict[str, Any], args: Dict[str, Any], preview_payload: Dict[str, Any]) -> Dict[str, Any]:
+    groups: Dict[str, Dict[str, Any]] = {}
+    for item in preview.get("eligible") or []:
+        if not isinstance(item, dict):
+            continue
+        name = _preview_group_name(item)
+        bucket = groups.setdefault(name, {"name": name, "target_count": 0, "servers": []})
+        bucket["target_count"] += 1
+        server_name = _preview_server_name(item)
+        if server_name:
+            bucket["servers"].append(server_name)
+    ordered_groups = sorted(groups.values(), key=lambda item: str(item.get("name") or ""))
+    execution_plan = preview.get("execution_plan") or {}
+    next_actions: List[Dict[str, Any]] = []
+    base_arguments = {
+        key: args.get(key)
+        for key in ["request", "scope_label", "categories", "concurrency", "batch_size", "command_timeout_seconds", "run_timeout_seconds", "skip_disabled", "generate_report"]
+        if args.get(key) not in (None, "")
+    }
+    for item in ordered_groups:
+        group_name = str(item.get("name") or "").strip()
+        if not group_name:
+            continue
+        action_args = dict(base_arguments)
+        action_args.pop("all_servers", None)
+        action_args["groups"] = [group_name]
+        next_actions.append({
+            "tool": "ops.workflow.inspect",
+            "arguments": action_args,
+            "description": f"预览并确认 {group_name} 分组巡检；确认后再次调用同一工具执行该分组。",
+        })
+    return {
+        "strategy": "先全量预览服务器，再按分组逐组预览、确认和执行；每组内部继续按 batch_size/concurrency 分批。",
+        "total_groups": len(ordered_groups),
+        "total_targets": int(preview.get("eligible_count") or sum(int(item.get("target_count") or 0) for item in ordered_groups)),
+        "skipped_count": int(preview.get("skipped_count") or 0),
+        "batch_size": execution_plan.get("batch_size") or preview_payload.get("batch_size"),
+        "concurrency": execution_plan.get("concurrency") or preview_payload.get("concurrency"),
+        "groups": ordered_groups,
+        "next_actions": next_actions,
+        "final_report_template": {
+            "tool": "ops.inspection.generate_report_for_runs",
+            "arguments": {"run_ids": [], "format": "md", "title": "全量服务器分组巡检合并报告"},
+            "description": "所有分组执行完成后，收集每组返回的 run_ids，填入 run_ids 生成一份全量合并巡检报告。",
+        },
+    }
+
+
+def _should_return_grouped_preview(args: Dict[str, Any], request: str, preview_payload: Dict[str, Any], preview: Dict[str, Any]) -> bool:
+    if not _infer_grouped(request, args):
+        return False
+    if _as_list(args.get("server_ids")) or _as_list(args.get("groups")) or _as_list(args.get("group")):
+        return False
+    return bool(preview_payload.get("all_servers") or preview.get("all_servers"))
 
 
 def _inspection_profile_payload(args: Dict[str, Any], *, include_execution_fields: bool) -> Dict[str, Any]:
@@ -104,6 +196,9 @@ def _inspection_profile_payload(args: Dict[str, Any], *, include_execution_field
             "concurrency": {"type": "integer", "minimum": 1, "maximum": 20},
             "batch_size": {"type": "integer", "minimum": 1, "maximum": 20},
             "all_servers": {"type": "boolean"},
+            "grouped": {"type": "boolean", "description": "Return an all-server grouped execution plan before running."},
+            "group_by": {"type": "boolean", "description": "Alias for grouped."},
+            "group_by_group": {"type": "boolean", "description": "Alias for grouped."},
             "skip_disabled": {"type": "boolean"},
             "command_timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
             "run_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
@@ -175,6 +270,30 @@ def inspect_servers(args: Dict[str, Any], ctx, db):
         preview_call = reg.call(db, "ops.inspection.preview_servers_batch", preview_payload, ctx)
         preview = _unwrap_tool_result(preview_call)
         confirm_text = (preview.get("confirmation") or {}).get("confirm_text") if isinstance(preview, dict) else ""
+        if isinstance(preview, dict) and _should_return_grouped_preview(args, request, preview_payload, preview):
+            grouped_plan = _build_grouped_plan(preview, args, preview_payload)
+            return {
+                "summary": "All-server inspection can be completed, but this request should be executed group by group because the target count is large.",
+                "workflow_type": "inspection",
+                "source_tool": "ops.workflow.inspect",
+                "mode": "grouped_preview",
+                "can_complete": True,
+                "execution_strategy": "grouped_batch_inspection",
+                "request": request,
+                "routed_arguments": preview_payload,
+                "child_tools": child_tools,
+                "records": records,
+                "logic_checks": [
+                    "Natural language all-server scope was routed to all_servers=true.",
+                    "Grouped execution is kept as multiple preview/confirm/run calls so each high-risk execution remains auditable.",
+                    "Each group run will preserve inspection_runs, inspection_issues, reports, operation jobs, tool-call logs, and audit logs.",
+                    "After all groups finish, collect all returned run_ids and call ops.inspection.generate_report_for_runs for the final merged report.",
+                ],
+                "preview": preview,
+                "confirmation": preview.get("confirmation") or {},
+                "grouped_plan": grouped_plan,
+                "next_actions": grouped_plan.get("next_actions") or [],
+            }
         next_arguments = dict(args)
         if confirm_text:
             next_arguments["confirm_text"] = confirm_text
@@ -203,13 +322,13 @@ def inspect_servers(args: Dict[str, Any], ctx, db):
     run_result = _unwrap_tool_result(run_call)
     next_actions = run_result.get("next_actions") if isinstance(run_result, dict) else []
     if args.get("generate_report") and isinstance(run_result, dict) and run_result.get("run_ids"):
-        child_tools.append("ops.inspection.generate_report")
+        child_tools.append("ops.inspection.generate_report_for_runs")
         next_actions = list(next_actions or [])
-        if not any(action.get("tool") == "ops.inspection.generate_report" for action in next_actions if isinstance(action, dict)):
+        if not any(action.get("tool") == "ops.inspection.generate_report_for_runs" for action in next_actions if isinstance(action, dict)):
             next_actions.append({
-                "tool": "ops.inspection.generate_report",
+                "tool": "ops.inspection.generate_report_for_runs",
                 "arguments": {"run_ids": run_result.get("run_ids") or []},
-                "description": "Generate an inspection report from the completed run records.",
+                "description": "Generate one merged inspection report from the completed run records.",
             })
     return {
         "summary": "Inspection workflow execution was delegated to the audited batch inspection tool.",

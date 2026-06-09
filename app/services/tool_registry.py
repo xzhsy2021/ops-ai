@@ -195,6 +195,7 @@ DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.inspection.list_issues",
     "ops.inspection.get_issue",
     "ops.inspection.generate_report",
+    "ops.inspection.generate_report_for_runs",
     "ops.inspection.summarize_run",
     "ops.inspection.run_server",
     "ops.risk.list",

@@ -965,7 +965,17 @@ def mcp_tool_recommend(request: Request, scenario: str = "", db: Session = Depen
     mapping = {
         "project_health": ["ops.workflow.generate_project_health_brief", "ops.get_system_status", "ops.inspection.list_runs", "ops.risk.list"],
         "risk_triage": ["ops.workflow.triage_open_risks", "ops.risk.list", "ops.risk.generate_fix_plan"],
-        "inspection": ["ops.workflow.inspect", "ops.inspection.preview_servers_batch", "ops.inspection.run_servers_batch", "ops.inspection.list_runs", "ops.inspection.get_run", "ops.inspection.summarize_run", "ops.inspection.generate_report"],
+        "inspection": [
+            "ops.workflow.inspect",
+            "ops.list_server_groups",
+            "ops.inspection.preview_servers_batch",
+            "ops.inspection.run_servers_batch",
+            "ops.inspection.list_runs",
+            "ops.inspection.get_run",
+            "ops.inspection.summarize_run",
+            "ops.inspection.generate_report",
+            "ops.inspection.generate_report_for_runs",
+        ],
         "failed_deploy": ["ops.workflow.analyze_failed_deploy", "ops.get_deployment_report", "ops.get_deployment_tasks", "ops.get_deployment_logs"],
         "monthly_report": ["ops.workflow.generate_monthly_ops_report", "ops.list_reports", "ops.risk.list", "ops.inspection.list_runs"],
     }

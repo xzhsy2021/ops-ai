@@ -11,8 +11,8 @@ OPS 用 `ToolToken` 来标识一个 MCP/AI 客户端身份。Token 决定你能�
 
 | 场景 | scopes | allow_write | allow_prod | 说明 |
 |------|--------|-------------|------------|------|
-| **只读 / 健康分析**（默认推荐） | `["ops:read", "ops:write"]` | 自动按 scopes 推导 = `true` | `false` | 可跑 Path A `ops.inspection.run_*`、Path B `ops.check_disk` 等；不会触达 deploy/rollback/destructive |
-| **AI 运维助手**（日常巡检 + 报告 + 风险分流） | `["ops:read", "ops:write", "audit:read"]` | 自动 = `true` | `false` | 在上一档基础上加审计读取，能调 `ops.ai.*`、`ops.workflow.*` |
+| **巡检助手**（默认推荐） | `["ops:read", "ops:write", "server:read", "audit:read"]` | 自动按 scopes 推导 = `true` | `false` | 可跑 Path A `ops.workflow.inspect` / `ops.inspection.run_*`，可生成单 run 或多 run 巡检报告；不会触达 deploy/rollback/destructive |
+| **只读 / 健康分析** | `["ops:read", "audit:read", "server:read"]` | `false` | `false` | 只能读资产、报告、审计和风险上下文；不能执行巡检 |
 | **高级 AI 代理**（含 DML/部署/回滚的预演） | `["*"]` | 显式 `true` | `true` | **必须 admin 创建**，不要给普通用户的 token；会自动变成 `allow_write=true / allow_prod=true` |
 
 ### 不要把 `allow_write` 显式设成 `false` 配 `ops:write`
@@ -56,19 +56,20 @@ admin 可以在 "AI 工具接入 → 概览与接入 → 能力开关" 调整，
 
 调用模板（推荐 AI 端到端执行）：
 ```
-1. ops.list_server_groups → 取 group 列表
-2. ops.inspection.preview_servers_batch(
+1. ops.workflow.inspect(request="巡检全部服务器，按分组分批巡检并输出报告", batch_size=8, concurrency=4, generate_report=true)
+2. 如果返回 mode=grouped_preview，按 next_actions 逐组执行；每组仍先 preview，再让用户确认 `确认巡检 <fingerprint>`
+3. 对单组临时巡检，也可直接调用 ops.inspection.preview_servers_batch(
      groups=["<group>"],
      categories=["ACCOUNT_SECURITY","DISK","PROCESS_PORT","SERVICE_STATUS"],
      concurrency=4,
      batch_size=8
    )
-3. 向用户复述 preview 的目标数量、跳过数量、批次计划，并请用户确认 `确认巡检 <fingerprint>`
-4. ops.inspection.run_servers_batch(..., confirm_text="<preview.confirmation.confirm_text>")
-5. ops.inspection.get_run(run_id=...) → 轮询到 SUCCESS
-6. ops.inspection.list_issues(run_id=...) → 拉问题
-7. ops.inspection.summarize_run(run_id=...) → FIRE 摘要
-8. ops.inspection.generate_report(run_id=...) → 落报告
+4. 向用户复述 preview 的目标数量、跳过数量、批次计划，并请用户确认 `确认巡检 <fingerprint>`
+5. ops.inspection.run_servers_batch(..., confirm_text="<preview.confirmation.confirm_text>")
+6. ops.inspection.get_run(run_id=...) → 轮询到 SUCCESS / PARTIAL_SUCCESS / FAILED
+7. ops.inspection.list_issues(run_id=...) → 拉问题
+8. ops.inspection.summarize_run(run_id=...) → FIRE 摘要
+9. 单 run 用 ops.inspection.generate_report；多分组/多 run 收集 run_ids 后用 ops.inspection.generate_report_for_runs → 落合并报告
 ```
 
 ## ⚠️ Path Priority Policy (MANDATORY — DO NOT DEFAULT TO PATH B)
@@ -80,7 +81,7 @@ supplement Path A — never the other way around.
 
 | Priority | Path | Tools | When to use |
 |---|---|---|---|
-| **A — PRIMARY (default)** | **System inspection** (the system's own capability) | `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.summarize_run`, `ops.inspection.summarize_issues` | **Any** request mentioning 巡检 / inspect / 检查服务器 / 健康检查 / 批量巡检 / 系统巡检 / 合规检查. Path A creates `inspection_runs` + `inspection_reports` + `audit_logs` records and runs 9 built-in rule categories (ACCOUNT_SECURITY, DISK_USAGE, PROCESS_PORT, FIREWALL, LOGIN_SECURITY, COMMAND_HISTORY, MEMORY, SERVICE_STATUS, BACKUP). |
+| **A — PRIMARY (default)** | **System inspection** (the system's own capability) | `ops.workflow.inspect`, `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.generate_report_for_runs`, `ops.inspection.summarize_run` | **Any** request mentioning 巡检 / inspect / 检查服务器 / 健康检查 / 批量巡检 / 系统巡检 / 合规检查. Path A creates `inspection_runs` + `inspection_reports` + `audit_logs` records and runs 9 built-in rule categories (ACCOUNT_SECURITY, DISK_USAGE, PROCESS_PORT, FIREWALL, LOGIN_SECURITY, COMMAND_HISTORY, MEMORY, SERVICE_STATUS, BACKUP). |
 | **B — FALLBACK (only when Path A is unavailable)** | **Single-shot SSH probes** (the ops individual capabilities) | `ops.check_disk`, `ops.check_process`, `ops.list_service_directory`, `ops.tail_service_log`, `ops.run_health_check` | **Only** when Path A errored / `ops.inspection.preview_servers_batch` or `ops.inspection.run_servers_batch` was blocked, or the user explicitly asks for an ad-hoc check on one specific metric. Path B does **not** create `inspection_runs`, cannot run batch rules, and is meant to supplement — not replace — Path A. |
 
 **When a user says "巡检" / "检查" / "inspect" / "健康检查":**
@@ -100,13 +101,13 @@ supplement Path A — never the other way around.
 ```
 User asks: 巡检 / inspect / 检查 server
   ├─ Default: 走 Path A (系统的能力)
-  │     Step 1: ops.list_server_groups (find target group)
-  │     Step 2: ops.list_systems (find system name)
+  │     Step 1: ops.workflow.inspect (natural-language route; may return grouped_preview for all servers)
+  │     Step 2: If grouped_preview, follow per-group next_actions
   │     Step 3: ops.inspection.preview_servers_batch (resolve target count + short phrase)
   │     Step 4: Ask user to approve `确认巡检 <fingerprint>`
   │     Step 5: ops.inspection.run_servers_batch (PRIMARY; with preview confirm_text)
   │     Step 6: ops.inspection.get_run / list_issues (collect findings)
-  │     Step 7: ops.inspection.generate_report (produce report)
+  │     Step 7: ops.inspection.generate_report_for_runs for grouped/batch reports, or generate_report for one run
   │     Step 8: Summarize in FIRE structure for user
   │
   └─ Fallback to Path B (ops 单项能力 — 备用) ONLY if:

@@ -410,6 +410,124 @@ def test_workflow_inspect_routes_to_underlying_inspection_and_preserves_records(
         engine.dispose()
 
 
+def test_workflow_inspect_builds_grouped_all_server_plan_for_ai_agent(monkeypatch, tmp_path):
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    calls = []
+
+    def _fake_call(db_arg, tool_name, arguments, ctx_arg, stream_callback=None):
+        calls.append((tool_name, dict(arguments or {})))
+        if tool_name == "ops.inspection.preview_servers_batch":
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "result": {
+                    "summary": "preview all ok",
+                    "eligible_count": 3,
+                    "skipped_count": 1,
+                    "eligible": [
+                        {"id": "srv-a", "name": "crypto-a", "group": "crypto", "status": "online"},
+                        {"id": "srv-b", "name": "crypto-b", "group": "crypto", "status": "online"},
+                        {"id": "srv-c", "name": "ops-c", "group": "ops", "status": "online"},
+                    ],
+                    "eligible_ids": ["crypto-a", "crypto-b", "ops-c"],
+                    "execution_plan": {"batch_size": 8, "concurrency": 4, "batch_count": 1},
+                    "confirmation": {"confirm_text": "确认巡检 all12345"},
+                },
+            }
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+    try:
+        register_builtin_tools()
+        monkeypatch.setattr(registry, "call", _fake_call)
+        tool = registry.get("ops.workflow.inspect")
+
+        result = tool.handler({
+            "request": "使用 ops 能力巡检全部服务器，数量较多，按分组分批巡检，分析并输出巡检报告",
+            "batch_size": 8,
+            "concurrency": 4,
+            "generate_report": True,
+        }, ctx, db)
+
+        assert calls == [(
+            "ops.inspection.preview_servers_batch",
+            {"concurrency": 4, "batch_size": 8, "all_servers": True},
+        )]
+        assert result["mode"] == "grouped_preview"
+        assert result["can_complete"] is True
+        assert result["execution_strategy"] == "grouped_batch_inspection"
+        assert result["routed_arguments"]["all_servers"] is True
+        assert result["grouped_plan"]["total_groups"] == 2
+        assert result["grouped_plan"]["total_targets"] == 3
+        assert result["grouped_plan"]["groups"][0]["name"] == "crypto"
+        assert result["grouped_plan"]["groups"][0]["target_count"] == 2
+        assert result["grouped_plan"]["groups"][1]["name"] == "ops"
+        assert result["grouped_plan"]["groups"][1]["target_count"] == 1
+        assert result["grouped_plan"]["final_report_template"]["tool"] == "ops.inspection.generate_report_for_runs"
+        assert result["next_actions"][0]["tool"] == "ops.workflow.inspect"
+        assert result["next_actions"][0]["arguments"]["groups"] == ["crypto"]
+        assert result["next_actions"][0]["arguments"]["batch_size"] == 8
+        assert result["next_actions"][0]["arguments"]["concurrency"] == 4
+        assert result["next_actions"][0]["arguments"]["generate_report"] is True
+        assert result["records"]["preserved"] is True
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_workflow_inspect_run_recommends_merged_report_for_multiple_runs(monkeypatch, tmp_path):
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    calls = []
+
+    def _fake_call(db_arg, tool_name, arguments, ctx_arg, stream_callback=None):
+        calls.append((tool_name, dict(arguments or {})))
+        if tool_name == "ops.inspection.run_servers_batch":
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "result": {
+                    "summary": "run ok",
+                    "status": "COMPLETED",
+                    "run_ids": ["run-a", "run-b"],
+                    "next_actions": [{"tool": "ops.inspection.get_run", "arguments": {"run_id": "run-a"}}],
+                },
+            }
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+    try:
+        register_builtin_tools()
+        monkeypatch.setattr(registry, "call", _fake_call)
+        tool = registry.get("ops.workflow.inspect")
+
+        result = tool.handler({
+            "request": "巡检 crypto 分组并输出报告",
+            "groups": ["crypto"],
+            "generate_report": True,
+            "confirm_text": "确认巡检 abc12345",
+        }, ctx, db)
+
+        assert result["mode"] == "run"
+        assert calls == [(
+            "ops.inspection.run_servers_batch",
+            {"groups": ["crypto"], "generate_report": True, "confirm_text": "确认巡检 abc12345"},
+        )]
+        report_actions = [item for item in result["next_actions"] if item.get("tool") == "ops.inspection.generate_report_for_runs"]
+        assert report_actions
+        assert report_actions[0]["arguments"]["run_ids"] == ["run-a", "run-b"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_mcp_capability_service_owns_resource_catalog_and_read_wrapper(tmp_path):
     from app.services.mcp_capability_service import mcp_resource_items, mcp_resources_list, mcp_resource_read
     from app.services.tool_context import ToolContext
@@ -567,6 +685,15 @@ def test_fastapi_mcp_endpoint_uses_capability_service_not_stdio_private_helpers(
     assert "def mcp_call_tool" in service_text
     assert "def mcp_resource_read" in service_text
     assert "def mcp_prompt_get" in service_text
+
+
+def test_mcp_inspection_recommendation_includes_merged_report_tool():
+    text = open("app/api/tools.py", encoding="utf-8").read()
+    body = text.split('"inspection": [', 1)[1].split("],", 1)[0]
+
+    assert '"ops.workflow.inspect"' in body
+    assert '"ops.list_server_groups"' in body
+    assert '"ops.inspection.generate_report_for_runs"' in body
 
 
 def test_fastapi_mcp_resource_read_has_no_unreachable_legacy_branches():

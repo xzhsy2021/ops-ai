@@ -71,8 +71,8 @@ const FALLBACK_TOKEN_TEMPLATES: TokenTemplate[] = [
   {
     key: 'inspection-ai',
     name: 'Inspection AI',
-    description: 'Routine MCP inspection assistant with Path A run tools and read evidence tools.',
-    notes: 'Path A run tools require exact confirm_text.',
+    description: 'Routine MCP inspection assistant with Path A1 (custom) and Path A2 (profile) entry points plus read evidence tools.',
+    notes: 'Path A1 (run_server/run_servers_batch) and Path A2 (profile.preview + profile.run) both require exact confirm_text. Use A1 for custom scope, A2 for daily/weekly/monthly preset profiles.',
     allow_write: true,
     allow_prod: false,
     expires_in_days: 90,

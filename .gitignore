@@ -35,6 +35,7 @@ data/reports/
 # Phase 3f 临时调试数据(scratch / one-shot inspect)
 data/_*.json
 data/_*.txt
+data/exports/db/
 
 dist/
 
@@ -56,6 +57,7 @@ scripts/_*.py
 scripts/_*.txt
 scripts/_*.md
 scripts/_*.json
+scripts/_*.log
 tests/_*.py
 tests/_tmp_*.py
 tests/_apply_*.py

@@ -13,6 +13,7 @@ import { OverviewTab } from './inspection/OverviewTab'
 import { ServerProfileStrip } from './inspection/ServerProfileStrip'
 import { ServerStatsGrid } from './inspection/ServerStatsGrid'
 import { ServerGroupChips } from './inspection/ServerGroupChips'
+import { ServerToolbar } from './inspection/ServerToolbar'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -819,36 +820,22 @@ export default function InspectionCenterPage() {
             selectedCount={selectedServerIds.length + selectedGroups.length}
           />
 
-          {/* 2. 工具栏 */}
-          <div className="cc-toolbar">
-            <div className="cc-toolbar-search">
-              <span className="cc-toolbar-search-icon">⌕</span>
-              <input
-                value={serverFilter}
-                onChange={(e) => setServerFilter(e.target.value)}
-                placeholder="搜索名称 / IP"
-                aria-label="搜索服务器"
-              />
-              {serverFilter && (
-                <button className="cc-icon-btn" style={{ padding: '0 8px', height: 20, fontSize: 10 }} onClick={() => setServerFilter('')}>清空</button>
-              )}
-            </div>
-            <div className="cc-toolbar-divider" />
-            <div className="cc-toolbar-actions">
-              <button className="cc-icon-btn" onClick={() => { setSelectedServerIds(activeServerIds); setMessage(`已选择全部在线/启用服务器 ${activeServerIds.length} 台，停用/离线 ${disabledServerCount} 台会自动跳过。`) }} disabled={running || activeServerIds.length === 0}>全选在线</button>
-              <button className="cc-icon-btn" onClick={() => { setSelectedServerIds([]); setSelectedGroups([]) }}>清空选择</button>
-              <button className="cc-icon-btn" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}>展开全部</button>
-              <button className="cc-icon-btn" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}>收起全部</button>
-            </div>
-            <div className="cc-toolbar-cta">
-              <span className="cc-toolbar-summary">单台</span>
-              <select className="cc-select" value={serverId} onChange={(e) => setServerId(e.target.value)}>
-                {servers.filter(isServerInspectable).map((s) => <option key={s.id || s.name} value={s.id || s.name}>{s.name || s.id}</option>)}
-              </select>
-              <button className="cc-icon-btn cc-icon-btn--success" onClick={runServer} disabled={running || !serverId}>{running ? '巡检中…' : '巡检单台'}</button>
-              <button className="cc-icon-btn" onClick={() => runServersBatch()} disabled={running || (selectedServerIds.length === 0 && selectedGroups.length === 0)}>{running ? '巡检中…' : `巡检选中 (${selectedServerIds.length + selectedGroups.length})`}</button>
-            </div>
-          </div>
+          <ServerToolbar
+            filter={serverFilter}
+            servers={servers}
+            selectedServerId={serverId}
+            activeServerCount={activeServerIds.length}
+            selectedTargetCount={selectedServerIds.length + selectedGroups.length}
+            running={running}
+            onFilterChange={setServerFilter}
+            onSelectOnlineServers={() => { setSelectedServerIds(activeServerIds); setMessage(`???????/????? ${activeServerIds.length} ????/?? ${disabledServerCount} ???????`) }}
+            onClearSelection={() => { setSelectedServerIds([]); setSelectedGroups([]) }}
+            onExpandAll={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}
+            onCollapseAll={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}
+            onSelectedServerChange={setServerId}
+            onRunServer={runServer}
+            onRunSelectedServers={() => runServersBatch()}
+          />
 
           <ServerGroupChips
             groupedServers={groupedServers}

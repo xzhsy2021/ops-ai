@@ -75,6 +75,8 @@ const inspectionServerStatsGridPath = path.join(root, 'frontend', 'src', 'pages'
 const inspectionServerStatsGridComponent = fs.existsSync(inspectionServerStatsGridPath) ? fs.readFileSync(inspectionServerStatsGridPath, 'utf8') : ''
 const inspectionServerGroupChipsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerGroupChips.tsx')
 const inspectionServerGroupChipsComponent = fs.existsSync(inspectionServerGroupChipsPath) ? fs.readFileSync(inspectionServerGroupChipsPath, 'utf8') : ''
+const inspectionServerToolbarPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerToolbar.tsx')
+const inspectionServerToolbarComponent = fs.existsSync(inspectionServerToolbarPath) ? fs.readFileSync(inspectionServerToolbarPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -302,6 +304,10 @@ if (!fs.existsSync(inspectionServerGroupChipsPath)) failures.push('Inspection se
 if (!inspectionPage.includes("from './inspection/ServerGroupChips'")) failures.push('InspectionCenterPage must import extracted ServerGroupChips')
 if (!inspectionPage.includes('<ServerGroupChips')) failures.push('InspectionCenterPage must render extracted ServerGroupChips')
 if (!inspectionServerGroupChipsComponent.includes('export function ServerGroupChips')) failures.push('ServerGroupChips component must export ServerGroupChips')
+if (!fs.existsSync(inspectionServerToolbarPath)) failures.push('Inspection server toolbar component file missing')
+if (!inspectionPage.includes("from './inspection/ServerToolbar'")) failures.push('InspectionCenterPage must import extracted ServerToolbar')
+if (!inspectionPage.includes('<ServerToolbar')) failures.push('InspectionCenterPage must render extracted ServerToolbar')
+if (!inspectionServerToolbarComponent.includes('export function ServerToolbar')) failures.push('ServerToolbar component must export ServerToolbar')
 
 
 if (failures.length) {

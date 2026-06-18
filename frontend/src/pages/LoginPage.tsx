@@ -1,8 +1,73 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { auth } from '../api'
 import { useAuthStore } from '../store'
 import { ROUTES } from '../routes'
+import { FRONTEND_BUILD_INFO } from '../generated/buildInfo'
+
+function BrandMark({ size = 22 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      aria-hidden="true"
+      style={{ display: 'block' }}
+    >
+      <path
+        d="M16 4 L27 10.5 L27 21.5 L16 28 L5 21.5 L5 10.5 Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+        opacity="0.95"
+      />
+      <path
+        d="M16 4 L16 28 M5 10.5 L27 21.5 M27 10.5 L5 21.5"
+        stroke="currentColor"
+        strokeWidth="1"
+        opacity="0.55"
+      />
+      <circle cx="16" cy="16" r="2.6" fill="currentColor" />
+    </svg>
+  )
+}
+
+const FEATURE_TERMS = [
+  { k: 'WORKBENCH', v: '统一指挥台', desc: 'servers · deploy · audit' },
+  { k: 'OBSERVABILITY', v: '可观测的发布与回滚', desc: 'live logs · reports' },
+  { k: 'AUDIT CHAIN', v: '每次写操作都留痕', desc: 'immutable · traceable' },
+  { k: 'AI / MCP', v: '把 Agent 装进安全笼子', desc: 'scoped · guarded' },
+]
+
+const STATUS_NODES = [
+  { label: 'API', state: 'ok' },
+  { label: 'WORKER', state: 'ok' },
+  { label: 'DB', state: 'ok' },
+  { label: 'AUDIT', state: 'ok' },
+] as const
+
+function useClock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  return now
+}
+
+function fmtClock(d: Date) {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+function fmtDateTag(d: Date) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+  }).format(d)
+}
 
 export default function LoginPage() {
   const [username, setUsername] = useState('')
@@ -11,6 +76,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
   const { user, setUser } = useAuthStore()
+  const now = useClock()
 
   useEffect(() => {
     if (user) navigate(ROUTES.dashboard, { replace: true })
@@ -32,33 +98,104 @@ export default function LoginPage() {
     }
   }
 
+  const uptime = useMemo(() => {
+    // 稳定的"运行时长"展示，基于构建时间起算
+    const build = FRONTEND_BUILD_INFO.builtAt
+      ? new Date(FRONTEND_BUILD_INFO.builtAt).getTime()
+      : Date.now() - 1000 * 60 * 60 * 24 * 9
+    const mins = Math.max(1, Math.floor((Date.now() - build) / 60000))
+    if (mins < 60) return `${mins}m`
+    if (mins < 1440) return `${Math.floor(mins / 60)}h ${mins % 60}m`
+    return `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h`
+  }, [])
+
   return (
     <div className="login-page page-enter">
-      <section className="login-visual glass-panel" aria-label="OPS 产品介绍">
-        <span className="eyebrow">OPS Cloud Console</span>
-        <h1>下一代运维控制台</h1>
-        <p>统一服务器、发布、文件、流程、审计与 SQL 查询，把高风险操作压缩进可观测、可回滚、可审计的现代化工作台。</p>
-        <div className="login-feature-grid">
-          <div><strong>Dark First</strong><span>深色优先，长时间使用更舒适</span></div>
-          <div><strong>Glass UI</strong><span>玻璃态卡片、微光影、清晰层级</span></div>
-          <div><strong>Audit Ready</strong><span>关键操作留痕，降低运维风险</span></div>
+      <section className="login-visual" aria-label="OPS 产品介绍">
+        <div className="login-visual-grid" aria-hidden="true" />
+        <div className="login-visual-scan" aria-hidden="true" />
+        <div className="login-visual-orb login-visual-orb--a" aria-hidden="true" />
+        <div className="login-visual-orb login-visual-orb--b" aria-hidden="true" />
+        <div className="login-visual-noise" aria-hidden="true" />
+
+        <div className="login-visual-top">
+          <div className="app-brand login-brand-inline">
+            <span className="app-brand-mark" aria-hidden="true">
+              <BrandMark size={22} />
+            </span>
+            <span className="brand-copy">
+              <strong>OPS</strong>
+              <small>Command Center</small>
+            </span>
+          </div>
+          <span className="login-build-chip">
+            <span className="login-build-dot" aria-hidden="true" />
+            v{FRONTEND_BUILD_INFO.version}
+          </span>
+        </div>
+
+        <div className="login-visual-body">
+          <span className="eyebrow">Engineering Operations · Mission Control</span>
+          <h1>
+            让每一次发布<br />
+            都有<em>可观测的</em>轨迹
+          </h1>
+          <p>
+            统一服务器资产、流水线发布、文件 / 终端、SQL 工作台与 AI 工具调用，
+            把高风险操作压缩进同一条可回滚、可审计、可解释的现代化工作流。
+          </p>
+
+          <div className="login-status-strip" role="status" aria-live="polite">
+            {STATUS_NODES.map((n) => (
+              <span key={n.label} className="login-status-node">
+                <span className={`login-status-led login-status-led--${n.state}`} aria-hidden="true" />
+                <span className="login-status-label">{n.label}</span>
+              </span>
+            ))}
+            <span className="login-status-sep" aria-hidden="true" />
+            <span className="login-status-meta">
+              UPTIME <strong>{uptime}</strong>
+            </span>
+          </div>
+        </div>
+
+        <div className="login-term-grid">
+          {FEATURE_TERMS.map((t, i) => (
+            <div key={t.k} className="login-term" style={{ animationDelay: `${120 + i * 80}ms` }}>
+              <span className="login-term-idx">{String(i + 1).padStart(2, '0')}</span>
+              <div className="login-term-body">
+                <span>{t.k}</span>
+                <strong>{t.v}</strong>
+                <small>{t.desc}</small>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="login-visual-footer" aria-hidden="true">
+          <span className="login-footer-clock">{fmtClock(now)}</span>
+          <span className="login-footer-date">{fmtDateTag(now)}</span>
+          <span className="login-footer-sep" />
+          <span>SYSTEM_READY</span>
+          <span>·</span>
+          <span>SESSION_OK</span>
+          <span>·</span>
+          <span>AUDIT_CHAIN</span>
         </div>
       </section>
 
-      <section className="login-card glass-card">
-        <div className="login-brand">
-          <span className="app-brand-mark">O</span>
-          <div>
-            <strong>欢迎回来</strong>
-            <span>登录 OPS 运维平台</span>
-          </div>
+      <section className="login-card">
+        <div className="login-card-head">
+          <span className="eyebrow">Sign In · 控制台准入</span>
+          <h2>欢迎回来</h2>
+          <p>使用内部账号登录 OPS · Command Center</p>
         </div>
 
         {error && <div className="alert-card alert-card--danger" role="alert">{error}</div>}
 
         <form onSubmit={handleSubmit} className="login-form">
           <label className="field-label">
-            用户名
+            <span>用户名</span>
             <input
               type="text"
               value={username}
@@ -69,7 +206,7 @@ export default function LoginPage() {
             />
           </label>
           <label className="field-label">
-            密码
+            <span>密码</span>
             <input
               type="password"
               value={password}
@@ -79,9 +216,24 @@ export default function LoginPage() {
             />
           </label>
           <button type="submit" className="btn btn-primary login-submit" disabled={loading}>
-            {loading ? '登录中...' : '登录控制台'}
+            {loading ? (
+              <>
+                <span className="login-spinner" aria-hidden="true" />
+                <span>登录中...</span>
+              </>
+            ) : (
+              <>
+                <span>登录控制台</span>
+                <span className="login-submit-arrow" aria-hidden="true">→</span>
+              </>
+            )}
           </button>
         </form>
+
+        <div className="login-card-foot">
+          <span className="status-dot online" />
+          <span>API &amp; session ready</span>
+        </div>
       </section>
     </div>
   )

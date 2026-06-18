@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { inspection, reports } from '../api'
 import { ROUTES } from '../routes'
-import { EmptyState, FavoriteButton, PageHeader, RiskBadge, RiskConfirmDialog, StatusBadge } from '../components/ui'
+import { EmptyState, FavoriteButton, RiskBadge, RiskConfirmDialog, StatusBadge } from '../components/ui'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -903,29 +903,65 @@ export default function InspectionCenterPage() {
   }, [groupedServers, expandedGroups, filteredServers])
 
   return (
-    <div className="page-container inspection-page">
-      <PageHeader
-        title="巡检中心"
-        description="单项目轻量巡检：平台本地/SSH 执行只读检查，保留台账与报告，AI 仅做摘要、解释和建议。"
-        actions={<div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><FavoriteButton url={ROUTES.inspection} label="巡检中心" category="inspection" /><Link className="btn btn-subtle" to={ROUTES.reports}>报告中心</Link><button className="btn primary" onClick={loadBase} disabled={loading}>{loading ? '加载中...' : '刷新'}</button></div>}
-      />
-
-      {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
-      {message && <div className="alert alert-success" style={{ marginBottom: 12 }}>{message}</div>}
-
-      <div className="tab-bar inspection-tabs" style={{ marginBottom: 16 }}>
-        {[
-          ['overview', '巡检总览'], ['server', '服务器巡检'], ['project', '项目巡检'], ['runs', '巡检记录'], ['ledger', '台账报表'], ['issues', '风险问题'], ['rules', '巡检规则'],
-        ].map(([key, label]) => <button key={key} className={`tab-btn${tab === key ? ' tab-btn--active' : ''}`} onClick={() => setTab(key as TabKey)}>{label}</button>)}
+    <div className="cc-grid-bg page-container inspection-page inspection-cc" style={{ padding: '4px 0 24px' }}>
+      <div className="cc-hero">
+        <div>
+          <span className="cc-hero-eyebrow">OBSERVABILITY · INSPECTION</span>
+          <h1 className="cc-hero-title">巡检中心</h1>
+          <p className="cc-hero-desc">单项目轻量巡检：平台本地/SSH 执行只读检查，保留台账与报告，AI 仅做摘要、解释和建议。</p>
+        </div>
+        <div className="cc-hero-stats" style={{ minWidth: 240 }}>
+          <div className="cc-hero-stat cc-hero-stat--ok">
+            <strong>{overview.server_count || servers.length || 0}</strong><span>服务器</span>
+          </div>
+          <div className="cc-hero-stat cc-hero-stat--info">
+            <strong>{overview.project_count || projects.length || 0}</strong><span>项目</span>
+          </div>
+          <div className="cc-hero-stat cc-hero-stat--risk">
+            <strong>{overview.open_issue_count || 0}</strong><span>待处理</span>
+          </div>
+        </div>
+        <div className="cc-server-detail-actions" style={{ position: 'absolute', top: 22, right: 30, display: 'flex', gap: 8 }}>
+          <FavoriteButton url={ROUTES.inspection} label="巡检中心" category="inspection" />
+          <Link className="cc-icon-btn" to={ROUTES.reports}>报告中心</Link>
+          <button className="cc-icon-btn cc-icon-btn--success" onClick={loadBase} disabled={loading}>{loading ? '加载中…' : '刷新'}</button>
+        </div>
       </div>
+
+      {error && <div className="cc-modal-callout cc-modal-callout--danger">{error}</div>}
+      {message && <div className="cc-modal-callout cc-modal-callout--success">{message}</div>}
+
+      <nav className="cc-tabbar" aria-label="巡检中心标签">
+        {[
+          ['overview', '巡检总览', overview.server_count || servers.length || 0],
+          ['server', '服务器巡检', servers.length || 0],
+          ['project', '项目巡检', projects.length || 0],
+          ['runs', '巡检记录', runsTotal || 0],
+          ['ledger', '台账报表', inspectionReportsTotal || 0],
+          ['issues', '风险问题', issuesTotal || 0],
+          ['rules', '巡检规则', rulesTotal || 0],
+        ].map(([key, label, count]) => <button key={key as string} className={`cc-tab${tab === key ? ' cc-tab--active' : ''}`} onClick={() => setTab(key as TabKey)}>{label}<small>{count as number}</small></button>)}
+      </nav>
 
       {tab === 'overview' && (
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 16 }}>
-            <div className="mini-card"><div className="muted">服务器资产</div><strong>{overview.server_count || servers.length || 0}</strong></div>
-            <div className="mini-card"><div className="muted">项目资产</div><strong>{overview.project_count || projects.length || 0}</strong></div>
-            <div className="mini-card"><div className="muted">待处理风险</div><strong>{overview.open_issue_count || 0}</strong></div>
-            <div className="mini-card"><div className="muted">高危 / 中危 / 低危</div><strong>{overview.high_issue_count || 0} / {overview.medium_issue_count || 0} / {overview.low_issue_count || 0}</strong></div>
+          <div className="cc-stat-grid">
+            <div className="cc-stat-card">
+              <div className="cc-stat-icon">⬡</div>
+              <div className="cc-stat-body"><span>服务器资产</span><strong>{overview.server_count || servers.length || 0}</strong></div>
+            </div>
+            <div className="cc-stat-card cc-stat-card--info">
+              <div className="cc-stat-icon">◇</div>
+              <div className="cc-stat-body"><span>项目资产</span><strong>{overview.project_count || projects.length || 0}</strong></div>
+            </div>
+            <div className="cc-stat-card cc-stat-card--danger">
+              <div className="cc-stat-icon">!</div>
+              <div className="cc-stat-body"><span>待处理风险</span><strong>{overview.open_issue_count || 0}</strong></div>
+            </div>
+            <div className="cc-stat-card cc-stat-card--warn">
+              <div className="cc-stat-icon">▲</div>
+              <div className="cc-stat-body"><span>高 / 中 / 低</span><strong>{overview.high_issue_count || 0} / {overview.medium_issue_count || 0} / {overview.low_issue_count || 0}</strong></div>
+            </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
             <section className="panel-card">
@@ -953,66 +989,64 @@ export default function InspectionCenterPage() {
 
           {/* 1. 4 项统计 */}
           {inspectionProfiles.length > 0 && (
-            <div className="inspection-profile-strip">
-              <div className="inspection-profile-strip-head">
+            <div className="cc-profile-strip">
+              <div className="cc-profile-strip-head">
                 <div>
                   <strong>常用巡检方案</strong>
                   <span className="muted">先预览目标和确认短语，再执行批量巡检。</span>
                 </div>
-                <button className="btn btn-subtle" type="button" disabled={running} onClick={() => previewIssueRetry()}>复巡未关闭风险</button>
+                <button className="cc-icon-btn" type="button" disabled={running} onClick={() => previewIssueRetry()}>复巡未关闭风险</button>
               </div>
-              <div className="inspection-profile-grid">
+              <div className="cc-profile-grid">
                 {inspectionProfiles.map((profile: any) => (
                   <button
                     key={profile.id}
                     type="button"
-                    className="inspection-profile-card"
+                    className="cc-profile-card"
                     disabled={running || profile.enabled === false}
                     onClick={() => previewInspectionProfile(profile.id)}
                   >
-                    <span className="inspection-profile-title">{profile.name || profile.id}</span>
-                    <span className="inspection-profile-desc">{profile.description || profile.id}</span>
-                    <span className="inspection-profile-meta">
+                    <span className="cc-profile-title">{profile.name || profile.id}</span>
+                    <span className="cc-profile-desc">{profile.description || profile.id}</span>
+                    <span className="cc-profile-meta">
                       {(profile.categories || []).length} 项 · 并发 {profile.concurrency || '-'} · 批量 {profile.batch_size || '-'}
                     </span>
                   </button>
                 ))}
               </div>
               {profilePreviewData && (
-                <div className="inspection-profile-preview">
-                  <div>
-                    <strong>{profilePreviewData.profile?.name || profilePreviewData.profile_id}</strong>
-                    <span>目标 {profilePreviewData.eligible_count || 0} 台，跳过 {profilePreviewData.skipped_count || 0} 台，过滤 {profilePreviewData.filtered_count || 0} 台。</span>
-                  </div>
-                  <span className="profile-confirm-hint">一键确认已就绪，无需手动输入字符串。</span>
+                <div className="cc-modal-callout">
+                  <strong>{profilePreviewData.profile?.name || profilePreviewData.profile_id}</strong>
+                  <div style={{ marginTop: 4, fontSize: 11 }}>目标 {profilePreviewData.eligible_count || 0} 台，跳过 {profilePreviewData.skipped_count || 0} 台，过滤 {profilePreviewData.filtered_count || 0} 台。</div>
+                  <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>一键确认已就绪，无需手动输入字符串。</div>
                 </div>
               )}
             </div>
           )}
 
-          <div className="inspection-stats-row">
-            <div className="stat-card">
-              <span className="stat-icon">⬡</span>
-              <div className="stat-body"><span>服务器总数</span><strong>{servers.length}</strong></div>
+          <div className="cc-stat-grid">
+            <div className="cc-stat-card">
+              <div className="cc-stat-icon">⬡</div>
+              <div className="cc-stat-body"><span>服务器总数</span><strong>{servers.length}</strong></div>
             </div>
-            <div className="stat-card stat-card--success">
-              <span className="stat-icon" style={{ background: 'color-mix(in srgb, var(--success, #16a34a) 18%, transparent)', color: 'var(--success, #16a34a)' }}>●</span>
-              <div className="stat-body"><span>在线 / 启用</span><strong>{activeServerIds.length}</strong></div>
+            <div className="cc-stat-card cc-stat-card--ok">
+              <div className="cc-stat-icon">●</div>
+              <div className="cc-stat-body"><span>在线 / 启用</span><strong>{activeServerIds.length}</strong></div>
             </div>
-            <div className="stat-card stat-card--warning">
-              <span className="stat-icon" style={{ background: 'color-mix(in srgb, var(--warning) 18%, transparent)', color: 'var(--warning)' }}>○</span>
-              <div className="stat-body"><span>停用 / 离线</span><strong>{disabledServerCount}</strong></div>
+            <div className="cc-stat-card cc-stat-card--warn">
+              <div className="cc-stat-icon">○</div>
+              <div className="cc-stat-body"><span>停用 / 离线</span><strong>{disabledServerCount}</strong></div>
             </div>
-            <div className="stat-card stat-card--accent">
-              <span className="stat-icon">✓</span>
-              <div className="stat-body"><span>当前已选</span><strong>{selectedServerIds.length + selectedGroups.length}</strong></div>
+            <div className="cc-stat-card cc-stat-card--info">
+              <div className="cc-stat-icon">✓</div>
+              <div className="cc-stat-body"><span>当前已选</span><strong>{selectedServerIds.length + selectedGroups.length}</strong></div>
             </div>
           </div>
 
           {/* 2. 工具栏 */}
-          <div className="inspection-toolbar">
-            <div className="toolbar-search">
-              <span className="toolbar-search-icon">⌕</span>
+          <div className="cc-toolbar">
+            <div className="cc-toolbar-search">
+              <span className="cc-toolbar-search-icon">⌕</span>
               <input
                 value={serverFilter}
                 onChange={(e) => setServerFilter(e.target.value)}
@@ -1020,31 +1054,29 @@ export default function InspectionCenterPage() {
                 aria-label="搜索服务器"
               />
               {serverFilter && (
-                <button className="btn btn-subtle" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => setServerFilter('')}>清空</button>
+                <button className="cc-icon-btn" style={{ padding: '0 8px', height: 20, fontSize: 10 }} onClick={() => setServerFilter('')}>清空</button>
               )}
             </div>
-            <div className="toolbar-divider" />
-            <div className="toolbar-actions">
-              <button className="btn btn-subtle" onClick={() => { setSelectedServerIds(activeServerIds); setMessage(`已选择全部在线/启用服务器 ${activeServerIds.length} 台，停用/离线 ${disabledServerCount} 台会自动跳过。`) }} disabled={running || activeServerIds.length === 0}>全选在线</button>
-              <button className="btn btn-subtle" onClick={() => { setSelectedServerIds([]); setSelectedGroups([]) }}>清空选择</button>
-              <button className="btn btn-subtle" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}>展开全部</button>
-              <button className="btn btn-subtle" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}>收起全部</button>
+            <div className="cc-toolbar-divider" />
+            <div className="cc-toolbar-actions">
+              <button className="cc-icon-btn" onClick={() => { setSelectedServerIds(activeServerIds); setMessage(`已选择全部在线/启用服务器 ${activeServerIds.length} 台，停用/离线 ${disabledServerCount} 台会自动跳过。`) }} disabled={running || activeServerIds.length === 0}>全选在线</button>
+              <button className="cc-icon-btn" onClick={() => { setSelectedServerIds([]); setSelectedGroups([]) }}>清空选择</button>
+              <button className="cc-icon-btn" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}>展开全部</button>
+              <button className="cc-icon-btn" onClick={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}>收起全部</button>
             </div>
-            <div className="toolbar-cta">
-              <label className="toolbar-summary" title="选择单台服务器">
-                单台
-                <select value={serverId} onChange={(e) => setServerId(e.target.value)} style={{ marginLeft: 6, padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-page)' }}>
-                  {servers.filter(isServerInspectable).map((s) => <option key={s.id || s.name} value={s.id || s.name}>{s.name || s.id}</option>)}
-                </select>
-              </label>
-              <button className="btn primary" onClick={runServer} disabled={running || !serverId}>{running ? '巡检中…' : '巡检单台'}</button>
-              <button className="btn" onClick={() => runServersBatch()} disabled={running || (selectedServerIds.length === 0 && selectedGroups.length === 0)}>{running ? '巡检中…' : `巡检选中 (${selectedServerIds.length + selectedGroups.length})`}</button>
+            <div className="cc-toolbar-cta">
+              <span className="cc-toolbar-summary">单台</span>
+              <select className="cc-select" value={serverId} onChange={(e) => setServerId(e.target.value)}>
+                {servers.filter(isServerInspectable).map((s) => <option key={s.id || s.name} value={s.id || s.name}>{s.name || s.id}</option>)}
+              </select>
+              <button className="cc-icon-btn cc-icon-btn--success" onClick={runServer} disabled={running || !serverId}>{running ? '巡检中…' : '巡检单台'}</button>
+              <button className="cc-icon-btn" onClick={() => runServersBatch()} disabled={running || (selectedServerIds.length === 0 && selectedGroups.length === 0)}>{running ? '巡检中…' : `巡检选中 (${selectedServerIds.length + selectedGroups.length})`}</button>
             </div>
           </div>
 
           {/* 3. 分组快速选择（chip） */}
           {Object.keys(groupedServers).length > 0 && (
-            <div className="inspection-group-quick">
+            <div className="cc-group-chip-row">
               <span className="quick-label">按分组：</span>
               {Object.entries(groupedServers).map(([group, list]) => {
                 const inspectableCount = (list as any[]).filter(isServerInspectable).length
@@ -1052,7 +1084,7 @@ export default function InspectionCenterPage() {
                 return (
                   <span
                     key={group}
-                    className={`group-chip${active ? ' group-chip--active' : ''}`}
+                    className={`cc-group-chip${active ? ' cc-group-chip--active' : ''}`}
                     onClick={() => {
                       const next = active ? selectedGroups.filter((x) => x !== group) : Array.from(new Set([...selectedGroups, group]))
                       setSelectedGroups(next)
@@ -1062,19 +1094,19 @@ export default function InspectionCenterPage() {
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); (e.currentTarget as HTMLSpanElement).click() } }}
                   >
                     {group}
-                    <span className="group-chip-count">{inspectableCount}</span>
+                    <span className="cc-group-chip-count">{inspectableCount}</span>
                   </span>
                 )
               })}
               {selectedGroups.length > 0 && (
-                <button className="btn btn-subtle" style={{ marginLeft: 4, padding: '2px 8px', fontSize: 11 }} onClick={() => setSelectedGroups([])}>清空分组</button>
+                <button className="cc-icon-btn" style={{ marginLeft: 4, height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => setSelectedGroups([])}>清空分组</button>
               )}
             </div>
           )}
 
           {/* 4. 紧凑服务器表格（按分组折叠） */}
-          <div className="inspection-server-scroll">
-            <table className="inspection-server-table">
+          <div className="cc-table-wrap inspection-server-scroll">
+            <table className="cc-table inspection-server-table">
               <thead>
                 <tr>
                   <th style={{ width: 36 }}><input type="checkbox" title="全选当前可见" checked={visibleServerIds.length > 0 && visibleServerIds.every((id) => selectedServerIds.includes(id))} onChange={(e) => setSelectedServerIds(e.target.checked ? Array.from(new Set([...selectedServerIds, ...visibleServerIds])) : selectedServerIds.filter((x) => !visibleServerIds.includes(x)))} /></th>
@@ -1086,7 +1118,7 @@ export default function InspectionCenterPage() {
               </thead>
               <tbody>
                 {Object.keys(groupedServers).length === 0 && (
-                  <tr><td colSpan={5} style={{ textAlign: 'center', padding: 24, color: 'var(--text-muted)' }}>{serverFilter ? `没有匹配「${serverFilter}」的服务器` : '暂无服务器，请先在「服务器」管理中添加'}</td></tr>
+                  <tr><td colSpan={5} className="cc-empty-state" style={{ padding: 24 }}>{serverFilter ? `没有匹配「${serverFilter}」的服务器` : '暂无服务器，请先在「服务器」管理中添加'}</td></tr>
                 )}
                 {Object.entries(groupedServers).map(([group, list]) => {
                   const ids = (list as any[]).filter(isServerInspectable).map((s) => s.id || s.name).filter(Boolean)

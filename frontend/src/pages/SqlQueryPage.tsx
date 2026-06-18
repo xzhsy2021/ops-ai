@@ -1,6 +1,35 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { maintenance } from '../api'
 import { DataTable } from '../components/ui'
+
+function SqlEditorWithGutter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const lineCount = Math.max(1, value.split('\n').length)
+  const gutterRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const lines = Array.from({ length: lineCount }, (_, i) => i + 1)
+
+  return (
+    <div className="cc-editor-wrap">
+      <div className="cc-editor-gutter" ref={gutterRef} aria-hidden="true">
+        {lines.map((n) => <div key={n}>{n}</div>)}
+      </div>
+      <textarea
+        ref={inputRef}
+        className="sql-editor"
+        value={value}
+        spellCheck={false}
+        onChange={(e) => onChange(e.target.value)}
+        onScroll={(e) => {
+          if (gutterRef.current) {
+            gutterRef.current.scrollTop = (e.target as HTMLTextAreaElement).scrollTop
+          }
+        }}
+        aria-label="SQL 编辑器"
+        placeholder="-- 在这里写 SQL，例如：&#10;SELECT id, name FROM users WHERE status = 1 LIMIT 50;"
+      />
+    </div>
+  )
+}
 
 function pickData<T = any>(res: any, fallback: T): T {
   if (!res) return fallback
@@ -303,7 +332,7 @@ LIMIT 100` },
                 <h2>SQL Editor</h2>
                 <p>建议先预览校验，再执行查询。</p>
               </div>
-              <span className={`status-badge ${readonlySafe ? 'status-badge--success' : 'status-badge--danger'}`}>
+              <span className={`cc-chip ${readonlySafe ? 'cc-chip--ok' : 'cc-chip--danger'}`}>
                 {readonlySafe ? '只读语句' : '需检查语句'}
               </span>
             </div>
@@ -316,13 +345,7 @@ LIMIT 100` },
               <button type="button" className="sql-snippet-btn sql-snippet-btn--muted" onClick={() => navigator.clipboard?.writeText(sql)}>复制 SQL</button>
               <button type="button" className="sql-snippet-btn sql-snippet-btn--muted" onClick={() => { setSql(''); setPreview(null); setResult(null) }}>清空</button>
             </div>
-            <textarea
-              className="sql-editor"
-              value={sql}
-              spellCheck={false}
-              onChange={(e) => { setSql(e.target.value); setPreview(null); setResult(null) }}
-              aria-label="SQL 编辑器"
-            />
+            <SqlEditorWithGutter value={sql} onChange={(v) => { setSql(v); setPreview(null); setResult(null) }} />
             <div className="sql-actions">
               <button className="btn btn-subtle" onClick={doPreview} disabled={loading || !connectionId || !sql.trim()}>
                 预览校验
@@ -340,11 +363,11 @@ LIMIT 100` },
                   <h2>执行预览</h2>
                   <p>后端生成的实际执行语句。</p>
                 </div>
-                <div className="preview-meta">
-                  <span>{preview.query_type || '-'}</span>
-                  <span>{String(preview.readonly ?? true)}</span>
-                  <span>limit {preview.limit || limit}</span>
-                  <span>{preview.timeout_seconds || timeoutSeconds}s</span>
+                <div className="sql-preview-meta">
+                  <span>TYPE · {preview.query_type || '-'}</span>
+                  <span>READONLY · {String(preview.readonly ?? true)}</span>
+                  <span>LIMIT · {preview.limit || limit}</span>
+                  <span>TIMEOUT · {preview.timeout_seconds || timeoutSeconds}s</span>
                 </div>
               </div>
               {(preview.blockers || []).map((w: string) => <div key={w} className="alert-card alert-card--danger">⛔ {w}</div>)}
@@ -371,11 +394,13 @@ LIMIT 100` },
               <div className="section-title-row">
                 <div>
                   <h2>查询结果</h2>
-                  <p>{result.row_count ?? rows.length} 行 · {result.duration_ms ?? '-'} ms</p>
+                  <p>执行返回的行与耗时</p>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span className="cc-chip cc-chip--ok">{result.row_count ?? rows.length} ROWS</span>
+                  <span className="cc-chip cc-chip--info">{result.duration_ms ?? '-'} MS</span>
                   {rows.length > 0 && (
-                    <button className="btn btn-subtle" onClick={handleExportCSV}>导出 CSV</button>
+                    <button className="cc-icon-btn" onClick={handleExportCSV}>导出 CSV</button>
                   )}
                 </div>
               </div>

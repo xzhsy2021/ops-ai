@@ -182,24 +182,36 @@ export default function ServerDetailPage() {
   return (
     <div className={`server-workbench-shell ${isStandalone ? 'server-workbench-shell--standalone' : ''}`}>
       <header className="server-workbench-header glass-panel">
-        <div className="server-title-block">
-          <span className="eyebrow">Remote Session</span>
-          <h1>{name}</h1>
-          <p>{isStandalone ? '独立终端窗口' : '服务器概览、终端、文件与命令历史统一工作台'}</p>
-        </div>
-        <div className="server-workbench-actions">
-          <span className="status-badge status-badge--neutral">SSH</span>
-          <span className="status-badge status-badge--success">Audited</span>
-          {isStandalone && <button className="btn btn-subtle" onClick={() => window.close()}>关闭</button>}
+        <div className="cc-server-detail-header" style={{ width: '100%' }}>
+          <div>
+            <span className="cc-hero-eyebrow">REMOTE SESSION · {isStandalone ? 'STANDALONE' : 'WORKBENCH'}</span>
+            <h1 className="cc-hero-title" style={{ fontSize: 22 }}>{name}</h1>
+            <p className="cc-hero-desc">{isStandalone ? '独立终端窗口 · 实时 SSH 会话' : '服务器概览、终端、文件与命令历史统一工作台'}</p>
+            <div className="cc-server-detail-meta">
+              <span className="cc-chip cc-chip--ok">SSH</span>
+              <span className="cc-chip cc-chip--info">Audited</span>
+              <span className="cc-status cc-status--ok">已连接</span>
+            </div>
+          </div>
+          <div className="cc-server-detail-actions">
+            {isStandalone ? (
+              <button className="cc-icon-btn cc-icon-btn--danger" onClick={() => window.close()}>关闭</button>
+            ) : (
+              <>
+                <a className="cc-icon-btn" href={`/servers/${encodeURIComponent(name!)}?standalone`} target="_blank" rel="noreferrer">独立终端</a>
+                <a className="cc-icon-btn cc-icon-btn--success" href={`/servers`}>返回列表</a>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      <nav className="server-tabbar" aria-label="服务器工作台标签">
+      <nav className="cc-tabbar" aria-label="服务器工作台标签">
         {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => handleTabChange(t.key)}
-            className={`server-tab ${activeTab === t.key ? 'active' : ''}`}
+            className={`cc-tab${activeTab === t.key ? ' cc-tab--active' : ''}`}
           >
             {t.label}
           </button>

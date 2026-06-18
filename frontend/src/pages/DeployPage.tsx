@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { deployment } from '../api'
 import { useNotificationStore } from '../store'
 import { ROUTES } from '../routes'
-import { RiskConfirmDialog, Skeleton, PageHeader, FavoriteButton } from '../components/ui'
+import { RiskConfirmDialog, Skeleton, FavoriteButton } from '../components/ui'
 import { StepWizard } from '../components/StepWizard'
 import DeployTargetStep from './deploy/DeployTargetStep'
 import DeployPackageStep from './deploy/DeployPackageStep'
@@ -290,27 +290,34 @@ export default function DeployPage() {
 
   return (
     <div style={{ display: 'grid', gap: '20px' }}>
-      <PageHeader
-        title="发布管理"
-        description="创建、执行和追踪应用发布"
-        badge={<span className="tag">{system || '请选择系统'}</span>}
-        actions={<FavoriteButton url={ROUTES.deploy} label="发布管理" category="deploy" />}
-      />
-      <div style={{ display: 'flex', gap: '12px', marginBottom: '4px' }}>
-        <button
-          className="btn"
-          onClick={() => { setSelectedReport(null); setActiveTab('deploy') }}
-          style={{ background: activeTab === 'deploy' ? 'var(--action-bg)' : 'var(--border-strong)', color: 'var(--text-primary)' }}
-        >
-          新发布
-        </button>
-        <button
-          className="btn"
-          onClick={() => { setActiveTab('history'); loadDeployments() }}
-          style={{ background: activeTab === 'history' ? 'var(--action-bg)' : 'var(--border-strong)', color: 'var(--text-primary)' }}
-        >
-          部署历史
-        </button>
+      <header className="cc-hero">
+        <div>
+          <span className="cc-hero-eyebrow">Deploy · Release Management</span>
+          <h1 className="cc-hero-title">发布管理</h1>
+          <p className="cc-hero-desc">创建、执行和追踪应用发布；所有高风险操作都经过预检、变量解析和风险确认。</p>
+        </div>
+        <div className="cc-hero-stats">
+          <div className="cc-hero-stat cc-hero-stat--info">
+            <strong>{system || '—'}</strong>
+            <span>系统</span>
+          </div>
+          <div className="cc-hero-stat cc-hero-stat--ok">
+            <strong>{selectedServerNames.length}</strong>
+            <span>目标服务器</span>
+          </div>
+          <div className={`cc-hero-stat ${precheckResult?.status === 'blocked' ? 'cc-hero-stat--risk' : precheckResult?.status === 'warning' ? 'cc-hero-stat--warn' : 'cc-hero-stat--ok'}`}>
+            <strong>{precheckResult ? (precheckResult.status === 'ok' ? 'OK' : precheckResult.status === 'blocked' ? 'BLOCK' : 'WARN') : '—'}</strong>
+            <span>预检</span>
+          </div>
+        </div>
+        <div style={{ position: 'absolute', right: 30, top: 26 }}>
+          <FavoriteButton url={ROUTES.deploy} label="发布管理" category="deploy" />
+        </div>
+      </header>
+
+      <div className="file-tab-bar" role="tablist">
+        <button className={activeTab === 'deploy' ? 'is-active' : ''} onClick={() => { setSelectedReport(null); setActiveTab('deploy') }}>新发布</button>
+        <button className={activeTab === 'history' ? 'is-active' : ''} onClick={() => { setActiveTab('history'); loadDeployments() }}>部署历史</button>
       </div>
 
       {optionsLoading && systems.length === 0 && (
@@ -403,55 +410,54 @@ export default function DeployPage() {
             activeStep={wizardStep}
             onStepChange={setWizardStep}
           />
-          <div className="glass-card" style={{ padding: '12px', fontSize: '13px', position: 'sticky', top: '12px' }}>
-            <div style={{ fontWeight: 600, marginBottom: '10px', fontSize: '14px' }}>已选配置</div>
-            <div style={{ display: 'grid', gap: '8px' }}>
-              <div>
-                <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>系统 / 服务 / 环境</div>
-                <div style={{ color: 'var(--text-primary)' }}>{system || '-'}</div>
-                <div style={{ color: 'var(--text-primary)' }}>{service || '-'}</div>
-                <div style={{ color: 'var(--text-primary)' }}>{environment || '-'}</div>
+          <div className="deploy-summary-card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <strong style={{ fontFamily: 'var(--font-display)', fontSize: 13, color: 'var(--text-strong)', letterSpacing: '-0.01em' }}>已选配置</strong>
+              <span className="cc-chip cc-chip--ghost">SUMMARY</span>
+            </div>
+            <div className="deploy-summary-grid">
+              <div className="deploy-summary-item">
+                <label>系统</label><span>{system || '—'}</span>
               </div>
-              <div>
-                <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>发布包</div>
-                <div style={{ color: 'var(--text-primary)', wordBreak: 'break-all' }}>{fileName || '-'}</div>
+              <div className="deploy-summary-item">
+                <label>服务</label><span>{service || '—'}</span>
               </div>
-              <div>
-                <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>目标服务器 ({selectedServerNames.length})</div>
-                <div style={{ color: 'var(--text-primary)', maxHeight: '80px', overflow: 'auto' }}>
-                  {selectedServerNames.length > 0 ? selectedServerNames.join(', ') : '-'}
-                </div>
+              <div className="deploy-summary-item">
+                <label>环境</label><span>{environment || '—'}</span>
               </div>
-              <div>
-                <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>Pipeline</div>
-                <div style={{ color: 'var(--text-primary)' }}>{pipelineId || '默认'}</div>
+              <div className="deploy-summary-item">
+                <label>发布包</label><span>{fileName || '—'}</span>
               </div>
-              <div>
-                <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>并行度 / 快速失败</div>
-                <div style={{ color: 'var(--text-primary)' }}>{parallelism} / {failFast ? '是' : '否'}</div>
+              <div className="deploy-summary-item">
+                <label>目标服务器 · {selectedServerNames.length}</label>
+                <span style={{ maxHeight: 80, overflow: 'auto' }}>{selectedServerNames.length > 0 ? selectedServerNames.join(', ') : '—'}</span>
+              </div>
+              <div className="deploy-summary-item">
+                <label>Pipeline</label><span>{pipelineId || '默认'}</span>
+              </div>
+              <div className="deploy-summary-item">
+                <label>并行度 / 快速失败</label><span>{parallelism} / {failFast ? '是' : '否'}</span>
               </div>
               {precheckResult && (
-                <div>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>预检状态</div>
-                  <div style={{ color: precheckResult.status === 'ok' ? 'var(--success)' : precheckResult.status === 'blocked' ? 'var(--danger)' : 'var(--warning)' }}>
+                <div className={`deploy-summary-item ${precheckResult.status === 'blocked' ? 'deploy-summary-item--danger' : precheckResult.status === 'warning' ? 'deploy-summary-item--warning' : ''}`}>
+                  <label>预检状态</label>
+                  <span>
                     {precheckResult.status === 'ok' ? '通过' : precheckResult.status === 'blocked' ? '阻塞' : '警告'}
-                  </div>
+                  </span>
                 </div>
               )}
             </div>
           </div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginTop: '16px' }}>
-          <button className="btn" onClick={goBack} disabled={wizardStep === 0}
-            style={{ background: 'var(--border-strong)', color: 'var(--text-secondary)' }}>
-            上一步
+          <button className="cc-icon-btn" onClick={goBack} disabled={wizardStep === 0} style={{ height: 32 }}>
+            ← 上一步
           </button>
-          <span className="muted-text" style={{ alignSelf: 'center', fontSize: '13px' }}>
-            {wizardStep + 1} / 6
+          <span className="cc-chip cc-chip--ghost" style={{ alignSelf: 'center' }}>
+            STEP {wizardStep + 1} / 6
           </span>
-          <button className="btn" onClick={goNext} disabled={wizardStep === 5}
-            style={{ background: 'var(--action-bg)', color: 'var(--action-text)' }}>
-            下一步
+          <button className="cc-icon-btn cc-icon-btn--success" onClick={goNext} disabled={wizardStep === 5} style={{ height: 32 }}>
+            下一步 →
           </button>
         </div>
         <ReleasePlanPanel system={system} service={service} environment={environment} />

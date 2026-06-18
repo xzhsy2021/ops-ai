@@ -2,7 +2,7 @@ import WorkbenchClock from "./components/WorkbenchClock"
 import { useEffect, useState, lazy, Suspense, useCallback, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { Routes, Route, Link, useLocation, Navigate, useNavigate } from 'react-router-dom'
-import { Orbit } from 'lucide-react'
+import { Search } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuthStore, useNotificationStore, useBackendStore } from './store'
 import { auth, resetAuthBootstrap, serverManagement, capabilityTools, deployment } from './api'
@@ -41,6 +41,34 @@ const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 const SystemListPage = lazy(() => import('./pages/SystemListPage'))
 const SystemEditPage = lazy(() => import('./pages/SystemEditPage'))
 const ServiceEditPage = lazy(() => import('./pages/ServiceEditPage'))
+
+function BrandMark({ size = 22 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      aria-hidden="true"
+      style={{ display: 'block' }}
+    >
+      <path
+        d="M16 4 L27 10.5 L27 21.5 L16 28 L5 21.5 L5 10.5 Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+        opacity="0.95"
+      />
+      <path
+        d="M16 4 L16 28 M5 10.5 L27 21.5 M27 10.5 L5 21.5"
+        stroke="currentColor"
+        strokeWidth="1"
+        opacity="0.55"
+      />
+      <circle cx="16" cy="16" r="2.6" fill="currentColor" />
+    </svg>
+  )
+}
 
 type ThemeMode = 'light' | 'dark'
 
@@ -403,7 +431,7 @@ function App() {
             <div className="sidebar-brand-row">
               <Link to={ROUTES.dashboard} className="app-brand" aria-label="返回工作台">
                 <span className="app-brand-mark" aria-hidden="true">
-                  <Orbit size={34} strokeWidth={2.8} />
+                  <BrandMark size={22} />
                 </span>
                 <span className="brand-copy">
                   <strong>OPS</strong>
@@ -464,9 +492,12 @@ function App() {
 
               <div className="topbar-actions">
                 <WorkbenchClock />
-                <span className="release-freeze-badge" title={`当前封板基线 ${FRONTEND_BUILD_INFO.version}`}>团队稳定版</span>
+                <span className="release-freeze-badge" title={`当前封板基线 ${FRONTEND_BUILD_INFO.version}`}>团队稳定版 · {FRONTEND_BUILD_INFO.version}</span>
                 <button className="command-trigger" onClick={() => setCommandOpen(true)} aria-label="打开命令面板">
-                  <span>搜索或跳转</span>
+                  <span className="command-trigger-text">
+                    <Search size={14} strokeWidth={2.4} aria-hidden="true" />
+                    <span>搜索或跳转</span>
+                  </span>
                   <kbd>Ctrl K</kbd>
                 </button>
                 <button className="theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'} aria-label={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}>

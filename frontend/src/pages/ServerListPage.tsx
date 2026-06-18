@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { serverManagement, adminMaintenance } from '../api'
-import { RiskConfirmDialog, PageHeader } from '../components/ui'
+import { RiskConfirmDialog } from '../components/ui'
 import { EnhancedDataTable } from '../components/EnhancedDataTable'
 import type { EnhancedColumn } from '../components/EnhancedDataTable'
 import { useCachedResource } from '../hooks/useCachedResource'
@@ -84,16 +85,28 @@ function normalizeServerStatus(s: any): 'online' | 'disabled' | 'offline' {
   return 'online'
 }
 
+function serverStatusChipClass(status: string) {
+  if (status === 'disabled') return 'cc-chip cc-chip--ghost'
+  if (status === 'offline') return 'cc-chip cc-chip--danger'
+  return 'cc-chip cc-chip--ok'
+}
+
 function serverStatusLabel(status: string) {
   if (status === 'disabled') return '停用'
   if (status === 'offline') return '离线'
   return '在线'
 }
 
-function serverStatusStyle(status: string) {
-  if (status === 'disabled') return { color: 'var(--text-muted)', background: 'var(--bg-page)' }
-  if (status === 'offline') return { color: 'var(--danger)', background: 'var(--danger-surface)' }
-  return { color: 'var(--success)', background: 'var(--success-surface)' }
+function authModeChipClass(mode: string) {
+  if (mode === 'password') return 'cc-chip cc-chip--warn'
+  if (mode === 'key_file') return 'cc-chip cc-chip--ok'
+  return 'cc-chip cc-chip--info'
+}
+
+function cfgChipClass(cfgStatus: string) {
+  if (cfgStatus === 'blocked') return 'cc-chip cc-chip--danger'
+  if (cfgStatus === 'warning') return 'cc-chip cc-chip--warn'
+  return 'cc-chip cc-chip--ok'
 }
 
 const emptyForm: ServerForm = {
@@ -105,6 +118,82 @@ const emptyForm: ServerForm = {
 
 const emptyBatchForm: BatchForm = {
   description: '', tags: '', jump_host: '', username: '', auth_type: '', port: '', group: '', status: '',
+}
+
+/**
+ * 操作列图标按钮：用 React Portal 渲染 tooltip，避免被 sticky 末列、stacking context、overflow 裁剪遮挡
+ * - position: fixed + z-index 10000 强制浮在所有元素之上
+ * - 动态计算 button 位置；底部空间不足时翻转到上方
+ * - 鼠标移入/键盘聚焦时显示，移出/失焦时关闭
+ */
+function ActionButton({
+  tip,
+  onClick,
+  variant,
+  disabled,
+  children,
+}: {
+  tip: string
+  onClick: (e: React.MouseEvent) => void
+  variant?: 'success' | 'danger'
+  disabled?: boolean
+  children: ReactNode
+}) {
+  const ref = useRef<HTMLButtonElement | null>(null)
+  const [show, setShow] = useState(false)
+  const [placement, setPlacement] = useState<'below' | 'above'>('below')
+  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 })
+
+  const updatePos = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const TIP_H = 30
+    const above = rect.bottom + TIP_H > window.innerHeight && rect.top - TIP_H > 0
+    setPlacement(above ? 'above' : 'below')
+    setPos({
+      top: above ? rect.top - 6 : rect.bottom + 6,
+      left: rect.left + rect.width / 2,
+    })
+  }, [])
+
+  const handleEnter = useCallback(() => {
+    updatePos()
+    setShow(true)
+  }, [updatePos])
+
+  const handleLeave = useCallback(() => setShow(false), [])
+
+  const cls = `cc-icon-btn${variant === 'success' ? ' cc-icon-btn--success' : ''}${variant === 'danger' ? ' cc-icon-btn--danger' : ''}`
+
+  return (
+    <>
+      <button
+        ref={ref}
+        className={cls}
+        onClick={onClick}
+        disabled={disabled}
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        onFocus={handleEnter}
+        onBlur={handleLeave}
+        data-stop-row-click
+      >
+        {children}
+      </button>
+      {show &&
+        createPortal(
+          <div
+            className={`cc-tooltip-portal${placement === 'above' ? ' cc-tooltip-portal--above' : ''}`}
+            style={{ top: pos.top, left: pos.left }}
+            role="tooltip"
+          >
+            {tip}
+          </div>,
+          document.body,
+        )}
+    </>
+  )
 }
 
 export default function ServerListPage() {
@@ -135,6 +224,7 @@ export default function ServerListPage() {
   const [keyError, setKeyError] = useState('')
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [batchForm, setBatchForm] = useState<BatchForm>({ ...emptyBatchForm })
   const [batchSaving, setBatchSaving] = useState(false)
@@ -154,6 +244,7 @@ export default function ServerListPage() {
   const [groupActionsOpen, setGroupActionsOpen] = useState<string | null>(null)
   const [configFilter, setConfigFilter] = useState<'all' | 'passed' | 'warning' | 'blocked'>('all')
   const [serverStatusFilter, setServerStatusFilter] = useState<'all' | 'online' | 'disabled' | 'offline'>('all')
+  const [serverFilter, setServerFilter] = useState<string>('')
   const [healthChecking, setHealthChecking] = useState<Record<string, boolean>>({})
   const [riskAction, setRiskAction] = useState<{
     title: string
@@ -197,7 +288,7 @@ export default function ServerListPage() {
   useEffect(() => { load(); loadKeys() }, [])
 
   // 筛选变化时重置到第一页
-  useEffect(() => { setServerPage(1) }, [selectedGroup, configFilter, serverStatusFilter])
+  useEffect(() => { setServerPage(1) }, [selectedGroup, configFilter, serverStatusFilter, serverFilter])
 
   const groupNames = groups
     .filter((g) => !g.is_default)
@@ -209,9 +300,18 @@ export default function ServerListPage() {
       ? servers.filter((s) => !s.group)
       : servers.filter((s) => s.group === selectedGroup)
 
-  const byStatusServers = serverStatusFilter === 'all'
+  const filteredByName = !serverFilter
     ? groupedServers
-    : groupedServers.filter((s) => normalizeServerStatus(s) === serverStatusFilter)
+    : groupedServers.filter((s) => {
+        const q = serverFilter.toLowerCase()
+        return (s.name || '').toLowerCase().includes(q)
+          || (s.host || '').toLowerCase().includes(q)
+          || (s.description || '').toLowerCase().includes(q)
+      })
+
+  const byStatusServers = serverStatusFilter === 'all'
+    ? filteredByName
+    : filteredByName.filter((s) => normalizeServerStatus(s) === serverStatusFilter)
 
   const filteredServers = configFilter === 'all'
     ? byStatusServers
@@ -649,74 +749,73 @@ export default function ServerListPage() {
 
   const serverColumns: EnhancedColumn<ServerRow>[] = [
     {
-      key: 'name', title: '名称',
+      key: 'name', title: '名称', width: 200, sticky: 'start',
       render: (s: ServerRow) => (
-        <span onClick={() => window.open(`/servers/${encodeURIComponent(s.name)}?standalone`, '_blank')}
-          style={{ color: 'var(--brand)', cursor: 'pointer', fontWeight: 'bold' }}>
+        <span
+          onClick={(e) => { e.stopPropagation(); window.open(`/servers/${encodeURIComponent(s.name)}?standalone`, '_blank') }}
+          style={{ color: 'var(--brand)', cursor: 'pointer', fontWeight: 600, fontFamily: 'var(--font-display)', fontSize: 13 }}
+          data-stop-row-click
+        >
           {s.name}
         </span>
       ),
     },
-    { key: 'host', title: '地址', render: (s: ServerRow) => <span style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{s.host}</span> },
-    { key: 'port', title: '端口', render: (s: ServerRow) => <span style={{ color: 'var(--text-muted)' }}>{s.port || 22}</span> },
-    { key: 'user', title: '用户', render: (s: ServerRow) => <span style={{ color: 'var(--text-secondary)' }}>{s.username || s.user || 'root'}</span> },
+    { key: 'host', title: '地址', width: 180, render: (s: ServerRow) => <span className="cc-status" style={{ color: 'var(--text-secondary)', letterSpacing: 0, textTransform: 'none' }}>{s.host}</span> },
+    { key: 'port', title: '端口', width: 80, className: 'col-hide-md', render: (s: ServerRow) => <span style={{ color: 'var(--text-muted)' }}>{s.port || 22}</span> },
+    { key: 'user', title: '用户', width: 100, className: 'col-hide-md', render: (s: ServerRow) => <span style={{ color: 'var(--text-secondary)' }}>{s.username || s.user || 'root'}</span> },
     {
-      key: 'auth', title: '认证',
+      key: 'auth', title: '认证', width: 110,
       render: (s: ServerRow) => {
         const authMode = s.auth_type || (s.key_content ? 'key_content' : s.key || s.key_file ? 'key_file' : 'password')
+        const label = authMode === 'password' ? '密码' : authMode === 'key_file' ? '密钥文件' : '密钥内容'
+        return <span className={authModeChipClass(authMode)}>{label}</span>
+      },
+    },
+    {
+      key: 'group', title: '分组', width: 130, className: 'col-hide-sm',
+      render: (s: ServerRow) => {
+        if (!s.group) return <span style={{ color: 'var(--text-faint)' }}>—</span>
+        const groupColor = getGroupColor(s.group)
         return (
-          <span style={{
-            color: authMode === 'password' ? 'var(--warning)' : authMode === 'key_file' ? 'var(--success)' : 'var(--purple-text)',
-            background: authMode === 'password' ? 'var(--warning-surface)' : authMode === 'key_file' ? 'var(--success-surface)' : 'var(--purple-surface)',
-            padding: '1px 8px', borderRadius: '4px', fontSize: '12px',
-          }}>
-            {authMode === 'password' ? '密码' : authMode === 'key_file' ? '密钥文件' : '密钥内容'}
+          <span className="cc-chip" style={{ color: groupColor?.text, background: 'transparent', borderColor: 'var(--border)' }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: groupColor?.text, marginRight: 4 }} />
+            {s.group}
           </span>
         )
       },
     },
     {
-      key: 'group', title: '分组',
-      render: (s: ServerRow) => {
-        if (!s.group) return <span style={{ color: 'var(--border-stronger)', fontSize: '12px' }}>—</span>
-        const groupColor = getGroupColor(s.group)
-        return <span style={{ color: groupColor?.text, background: groupColor?.bg, padding: '1px 8px', borderRadius: '4px', fontSize: '12px' }}>{s.group}</span>
-      },
-    },
-    {
-      key: 'jump', title: '跳板机',
+      key: 'jump', title: '跳板机', width: 140, className: 'col-hide-md',
       render: (s: ServerRow) => {
         const jumpLabel = typeof s.jump_host === 'string' ? s.jump_host : s.jump_host?.name || ''
-        return <span style={{ color: jumpLabel ? 'var(--action-text)' : 'var(--text-muted)', fontSize: '12px' }}>{jumpLabel || '-'}</span>
+        return <span style={{ color: jumpLabel ? 'var(--text-secondary)' : 'var(--text-faint)', fontSize: 11.5 }}>{jumpLabel || '—'}</span>
       },
     },
     {
-      key: 'desc', title: '描述',
-      render: (s: ServerRow) => <span style={{ color: 'var(--text-muted)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{s.description || '-'}</span>,
+      key: 'desc', title: '描述', className: 'col-hide-sm',
+      render: (s: ServerRow) => <span style={{ color: 'var(--text-muted)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', fontSize: 12 }}>{s.description || '—'}</span>,
     },
     {
-      key: 'status', title: '状态',
+      key: 'status', title: '状态', width: 90,
       render: (s: ServerRow) => {
         const status = normalizeServerStatus(s)
-        const style = serverStatusStyle(status)
-        return <span style={{ ...style, display: 'inline-block', padding: '1px 8px', borderRadius: '4px', fontSize: '12px' }}>{serverStatusLabel(status)}</span>
+        return <span className={serverStatusChipClass(status)}>{serverStatusLabel(status)}</span>
       },
     },
     {
-      key: 'config', title: '配置/健康',
+      key: 'config', title: '配置 / 健康', width: 200, className: 'col-hide-xs',
       render: (s: ServerRow) => {
         const cfg = s.config_status || {}
         const cfgStatus = cfg.status || (cfg.complete ? 'passed' : 'blocked')
         const health = s.health_probe || {}
         const healthLabel = health.status === 'passed' ? '在线' : health.status === 'blocked' ? '异常' : '未检查'
+        const cfgLabel = cfgStatus === 'blocked' ? '配置缺失' : cfgStatus === 'warning' ? '有建议' : '配置完整'
         return (
-          <div style={{ display: 'grid', gap: '4px' }}>
-            <span title={(cfg.missing || []).join(', ') || (cfg.suggestions || []).join('；')} style={{
-              display: 'inline-block', width: 'fit-content', padding: '1px 8px', borderRadius: '4px', fontSize: '12px',
-              color: cfgStatus === 'blocked' ? 'var(--danger)' : cfgStatus === 'warning' ? 'var(--warning)' : 'var(--success)',
-              background: cfgStatus === 'blocked' ? 'var(--danger-surface)' : cfgStatus === 'warning' ? 'var(--warning-surface)' : 'var(--success-surface)',
-            }}>{cfgStatus === 'blocked' ? '配置缺失' : cfgStatus === 'warning' ? '有建议' : '配置完整'}</span>
-            <span style={{ color: health.status === 'passed' ? 'var(--success)' : health.status === 'blocked' ? 'var(--danger)' : 'var(--text-muted)', fontSize: '12px' }}>
+          <div style={{ display: 'grid', gap: 4 }}>
+            <span title={(cfg.missing || []).join(', ') || (cfg.suggestions || []).join('；')} className={cfgChipClass(cfgStatus)}>
+              {cfgLabel}
+            </span>
+            <span className={`cc-status ${health.status === 'passed' ? 'cc-status--ok' : health.status === 'blocked' ? 'cc-status--danger' : 'cc-status--muted'}`} style={{ letterSpacing: 0, textTransform: 'none', fontSize: 10.5 }}>
               {healthLabel}{health.disk?.available_kb ? ` · 可用 ${Math.round(health.disk.available_kb / 1024 / 1024)}GB` : ''}
             </span>
           </div>
@@ -724,227 +823,184 @@ export default function ServerListPage() {
       },
     },
     {
-      key: 'actions', title: '操作', align: 'right',
-      render: (s: ServerRow) => (
-        <div style={{ whiteSpace: 'nowrap' }}>
-          <button className="btn" onClick={() => quickToggleServerStatus(s)}
-            style={{ padding: '4px 12px', fontSize: '12px', background: normalizeServerStatus(s) === 'disabled' ? 'var(--success-surface)' : 'var(--warning-surface)', color: normalizeServerStatus(s) === 'disabled' ? 'var(--success)' : 'var(--warning)', marginRight: '6px' }}>
-            {normalizeServerStatus(s) === 'disabled' ? '启用' : '停用'}
-          </button>
-          <button className="btn" onClick={() => handleHealthProbe(s.name)} disabled={healthChecking[s.name]}
-            style={{ padding: '4px 12px', fontSize: '12px', background: 'var(--border-strong)', color: 'var(--action-text)', marginRight: '6px' }}>
-            {healthChecking[s.name] ? '检查中' : '健康'}
-          </button>
-          <button className="btn" onClick={() => navigate(`/servers/${encodeURIComponent(s.name)}`)}
-            style={{ padding: '4px 12px', fontSize: '12px', background: 'var(--action-bg)', color: 'var(--action-text)', marginRight: '6px' }}>
-            详情
-          </button>
-          <button className="btn" onClick={() => openEdit(s)}
-            style={{ padding: '4px 12px', fontSize: '12px', background: 'var(--border-strong)', color: 'var(--text-secondary)', marginRight: '6px' }}>
-            编辑
-          </button>
-          <button className="btn" onClick={() => handleDelete(s)}
-            style={{ padding: '4px 12px', fontSize: '12px', background: 'var(--danger-surface)', color: 'var(--danger)' }}>
-            删除
-          </button>
-        </div>
-      ),
+      key: 'actions', title: '操作', align: 'right', width: 170, sticky: 'end',
+      render: (s: ServerRow) => {
+        const status = normalizeServerStatus(s)
+        const toggleTip = status === 'disabled' ? '启用' : '停用'
+        return (
+          <div className="col-actions" data-stop-row-click>
+            <ActionButton tip={toggleTip} onClick={(e) => { e.stopPropagation(); quickToggleServerStatus(s) }}>{status === 'disabled' ? '▶' : '⏸'}</ActionButton>
+            <ActionButton tip={healthChecking[s.name] ? '检查中' : '健康检查'} disabled={healthChecking[s.name]} onClick={(e) => { e.stopPropagation(); handleHealthProbe(s.name) }}>{healthChecking[s.name] ? '…' : '♥'}</ActionButton>
+            <ActionButton tip="详情" variant="success" onClick={(e) => { e.stopPropagation(); navigate(`/servers/${encodeURIComponent(s.name)}`) }}>↗</ActionButton>
+            <ActionButton tip="编辑" onClick={(e) => { e.stopPropagation(); openEdit(s) }}>✎</ActionButton>
+            <ActionButton tip="删除" variant="danger" onClick={(e) => { e.stopPropagation(); handleDelete(s) }}>×</ActionButton>
+          </div>
+        )
+      },
     },
   ]
 
   return (
-    <div style={{ display: 'grid', gap: '16px' }}>
-      <PageHeader
-        title="服务器管理"
-        description={`共 ${servers.length} 台服务器`}
-        badge={<span className="tag">{selectedGroup || '全部'}</span>}
-        breadcrumbs={[
-          { label: '基础设施', href: '/servers' },
-          { label: '服务器列表' },
-        ]}
-      />
-    <div style={{ display: 'flex', gap: '16px', minHeight: 0 }}>
-      <div style={{
-        width: '220px', minWidth: '220px', background: 'var(--bg-surface)',
-        borderRadius: '8px', padding: '12px 0', display: 'flex', flexDirection: 'column',
-        border: '1px solid var(--border-strong)',
-      }}>
-        <div style={{ padding: '0 12px 10px', borderBottom: '1px solid var(--border-strong)', marginBottom: '4px' }}>
-          <span style={{ fontSize: '13px', fontWeight: 'bold', color: 'var(--text-secondary)' }}>服务器分组</span>
+    <div className="cc-grid-bg" style={{ display: 'grid', gap: 16, padding: '4px 0 24px' }}>
+      <div className="cc-hero">
+        <div>
+          <span className="cc-hero-eyebrow">INFRA · SERVERS</span>
+          <h1 className="cc-hero-title">服务器管理</h1>
+          <p className="cc-hero-desc">共 <strong style={{ color: 'var(--brand)' }}>{servers.length}</strong> 台服务器 · 分组 <strong style={{ color: 'var(--brand)' }}>{groupNames.length}</strong> 个{selectedGroup !== null ? ` · 当前：${selectedGroup === '' ? '未分组' : selectedGroup}` : ''}</p>
         </div>
-
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          <div
-            onClick={() => setSelectedGroup(null)}
-            onDragOver={(e) => handleGroupDragOver(e, '__all__')}
-            onDragLeave={handleGroupDragLeave}
-            onDrop={(e) => handleGroupDrop(e, '__all__')}
-            style={{
-              padding: '8px 12px', cursor: 'pointer', display: 'flex',
-              justifyContent: 'space-between', alignItems: 'center',
-              background: selectedGroup === null ? 'rgba(59, 130, 246, 0.15)' : dragOverGroup === '__all__' ? 'rgba(59, 130, 246, 0.1)' : undefined,
-              borderLeft: selectedGroup === null ? '3px solid var(--brand)' : '3px solid transparent',
-              transition: 'background 0.15s',
-            }}
-          >
-            <span style={{ fontSize: '13px', color: selectedGroup === null ? 'var(--text-primary)' : 'var(--text-secondary)' }}>全部</span>
-            <span style={{
-              fontSize: '11px', background: 'var(--border-strong)', color: 'var(--text-secondary)',
-              padding: '1px 7px', borderRadius: '10px',
-            }}>{servers.length}</span>
+        <div className="cc-hero-stats" style={{ minWidth: 220 }}>
+          <div className="cc-hero-stat cc-hero-stat--ok">
+            <strong>{statusCounts.online || 0}</strong><span>在线</span>
           </div>
-
-          {groupNames.map((name: string) => {
-            const color = getGroupColor(name)
-            const groupData = groups.find((g) => g.name === name)
-            const count = groupData?.server_count || 0
-            return (
-              <div
-                key={name}
-                onClick={() => setSelectedGroup(name)}
-                onDragOver={(e) => handleGroupDragOver(e, name)}
-                onDragLeave={handleGroupDragLeave}
-                onDrop={(e) => handleGroupDrop(e, name)}
-                style={{
-                  padding: '8px 12px', cursor: 'pointer', display: 'flex',
-                  justifyContent: 'space-between', alignItems: 'center', position: 'relative',
-                  background: selectedGroup === name ? 'rgba(59, 130, 246, 0.15)' : dragOverGroup === name ? 'rgba(59, 130, 246, 0.1)' : undefined,
-                  borderLeft: selectedGroup === name ? '3px solid var(--brand)' : '3px solid transparent',
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={(e) => {
-                  const el = e.currentTarget.querySelector('.group-actions') as HTMLElement
-                  if (el) el.style.opacity = '1'
-                }}
-                onMouseLeave={(e) => {
-                  const el = e.currentTarget.querySelector('.group-actions') as HTMLElement
-                  if (el) el.style.opacity = '0'
-                  setGroupActionsOpen(null)
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', flex: 1 }}>
-                  <span style={{
-                    width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
-                    background: color.text,
-                  }} />
-                  <span style={{
-                    fontSize: '13px', color: selectedGroup === name ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>{name}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{
-                    fontSize: '11px', background: 'var(--border-strong)', color: 'var(--text-secondary)',
-                    padding: '1px 7px', borderRadius: '10px',
-                  }}>{count}</span>
-                  <div className="group-actions" style={{ opacity: 0, transition: 'opacity 0.15s', position: 'relative' }}>
-                    <button
-                      className="btn"
-                      onClick={(e) => { e.stopPropagation(); setGroupActionsOpen(groupActionsOpen === name ? null : name) }}
-                      style={{ padding: '0 4px', fontSize: '14px', background: 'transparent', color: 'var(--text-muted)', lineHeight: 1 }}
-                    >
-                      ⋮
-                    </button>
-                    {groupActionsOpen === name && (
-                      <div style={{
-                        position: 'absolute', right: 0, top: '100%', zIndex: 100,
-                        background: 'var(--bg-surface)', border: '1px solid var(--border-stronger)', borderRadius: '6px',
-                        padding: '4px 0', minWidth: '80px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-                      }}>
-                        <button className="btn" onClick={(e) => { e.stopPropagation(); setGroupActionsOpen(null); handleRenameGroup(name) }}
-                          style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 12px', fontSize: '12px', background: 'transparent', color: 'var(--text-secondary)' }}>
-                          重命名
-                        </button>
-                        <button className="btn" onClick={(e) => { e.stopPropagation(); setGroupActionsOpen(null); handleDeleteGroup(name) }}
-                          style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 12px', fontSize: '12px', background: 'transparent', color: 'var(--danger)' }}>
-                          删除分组
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-
-          <div
-            onClick={() => setSelectedGroup('')}
-            onDragOver={(e) => handleGroupDragOver(e, '__ungrouped__')}
-            onDragLeave={handleGroupDragLeave}
-            onDrop={(e) => handleGroupDrop(e, '__ungrouped__')}
-            style={{
-              padding: '8px 12px', cursor: 'pointer', display: 'flex',
-              justifyContent: 'space-between', alignItems: 'center',
-              background: selectedGroup === '' ? 'rgba(59, 130, 246, 0.15)' : dragOverGroup === '__ungrouped__' ? 'rgba(59, 130, 246, 0.1)' : undefined,
-              borderLeft: selectedGroup === '' ? '3px solid var(--brand)' : '3px solid transparent',
-              borderTop: groupNames.length > 0 ? '1px solid var(--border-strong)' : undefined,
-              marginTop: groupNames.length > 0 ? '4px' : undefined,
-              transition: 'background 0.15s',
-            }}
-          >
-            <span style={{ fontSize: '13px', color: selectedGroup === '' ? 'var(--text-primary)' : 'var(--text-muted)', fontStyle: 'italic' }}>未分组</span>
-            <span style={{
-              fontSize: '11px', background: 'var(--border-strong)', color: 'var(--text-muted)',
-              padding: '1px 7px', borderRadius: '10px',
-            }}>{ungroupedCount}</span>
+          <div className="cc-hero-stat cc-hero-stat--warn">
+            <strong>{statusCounts.disabled || 0}</strong><span>停用</span>
           </div>
-        </div>
-
-        <div style={{ padding: '8px 12px 0', borderTop: '1px solid var(--border-strong)', marginTop: '4px', paddingTop: '8px' }}>
-          <button className="btn" onClick={handleCreateGroup}
-            style={{
-              width: '100%', padding: '6px 0', fontSize: '12px',
-              background: 'var(--bg-page)', color: 'var(--text-muted)', border: '1px dashed var(--border-strong)',
-              borderRadius: '6px',
-            }}>
-            + 新建分组
-          </button>
+          <div className="cc-hero-stat cc-hero-stat--risk">
+            <strong>{statusCounts.offline || 0}</strong><span>离线</span>
+          </div>
         </div>
       </div>
+    <div className="cc-server-layout">
+      <aside className="cc-server-side">
+        <div className="cc-server-side-head">
+          <strong>服务器分组</strong>
+          <small>{servers.length} 台</small>
+        </div>
 
-      <div style={{ flex: 1, display: 'grid', gap: '16px', minWidth: 0 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-          <h2 style={{ margin: 0 }}>
-            服务器管理
-            {selectedGroup !== null && (
-              <span style={{ fontSize: '13px', fontWeight: 'normal', color: 'var(--text-muted)', marginLeft: '8px' }}>
-                — {selectedGroup === '' ? '未分组' : selectedGroup} ({filteredServers.length})
+        <div className={`cc-server-group${selectedGroup === null ? ' cc-server-group--active' : ''}`}
+          onClick={() => setSelectedGroup(null)}
+          onDragOver={(e) => handleGroupDragOver(e, '__all__')}
+          onDragLeave={handleGroupDragLeave}
+          onDrop={(e) => handleGroupDrop(e, '__all__')}
+        >
+          <span className="cc-server-group-name">全部</span>
+          <span className="cc-server-group-count">{servers.length}</span>
+        </div>
+
+        {groupNames.map((name: string) => {
+          const color = getGroupColor(name)
+          const groupData = groups.find((g) => g.name === name)
+          const count = groupData?.server_count || 0
+          return (
+            <div
+              key={name}
+              className={`cc-server-group${selectedGroup === name ? ' cc-server-group--active' : ''}${dragOverGroup === name ? ' cc-server-group--active' : ''}`}
+              onClick={() => setSelectedGroup(name)}
+              onDragOver={(e) => handleGroupDragOver(e, name)}
+              onDragLeave={handleGroupDragLeave}
+              onDrop={(e) => handleGroupDrop(e, name)}
+              onMouseEnter={(e) => {
+                const el = e.currentTarget.querySelector('.group-actions') as HTMLElement
+                if (el) el.style.opacity = '1'
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget.querySelector('.group-actions') as HTMLElement
+                if (el) el.style.opacity = '0'
+                setGroupActionsOpen(null)
+              }}
+              style={{ position: 'relative' }}
+            >
+              <span className="cc-server-group-name">
+                <span style={{ width: 8, height: 8, borderRadius: 999, background: color?.text, boxShadow: `0 0 6px ${color?.text}` }} />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
               </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span className="cc-server-group-count">{count}</span>
+                <div className="group-actions" style={{ opacity: 0, transition: 'opacity 0.15s', position: 'relative' }}>
+                  <button
+                    className="cc-icon-btn"
+                    onClick={(e) => { e.stopPropagation(); setGroupActionsOpen(groupActionsOpen === name ? null : name) }}
+                    style={{ padding: '0 4px', fontSize: 14, minWidth: 22, height: 22 }}
+                  >⋮</button>
+                  {groupActionsOpen === name && (
+                    <div style={{
+                      position: 'absolute', right: 0, top: '100%', zIndex: 100,
+                      background: 'var(--bg-surface)', border: '1px solid var(--border-stronger)', borderRadius: 6,
+                      padding: '4px 0', minWidth: 90, boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                    }}>
+                      <button className="cc-icon-btn" onClick={(e) => { e.stopPropagation(); setGroupActionsOpen(null); handleRenameGroup(name) }}
+                        style={{ display: 'block', width: '100%', justifyContent: 'flex-start', fontSize: 12 }}>
+                        重命名
+                      </button>
+                      <button className="cc-icon-btn cc-icon-btn--danger" onClick={(e) => { e.stopPropagation(); setGroupActionsOpen(null); handleDeleteGroup(name) }}
+                        style={{ display: 'block', width: '100%', justifyContent: 'flex-start', fontSize: 12 }}>
+                        删除分组
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+
+        <div
+          className={`cc-server-group${selectedGroup === '' ? ' cc-server-group--active' : ''}${dragOverGroup === '__ungrouped__' ? ' cc-server-group--active' : ''}`}
+          onClick={() => setSelectedGroup('')}
+          onDragOver={(e) => handleGroupDragOver(e, '__ungrouped__')}
+          onDragLeave={handleGroupDragLeave}
+          onDrop={(e) => handleGroupDrop(e, '__ungrouped__')}
+          style={{ marginTop: 6, borderTop: '1px solid var(--border)', paddingTop: 10 }}
+        >
+          <span className="cc-server-group-name" style={{ fontStyle: 'italic', color: 'var(--text-muted)' }}>未分组</span>
+          <span className="cc-server-group-count">{ungroupedCount}</span>
+        </div>
+
+        <button className="cc-icon-btn" onClick={handleCreateGroup}
+          style={{
+            marginTop: 6, width: '100%', justifyContent: 'center', fontSize: 12,
+            background: 'transparent', border: '1px dashed var(--border-strong)', color: 'var(--text-muted)',
+          }}>
+          + 新建分组
+        </button>
+      </aside>
+
+      <div style={{ flex: 1, display: 'grid', gap: 14, minWidth: 0 }}>
+        <div className="cc-toolbar">
+          <div className="cc-toolbar-search">
+            <span className="cc-toolbar-search-icon">⌕</span>
+            <input
+              value={serverFilter}
+              onChange={(e) => setServerFilter(e.target.value)}
+              placeholder="搜索名称 / IP / 描述"
+              aria-label="搜索服务器"
+            />
+            {serverFilter && (
+              <button className="cc-icon-btn" style={{ padding: '0 8px', height: 20, fontSize: 10 }} onClick={() => setServerFilter('')}>清空</button>
             )}
-          </h2>
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <select value={serverStatusFilter} onChange={(e) => setServerStatusFilter(e.target.value as any)}
-              style={{ padding: '7px 10px', borderRadius: '8px', background: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)' }}>
-              <option value="all">全部状态</option>
+          </div>
+          <div className="cc-toolbar-divider" />
+          <div className="cc-toolbar-actions">
+            <span className="cc-toolbar-summary">状态</span>
+            <select className="cc-select" value={serverStatusFilter} onChange={(e) => setServerStatusFilter(e.target.value as any)}>
+              <option value="all">全部 ({statusCounts.online + statusCounts.disabled + statusCounts.offline || servers.length})</option>
               <option value="online">在线 ({statusCounts.online || 0})</option>
               <option value="disabled">停用 ({statusCounts.disabled || 0})</option>
               <option value="offline">离线 ({statusCounts.offline || 0})</option>
             </select>
-            <select value={configFilter} onChange={(e) => setConfigFilter(e.target.value as any)}
-              style={{ padding: '7px 10px', borderRadius: '8px', background: 'var(--bg-surface)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)' }}>
-              <option value="all">全部配置</option>
+            <span className="cc-toolbar-summary">配置</span>
+            <select className="cc-select" value={configFilter} onChange={(e) => setConfigFilter(e.target.value as any)}>
+              <option value="all">全部</option>
               <option value="passed">配置完整 ({configCounts.passed || 0})</option>
               <option value="warning">有建议 ({configCounts.warning || 0})</option>
               <option value="blocked">配置缺失 ({configCounts.blocked || 0})</option>
             </select>
+          </div>
+          <div className="cc-toolbar-cta">
             {selected.size >= 2 && (
-              <button className="btn" onClick={openBatchEdit}
-                style={{ padding: '8px 20px', background: 'var(--purple)', color: 'var(--purple-text)', fontSize: '14px', fontWeight: 'bold' }}>
+              <button className="cc-icon-btn" onClick={openBatchEdit} style={{ height: 30, padding: '0 12px', background: 'color-mix(in srgb, var(--brand) 14%, transparent)', color: 'var(--brand)', borderColor: 'color-mix(in srgb, var(--brand) 32%, var(--border))' }}>
                 批量编辑 ({selected.size})
               </button>
             )}
             {selected.size > 0 && (
-              <button className="btn" onClick={() => setSelected(new Set())}
-                style={{ padding: '8px 16px', background: 'var(--border-strong)', color: 'var(--text-secondary)', fontSize: '13px' }}>
+              <button className="cc-icon-btn" onClick={() => setSelected(new Set())} style={{ height: 30, padding: '0 10px' }}>
                 取消选择
               </button>
             )}
-            <button className="btn" onClick={openKeyCreate}
-              style={{ padding: '8px 16px', background: 'var(--bg-surface)', color: 'var(--action-text)', border: '1px solid var(--border-strong)', fontSize: '13px' }}>
-              🔑 密钥管理 ({sshKeys.length})
+            <button className="cc-icon-btn" onClick={openKeyCreate} style={{ height: 30, padding: '0 10px' }}>
+              密钥管理 ({sshKeys.length})
             </button>
-            <button className="btn" onClick={openCreate}
-              style={{ padding: '8px 20px', background: 'var(--success-border)', color: 'var(--success)', fontSize: '14px', fontWeight: 'bold' }}>
+            <button className="cc-icon-btn cc-icon-btn--success" onClick={openCreate} style={{ height: 30, padding: '0 14px' }}>
               + 新增服务器
             </button>
           </div>
@@ -961,7 +1017,7 @@ export default function ServerListPage() {
           </div>
         )}
 
-        <div className="card" style={{ padding: 0, overflow: 'auto' }}>
+        <div className="cc-table-wrap" style={{ padding: 0, overflow: 'hidden' }}>
           <EnhancedDataTable
             rows={filteredServers}
             columns={serverColumns}
@@ -973,27 +1029,41 @@ export default function ServerListPage() {
               const newSet = new Set<string>(keys)
               setSelected(newSet)
             }}
+            onRowClick={(s: ServerRow) => navigate(`/servers/${encodeURIComponent(s.name)}`)}
+            expandRow={(s: ServerRow) => (
+              <div className="row-expanded-content">
+                <div><strong>地址</strong><span>{s.host}:{s.port || 22}</span></div>
+                <div><strong>用户</strong><span>{s.username || s.user || 'root'}</span></div>
+                <div><strong>认证</strong><span>{s.auth_type === 'password' ? '密码' : s.auth_type === 'key_file' ? '密钥文件' : (s.key || s.key_content ? '密钥内容' : '密码')}</span></div>
+                <div><strong>跳板机</strong><span>{typeof s.jump_host === 'string' ? s.jump_host : s.jump_host?.name || '—'}</span></div>
+                <div><strong>分组</strong><span>{s.group || '—'}</span></div>
+                <div style={{ gridColumn: '1 / -1' }}><strong>描述</strong><span>{s.description || '—'}</span></div>
+                {s.config_status && s.config_status.suggestions && s.config_status.suggestions.length > 0 && (
+                  <div style={{ gridColumn: '1 / -1' }}><strong>配置建议</strong><span>{s.config_status.suggestions.join('；')}</span></div>
+                )}
+              </div>
+            )}
+            expandedKeys={Array.from(expandedRows)}
+            onExpandChange={(keys) => setExpandedRows(new Set(keys))}
             pageSize={serverPageSize}
             currentPage={serverPage}
             totalCount={filteredServers.length}
             onPageChange={setServerPage}
             onPageSizeChange={setServerPageSize}
+            stackOnNarrow
           />
         </div>
       </div>
 
       {showModal && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-        }} onClick={(e) => { if (e.target === e.currentTarget) setShowModal(false) }}>
-          <div className="card" style={{ width: '620px', maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h3 style={{ margin: 0 }}>{editing ? `编辑服务器: ${editing}` : '新增服务器'}</h3>
-              <button className="btn" onClick={() => setShowModal(false)}
-                style={{ padding: '4px 12px', fontSize: '13px', background: 'var(--border-strong)', color: 'var(--text-secondary)' }}>
-                ✕
-              </button>
+        <div className="cc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowModal(false) }}>
+          <div className="cc-modal-shell">
+            <div className="cc-modal-head">
+              <h3>
+                {editing ? `编辑服务器: ${editing}` : '新增服务器'}
+                <small>SERVER · FORM</small>
+              </h3>
+              <button className="cc-modal-close" onClick={() => setShowModal(false)}>✕</button>
             </div>
 
             {formError && (
@@ -1183,70 +1253,62 @@ export default function ServerListPage() {
 
 
       {showKeyManager && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100,
-        }} onClick={(e) => { if (e.target === e.currentTarget) setShowKeyManager(false) }}>
-          <div className="card" style={{ width: '760px', maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div className="cc-modal-overlay" style={{ zIndex: 1100 }} onClick={(e) => { if (e.target === e.currentTarget) setShowKeyManager(false) }}>
+          <div className="cc-modal-shell cc-modal-shell--wide">
+            <div className="cc-modal-head">
               <div>
-                <h3 style={{ margin: 0 }}>SSH 密钥管理</h3>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>密钥保存在项目 keys/ 目录，列表仅展示元数据；编辑时才读取内容。</div>
+                <h3>SSH 密钥管理</h3>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>密钥保存在项目 keys/ 目录，列表仅展示元数据</div>
               </div>
-              <button className="btn" onClick={() => setShowKeyManager(false)}
-                style={{ padding: '4px 12px', fontSize: '13px', background: 'var(--border-strong)', color: 'var(--text-secondary)' }}>✕</button>
+              <button className="cc-modal-close" onClick={() => setShowKeyManager(false)}>✕</button>
             </div>
 
             {keyError && (
-              <div style={{ background: 'var(--danger-surface)', color: 'var(--danger)', padding: '10px', borderRadius: '6px', marginBottom: '12px', fontSize: '13px' }}>{keyError}</div>
+              <div className="cc-modal-callout cc-modal-callout--danger" style={{ marginBottom: 12 }}>{keyError}</div>
             )}
 
-            <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: '16px' }}>
-              <div style={{ border: '1px solid var(--border-strong)', borderRadius: '8px', overflow: 'hidden' }}>
-                <div style={{ padding: '10px 12px', background: 'var(--bg-page)', color: 'var(--text-secondary)', fontSize: '13px', fontWeight: 'bold' }}>已保存密钥</div>
-                <div style={{ maxHeight: '360px', overflowY: 'auto' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 16 }}>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+                <div style={{ padding: '10px 12px', background: 'var(--bg-surface-2)', color: 'var(--text-secondary)', fontSize: 12, fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>已保存密钥</div>
+                <div style={{ maxHeight: 360, overflowY: 'auto' }}>
                   {sshKeys.length === 0 ? (
-                    <div style={{ padding: '18px 12px', color: 'var(--text-muted)', fontSize: '13px' }}>暂无保存的密钥</div>
+                    <div className="cc-empty-state" style={{ padding: 18 }}><span>暂无保存的密钥</span></div>
                   ) : sshKeys.map((k) => (
-                    <div key={k.name} style={{ padding: '10px 12px', borderTop: '1px solid var(--bg-surface)', display: 'grid', gap: '6px' }}>
-                      <div style={{ color: 'var(--text-primary)', fontSize: '13px', fontFamily: 'monospace', wordBreak: 'break-all' }}>{k.name}</div>
-                      <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{k.size} bytes · {new Date(k.modified * 1000).toLocaleString()}</div>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <button type="button" className="btn" onClick={() => { updateField('key', k.name); setUploadedKeyName(k.name); setShowKeyManager(false) }}
-                          style={{ padding: '4px 8px', fontSize: '12px', background: 'var(--success-surface)', color: 'var(--success)' }}>选择</button>
-                        <button type="button" className="btn" onClick={() => openKeyEdit(k.name)}
-                          style={{ padding: '4px 8px', fontSize: '12px', background: 'var(--border-strong)', color: 'var(--action-text)' }}>编辑</button>
-                        <button type="button" className="btn" onClick={() => handleKeyDelete(k.name)}
-                          style={{ padding: '4px 8px', fontSize: '12px', background: 'var(--danger-surface)', color: 'var(--danger)' }}>删除</button>
+                    <div key={k.name} style={{ padding: '10px 12px', borderTop: '1px solid var(--border)', display: 'grid', gap: 6 }}>
+                      <div style={{ color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{k.name}</div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>{k.size} bytes · {new Date(k.modified * 1000).toLocaleString()}</div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button type="button" className="cc-icon-btn" onClick={() => { updateField('key', k.name); setUploadedKeyName(k.name); setShowKeyManager(false) }}
+                          style={{ height: 26, padding: '0 8px', fontSize: 11 }}>选择</button>
+                        <button type="button" className="cc-icon-btn" onClick={() => openKeyEdit(k.name)} style={{ height: 26, padding: '0 8px', fontSize: 11 }}>编辑</button>
+                        <button type="button" className="cc-icon-btn cc-icon-btn--danger" onClick={() => handleKeyDelete(k.name)} style={{ height: 26, padding: '0 8px', fontSize: 11 }}>删除</button>
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
 
-              <form onSubmit={handleKeyManagerSubmit} style={{ display: 'grid', gap: '12px' }}>
+              <form onSubmit={handleKeyManagerSubmit} style={{ display: 'grid', gap: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <strong style={{ color: 'var(--text-primary)' }}>{keyEditingName ? `编辑: ${keyEditingName}` : '新增密钥'}</strong>
+                  <strong style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-display)' }}>{keyEditingName ? `编辑: ${keyEditingName}` : '新增密钥'}</strong>
                   {keyEditingName && (
-                    <button type="button" className="btn" onClick={() => { setKeyEditingName(null); setKeyFormName(''); setKeyFormContent(''); setKeyError('') }}
-                      style={{ padding: '4px 10px', fontSize: '12px', background: 'var(--border-strong)', color: 'var(--text-secondary)' }}>新建</button>
+                    <button type="button" className="cc-icon-btn" onClick={() => { setKeyEditingName(null); setKeyFormName(''); setKeyFormContent(''); setKeyError('') }}
+                      style={{ height: 28, padding: '0 10px', fontSize: 12 }}>新建</button>
                   )}
                 </div>
-                <FormField label="密钥名称" value={keyFormName} onChange={setKeyFormName} placeholder="prod-web.pem 或 prod-web-id_rsa" />
+                <FormField label="密钥名称" value={keyFormName} onChange={setKeyFormName} placeholder="prod-web.pem" />
                 <div>
-                  <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '4px' }}>密钥内容</label>
+                  <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 4, fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>密钥内容</label>
                   <textarea value={keyFormContent} onChange={(e) => setKeyFormContent(e.target.value)}
                     placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n..."}
-                    style={{ width: '100%', height: '230px', fontFamily: 'monospace', fontSize: '12px', background: 'var(--bg-page)', color: 'var(--text-primary)', border: '1px solid var(--border-strong)', borderRadius: '6px', padding: '8px', resize: 'vertical' }} />
+                    style={{ width: '100%', height: 220, fontFamily: 'var(--font-mono)', fontSize: 12, background: 'var(--bg-panel-deep)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 10, padding: 10, resize: 'vertical', outline: 'none' }} />
                 </div>
-                <div style={{ background: 'var(--warning-surface)', border: '1px solid var(--warning-border)', color: 'var(--warning)', padding: '8px 10px', borderRadius: '6px', fontSize: '12px' }}>
+                <div className="cc-modal-callout cc-modal-callout--warning" style={{ fontSize: 11 }}>
                   安全提示：删除或重命名密钥不会自动更新已引用旧名称的服务器，请先确认引用关系。
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                  <button type="button" className="btn" onClick={() => setShowKeyManager(false)}
-                    style={{ padding: '8px 18px', background: 'var(--border-strong)', color: 'var(--text-primary)', fontSize: '14px' }}>关闭</button>
-                  <button type="submit" className="btn" disabled={keySaving}
-                    style={{ padding: '8px 22px', background: 'var(--success-border)', color: 'var(--success)', fontSize: '14px', fontWeight: 'bold' }}>
+                <div className="cc-modal-foot" style={{ marginTop: 0, borderTop: 0, paddingTop: 0 }}>
+                  <button type="button" className="cc-icon-btn" onClick={() => setShowKeyManager(false)} style={{ height: 32, padding: '0 14px' }}>关闭</button>
+                  <button type="submit" className="cc-icon-btn cc-icon-btn--success" disabled={keySaving} style={{ height: 32, padding: '0 16px' }}>
                     {keySaving ? '保存中...' : keyEditingName ? '保存密钥' : '新增密钥'}
                   </button>
                 </div>
@@ -1257,27 +1319,16 @@ export default function ServerListPage() {
       )}
 
       {showBatchModal && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-        }} onClick={(e) => { if (e.target === e.currentTarget) setShowBatchModal(false) }}>
-          <div className="card" style={{ width: '560px', maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h3 style={{ margin: 0 }}>批量编辑服务器 ({selected.size} 台)</h3>
-              <button className="btn" onClick={() => setShowBatchModal(false)}
-                style={{ padding: '4px 12px', fontSize: '13px', background: 'var(--border-strong)', color: 'var(--text-secondary)' }}>
-                ✕
-              </button>
+        <div className="cc-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowBatchModal(false) }}>
+          <div className="cc-modal-shell cc-modal-shell--narrow">
+            <div className="cc-modal-head">
+              <h3>批量编辑服务器 <small>BATCH · {selected.size} 台</small></h3>
+              <button className="cc-modal-close" onClick={() => setShowBatchModal(false)}>✕</button>
             </div>
 
-            <div style={{
-              background: 'rgba(124, 58, 237, 0.15)', border: '1px solid var(--purple)',
-              padding: '10px 14px', borderRadius: '8px', marginBottom: '16px', fontSize: '13px', color: 'var(--purple-text)',
-            }}>
-              已选择 {selected.size} 台服务器：{Array.from(selected).join(', ')}
-              <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--purple-text)' }}>
-                留空的字段将保持不变，只更新填写的字段。
-              </div>
+            <div className="cc-modal-callout" style={{ marginBottom: 12 }}>
+              已选择 <strong>{selected.size}</strong> 台：<span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>{Array.from(selected).join(', ')}</span>
+              <div style={{ marginTop: 4, fontSize: 11 }}>留空的字段将保持不变，只更新填写的字段。</div>
             </div>
 
             {batchError && (
@@ -1402,11 +1453,10 @@ function FormField({ label, value, onChange, type = 'text', placeholder, disable
 }) {
   return (
     <div>
-      <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '4px' }}>{label}</label>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)}
+      <label style={{ display: 'block', color: 'var(--text-muted)', fontSize: 10.5, marginBottom: 4, fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{label}</label>
+      <input className="cc-input" type={type} value={value} onChange={(e) => onChange(e.target.value)}
         disabled={disabled} placeholder={placeholder}
-        style={{ width: '100%', background: disabled ? 'var(--bg-page)' : 'var(--bg-surface)', color: disabled ? 'var(--text-muted)' : 'var(--text-primary)',
-          opacity: disabled ? 0.6 : 1 }} />
+        style={{ width: '100%', opacity: disabled ? 0.6 : 1 }} />
     </div>
   )
 }

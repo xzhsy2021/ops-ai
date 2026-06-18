@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, type MouseEvent } from 'react'
 import type { ReactNode } from 'react'
 import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown } from 'lucide-react'
 import { LoadingState, EmptyState, ErrorState } from './ui'
@@ -12,6 +12,10 @@ export type EnhancedColumn<T> = {
   render?: (row: T, index: number) => ReactNode
   getValue?: (row: T) => ReactNode
   getSortValue?: (row: T) => string | number
+  className?: string
+  cellClassName?: string
+  label?: string
+  sticky?: 'start' | 'end'
 }
 
 export type EnhancedDataTableProps<T> = {
@@ -36,6 +40,8 @@ export type EnhancedDataTableProps<T> = {
   onExpandChange?: (keys: string[]) => void
   stickyHeader?: boolean
   maxHeight?: number
+  onRowClick?: (row: T, index: number) => void
+  stackOnNarrow?: boolean
 }
 
 export function EnhancedDataTable<T>({
@@ -60,6 +66,8 @@ export function EnhancedDataTable<T>({
   onExpandChange,
   stickyHeader = true,
   maxHeight,
+  onRowClick,
+  stackOnNarrow = false,
 }: EnhancedDataTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
@@ -140,20 +148,22 @@ export function EnhancedDataTable<T>({
   return (
     <div className="enhanced-table-wrap" style={maxHeight ? { maxHeight } : undefined}>
       <div className={`table-scroll ${className}`.trim()}>
-        <table className={`data-table data-table--compact ${stickyHeader ? 'data-table--sticky' : ''}`}>
+        <table className={`data-table data-table--compact ${stickyHeader ? 'data-table--sticky' : ''}${stackOnNarrow ? ' stack-on-narrow' : ''}`}>
           <thead>
             <tr>
               {onSelectionChange && (
-                <th style={{ width: 40 }}>
+                <th style={{ width: 40 }} className={!expandRow ? 'is-sticky-start' : ''}>
                   <input type="checkbox" checked={!!allSelected} onChange={handleSelectAll} />
                 </th>
               )}
-              {expandRow && <th style={{ width: 40 }} />}
-              {columns.map((column) => (
+              {expandRow && <th style={{ width: 40 }} className={onSelectionChange ? '' : 'is-sticky-start'} />}
+              {columns.map((column) => {
+                const stickyCls = column.sticky === 'start' ? 'is-sticky-start' : column.sticky === 'end' ? 'is-sticky-end' : ''
+                return (
                 <th
                   key={column.key}
                   style={{ width: column.width, textAlign: column.align || 'left' }}
-                  className={column.sortable ? 'sortable-col' : ''}
+                  className={`${stickyCls} ${column.className || ''}`.trim()}
                   onClick={column.sortable ? () => handleSort(column.key) : undefined}
                 >
                   <span className="sortable-col-header">
@@ -169,7 +179,7 @@ export function EnhancedDataTable<T>({
                     )}
                   </span>
                 </th>
-              ))}
+              )})}
             </tr>
           </thead>
           <tbody>
@@ -177,11 +187,21 @@ export function EnhancedDataTable<T>({
               const key = rowKey(row, index)
               const isSelected = selectedKeys?.includes(key)
               const isExpanded = expandedKeys?.includes(key)
+              const rowCls = [
+                isSelected ? 'row-selected' : '',
+                onRowClick ? 'row-clickable' : '',
+              ].filter(Boolean).join(' ')
+              const handleRowClick = (e: MouseEvent<HTMLTableRowElement>) => {
+                if (!onRowClick) return
+                const target = e.target as HTMLElement
+                if (target.closest('button, a, input, [data-stop-row-click]')) return
+                onRowClick(row, index)
+              }
               return (
                 <>
-                  <tr key={key} className={isSelected ? 'row-selected' : ''}>
+                  <tr key={key} className={rowCls} onClick={handleRowClick}>
                     {onSelectionChange && (
-                      <td>
+                      <td data-label="选择" className={!expandRow ? 'is-sticky-start' : ''}>
                         <input
                           type="checkbox"
                           checked={!!isSelected}
@@ -190,9 +210,9 @@ export function EnhancedDataTable<T>({
                       </td>
                     )}
                     {expandRow && (
-                      <td>
+                      <td data-label="展开" className={onSelectionChange ? '' : 'is-sticky-start'}>
                         <button
-                          className="btn btn-subtle expand-toggle-btn"
+                          className={`expand-toggle-btn${isExpanded ? ' is-open' : ''}`}
                           onClick={() => handleToggleExpand(key)}
                           aria-label={isExpanded ? '折叠' : '展开'}
                         >
@@ -200,15 +220,19 @@ export function EnhancedDataTable<T>({
                         </button>
                       </td>
                     )}
-                    {columns.map((column) => (
-                      <td key={column.key} style={{ textAlign: column.align || 'left' }}>
-                        {column.render
-                          ? column.render(row, index)
-                          : column.getValue
-                            ? column.getValue(row)
-                            : '-'}
-                      </td>
-                    ))}
+                    {columns.map((column) => {
+                      const stickyCls = column.sticky === 'start' ? 'is-sticky-start' : column.sticky === 'end' ? 'is-sticky-end' : ''
+                      const tdCls = `${stickyCls} ${column.cellClassName || column.className || ''}`.trim()
+                      return (
+                        <td key={column.key} style={{ textAlign: column.align || 'left' }} className={tdCls} data-label={column.label || (typeof column.title === 'string' ? column.title : column.key)}>
+                          {column.render
+                            ? column.render(row, index)
+                            : column.getValue
+                              ? column.getValue(row)
+                              : '-'}
+                        </td>
+                      )
+                    })}
                   </tr>
                   {expandRow && isExpanded && (
                     <tr key={`${key}-expand`} className="row-expanded">

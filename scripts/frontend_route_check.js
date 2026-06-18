@@ -77,6 +77,8 @@ const inspectionServerGroupChipsPath = path.join(root, 'frontend', 'src', 'pages
 const inspectionServerGroupChipsComponent = fs.existsSync(inspectionServerGroupChipsPath) ? fs.readFileSync(inspectionServerGroupChipsPath, 'utf8') : ''
 const inspectionServerToolbarPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerToolbar.tsx')
 const inspectionServerToolbarComponent = fs.existsSync(inspectionServerToolbarPath) ? fs.readFileSync(inspectionServerToolbarPath, 'utf8') : ''
+const inspectionServerCategoryChipsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerCategoryChips.tsx')
+const inspectionServerCategoryChipsComponent = fs.existsSync(inspectionServerCategoryChipsPath) ? fs.readFileSync(inspectionServerCategoryChipsPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -308,6 +310,10 @@ if (!fs.existsSync(inspectionServerToolbarPath)) failures.push('Inspection serve
 if (!inspectionPage.includes("from './inspection/ServerToolbar'")) failures.push('InspectionCenterPage must import extracted ServerToolbar')
 if (!inspectionPage.includes('<ServerToolbar')) failures.push('InspectionCenterPage must render extracted ServerToolbar')
 if (!inspectionServerToolbarComponent.includes('export function ServerToolbar')) failures.push('ServerToolbar component must export ServerToolbar')
+if (!fs.existsSync(inspectionServerCategoryChipsPath)) failures.push('Inspection server category chips component file missing')
+if (!inspectionPage.includes("from './inspection/ServerCategoryChips'")) failures.push('InspectionCenterPage must import extracted ServerCategoryChips')
+if (!inspectionPage.includes('<ServerCategoryChips')) failures.push('InspectionCenterPage must render extracted ServerCategoryChips')
+if (!inspectionServerCategoryChipsComponent.includes('export function ServerCategoryChips')) failures.push('ServerCategoryChips component must export ServerCategoryChips')
 
 
 if (failures.length) {

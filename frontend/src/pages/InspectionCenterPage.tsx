@@ -14,6 +14,7 @@ import { ServerProfileStrip } from './inspection/ServerProfileStrip'
 import { ServerStatsGrid } from './inspection/ServerStatsGrid'
 import { ServerGroupChips } from './inspection/ServerGroupChips'
 import { ServerToolbar } from './inspection/ServerToolbar'
+import { ServerCategoryChips } from './inspection/ServerCategoryChips'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -918,43 +919,13 @@ export default function InspectionCenterPage() {
             </table>
           </div>
 
-          {/* 5. 巡检类别（紧凑 chip） */}
-          <div className="inspection-category-chips">
-            <span className="chip-label">巡检类别：</span>
-            {(categories.server || []).map((item: any) => {
-              const cfg = (itemConfigs.server || []).find((c: any) => c.item_code === item.code)
-              const enabled = cfg ? cfg.enabled !== false : true
-              const active = serverCats.includes(item.code)
-              const chipClass = `chip${active ? ' chip--active' : ''}${enabled ? '' : ' chip--disabled'}`
-              return (
-                <span
-                  key={item.code}
-                  className={chipClass}
-                  title={enabled ? item.description : '已禁用'}
-                  onClick={() => enabled && setServerCats(active ? serverCats.filter((x) => x !== item.code) : [...serverCats, item.code])}
-                  role="button"
-                  tabIndex={enabled ? 0 : -1}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); enabled && (active ? setServerCats(serverCats.filter((x) => x !== item.code)) : setServerCats([...serverCats, item.code])) } }}
-                >
-                  {item.name}
-                  {cfg && <small>{cfg.rules?.length || 0} 规则</small>}
-                  {openItemConfigEditor && cfg && (
-                    <span className="chip-actions">
-                      <button onClick={(e) => { e.stopPropagation(); openItemConfigEditor(cfg) }}>配置</button>
-                    </span>
-                  )}
-                </span>
-              )
-            })}
-            {(categories.server || []).length > 0 && (
-              <>
-                <div className="toolbar-divider" />
-                <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => setServerCats((categories.server || []).map((x: any) => x.code))}>全选</button>
-                <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => setServerCats([])}>清空</button>
-                <span className="toolbar-summary" style={{ marginLeft: 'auto' }}><strong>{serverCats.length}</strong> / {(categories.server || []).length} 已选</span>
-              </>
-            )}
-          </div>
+          <ServerCategoryChips
+            items={categories.server || []}
+            itemConfigs={itemConfigs.server || []}
+            selected={serverCats}
+            onChange={setServerCats}
+            onConfigEdit={openItemConfigEditor}
+          />
 
           {/* 6. 高级设置 + 阈值配置（默认折叠，一处全看到） */}
           <details className="inspection-advanced">

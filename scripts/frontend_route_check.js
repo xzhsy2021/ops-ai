@@ -57,6 +57,8 @@ const frontendStyles = fs.readFileSync(path.join(root, 'frontend', 'src', 'index
 const inspectionPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'InspectionCenterPage.tsx'), 'utf8')
 const inspectionPaginationPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'PaginationControls.tsx')
 const inspectionPaginationComponent = fs.existsSync(inspectionPaginationPath) ? fs.readFileSync(inspectionPaginationPath, 'utf8') : ''
+const inspectionRunDetailModalPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'RunDetailRawModal.tsx')
+const inspectionRunDetailModalComponent = fs.existsSync(inspectionRunDetailModalPath) ? fs.readFileSync(inspectionRunDetailModalPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -246,6 +248,10 @@ if (!fs.existsSync(inspectionPaginationPath)) failures.push('Inspection paginati
 if (!inspectionPage.includes("from './inspection/PaginationControls'")) failures.push('InspectionCenterPage must import extracted PaginationControls')
 if (inspectionPage.includes('function PaginationControls(')) failures.push('InspectionCenterPage should not define PaginationControls inline')
 if (!inspectionPaginationComponent.includes('export function PaginationControls')) failures.push('PaginationControls component must export PaginationControls')
+if (!fs.existsSync(inspectionRunDetailModalPath)) failures.push('Inspection run detail raw modal component file missing')
+if (!inspectionPage.includes("from './inspection/RunDetailRawModal'")) failures.push('InspectionCenterPage must import extracted RunDetailRawModal')
+if (inspectionPage.includes('function RunDetailRawModal(')) failures.push('InspectionCenterPage should not define RunDetailRawModal inline')
+if (!inspectionRunDetailModalComponent.includes('export function RunDetailRawModal')) failures.push('RunDetailRawModal component must export RunDetailRawModal')
 
 
 if (failures.length) {

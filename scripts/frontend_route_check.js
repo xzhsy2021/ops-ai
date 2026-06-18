@@ -65,6 +65,8 @@ const inspectionThresholdSettingsPath = path.join(root, 'frontend', 'src', 'page
 const inspectionThresholdSettingsComponent = fs.existsSync(inspectionThresholdSettingsPath) ? fs.readFileSync(inspectionThresholdSettingsPath, 'utf8') : ''
 const inspectionCategoryOptionsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'CategoryOptions.tsx')
 const inspectionCategoryOptionsComponent = fs.existsSync(inspectionCategoryOptionsPath) ? fs.readFileSync(inspectionCategoryOptionsPath, 'utf8') : ''
+const inspectionHelpersPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'inspectionHelpers.ts')
+const inspectionHelpersComponent = fs.existsSync(inspectionHelpersPath) ? fs.readFileSync(inspectionHelpersPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -270,6 +272,12 @@ if (!fs.existsSync(inspectionCategoryOptionsPath)) failures.push('Inspection cat
 if (!inspectionPage.includes("from './inspection/CategoryOptions'")) failures.push('InspectionCenterPage must import extracted CategoryOptions')
 if (inspectionPage.includes('function categoryOptions(')) failures.push('InspectionCenterPage should not define categoryOptions inline')
 if (!inspectionCategoryOptionsComponent.includes('export function CategoryOptions')) failures.push('CategoryOptions component must export CategoryOptions')
+if (!fs.existsSync(inspectionHelpersPath)) failures.push('Inspection helpers file missing')
+if (!inspectionPage.includes("from './inspection/inspectionHelpers'")) failures.push('InspectionCenterPage must import extracted inspection helpers')
+for (const helperName of ['formatTime', 'riskLabel', 'scoreTone', 'normalizeServerStatus', 'isServerInspectable', 'serverStatusText', 'extractShellCommand', 'formatExecutionEntry']) {
+  if (inspectionPage.includes(`function ${helperName}(`)) failures.push(`InspectionCenterPage should not define ${helperName} inline`)
+  if (!inspectionHelpersComponent.includes(`export function ${helperName}`)) failures.push(`inspectionHelpers must export ${helperName}`)
+}
 
 
 if (failures.length) {

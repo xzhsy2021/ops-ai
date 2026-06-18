@@ -11,6 +11,7 @@ import { CategoryOptions } from './inspection/CategoryOptions'
 import { extractShellCommand, formatExecutionEntry, formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
 import { OverviewTab } from './inspection/OverviewTab'
 import { ServerProfileStrip } from './inspection/ServerProfileStrip'
+import { ServerStatsGrid } from './inspection/ServerStatsGrid'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -810,24 +811,12 @@ export default function InspectionCenterPage() {
             onPreviewInspectionProfile={previewInspectionProfile}
           />
 
-          <div className="cc-stat-grid">
-            <div className="cc-stat-card">
-              <div className="cc-stat-icon">⬡</div>
-              <div className="cc-stat-body"><span>服务器总数</span><strong>{servers.length}</strong></div>
-            </div>
-            <div className="cc-stat-card cc-stat-card--ok">
-              <div className="cc-stat-icon">●</div>
-              <div className="cc-stat-body"><span>在线 / 启用</span><strong>{activeServerIds.length}</strong></div>
-            </div>
-            <div className="cc-stat-card cc-stat-card--warn">
-              <div className="cc-stat-icon">○</div>
-              <div className="cc-stat-body"><span>停用 / 离线</span><strong>{disabledServerCount}</strong></div>
-            </div>
-            <div className="cc-stat-card cc-stat-card--info">
-              <div className="cc-stat-icon">✓</div>
-              <div className="cc-stat-body"><span>当前已选</span><strong>{selectedServerIds.length + selectedGroups.length}</strong></div>
-            </div>
-          </div>
+          <ServerStatsGrid
+            serverCount={servers.length}
+            activeServerCount={activeServerIds.length}
+            disabledServerCount={disabledServerCount}
+            selectedCount={selectedServerIds.length + selectedGroups.length}
+          />
 
           {/* 2. 工具栏 */}
           <div className="cc-toolbar">

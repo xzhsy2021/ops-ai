@@ -71,6 +71,8 @@ const inspectionOverviewTabPath = path.join(root, 'frontend', 'src', 'pages', 'i
 const inspectionOverviewTabComponent = fs.existsSync(inspectionOverviewTabPath) ? fs.readFileSync(inspectionOverviewTabPath, 'utf8') : ''
 const inspectionServerProfileStripPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerProfileStrip.tsx')
 const inspectionServerProfileStripComponent = fs.existsSync(inspectionServerProfileStripPath) ? fs.readFileSync(inspectionServerProfileStripPath, 'utf8') : ''
+const inspectionServerStatsGridPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerStatsGrid.tsx')
+const inspectionServerStatsGridComponent = fs.existsSync(inspectionServerStatsGridPath) ? fs.readFileSync(inspectionServerStatsGridPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -290,6 +292,10 @@ if (!fs.existsSync(inspectionServerProfileStripPath)) failures.push('Inspection 
 if (!inspectionPage.includes("from './inspection/ServerProfileStrip'")) failures.push('InspectionCenterPage must import extracted ServerProfileStrip')
 if (!inspectionPage.includes('<ServerProfileStrip')) failures.push('InspectionCenterPage must render extracted ServerProfileStrip')
 if (!inspectionServerProfileStripComponent.includes('export function ServerProfileStrip')) failures.push('ServerProfileStrip component must export ServerProfileStrip')
+if (!fs.existsSync(inspectionServerStatsGridPath)) failures.push('Inspection server stats grid component file missing')
+if (!inspectionPage.includes("from './inspection/ServerStatsGrid'")) failures.push('InspectionCenterPage must import extracted ServerStatsGrid')
+if (!inspectionPage.includes('<ServerStatsGrid')) failures.push('InspectionCenterPage must render extracted ServerStatsGrid')
+if (!inspectionServerStatsGridComponent.includes('export function ServerStatsGrid')) failures.push('ServerStatsGrid component must export ServerStatsGrid')
 
 
 if (failures.length) {

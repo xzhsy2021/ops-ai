@@ -61,6 +61,8 @@ const inspectionRunDetailModalPath = path.join(root, 'frontend', 'src', 'pages',
 const inspectionRunDetailModalComponent = fs.existsSync(inspectionRunDetailModalPath) ? fs.readFileSync(inspectionRunDetailModalPath, 'utf8') : ''
 const inspectionItemConfigModalPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ItemConfigEditorModal.tsx')
 const inspectionItemConfigModalComponent = fs.existsSync(inspectionItemConfigModalPath) ? fs.readFileSync(inspectionItemConfigModalPath, 'utf8') : ''
+const inspectionThresholdSettingsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ThresholdSettingsSection.tsx')
+const inspectionThresholdSettingsComponent = fs.existsSync(inspectionThresholdSettingsPath) ? fs.readFileSync(inspectionThresholdSettingsPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -258,6 +260,10 @@ if (!fs.existsSync(inspectionItemConfigModalPath)) failures.push('Inspection ite
 if (!inspectionPage.includes("from './inspection/ItemConfigEditorModal'")) failures.push('InspectionCenterPage must import extracted ItemConfigEditorModal')
 if (inspectionPage.includes('function ItemConfigEditorModal(')) failures.push('InspectionCenterPage should not define ItemConfigEditorModal inline')
 if (!inspectionItemConfigModalComponent.includes('export function ItemConfigEditorModal')) failures.push('ItemConfigEditorModal component must export ItemConfigEditorModal')
+if (!fs.existsSync(inspectionThresholdSettingsPath)) failures.push('Inspection threshold settings component file missing')
+if (!inspectionPage.includes("from './inspection/ThresholdSettingsSection'")) failures.push('InspectionCenterPage must import extracted ThresholdSettingsSection')
+if (inspectionPage.includes('function ThresholdSettingsSection(')) failures.push('InspectionCenterPage should not define ThresholdSettingsSection inline')
+if (!inspectionThresholdSettingsComponent.includes('export function ThresholdSettingsSection')) failures.push('ThresholdSettingsSection component must export ThresholdSettingsSection')
 
 
 if (failures.length) {

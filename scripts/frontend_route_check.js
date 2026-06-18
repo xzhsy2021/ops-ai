@@ -67,6 +67,8 @@ const inspectionCategoryOptionsPath = path.join(root, 'frontend', 'src', 'pages'
 const inspectionCategoryOptionsComponent = fs.existsSync(inspectionCategoryOptionsPath) ? fs.readFileSync(inspectionCategoryOptionsPath, 'utf8') : ''
 const inspectionHelpersPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'inspectionHelpers.ts')
 const inspectionHelpersComponent = fs.existsSync(inspectionHelpersPath) ? fs.readFileSync(inspectionHelpersPath, 'utf8') : ''
+const inspectionOverviewTabPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'OverviewTab.tsx')
+const inspectionOverviewTabComponent = fs.existsSync(inspectionOverviewTabPath) ? fs.readFileSync(inspectionOverviewTabPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -278,6 +280,10 @@ for (const helperName of ['formatTime', 'riskLabel', 'scoreTone', 'normalizeServ
   if (inspectionPage.includes(`function ${helperName}(`)) failures.push(`InspectionCenterPage should not define ${helperName} inline`)
   if (!inspectionHelpersComponent.includes(`export function ${helperName}`)) failures.push(`inspectionHelpers must export ${helperName}`)
 }
+if (!fs.existsSync(inspectionOverviewTabPath)) failures.push('Inspection overview tab component file missing')
+if (!inspectionPage.includes("from './inspection/OverviewTab'")) failures.push('InspectionCenterPage must import extracted OverviewTab')
+if (!inspectionPage.includes('<OverviewTab')) failures.push('InspectionCenterPage must render extracted OverviewTab')
+if (!inspectionOverviewTabComponent.includes('export function OverviewTab')) failures.push('OverviewTab component must export OverviewTab')
 
 
 if (failures.length) {

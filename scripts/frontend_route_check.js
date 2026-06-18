@@ -63,6 +63,8 @@ const inspectionItemConfigModalPath = path.join(root, 'frontend', 'src', 'pages'
 const inspectionItemConfigModalComponent = fs.existsSync(inspectionItemConfigModalPath) ? fs.readFileSync(inspectionItemConfigModalPath, 'utf8') : ''
 const inspectionThresholdSettingsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ThresholdSettingsSection.tsx')
 const inspectionThresholdSettingsComponent = fs.existsSync(inspectionThresholdSettingsPath) ? fs.readFileSync(inspectionThresholdSettingsPath, 'utf8') : ''
+const inspectionCategoryOptionsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'CategoryOptions.tsx')
+const inspectionCategoryOptionsComponent = fs.existsSync(inspectionCategoryOptionsPath) ? fs.readFileSync(inspectionCategoryOptionsPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -264,6 +266,10 @@ if (!fs.existsSync(inspectionThresholdSettingsPath)) failures.push('Inspection t
 if (!inspectionPage.includes("from './inspection/ThresholdSettingsSection'")) failures.push('InspectionCenterPage must import extracted ThresholdSettingsSection')
 if (inspectionPage.includes('function ThresholdSettingsSection(')) failures.push('InspectionCenterPage should not define ThresholdSettingsSection inline')
 if (!inspectionThresholdSettingsComponent.includes('export function ThresholdSettingsSection')) failures.push('ThresholdSettingsSection component must export ThresholdSettingsSection')
+if (!fs.existsSync(inspectionCategoryOptionsPath)) failures.push('Inspection category options component file missing')
+if (!inspectionPage.includes("from './inspection/CategoryOptions'")) failures.push('InspectionCenterPage must import extracted CategoryOptions')
+if (inspectionPage.includes('function categoryOptions(')) failures.push('InspectionCenterPage should not define categoryOptions inline')
+if (!inspectionCategoryOptionsComponent.includes('export function CategoryOptions')) failures.push('CategoryOptions component must export CategoryOptions')
 
 
 if (failures.length) {

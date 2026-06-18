@@ -54,6 +54,9 @@ const databasePage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages',
 const dashboardPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'DashboardPage.tsx'), 'utf8')
 const dashboardService = fs.readFileSync(path.join(root, 'app', 'services', 'dashboard.py'), 'utf8')
 const frontendStyles = fs.readFileSync(path.join(root, 'frontend', 'src', 'index.css'), 'utf8')
+const inspectionPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'InspectionCenterPage.tsx'), 'utf8')
+const inspectionPaginationPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'PaginationControls.tsx')
+const inspectionPaginationComponent = fs.existsSync(inspectionPaginationPath) ? fs.readFileSync(inspectionPaginationPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -238,6 +241,11 @@ for (const marker of ['dashboard-clock-card', 'dashboard-hero-side']) {
 }
 if (dashboardService.includes('维护审批')) failures.push('Dashboard quick action must not mention approval before the approval feature is introduced')
 if (!dashboardService.includes('维护工具') || !dashboardService.includes('备份、清理与恢复')) failures.push('Dashboard maintenance quick action title/description missing')
+
+if (!fs.existsSync(inspectionPaginationPath)) failures.push('Inspection pagination component file missing')
+if (!inspectionPage.includes("from './inspection/PaginationControls'")) failures.push('InspectionCenterPage must import extracted PaginationControls')
+if (inspectionPage.includes('function PaginationControls(')) failures.push('InspectionCenterPage should not define PaginationControls inline')
+if (!inspectionPaginationComponent.includes('export function PaginationControls')) failures.push('PaginationControls component must export PaginationControls')
 
 
 if (failures.length) {

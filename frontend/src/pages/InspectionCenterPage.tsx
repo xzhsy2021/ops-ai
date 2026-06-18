@@ -6,7 +6,6 @@ import { EmptyState, FavoriteButton, RiskBadge, RiskConfirmDialog, StatusBadge }
 import { DEFAULT_PAGE_SIZE, PaginationControls } from './inspection/PaginationControls'
 import { RunDetailRawModal } from './inspection/RunDetailRawModal'
 import { ItemConfigEditorModal } from './inspection/ItemConfigEditorModal'
-import { ThresholdSettingsSection } from './inspection/ThresholdSettingsSection'
 import { CategoryOptions } from './inspection/CategoryOptions'
 import { extractShellCommand, formatExecutionEntry, formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
 import { OverviewTab } from './inspection/OverviewTab'
@@ -15,6 +14,7 @@ import { ServerStatsGrid } from './inspection/ServerStatsGrid'
 import { ServerGroupChips } from './inspection/ServerGroupChips'
 import { ServerToolbar } from './inspection/ServerToolbar'
 import { ServerCategoryChips } from './inspection/ServerCategoryChips'
+import { ServerAdvancedSettings } from './inspection/ServerAdvancedSettings'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -927,28 +927,16 @@ export default function InspectionCenterPage() {
             onConfigEdit={openItemConfigEditor}
           />
 
-          {/* 6. 高级设置 + 阈值配置（默认折叠，一处全看到） */}
-          <details className="inspection-advanced">
-            <summary>高级设置 · 并发 / 超时 / 阈值配置</summary>
-            <div className="inspection-advanced-body">
-              <label>并发数 (1-8)
-                <input type="number" min={1} max={8} value={batchConcurrency} onChange={(e) => setBatchConcurrency(Math.max(1, Math.min(8, Number(e.target.value || 1))))} />
-              </label>
-              <label>分批大小 (1-20)
-                <input type="number" min={1} max={20} value={batchSize} onChange={(e) => setBatchSize(Math.max(1, Math.min(20, Number(e.target.value || 1))))} />
-              </label>
-              <label>单命令超时 (秒)
-                <input type="number" min={5} max={120} value={commandTimeoutSeconds} onChange={(e) => setCommandTimeoutSeconds(Math.max(5, Math.min(120, Number(e.target.value || 20))))} />
-              </label>
-              <label>单服务器总超时 (秒)
-                <input type="number" min={30} max={1800} value={runTimeoutSeconds} onChange={(e) => setRunTimeoutSeconds(Math.max(30, Math.min(1800, Number(e.target.value || 180))))} />
-              </label>
-            </div>
-            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 14px 0' }} />
-            <div style={{ padding: '12px 14px 14px' }}>
-              <ThresholdSettingsSection compact />
-            </div>
-          </details>
+          <ServerAdvancedSettings
+            batchConcurrency={batchConcurrency}
+            batchSize={batchSize}
+            commandTimeoutSeconds={commandTimeoutSeconds}
+            runTimeoutSeconds={runTimeoutSeconds}
+            onBatchConcurrencyChange={setBatchConcurrency}
+            onBatchSizeChange={setBatchSize}
+            onCommandTimeoutSecondsChange={setCommandTimeoutSeconds}
+            onRunTimeoutSecondsChange={setRunTimeoutSeconds}
+          />
         </section>
       )}
 

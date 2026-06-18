@@ -79,6 +79,8 @@ const inspectionServerToolbarPath = path.join(root, 'frontend', 'src', 'pages', 
 const inspectionServerToolbarComponent = fs.existsSync(inspectionServerToolbarPath) ? fs.readFileSync(inspectionServerToolbarPath, 'utf8') : ''
 const inspectionServerCategoryChipsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerCategoryChips.tsx')
 const inspectionServerCategoryChipsComponent = fs.existsSync(inspectionServerCategoryChipsPath) ? fs.readFileSync(inspectionServerCategoryChipsPath, 'utf8') : ''
+const inspectionServerAdvancedSettingsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerAdvancedSettings.tsx')
+const inspectionServerAdvancedSettingsComponent = fs.existsSync(inspectionServerAdvancedSettingsPath) ? fs.readFileSync(inspectionServerAdvancedSettingsPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -277,7 +279,7 @@ if (!inspectionPage.includes("from './inspection/ItemConfigEditorModal'")) failu
 if (inspectionPage.includes('function ItemConfigEditorModal(')) failures.push('InspectionCenterPage should not define ItemConfigEditorModal inline')
 if (!inspectionItemConfigModalComponent.includes('export function ItemConfigEditorModal')) failures.push('ItemConfigEditorModal component must export ItemConfigEditorModal')
 if (!fs.existsSync(inspectionThresholdSettingsPath)) failures.push('Inspection threshold settings component file missing')
-if (!inspectionPage.includes("from './inspection/ThresholdSettingsSection'")) failures.push('InspectionCenterPage must import extracted ThresholdSettingsSection')
+if (!inspectionPage.includes("from './inspection/ThresholdSettingsSection'") && !inspectionServerAdvancedSettingsComponent.includes("from './ThresholdSettingsSection'")) failures.push('Inspection threshold settings component must be imported by InspectionCenterPage or a composed inspection component')
 if (inspectionPage.includes('function ThresholdSettingsSection(')) failures.push('InspectionCenterPage should not define ThresholdSettingsSection inline')
 if (!inspectionThresholdSettingsComponent.includes('export function ThresholdSettingsSection')) failures.push('ThresholdSettingsSection component must export ThresholdSettingsSection')
 if (!fs.existsSync(inspectionCategoryOptionsPath)) failures.push('Inspection category options component file missing')
@@ -314,6 +316,10 @@ if (!fs.existsSync(inspectionServerCategoryChipsPath)) failures.push('Inspection
 if (!inspectionPage.includes("from './inspection/ServerCategoryChips'")) failures.push('InspectionCenterPage must import extracted ServerCategoryChips')
 if (!inspectionPage.includes('<ServerCategoryChips')) failures.push('InspectionCenterPage must render extracted ServerCategoryChips')
 if (!inspectionServerCategoryChipsComponent.includes('export function ServerCategoryChips')) failures.push('ServerCategoryChips component must export ServerCategoryChips')
+if (!fs.existsSync(inspectionServerAdvancedSettingsPath)) failures.push('Inspection server advanced settings component file missing')
+if (!inspectionPage.includes("from './inspection/ServerAdvancedSettings'")) failures.push('InspectionCenterPage must import extracted ServerAdvancedSettings')
+if (!inspectionPage.includes('<ServerAdvancedSettings')) failures.push('InspectionCenterPage must render extracted ServerAdvancedSettings')
+if (!inspectionServerAdvancedSettingsComponent.includes('export function ServerAdvancedSettings')) failures.push('ServerAdvancedSettings component must export ServerAdvancedSettings')
 
 
 if (failures.length) {

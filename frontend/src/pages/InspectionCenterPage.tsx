@@ -10,6 +10,7 @@ import { ThresholdSettingsSection } from './inspection/ThresholdSettingsSection'
 import { CategoryOptions } from './inspection/CategoryOptions'
 import { extractShellCommand, formatExecutionEntry, formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
 import { OverviewTab } from './inspection/OverviewTab'
+import { ServerProfileStrip } from './inspection/ServerProfileStrip'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -801,42 +802,13 @@ export default function InspectionCenterPage() {
             <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>只读命令 · 登录/账号/命令/端口/防火墙/磁盘/服务/备份</span>
           </div>
 
-          {/* 1. 4 项统计 */}
-          {inspectionProfiles.length > 0 && (
-            <div className="cc-profile-strip">
-              <div className="cc-profile-strip-head">
-                <div>
-                  <strong>常用巡检方案</strong>
-                  <span className="muted">先预览目标和确认短语，再执行批量巡检。</span>
-                </div>
-                <button className="cc-icon-btn" type="button" disabled={running} onClick={() => previewIssueRetry()}>复巡未关闭风险</button>
-              </div>
-              <div className="cc-profile-grid">
-                {inspectionProfiles.map((profile: any) => (
-                  <button
-                    key={profile.id}
-                    type="button"
-                    className="cc-profile-card"
-                    disabled={running || profile.enabled === false}
-                    onClick={() => previewInspectionProfile(profile.id)}
-                  >
-                    <span className="cc-profile-title">{profile.name || profile.id}</span>
-                    <span className="cc-profile-desc">{profile.description || profile.id}</span>
-                    <span className="cc-profile-meta">
-                      {(profile.categories || []).length} 项 · 并发 {profile.concurrency || '-'} · 批量 {profile.batch_size || '-'}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {profilePreviewData && (
-                <div className="cc-modal-callout">
-                  <strong>{profilePreviewData.profile?.name || profilePreviewData.profile_id}</strong>
-                  <div style={{ marginTop: 4, fontSize: 11 }}>目标 {profilePreviewData.eligible_count || 0} 台，跳过 {profilePreviewData.skipped_count || 0} 台，过滤 {profilePreviewData.filtered_count || 0} 台。</div>
-                  <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>一键确认已就绪，无需手动输入字符串。</div>
-                </div>
-              )}
-            </div>
-          )}
+          <ServerProfileStrip
+            profiles={inspectionProfiles}
+            previewData={profilePreviewData}
+            running={running}
+            onPreviewIssueRetry={() => previewIssueRetry()}
+            onPreviewInspectionProfile={previewInspectionProfile}
+          />
 
           <div className="cc-stat-grid">
             <div className="cc-stat-card">

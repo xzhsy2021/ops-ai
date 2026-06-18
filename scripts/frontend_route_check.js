@@ -69,6 +69,8 @@ const inspectionHelpersPath = path.join(root, 'frontend', 'src', 'pages', 'inspe
 const inspectionHelpersComponent = fs.existsSync(inspectionHelpersPath) ? fs.readFileSync(inspectionHelpersPath, 'utf8') : ''
 const inspectionOverviewTabPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'OverviewTab.tsx')
 const inspectionOverviewTabComponent = fs.existsSync(inspectionOverviewTabPath) ? fs.readFileSync(inspectionOverviewTabPath, 'utf8') : ''
+const inspectionServerProfileStripPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerProfileStrip.tsx')
+const inspectionServerProfileStripComponent = fs.existsSync(inspectionServerProfileStripPath) ? fs.readFileSync(inspectionServerProfileStripPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -284,6 +286,10 @@ if (!fs.existsSync(inspectionOverviewTabPath)) failures.push('Inspection overvie
 if (!inspectionPage.includes("from './inspection/OverviewTab'")) failures.push('InspectionCenterPage must import extracted OverviewTab')
 if (!inspectionPage.includes('<OverviewTab')) failures.push('InspectionCenterPage must render extracted OverviewTab')
 if (!inspectionOverviewTabComponent.includes('export function OverviewTab')) failures.push('OverviewTab component must export OverviewTab')
+if (!fs.existsSync(inspectionServerProfileStripPath)) failures.push('Inspection server profile strip component file missing')
+if (!inspectionPage.includes("from './inspection/ServerProfileStrip'")) failures.push('InspectionCenterPage must import extracted ServerProfileStrip')
+if (!inspectionPage.includes('<ServerProfileStrip')) failures.push('InspectionCenterPage must render extracted ServerProfileStrip')
+if (!inspectionServerProfileStripComponent.includes('export function ServerProfileStrip')) failures.push('ServerProfileStrip component must export ServerProfileStrip')
 
 
 if (failures.length) {

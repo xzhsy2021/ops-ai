@@ -59,6 +59,8 @@ const inspectionPaginationPath = path.join(root, 'frontend', 'src', 'pages', 'in
 const inspectionPaginationComponent = fs.existsSync(inspectionPaginationPath) ? fs.readFileSync(inspectionPaginationPath, 'utf8') : ''
 const inspectionRunDetailModalPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'RunDetailRawModal.tsx')
 const inspectionRunDetailModalComponent = fs.existsSync(inspectionRunDetailModalPath) ? fs.readFileSync(inspectionRunDetailModalPath, 'utf8') : ''
+const inspectionItemConfigModalPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ItemConfigEditorModal.tsx')
+const inspectionItemConfigModalComponent = fs.existsSync(inspectionItemConfigModalPath) ? fs.readFileSync(inspectionItemConfigModalPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -252,6 +254,10 @@ if (!fs.existsSync(inspectionRunDetailModalPath)) failures.push('Inspection run 
 if (!inspectionPage.includes("from './inspection/RunDetailRawModal'")) failures.push('InspectionCenterPage must import extracted RunDetailRawModal')
 if (inspectionPage.includes('function RunDetailRawModal(')) failures.push('InspectionCenterPage should not define RunDetailRawModal inline')
 if (!inspectionRunDetailModalComponent.includes('export function RunDetailRawModal')) failures.push('RunDetailRawModal component must export RunDetailRawModal')
+if (!fs.existsSync(inspectionItemConfigModalPath)) failures.push('Inspection item config editor modal component file missing')
+if (!inspectionPage.includes("from './inspection/ItemConfigEditorModal'")) failures.push('InspectionCenterPage must import extracted ItemConfigEditorModal')
+if (inspectionPage.includes('function ItemConfigEditorModal(')) failures.push('InspectionCenterPage should not define ItemConfigEditorModal inline')
+if (!inspectionItemConfigModalComponent.includes('export function ItemConfigEditorModal')) failures.push('ItemConfigEditorModal component must export ItemConfigEditorModal')
 
 
 if (failures.length) {

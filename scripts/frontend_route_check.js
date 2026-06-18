@@ -73,6 +73,8 @@ const inspectionServerProfileStripPath = path.join(root, 'frontend', 'src', 'pag
 const inspectionServerProfileStripComponent = fs.existsSync(inspectionServerProfileStripPath) ? fs.readFileSync(inspectionServerProfileStripPath, 'utf8') : ''
 const inspectionServerStatsGridPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerStatsGrid.tsx')
 const inspectionServerStatsGridComponent = fs.existsSync(inspectionServerStatsGridPath) ? fs.readFileSync(inspectionServerStatsGridPath, 'utf8') : ''
+const inspectionServerGroupChipsPath = path.join(root, 'frontend', 'src', 'pages', 'inspection', 'ServerGroupChips.tsx')
+const inspectionServerGroupChipsComponent = fs.existsSync(inspectionServerGroupChipsPath) ? fs.readFileSync(inspectionServerGroupChipsPath, 'utf8') : ''
 
 const routeEntries = new Map()
 for (const match of routesSource.matchAll(/([a-zA-Z][a-zA-Z0-9_]*):\s*'([^']+)'/g)) {
@@ -296,6 +298,10 @@ if (!fs.existsSync(inspectionServerStatsGridPath)) failures.push('Inspection ser
 if (!inspectionPage.includes("from './inspection/ServerStatsGrid'")) failures.push('InspectionCenterPage must import extracted ServerStatsGrid')
 if (!inspectionPage.includes('<ServerStatsGrid')) failures.push('InspectionCenterPage must render extracted ServerStatsGrid')
 if (!inspectionServerStatsGridComponent.includes('export function ServerStatsGrid')) failures.push('ServerStatsGrid component must export ServerStatsGrid')
+if (!fs.existsSync(inspectionServerGroupChipsPath)) failures.push('Inspection server group chips component file missing')
+if (!inspectionPage.includes("from './inspection/ServerGroupChips'")) failures.push('InspectionCenterPage must import extracted ServerGroupChips')
+if (!inspectionPage.includes('<ServerGroupChips')) failures.push('InspectionCenterPage must render extracted ServerGroupChips')
+if (!inspectionServerGroupChipsComponent.includes('export function ServerGroupChips')) failures.push('ServerGroupChips component must export ServerGroupChips')
 
 
 if (failures.length) {

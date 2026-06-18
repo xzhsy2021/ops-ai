@@ -12,6 +12,7 @@ import { extractShellCommand, formatExecutionEntry, formatTime, isServerInspecta
 import { OverviewTab } from './inspection/OverviewTab'
 import { ServerProfileStrip } from './inspection/ServerProfileStrip'
 import { ServerStatsGrid } from './inspection/ServerStatsGrid'
+import { ServerGroupChips } from './inspection/ServerGroupChips'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -849,35 +850,11 @@ export default function InspectionCenterPage() {
             </div>
           </div>
 
-          {/* 3. 分组快速选择（chip） */}
-          {Object.keys(groupedServers).length > 0 && (
-            <div className="cc-group-chip-row">
-              <span className="quick-label">按分组：</span>
-              {Object.entries(groupedServers).map(([group, list]) => {
-                const inspectableCount = (list as any[]).filter(isServerInspectable).length
-                const active = selectedGroups.includes(group)
-                return (
-                  <span
-                    key={group}
-                    className={`cc-group-chip${active ? ' cc-group-chip--active' : ''}`}
-                    onClick={() => {
-                      const next = active ? selectedGroups.filter((x) => x !== group) : Array.from(new Set([...selectedGroups, group]))
-                      setSelectedGroups(next)
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); (e.currentTarget as HTMLSpanElement).click() } }}
-                  >
-                    {group}
-                    <span className="cc-group-chip-count">{inspectableCount}</span>
-                  </span>
-                )
-              })}
-              {selectedGroups.length > 0 && (
-                <button className="cc-icon-btn" style={{ marginLeft: 4, height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => setSelectedGroups([])}>清空分组</button>
-              )}
-            </div>
-          )}
+          <ServerGroupChips
+            groupedServers={groupedServers}
+            selectedGroups={selectedGroups}
+            onSelectedGroupsChange={setSelectedGroups}
+          />
 
           {/* 4. 紧凑服务器表格（按分组折叠） */}
           <div className="cc-table-wrap inspection-server-scroll">

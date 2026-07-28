@@ -6,7 +6,7 @@ import secrets
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Depends
 from app.db import get_db, UserRepository
 from sqlalchemy.orm import Session
 
@@ -81,7 +81,7 @@ def verify_session_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_current_user(request: Request, db: Session) -> Optional[Dict[str, Any]]:
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[Dict[str, Any]]:
     token = request.cookies.get("ops_session_v2")
     if not token:
         return None
@@ -105,14 +105,14 @@ def get_current_user(request: Request, db: Session) -> Optional[Dict[str, Any]]:
     }
 
 
-def require_auth(request: Request, db: Session) -> Dict[str, Any]:
+def require_auth(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
 
 
-def require_admin(request: Request, db: Session) -> Dict[str, Any]:
+def require_admin(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     user = require_auth(request, db)
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")

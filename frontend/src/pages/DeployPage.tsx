@@ -17,6 +17,7 @@ import RollbackPlanDialog from './deploy/RollbackPlanDialog'
 import DeploymentHistoryTable from './deploy/DeploymentHistoryTable'
 import type { DeploymentRecord, DeploymentReport } from '../types/deploy'
 import DeploymentRunPanel from './deploy/DeploymentRunPanel'
+import { DeploySummaryCard } from './deploy/DeploySummaryCard'
 import { useDeploymentStream } from './deploy/useDeploymentStream'
 import { useDeployFormState } from './deploy/useDeployFormState'
 import { useDeployOptionsLoader } from './deploy/useDeployOptionsLoader'
@@ -410,44 +411,26 @@ export default function DeployPage() {
             activeStep={wizardStep}
             onStepChange={setWizardStep}
           />
-          <div className="deploy-summary-card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <strong style={{ fontFamily: 'var(--font-display)', fontSize: 13, color: 'var(--text-strong)', letterSpacing: '-0.01em' }}>已选配置</strong>
-              <span className="cc-chip cc-chip--ghost">SUMMARY</span>
-            </div>
-            <div className="deploy-summary-grid">
-              <div className="deploy-summary-item">
-                <label>系统</label><span>{system || '—'}</span>
-              </div>
-              <div className="deploy-summary-item">
-                <label>服务</label><span>{service || '—'}</span>
-              </div>
-              <div className="deploy-summary-item">
-                <label>环境</label><span>{environment || '—'}</span>
-              </div>
-              <div className="deploy-summary-item">
-                <label>发布包</label><span>{fileName || '—'}</span>
-              </div>
-              <div className="deploy-summary-item">
-                <label>目标服务器 · {selectedServerNames.length}</label>
-                <span style={{ maxHeight: 80, overflow: 'auto' }}>{selectedServerNames.length > 0 ? selectedServerNames.join(', ') : '—'}</span>
-              </div>
-              <div className="deploy-summary-item">
-                <label>Pipeline</label><span>{pipelineId || '默认'}</span>
-              </div>
-              <div className="deploy-summary-item">
-                <label>并行度 / 快速失败</label><span>{parallelism} / {failFast ? '是' : '否'}</span>
-              </div>
-              {precheckResult && (
-                <div className={`deploy-summary-item ${precheckResult.status === 'blocked' ? 'deploy-summary-item--danger' : precheckResult.status === 'warning' ? 'deploy-summary-item--warning' : ''}`}>
-                  <label>预检状态</label>
-                  <span>
-                    {precheckResult.status === 'ok' ? '通过' : precheckResult.status === 'blocked' ? '阻塞' : '警告'}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
+          <DeploySummaryCard
+            title="已选配置"
+            extra={<span className="cc-chip cc-chip--ghost">SUMMARY</span>}
+            items={[
+              { label: '系统', value: system || '—' },
+              { label: '服务', value: service || '—' },
+              { label: '环境', value: environment || '—' },
+              { label: '发布包', value: fileName || '—' },
+              { label: `目标服务器 · ${selectedServerNames.length}`, value: selectedServerNames.length > 0 ? selectedServerNames.join(', ') : '—' },
+              { label: 'Pipeline', value: pipelineId || '默认' },
+              { label: '并行度 / 快速失败', value: `${parallelism} / ${failFast ? '是' : '否'}` },
+              ...(precheckResult
+                ? [{
+                    label: '预检状态',
+                    value: precheckResult.status === 'ok' ? '通过' : precheckResult.status === 'blocked' ? '阻塞' : '警告',
+                    tone: (precheckResult.status === 'blocked' ? 'danger' : precheckResult.status === 'warning' ? 'warning' : 'default') as 'danger' | 'warning' | 'default',
+                  }]
+                : []),
+            ]}
+          />
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginTop: '16px' }}>
           <button className="cc-icon-btn" onClick={goBack} disabled={wizardStep === 0} style={{ height: 32 }}>

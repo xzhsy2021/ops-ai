@@ -386,6 +386,11 @@ class ToolToken(Base):
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
+    # qclaw Element room binding: if non-empty, this token is only allowed to
+    # call qclaw routing/approval tools from the listed Matrix room IDs.
+    # Empty list (= []) means no room restriction; default is empty for
+    # backward compatibility (existing tokens keep working unchanged).
+    bound_room_ids = Column(JSON, default=list)
 
 
 class ToolCallLog(Base):
@@ -520,7 +525,12 @@ class AiAnalysisFinding(Base):
 
 
 class AiActionApproval(Base):
-    """Human approval request for high-risk AI/MCP suggested actions."""
+    """Human approval request for high-risk AI/MCP suggested actions.
+
+    Extended for qclaw Element approval flow: supports immutable action
+    manifests, one-time approval codes, routing tickets, package bindings,
+    and execution lifecycle tracking.
+    """
     __tablename__ = "ai_action_approvals"
 
     id = Column(String(32), primary_key=True, default=_uuid)
@@ -531,12 +541,33 @@ class AiActionApproval(Base):
     request_payload = Column(JSON, default=dict)
     risk_level = Column(String(32), nullable=True, index=True)
     ai_reason = Column(Text, nullable=True)
-    status = Column(String(32), default="PENDING", index=True)
+    status = Column(String(32), default="PENDING_APPROVAL", index=True)
     requested_by = Column(String(128), nullable=True, index=True)
     approved_by = Column(String(128), nullable=True, index=True)
     created_at = Column(DateTime, default=_utcnow, index=True)
     approved_at = Column(DateTime, nullable=True)
     executed_at = Column(DateTime, nullable=True)
+
+    # ── qclaw Element approval extension fields ──
+    action_digest = Column(String(64), nullable=True, index=True)
+    approval_code_hash = Column(String(128), nullable=True)
+    room_id = Column(String(255), nullable=True)
+    request_event_id = Column(String(255), nullable=True)
+    approval_event_id = Column(String(255), nullable=True)
+    content_sha256 = Column(String(64), nullable=True)
+    routing_ticket_digest = Column(String(64), nullable=True)
+    routing_config_revision = Column(String(64), nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    consumed_at = Column(DateTime, nullable=True)
+    rejected_by = Column(String(255), nullable=True)
+    rejected_at = Column(DateTime, nullable=True)
+    package_name = Column(String(255), nullable=True)
+    package_sha256 = Column(String(64), nullable=True)
+    package_size_bytes = Column(Integer, nullable=True)
+    execution_job_id = Column(Integer, nullable=True, index=True)
+    execution_result = Column(JSON, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class DeployPackage(Base):

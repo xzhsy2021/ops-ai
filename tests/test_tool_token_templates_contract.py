@@ -22,7 +22,13 @@ def test_recommended_tool_token_templates_are_backend_source_of_truth():
     templates = recommended_tool_token_templates()
     by_key = {item["key"]: item for item in templates}
 
-    assert list(by_key.keys()) == ["readonly-ai", "inspection-ai", "operator-human", "admin-breakglass"]
+    assert list(by_key.keys()) == [
+        "readonly-ai",
+        "inspection-ai",
+        "operator-human",
+        "qclaw-mcp",
+        "admin-breakglass",
+    ]
 
     readonly = by_key["readonly-ai"]
     assert readonly["scopes"] == ["ops:read", "audit:read", "server:read"]
@@ -41,6 +47,15 @@ def test_recommended_tool_token_templates_are_backend_source_of_truth():
     assert "deploy:execute" not in operator["scopes"]
     assert operator["allow_write"] is True
     assert operator["allow_prod"] is False
+
+    qclaw = by_key["qclaw-mcp"]
+    assert qclaw["scopes"] == ["ops:read"]
+    assert qclaw["allow_write"] is False
+    assert qclaw["allow_prod"] is False
+    # qclaw 必须 NOT 持有任何危险 scope
+    dangerous_scopes = {"deploy:execute", "package:write", "package:cleanup", "db:write", "*"}
+    assert not (set(qclaw["scopes"]) & dangerous_scopes)
+    assert "short_code" in qclaw["notes"] or "approval" in qclaw["notes"].lower()
 
     admin = by_key["admin-breakglass"]
     assert admin["scopes"] == ["*"]

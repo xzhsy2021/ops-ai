@@ -865,6 +865,183 @@ MIGRATIONS: List[Dict[str, str]] = [
         "sql": "ALTER TABLE tool_tokens ADD COLUMN description TEXT",
     },
 
+    # ── qclaw Element Approval: AiActionApproval extension ──
+    {
+        "version": "072_001_action_digest",
+        "name": "Add action_digest to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "action_digest",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN action_digest VARCHAR(64)",
+    },
+    {
+        "version": "072_002_approval_code_hash",
+        "name": "Add approval_code_hash to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "approval_code_hash",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN approval_code_hash VARCHAR(128)",
+    },
+    {
+        "version": "072_003_room_id",
+        "name": "Add room_id to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "room_id",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN room_id VARCHAR(255)",
+    },
+    {
+        "version": "072_004_request_event_id",
+        "name": "Add request_event_id to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "request_event_id",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN request_event_id VARCHAR(255)",
+    },
+    {
+        "version": "072_005_approval_event_id",
+        "name": "Add approval_event_id to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "approval_event_id",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN approval_event_id VARCHAR(255)",
+    },
+    {
+        "version": "072_006_content_sha256",
+        "name": "Add content_sha256 to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "content_sha256",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN content_sha256 VARCHAR(64)",
+    },
+    {
+        "version": "072_007_routing_ticket_digest",
+        "name": "Add routing_ticket_digest to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "routing_ticket_digest",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN routing_ticket_digest VARCHAR(64)",
+    },
+    {
+        "version": "072_008_routing_config_revision",
+        "name": "Add routing_config_revision to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "routing_config_revision",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN routing_config_revision VARCHAR(64)",
+    },
+    {
+        "version": "072_009_expires_at",
+        "name": "Add expires_at to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "expires_at",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN expires_at DATETIME",
+    },
+    {
+        "version": "072_010_consumed_at",
+        "name": "Add consumed_at to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "consumed_at",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN consumed_at DATETIME",
+    },
+    {
+        "version": "072_011_rejected_by",
+        "name": "Add rejected_by to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "rejected_by",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN rejected_by VARCHAR(255)",
+    },
+    {
+        "version": "072_012_rejected_at",
+        "name": "Add rejected_at to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "rejected_at",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN rejected_at DATETIME",
+    },
+    {
+        "version": "072_013_package_name",
+        "name": "Add package_name to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "package_name",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN package_name VARCHAR(255)",
+    },
+    {
+        "version": "072_014_package_sha256",
+        "name": "Add package_sha256 to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "package_sha256",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN package_sha256 VARCHAR(64)",
+    },
+    {
+        "version": "072_015_package_size_bytes",
+        "name": "Add package_size_bytes to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "package_size_bytes",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN package_size_bytes BIGINT",
+    },
+    {
+        "version": "072_016_execution_job_id",
+        "name": "Add execution_job_id to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "execution_job_id",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN execution_job_id INTEGER",
+    },
+    {
+        "version": "072_017_execution_result",
+        "name": "Add execution_result to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "execution_result",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN execution_result JSON",
+    },
+    {
+        "version": "072_018_failure_reason",
+        "name": "Add failure_reason to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "failure_reason",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN failure_reason TEXT",
+    },
+    {
+        "version": "072_019_updated_at",
+        "name": "Add updated_at to ai_action_approvals",
+        "table": "ai_action_approvals",
+        "column": "updated_at",
+        "sql": "ALTER TABLE ai_action_approvals ADD COLUMN updated_at DATETIME",
+    },
+    {
+        "version": "072_020_approval_indexes",
+        "name": "Create indexes for qclaw approval lookups",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_ai_approval_action_digest ON ai_action_approvals(action_digest)",
+    },
+    {
+        "version": "072_021_approval_index_expires",
+        "name": "Create expires_at index for qclaw approval",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_ai_approval_expires_at ON ai_action_approvals(expires_at)",
+    },
+    {
+        "version": "072_022_approval_index_job",
+        "name": "Create execution_job_id index for qclaw approval",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_ai_approval_job_id ON ai_action_approvals(execution_job_id)",
+    },
+    {
+        "version": "072_023_approval_index_room_event",
+        "name": "Create room+event index for qclaw approval",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_ai_approval_room_event ON ai_action_approvals(room_id, request_event_id)",
+    },
+    {
+        "version": "073_001_tool_token_bound_rooms",
+        "name": "Add bound_room_ids column to tool_tokens for qclaw room binding",
+        # Runner uses `table` + `column` to make ALTER TABLE idempotent: if
+        # the column already exists (e.g. schema was rebuilt manually), the
+        # migration is marked applied without re-running the ALTER. Using
+        # TEXT instead of JSON for cross-database portability (MySQL < 5.7.7
+        # rejects JSON DEFAULT; SQLite treats JSON as TEXT anyway). The
+        # SQLAlchemy model declares `Column(JSON)` which maps to TEXT on
+        # SQLite and JSON on MySQL — both read/write the column fine.
+        "table": "tool_tokens",
+        "column": "bound_room_ids",
+        "sql": (
+            "ALTER TABLE tool_tokens ADD COLUMN bound_room_ids TEXT DEFAULT '[]' NOT NULL"
+        ),
+    },
+    # NOTE: deliberately no separate index migration for bound_room_ids.
+    # Indexing a JSON/TEXT column directly is not portable (MySQL requires
+    # a generated column + index). Room-binding lookups are point reads on
+    # token_hash (already indexed) followed by an in-Python membership
+    # check against bound_room_ids, so a DB index on the column itself
+    # would not help the hot path.
+
 ]
 
 

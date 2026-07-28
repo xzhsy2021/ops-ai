@@ -17,8 +17,9 @@ export function DeploySummaryCard({
 }) {
   return (
     <div className="deploy-summary-card">
-      <div className="section-title-row section-title-row--compact">
-        <h2>{title}</h2>
+      <div className="section-title-row section-title-row--compact" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <h2 style={{ margin: 0 }}>{title}</h2>
+        {extra}
       </div>
       <div className="deploy-summary-grid">
         {items.map((item, i) => (
@@ -31,7 +32,6 @@ export function DeploySummaryCard({
           </div>
         ))}
       </div>
-      {extra && <div>{extra}</div>}
     </div>
   )
 }

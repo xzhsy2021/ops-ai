@@ -76,7 +76,7 @@ async def terminal_session_create(request: Request, name: str, db: Session = Dep
             cols=cols,
             rows=rows,
         )
-    except RuntimeError as e:
+    except (RuntimeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     ac = build_audit_context(srv, name)

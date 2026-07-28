@@ -10,6 +10,7 @@ import { ToolOverviewPanel } from './tools/ToolOverviewPanel'
 import { ToolRiskPolicyPanel } from './tools/ToolRiskPolicyPanel'
 import { ToolTokenPanel } from './tools/ToolTokenPanel'
 import { McpAccessGuide } from './tools/McpAccessGuide'
+import { ToolDetailDrawer } from './tools/ToolDetailDrawer'
 import type { ToolInfo as _ToolInfo } from './tools/ToolCatalogPanel'
 
 type ToolInfo = _ToolInfo
@@ -69,6 +70,21 @@ function isRiskyTool(tool?: ToolInfo | null) {
 
 function toMcpAlias(name?: string) {
   return String(name || '').replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '') || 'ops_tool'
+}
+
+function buildSampleArgs(tool?: ToolInfo | null) {
+  if (!tool) return '{}'
+  const props = tool.input_schema?.properties || {}
+  const example: Record<string, any> = {}
+  Object.keys(props).forEach((key) => {
+    const typ = props[key]?.type
+    if (typ === 'array') example[key] = []
+    else if (typ === 'boolean') example[key] = false
+    else if (typ === 'integer' || typ === 'number') example[key] = 0
+    else if (typ === 'object') example[key] = {}
+    else example[key] = ''
+  })
+  return JSON.stringify(example, null, 2)
 }
 
 function JsonBlock({ value, small = true }: { value: any; small?: boolean }) {
@@ -150,6 +166,7 @@ export default function ToolAccessPage() {
   const [selectedPlanIds, setSelectedPlanIds] = useState<string[]>([])
   const [deleteToolRecordsOpen, setDeleteToolRecordsOpen] = useState(false)
   const [deletingToolRecords, setDeletingToolRecords] = useState(false)
+  const [toolDetailOpen, setToolDetailOpen] = useState(false)
 
   const loadInitial = async () => {
     setLoading(true)
@@ -251,17 +268,7 @@ export default function ToolAccessPage() {
   const selectTool = async (tool: ToolInfo) => {
     setSelectedTool(tool)
     setSampleTool(tool.name)
-    const props = tool.input_schema?.properties || {}
-    const example: Record<string, any> = {}
-    Object.keys(props).forEach((key) => {
-      const typ = props[key]?.type
-      if (typ === 'array') example[key] = []
-      else if (typ === 'boolean') example[key] = false
-      else if (typ === 'integer' || typ === 'number') example[key] = 0
-      else if (typ === 'object') example[key] = {}
-      else example[key] = ''
-    })
-    setSampleArgs(JSON.stringify(example, null, 2))
+    setSampleArgs(buildSampleArgs(tool))
     try {
       const res = await capabilityTools.detail(tool.name)
       setToolDetail(getData(res))
@@ -619,6 +626,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                 allow_write: data.allow_write,
                 allow_prod: data.allow_prod,
                 expires_in_days: data.expires_in_days,
+                bound_room_ids: data.bound_room_ids || [],
               })
               const d = getData(res)
               setCreatedToken(d.token || '')
@@ -627,7 +635,10 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               await refreshAll()
             }}
             onUpdate={async (tokenId, data) => {
-              await capabilityTools.updateToken(tokenId, data)
+              await capabilityTools.updateToken(tokenId, {
+                ...data,
+                bound_room_ids: data.bound_room_ids ?? [],
+              })
               capabilityTools.clearCache()
               notify({ type: 'success', text: 'Token 权限已更新' })
               await refreshAll()
@@ -656,22 +667,34 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
 
       {activeTab === 'catalog' && (
         <section className="tool-tab-panel">
-          <div className="tool-catalog-layout">
-            <ToolCatalogPanel
-              tools={tools}
-              categories={categories}
-              loading={loading}
-              selectedToolName={selectedTool?.name}
-              toolDetail={toolDetail}
-              onSelectTool={(tool) => {
-                selectTool(tool)
-              }}
-              onOpenPlayground={(tool) => {
-                setSampleTool(tool.name)
-                setActiveTab('playground')
-              }}
-            />
-          </div>
+          <ToolCatalogPanel
+            tools={tools}
+            categories={categories}
+            loading={loading}
+            selectedToolName={selectedTool?.name}
+            onOpenDetail={(tool) => {
+              selectTool(tool)
+              setToolDetailOpen(true)
+            }}
+            onOpenPlayground={(tool) => {
+              setSampleTool(tool.name)
+              setSampleArgs(buildSampleArgs(tool))
+              setActiveTab('playground')
+            }}
+          />
+          <ToolDetailDrawer
+            open={toolDetailOpen}
+            tool={selectedTool}
+            toolDetail={toolDetail}
+            onClose={() => setToolDetailOpen(false)}
+            onOpenPlayground={() => {
+              if (!selectedTool) return
+              setSampleTool(selectedTool.name)
+              setSampleArgs(buildSampleArgs(selectedTool))
+              setToolDetailOpen(false)
+              setActiveTab('playground')
+            }}
+          />
         </section>
       )}
 

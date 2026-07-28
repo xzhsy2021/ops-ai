@@ -10,6 +10,20 @@ const STRATEGY_LABELS: Record<string, string> = {
   WORKFLOW: 'Workflow',
 }
 
+interface MessageRouting {
+  enabled: boolean
+  aliases: string[]
+  keywords: string[]
+  priority: number
+}
+
+const DEFAULT_ROUTING: MessageRouting = {
+  enabled: false,
+  aliases: [],
+  keywords: [],
+  priority: 0,
+}
+
 export default function SystemEditPage() {
   const { name } = useParams<{ name: string }>()
   const navigate = useNavigate()
@@ -26,6 +40,10 @@ export default function SystemEditPage() {
     variables: {} as Record<string, any>,
     servers: '',
   })
+  const [services, setServices] = useState<Array<{ name: string }>>([])
+  const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
+  const [aliasInput, setAliasInput] = useState('')
+  const [keywordInput, setKeywordInput] = useState('')
 
   useEffect(() => {
     if (!name) return
@@ -40,12 +58,69 @@ export default function SystemEditPage() {
         variables: s.variables || {},
         servers: (s.servers || []).join(', '),
       })
+      setServices(Array.isArray(s.services) ? s.services : [])
+      const r = s.message_routing || {}
+      setRouting({
+        enabled: !!r.enabled,
+        aliases: Array.isArray(r.aliases) ? r.aliases : [],
+        keywords: Array.isArray(r.keywords) ? r.keywords : [],
+        priority: typeof r.priority === 'number' ? r.priority : 0,
+      })
     }).catch(() => {
       notify('无法加载系统配置', 'error')
     }).finally(() => {
       setLoading(false)
     })
   }, [name])
+
+  // 启用路由时，若关键词为空，自动填充当前系统已配置的服务名
+  const handleToggleEnabled = (checked: boolean) => {
+    if (checked && routing.keywords.length === 0 && services.length > 0) {
+      const serviceNames = services
+        .map((s) => s?.name)
+        .filter((n): n is string => !!n && typeof n === 'string')
+      if (serviceNames.length > 0) {
+        setRouting({
+          ...routing,
+          enabled: true,
+          keywords: serviceNames,
+        })
+        notify(`已自动填充 ${serviceNames.length} 个服务名为关键词`, 'success')
+        return
+      }
+    }
+    setRouting({ ...routing, enabled: checked })
+  }
+
+  const addAlias = () => {
+    const v = aliasInput.trim()
+    if (!v) return
+    if (routing.aliases.includes(v)) {
+      notify('别名已存在', 'error')
+      return
+    }
+    setRouting({ ...routing, aliases: [...routing.aliases, v] })
+    setAliasInput('')
+  }
+
+  const removeAlias = (idx: number) => {
+    setRouting({ ...routing, aliases: routing.aliases.filter((_, i) => i !== idx) })
+  }
+
+  const addKeyword = () => {
+    const v = keywordInput.trim()
+    if (!v) return
+    if (routing.keywords.includes(v)) {
+      notify('关键词已存在', 'error')
+      return
+    }
+    setRouting({ ...routing, keywords: [...routing.keywords, v] })
+    setKeywordInput('')
+  }
+
+  const removeKeyword = (idx: number) => {
+    setRouting({ ...routing, keywords: routing.keywords.filter((_, i) => i !== idx) })
+  }
 
   const handleSubmit = async () => {
     const sysName = form.name.trim()
@@ -58,6 +133,7 @@ export default function SystemEditPage() {
       description: form.description.trim(),
       variables: form.variables,
       servers,
+      message_routing: routing,
     }
     setSaving(true)
     try {
@@ -172,6 +248,129 @@ export default function SystemEditPage() {
             />
           </div>
         </div>
+
+        {/* qclaw Element 消息路由配置 */}
+        <div style={{
+          marginTop: '24px', paddingTop: '20px',
+          borderTop: '1px solid var(--border-strong)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+            <h3 style={{ margin: 0, fontSize: '15px' }}>qclaw Element 消息路由</h3>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={routing.enabled}
+                onChange={(e) => handleToggleEnabled(e.target.checked)}
+              />
+              <span style={{ fontSize: '13px' }}>启用</span>
+            </label>
+          </div>
+          <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '12px' }}>
+            配置后，qclaw 可将 Element 房间消息确定性路由到此系统。详见{' '}
+            <a href="/docs/qclaw-element-approval-integration.md" target="_blank" rel="noreferrer">
+              集成文档
+            </a>
+            。
+          </div>
+          {routing.enabled && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+              <div>
+                <label>别名（精确匹配）</label>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1 }}
+                    value={aliasInput}
+                    onChange={(e) => setAliasInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAlias() } }}
+                    placeholder="如：量化、量化交易"
+                  />
+                  <button className="btn" onClick={addAlias} type="button">+</button>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {routing.aliases.map((a, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '4px',
+                        padding: '2px 8px', borderRadius: '12px',
+                        background: 'var(--bg-hover)', fontSize: '12px',
+                      }}
+                    >
+                      {a}
+                      <button
+                        onClick={() => removeAlias(i)}
+                        type="button"
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: 'var(--text-muted)', padding: 0, fontSize: '14px',
+                        }}
+                      >×</button>
+                    </span>
+                  ))}
+                  {routing.aliases.length === 0 && (
+                    <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>暂无别名</span>
+                  )}
+                </div>
+              </div>
+              <div>
+                <label>关键词（包含匹配）</label>
+                <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '6px' }}>
+                  启用时已自动填入当前系统已配置的服务名，可继续编辑添加自定义关键词
+                </div>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1 }}
+                    value={keywordInput}
+                    onChange={(e) => setKeywordInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addKeyword() } }}
+                    placeholder="如：btc strategy、crypto deploy"
+                  />
+                  <button className="btn" onClick={addKeyword} type="button">+</button>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {routing.keywords.map((k, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '4px',
+                        padding: '2px 8px', borderRadius: '12px',
+                        background: 'var(--bg-hover)', fontSize: '12px',
+                      }}
+                    >
+                      {k}
+                      <button
+                        onClick={() => removeKeyword(i)}
+                        type="button"
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: 'var(--text-muted)', padding: 0, fontSize: '14px',
+                        }}
+                      >×</button>
+                    </span>
+                  ))}
+                  {routing.keywords.length === 0 && (
+                    <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>暂无关键词</span>
+                  )}
+                </div>
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label>优先级（0-1000，数字越大优先级越高）</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={1000}
+                  style={{ ...inputStyle, maxWidth: '200px' }}
+                  value={routing.priority}
+                  onChange={(e) => setRouting({ ...routing, priority: Math.max(0, Math.min(1000, Number(e.target.value) || 0)) })}
+                />
+                <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '4px' }}>
+                  多个系统匹配同关键词时，优先级高者优先；同优先级会判定为歧义（AMBIGUOUS）。
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }}>
           <button className="btn btn-primary" onClick={handleSubmit} disabled={saving}>
             {saving ? '保存中...' : (isCreate ? '创建系统' : '保存修改')}

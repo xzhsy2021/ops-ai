@@ -13,6 +13,7 @@ type TokenInfo = {
   scopes?: string[]
   allow_write?: boolean
   allow_prod?: boolean
+  bound_room_ids?: string[]
   key_prefix?: string
   value?: string
   masked_value?: string
@@ -25,6 +26,7 @@ type TokenPayload = {
   allow_write?: boolean
   allow_prod?: boolean
   expires_in_days?: number
+  bound_room_ids?: string[]
 }
 
 type TokenUpdatePayload = {
@@ -35,6 +37,7 @@ type TokenUpdatePayload = {
   allow_prod?: boolean
   expires_in_days?: number
   revoke?: boolean
+  bound_room_ids?: string[]
 }
 
 type PolicyPreviewResult = {
@@ -174,6 +177,8 @@ export function ToolTokenPanel({
   const [allowWrite, setAllowWrite] = useState(false)
   const [allowProd, setAllowProd] = useState(false)
   const [expiresDays, setExpiresDays] = useState(90)
+  const [boundRooms, setBoundRooms] = useState<string[]>([])
+  const [roomInput, setRoomInput] = useState('')
   const [generating, setGenerating] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -185,9 +190,94 @@ export function ToolTokenPanel({
   const [editAllowWrite, setEditAllowWrite] = useState(false)
   const [editAllowProd, setEditAllowProd] = useState(false)
   const [editExpiresDays, setEditExpiresDays] = useState(90)
+  const [editBoundRooms, setEditBoundRooms] = useState<string[]>([])
+  const [editRoomInput, setEditRoomInput] = useState('')
   const [previewing, setPreviewing] = useState(false)
   const [policyPreview, setPolicyPreview] = useState<PolicyPreviewResult | null>(null)
   const activeCount = useMemo(() => tokens.filter((x) => x.status === 'active').length, [tokens])
+
+  // Room-ID chip helpers: accept a single room id (raw, no chip syntax) per
+  // submission. Backend normalizes (strips blanks, dedupes), so we just
+  // mirror that contract here to keep the UI consistent.
+  const pushRoom = (setter: (v: (prev: string[]) => string[]) => void) => {
+    const raw = (editing ? editRoomInput : roomInput).trim()
+    if (!raw) return
+    setter((prev) => (prev.includes(raw) ? prev : [...prev, raw]))
+    if (editing) setEditRoomInput('')
+    else setRoomInput('')
+  }
+  const popRoom = (
+    idx: number,
+    getter: string[],
+    setter: (v: (prev: string[]) => string[]) => void,
+  ) => {
+    setter((prev) => prev.filter((_, i) => i !== idx))
+  }
+  const onRoomKey = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    setter: (v: (prev: string[]) => string[]) => void,
+  ) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault()
+      pushRoom(setter)
+    }
+  }
+
+  const renderRoomChips = (
+    rooms: string[],
+    setter: (v: (prev: string[]) => string[]) => void,
+    input: string,
+    setInput: (v: string) => void,
+    readOnly = false,
+  ) => (
+    <div>
+      {!readOnly && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => onRoomKey(e, setter)}
+            placeholder="如：!opsRoom:matrix.org"
+            style={{ flex: 1 }}
+          />
+          <button type="button" className="btn" onClick={() => pushRoom(setter)}>
+            +
+          </button>
+        </div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {rooms.map((r, i) => (
+          <span
+            key={`${r}-${i}`}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '2px 8px', borderRadius: 12,
+              background: 'var(--bg-hover)', fontSize: 12,
+              fontFamily: 'monospace',
+            }}
+            title={r}
+          >
+            {r}
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => popRoom(i, rooms, setter)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'var(--text-muted)', padding: 0, fontSize: 14,
+                }}
+              >×</button>
+            )}
+          </span>
+        ))}
+        {rooms.length === 0 && (
+          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            暂未绑定（留空表示不限制房间）
+          </span>
+        )}
+      </div>
+    </div>
+  )
 
   const applyTemplate = (tpl: TokenTemplate) => {
     setScopesText(scopesToText(tpl.scopes))
@@ -211,6 +301,7 @@ export function ToolTokenPanel({
     setEditAllowWrite(Boolean(token.allow_write))
     setEditAllowProd(Boolean(token.allow_prod))
     setEditExpiresDays(90)
+    setEditBoundRooms(Array.isArray(token.bound_room_ids) ? [...token.bound_room_ids] : [])
   }
 
   const handleGenerate = async () => {
@@ -224,9 +315,12 @@ export function ToolTokenPanel({
         allow_write: allowWrite,
         allow_prod: allowProd,
         expires_in_days: expiresDays,
+        bound_room_ids: boundRooms,
       })
       setName('')
       setDescription('')
+      setBoundRooms([])
+      setRoomInput('')
     } finally {
       setGenerating(false)
     }
@@ -243,6 +337,7 @@ export function ToolTokenPanel({
         allow_write: editAllowWrite,
         allow_prod: editAllowProd,
         expires_in_days: editExpiresDays,
+        bound_room_ids: editBoundRooms,
       })
       setEditing(null)
     } finally {
@@ -345,6 +440,14 @@ export function ToolTokenPanel({
             允许生产操作
           </label>
         </div>
+        <div className="field-item">
+          <label>绑定 Element 房间 ID（qclaw 限定）</label>
+          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+            留空表示不限制；填写后，此 Token 仅能在指定 Element 房间被 qclaw 用于路由/审批调用。
+            推荐每个 qclaw Token 只绑定一个房间。
+          </div>
+          {renderRoomChips(boundRooms, setBoundRooms, roomInput, setRoomInput)}
+        </div>
         <button className="btn btn-primary" disabled={!name.trim() || generating} onClick={handleGenerate}>
           {generating ? '生成中...' : '生成 Token'}
         </button>
@@ -394,6 +497,15 @@ export function ToolTokenPanel({
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
                     {token.allow_write && <span className="tag tag-warning">允许写</span>}
                     {token.allow_prod && <span className="tag tag-danger">生产操作</span>}
+                    {(token.bound_room_ids || []).length > 0 && (
+                      <span
+                        className="tag"
+                        title={(token.bound_room_ids || []).join('\n')}
+                        style={{ background: 'var(--bg-hover)', fontFamily: 'monospace' }}
+                      >
+                        房间: {(token.bound_room_ids || []).length}
+                      </span>
+                    )}
                     {(token.scopes || []).slice(0, 6).map((s) => <span className="scope-chip" key={s} title={s}>{formatScopeLabel(s)}</span>)}
                     {(token.scopes || []).length > 6 && <span style={{ color: 'var(--text-muted)' }}>+{(token.scopes || []).length - 6}</span>}
                   </div>
@@ -479,6 +591,13 @@ export function ToolTokenPanel({
                 <input type="checkbox" checked={editAllowProd} onChange={(e) => setEditAllowProd(e.target.checked)} />
                 允许生产操作
               </label>
+            </div>
+            <div className="field-item">
+              <label>绑定 Element 房间 ID（qclaw 限定）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+                修改后将立即在下次 MCP 调用生效。留空表示不限制房间。
+              </div>
+              {renderRoomChips(editBoundRooms, setEditBoundRooms, editRoomInput, setEditRoomInput)}
             </div>
             <div className="alert alert-warning">
               巡检执行需要 <code>ops:write</code> 与写操作开关；启用服务器读取管控时，服务器只读工具需要 <code>server:read</code>。

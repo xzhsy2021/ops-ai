@@ -62,6 +62,26 @@ def recommended_tool_token_templates() -> List[Dict[str, Any]]:
             "notes": "Does not include deploy:execute; use task center and human approval for high-risk work.",
         },
         {
+            "key": "claw-mcp",
+            "name": "Claw Element MCP",
+            "description": "通用 claw Element room integration token。Routes messages, prepares/approves/executes high-risk actions via human-approved short codes. Actual deploy/rollback/DML/cleanup runs through internal ApprovalExecutor, NOT the caller's scopes.",
+            "scopes": ["ops:read"],
+            "allow_write": False,
+            "allow_prod": False,
+            "expires_in_days": 30,
+            "notes": "通用 claw 接入模板。Deliberately narrow: NO deploy:execute / package:write / package:cleanup / db:write / wildcard. Security gate is the one-time approval short_code (15min, room+event+content bound).",
+        },
+        {
+            "key": "qclaw-mcp",
+            "name": "qclaw Element MCP",
+            "description": "qclaw Element room integration token (legacy key, use claw-mcp for new integrations). Routes messages, prepares/approves/executes high-risk actions via human-approved short codes. Actual deploy/rollback/DML/cleanup runs through internal ApprovalExecutor, NOT the caller's scopes.",
+            "scopes": ["ops:read"],
+            "allow_write": False,
+            "allow_prod": False,
+            "expires_in_days": 30,
+            "notes": "Deliberately narrow: NO deploy:execute / package:write / package:cleanup / db:write / wildcard. Security gate is the one-time approval short_code (15min, room+event+content bound). See docs/qclaw-element-approval-integration.md.",
+        },
+        {
             "key": "admin-breakglass",
             "name": "Admin Breakglass",
             "description": "Short-lived emergency token for admin-only operations.",
@@ -105,6 +125,46 @@ def _resolve_expires_at(expires_in_days: Optional[int]) -> Optional[datetime]:
     return _utcnow() + timedelta(days=min(max(days, 1), 3650))
 
 
+def _normalize_bound_room_ids(value: Any) -> List[str]:
+    """Coerce arbitrary user input into a clean list[str] of Matrix room IDs.
+
+    Empty / None / all-blank input returns an empty list (= no binding).
+    Each entry is stripped; duplicates are removed while preserving order.
+    Non-string items in list input are dropped (we never auto-stringify
+    integers or None into bogus "123" / "None" room IDs).
+
+    Accepted inputs:
+    - None / [] / "" / "   " -> []
+    - str -> one room ID per non-blank line. Comma is intentionally NOT
+      treated as a separator because Matrix room IDs are themselves allowed
+      to contain commas (and the canonical form `!opaque:server` never
+      uses one in practice, so this is a safe simplification that mirrors
+      the way the Web UI's chip editor works).
+    - list / tuple / set of strings -> each non-blank string kept; non-
+      string items (e.g. accidental ints) are dropped silently.
+    - any other type -> [] (not crash).
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        # Newline-separated only. Tabs/spaces around lines are stripped.
+        candidates = [p for p in value.splitlines() if p.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        # Only accept string members; drop everything else.
+        candidates = [p for p in value if isinstance(p, str)]
+    else:
+        return []
+    seen: set[str] = set()
+    result: List[str] = []
+    for raw in candidates:
+        room_id = raw.strip()
+        if not room_id or room_id in seen:
+            continue
+        seen.add(room_id)
+        result.append(room_id)
+    return result
+
+
 def create_tool_token(
     db: Session,
     *,
@@ -115,10 +175,12 @@ def create_tool_token(
     allow_write: Optional[bool] = None,
     allow_prod: bool = False,
     expires_in_days: Optional[int] = 90,
+    bound_room_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
     resolved_scopes = list(scopes) if scopes else list(DEFAULT_AI_TOKEN_SCOPES)
     resolved_allow_write = _resolve_write_flag(resolved_scopes, allow_write)
+    resolved_bound_rooms = _normalize_bound_room_ids(bound_room_ids)
     token = ToolToken(
         name=name.strip() or "tool-token",
         token_hash=hash_token(raw),
@@ -129,6 +191,7 @@ def create_tool_token(
         allow_write=resolved_allow_write,
         allow_prod=bool(allow_prod),
         expires_at=_resolve_expires_at(expires_in_days),
+        bound_room_ids=resolved_bound_rooms,
     )
     db.add(token)
     db.commit()
@@ -155,6 +218,35 @@ def validate_tool_token(db: Session, raw_token: str) -> ToolToken:
     return record
 
 
+def enforce_room_binding(bound_room_ids: Any, room_id: str | None) -> None:
+    """Reject the request if the caller's room is not on the allow list.
+
+    Used by qclaw routing/approval tools to enforce Element room binding at
+    the MCP layer. Only applies when the token was issued with a non-empty
+    list of room IDs; an empty list (or None) means "no binding, allow any
+    room" for backward compatibility with pre-binding tokens.
+
+    Raises HTTPException(403) when the binding is configured and the call's
+    room_id is missing or not on the list.
+    """
+    rooms = _normalize_bound_room_ids(bound_room_ids)
+    if not rooms:
+        return  # No binding configured -> pass through.
+    if not room_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Tool token has room binding configured but request has no room_id",
+        )
+    if str(room_id).strip() not in rooms:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Tool token not allowed in room {room_id!r}; "
+                f"allowed rooms: {','.join(rooms)}"
+            ),
+        )
+
+
 def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any]:
     now = _utcnow()
     if token.revoked_at:
@@ -177,6 +269,7 @@ def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any
         "expires_at": token.expires_at.isoformat() if token.expires_at else None,
         "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
         "revoked_at": token.revoked_at.isoformat() if token.revoked_at else None,
+        "bound_room_ids": _normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
     }
     if include_hash:
         data["token_hash"] = token.token_hash

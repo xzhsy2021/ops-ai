@@ -20,6 +20,10 @@ class ToolContext:
     scopes: List[str] = field(default_factory=list)
     allow_write: bool = False
     allow_prod: bool = False
+    # qclaw Element room binding: when the underlying token has a non-empty
+    # list of allowed room IDs, MCP routing/approval tools must reject calls
+    # coming from a room not on the list. Empty list = no binding.
+    bound_room_ids: List[str] = field(default_factory=list)
     client_name: str = ""
     ip_address: str = ""
     user_agent: str = ""
@@ -46,6 +50,9 @@ class ToolContext:
             "scopes": self.scopes,
             "allow_write": self.allow_write,
             "allow_prod": self.allow_prod,
+            # Include room binding so downstream audit logs can correlate a
+            # qclaw MCP call with the room restriction in force at call time.
+            "bound_room_ids": self.bound_room_ids,
             "client_name": self.client_name,
             "ip_address": self.ip_address,
             "user_agent": self.user_agent,

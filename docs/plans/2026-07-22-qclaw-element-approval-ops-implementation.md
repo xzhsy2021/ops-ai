@@ -1017,3 +1017,28 @@ Before merging or enabling the qclaw token in production:
 6. Execute one non-production package release, rollback, cleanup, and transactionally rolled-back DML test.
 7. Confirm duplicate approval replies cannot create duplicate jobs.
 8. Confirm audit records correlate Matrix room/event IDs, approval ID, operation job ID, deployment ID, package SHA, and approving Matrix user.
+
+## Implementation Simplifications (vs Original Design)
+
+以下设计项在实现时有意简化，原因是对齐项目"最小复杂度"约束：
+
+### 1. `manages_own_job` on ToolDefinition (Task 6 Step 3)
+**设计意图**: 扩展 `ToolDefinition` 增加 `manages_own_job: bool = False`，让 `ops.approval.execute` 跳过 registry 的通用 pre-handler job enqueue，自行管理 job 生命周期。
+
+**实现简化**: 未添加此字段。当前实现采用同步执行模式（consume → execute 在同一调用中完成），不需要异步 job 队列。审批通过后 `approval_execute` 直接调用 `ApprovalExecutor.execute()` 并返回结果，Job 的创建和状态更新在 executor 内部完成。
+
+### 2. `approval_id` / `approved_by_matrix_id` on ToolContext (Task 6 Step 3)
+**设计意图**: 在 `ToolContext` 上增加 `approval_id` 和 `approved_by_matrix_id` 字段，用于安全审计和 job 序列化。
+
+**实现简化**: 未添加这些字段。执行上下文直接从数据库中的 `AiActionApproval` 记录派生（`approval.approved_by`、`approval.id`），无需通过 ToolContext 传递。Job 的 `operator` 和 `request_json` 字段直接从审批记录填充。
+
+### 3. Startup Recovery for Approved-Action Jobs (Task 8 Step 5)
+**设计意图**: 在应用启动时恢复排队中的 approved-action job，对账 stale running job。
+
+**实现简化**: 未实现。当前同步执行模式意味着不存在"排队中"的审批 job——审批通过后立即执行，不会有待恢复的 job。如果 executor 执行失败，状态直接标记为 FAILED，不需要重启后对账。
+
+### 简化理由
+- 项目为单机部署，不需要异步 job 队列的复杂性
+- 审批操作本身是低频事件（人工在 Element 房间批准），同步执行不会阻塞
+- 减少代码路径和测试表面积，降低维护成本
+- 如未来需要异步执行，可在 `approval_execute` 中改为创建 job 并返回 EXECUTING 状态，由 worker 异步消费

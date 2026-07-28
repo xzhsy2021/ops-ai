@@ -436,6 +436,8 @@ async def get_system_v2(system_name: str, request: Request):
     svcs = system.get("services", []) or []
     envs = system.get("environments", {}) or {}
     groups = system.get("groups") or system.get("regions") or {}
+    # qclaw Element 消息路由配置（透传，可能不存在）
+    routing = system.get("message_routing") or {}
     return api_response(data={
         "name": system_name,
         "display_name": system.get("display_name", system_name),
@@ -446,6 +448,12 @@ async def get_system_v2(system_name: str, request: Request):
         "groups": groups,
         "variables": system.get("variables", {}),
         "servers": system.get("servers", []),
+        "message_routing": {
+            "enabled": bool(routing.get("enabled", False)),
+            "aliases": list(routing.get("aliases", []) or []),
+            "keywords": list(routing.get("keywords", []) or []),
+            "priority": int(routing.get("priority", 0) or 0),
+        },
         "environment_count": len(envs),
         "service_count": len(svcs),
         "group_count": len(groups),
@@ -474,6 +482,15 @@ async def create_system_v2(payload: Dict[str, Any], request: Request, db: Sessio
         "variables": payload.get("variables", {}) or {},
         "servers": payload.get("servers", []) or [],
     }
+    # qclaw Element 消息路由配置（可选）
+    routing = payload.get("message_routing")
+    if isinstance(routing, dict):
+        system["message_routing"] = {
+            "enabled": bool(routing.get("enabled", False)),
+            "aliases": [str(a).strip() for a in routing.get("aliases", []) if str(a).strip()],
+            "keywords": [str(k).strip() for k in routing.get("keywords", []) if str(k).strip()],
+            "priority": int(routing.get("priority", 0)),
+        }
     groups = payload.get("groups") or payload.get("regions") or {}
     if isinstance(groups, dict) and groups:
         system["groups"] = groups
@@ -503,6 +520,18 @@ async def update_system_v2(system_name: str, payload: Dict[str, Any], request: R
         system["variables"] = payload["variables"] if isinstance(payload["variables"], dict) else {}
     if "servers" in payload:
         system["servers"] = payload["servers"] if isinstance(payload["servers"], list) else []
+    if "message_routing" in payload:
+        # qclaw Element 消息路由配置：{enabled, aliases, keywords, priority}
+        routing = payload["message_routing"]
+        if isinstance(routing, dict):
+            system["message_routing"] = {
+                "enabled": bool(routing.get("enabled", False)),
+                "aliases": [str(a).strip() for a in routing.get("aliases", []) if str(a).strip()],
+                "keywords": [str(k).strip() for k in routing.get("keywords", []) if str(k).strip()],
+                "priority": int(routing.get("priority", 0)),
+            }
+        else:
+            system.pop("message_routing", None)
     if "services" in payload:
         system["services"] = payload["services"] if isinstance(payload["services"], list) else system.get("services", [])
     if "environments" in payload:

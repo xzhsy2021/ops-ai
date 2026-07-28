@@ -3852,25 +3852,42 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .tool-directory-workspace { display: grid; grid-template-columns: minmax(360px, .95fr) minmax(420px, 1.05fr); gap: 14px; align-items: start; }
 .tool-directory-master, .tool-directory-detail { min-height: 620px; }
 .tool-directory-detail { position: sticky; top: 88px; display: grid; gap: 14px; align-content: start; }
-.tool-directory-filters { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(140px, .48fr) minmax(130px, .42fr); gap: 8px; }
+.tool-directory-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
 .tool-list { display: grid; gap: 9px; max-height: 640px; overflow: auto; padding-right: 4px; }
 .tool-empty { padding: 24px; color: var(--text-muted); text-align: center; }
 .tool-card {
-  display: grid;
-  width: 100%;
-  gap: 9px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 15px;
   background: var(--bg-page);
   color: var(--text-primary);
-  cursor: pointer;
   transition: transform .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
 }
 .tool-card:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); background: var(--bg-hover); }
 .tool-card.active { border-color: color-mix(in srgb, var(--brand) 52%, var(--border)); box-shadow: inset 3px 0 0 var(--brand); }
-.tool-card strong { color: var(--text-strong); font-size: 13px; }
-.tool-card small { display: block; margin-top: 4px; color: var(--text-muted); line-height: 1.45; }
+.tool-card-main {
+  flex: 1 1 auto;
+  display: grid;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tool-card-main strong { color: var(--text-strong); font-size: 13px; }
+.tool-card-main small { display: block; margin-top: 4px; color: var(--text-muted); line-height: 1.45; }
+.tool-card-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: center;
+}
 .tool-detail-meta { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-page); color: var(--text-muted); font-size: 12px; }
 .tool-detail-meta strong { color: var(--text-primary); }
 .tool-schema-grid { display: grid; grid-template-columns: 1fr; gap: 12px; min-width: 0; }
@@ -10520,6 +10537,153 @@ html[data-zen='true'] .app-main {
   border-radius: 4px;
   font-size: 11px;
 }
+
+/* 执行结果面板 — 计划 §9.3 审计/任务/报告/重试/回滚入口 */
+.risk-confirm-result-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.risk-confirm-result-icon--success {
+  background: var(--success-surface);
+  color: var(--success);
+  border: 1px solid var(--success-border);
+  box-shadow: 0 0 12px -4px color-mix(in srgb, var(--success) 50%, transparent);
+}
+.risk-confirm-result-icon--error {
+  background: var(--danger-surface);
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  box-shadow: 0 0 12px -4px color-mix(in srgb, var(--danger) 50%, transparent);
+}
+.risk-confirm-result-card {
+  position: relative;
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-surface-2);
+  overflow: hidden;
+}
+.risk-confirm-result-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+}
+.risk-confirm-result-card--success::before { background: var(--success); }
+.risk-confirm-result-card--success {
+  border-color: var(--success-border);
+  background: color-mix(in srgb, var(--success-surface) 35%, var(--bg-surface-2));
+}
+.risk-confirm-result-card--error::before { background: var(--danger); }
+.risk-confirm-result-card--error {
+  border-color: var(--danger-border);
+  background: color-mix(in srgb, var(--danger-surface) 35%, var(--bg-surface-2));
+}
+.risk-confirm-result-message {
+  position: relative;
+  color: var(--text-strong);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.risk-confirm-result-target {
+  position: relative;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.risk-confirm-result-target code {
+  color: var(--text-strong);
+  background: color-mix(in srgb, #ffffff 6%, transparent);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.risk-confirm-result-ids {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.risk-confirm-result-ids > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.risk-confirm-result-ids strong {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.risk-confirm-result-ids code {
+  color: var(--brand);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.risk-confirm-result-links {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.risk-confirm-result-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface-3);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all var(--dur-fast) var(--ease-emphasized);
+}
+.risk-confirm-result-link:hover {
+  border-color: var(--border-bright);
+  color: var(--text-strong);
+  transform: translateY(-1px);
+}
+.risk-confirm-result-link span {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  transition: transform var(--dur-fast) var(--ease-emphasized);
+}
+.risk-confirm-result-link:hover span {
+  transform: translateX(3px);
+  color: var(--brand);
+}
+.risk-confirm-result-link--brand { border-color: var(--brand-border); color: var(--brand); background: var(--brand-surface); }
+.risk-confirm-result-link--success { border-color: var(--success-border); color: var(--success); background: var(--success-surface); }
+.risk-confirm-result-link--warning { border-color: var(--warning-border); color: var(--warning); background: var(--warning-surface); }
+.risk-confirm-result-link--danger { border-color: var(--danger-border); color: var(--danger); background: var(--danger-surface); }
 
 /* 普通确认对话框 */
 .confirm-overlay {

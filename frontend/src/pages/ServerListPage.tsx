@@ -3,7 +3,10 @@ import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { serverManagement, adminMaintenance } from '../api'
 import { RiskConfirmDialog } from '../components/ui'
+import { RiskActionGuard } from '../components/RiskActionGuard'
+import type { RiskActionResult } from '../components/RiskActionGuard'
 import { EnhancedDataTable } from '../components/EnhancedDataTable'
+import { ROUTES } from '../routes'
 import type { EnhancedColumn } from '../components/EnhancedDataTable'
 import { useCachedResource } from '../hooks/useCachedResource'
 
@@ -254,7 +257,8 @@ export default function ServerListPage() {
     confirmButtonLabel?: string
     riskLevel?: string
     details?: Array<{ label: string; value: React.ReactNode }>
-    onConfirm: () => Promise<void> | void
+    result?: RiskActionResult | null
+    onConfirm: () => Promise<RiskActionResult | void> | RiskActionResult | void
   } | null>(null)
 
   const flash = (msg: string, isError = false) => {
@@ -366,26 +370,26 @@ export default function ServerListPage() {
     setShowModal(true)
   }
 
-  const handleDelete = async (s: any) => {
-    setRiskAction({
-      title: '删除服务器',
-      description: '服务器资产会从平台移除，已有发布记录不会删除。',
-      target: `${s.name} (${s.host})`,
-      confirmText: `DELETE_SERVER ${s.name}`,
-      confirmButtonLabel: '删除服务器',
-      riskLevel: 'high',
-      details: [{ label: '主机', value: s.host }, { label: '分组', value: s.group || '未分组' }],
-      onConfirm: async () => {
-        try {
-          await serverManagement.delete(s.name)
-          flash(`已删除: ${s.name}`)
-          setSelected((prev) => { const next = new Set(prev); next.delete(s.name); return next })
-          load()
-        } catch (e: any) {
-          flash(typeof e === 'string' ? e : '删除失败', true)
-        }
-      },
-    })
+  const doDeleteServer = async (s: any): Promise<RiskActionResult> => {
+    try {
+      await serverManagement.delete(s.name)
+      flash(`已删除: ${s.name}`)
+      setSelected((prev) => { const next = new Set(prev); next.delete(s.name); return next })
+      load()
+      return {
+        success: true,
+        message: `服务器 ${s.name} 已删除`,
+        auditId: `srv-delete-${s.name}`,
+        links: [
+          { label: '查看审计', to: ROUTES.audit, tone: 'brand' },
+          { label: '服务器列表', to: ROUTES.servers, tone: 'neutral' },
+        ],
+      }
+    } catch (e: any) {
+      const msg = typeof e === 'string' ? e : '删除失败'
+      flash(msg, true)
+      return { success: false, message: msg }
+    }
   }
 
   const handleKeyUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -621,14 +625,24 @@ export default function ServerListPage() {
       confirmText: `DELETE_KEY ${name}`,
       confirmButtonLabel: '删除密钥',
       riskLevel: 'high',
-      onConfirm: async () => {
+      onConfirm: async (): Promise<RiskActionResult> => {
         try {
           await adminMaintenance.sshKeys.delete(name)
           if (form.key === name) updateField('key', '')
           flash(`已删除密钥: ${name}`)
           loadKeys()
+          return {
+            success: true,
+            message: `密钥 ${name} 已删除`,
+            links: [
+              { label: '查看审计', to: ROUTES.audit, tone: 'brand' },
+              { label: '密钥管理', to: ROUTES.servers, tone: 'neutral' },
+            ],
+          }
         } catch (err: any) {
-          flash(typeof err === 'string' ? err : '删除密钥失败', true)
+          const msg = typeof err === 'string' ? err : '删除密钥失败'
+          flash(msg, true)
+          return { success: false, message: msg }
         }
       },
     })
@@ -719,15 +733,25 @@ export default function ServerListPage() {
       confirmText: `DELETE_GROUP ${name}`,
       confirmButtonLabel: '删除分组',
       riskLevel: 'medium',
-      onConfirm: async () => {
+      onConfirm: async (): Promise<RiskActionResult> => {
         try {
           await serverManagement.groups.delete(name)
           flash(`已删除分组: ${name}`)
           if (selectedGroup === name) setSelectedGroup(null)
           load()
           loadGroups()
+          return {
+            success: true,
+            message: `分组 ${name} 已删除`,
+            links: [
+              { label: '查看审计', to: ROUTES.audit, tone: 'brand' },
+              { label: '服务器列表', to: ROUTES.servers, tone: 'neutral' },
+            ],
+          }
         } catch (err: any) {
-          flash(typeof err === 'string' ? err : '删除分组失败', true)
+          const msg = typeof err === 'string' ? err : '删除分组失败'
+          flash(msg, true)
+          return { success: false, message: msg }
         }
       },
     })
@@ -833,7 +857,20 @@ export default function ServerListPage() {
             <ActionButton tip={healthChecking[s.name] ? '检查中' : '健康检查'} disabled={healthChecking[s.name]} onClick={(e) => { e.stopPropagation(); handleHealthProbe(s.name) }}>{healthChecking[s.name] ? '…' : '♥'}</ActionButton>
             <ActionButton tip="详情" variant="success" onClick={(e) => { e.stopPropagation(); navigate(`/servers/${encodeURIComponent(s.name)}`) }}>↗</ActionButton>
             <ActionButton tip="编辑" onClick={(e) => { e.stopPropagation(); openEdit(s) }}>✎</ActionButton>
-            <ActionButton tip="删除" variant="danger" onClick={(e) => { e.stopPropagation(); handleDelete(s) }}>×</ActionButton>
+            <RiskActionGuard
+              riskLevel="high"
+              title="删除服务器"
+              description="服务器资产会从平台移除，已有发布记录不会删除。"
+              target={`${s.name} (${s.host})`}
+              confirmText={`DELETE_SERVER ${s.name}`}
+              confirmMode="one-click"
+              details={[{ label: '主机', value: s.host }, { label: '分组', value: s.group || '未分组' }]}
+              onConfirm={() => doDeleteServer(s)}
+            >
+              {(open) => (
+                <ActionButton tip="删除" variant="danger" onClick={(e) => { e.stopPropagation(); open() }}>×</ActionButton>
+              )}
+            </RiskActionGuard>
           </div>
         )
       },
@@ -1431,11 +1468,13 @@ export default function ServerListPage() {
         riskLevel={riskAction?.riskLevel || 'high'}
         details={riskAction?.details}
         confirmButtonLabel={riskAction?.confirmButtonLabel || '确认执行'}
+        result={riskAction?.result}
         onCancel={() => setRiskAction(null)}
         onConfirm={async () => {
           const action = riskAction?.onConfirm
-          setRiskAction(null)
-          await action?.()
+          if (!action) return
+          const res = await action()
+          setRiskAction((prev) => prev ? { ...prev, result: res || { success: true, message: '操作已完成' } } : null)
         }}
       />
     </div>

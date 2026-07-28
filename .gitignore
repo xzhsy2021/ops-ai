@@ -37,6 +37,7 @@ data/reports/
 data/_*.json
 data/_*.txt
 data/exports/db/
+data/qclaw-staging/
 
 dist/
 

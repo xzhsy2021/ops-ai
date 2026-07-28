@@ -1,16 +1,39 @@
 #!/usr/bin/env bash
+# 开发模式启动脚本
+# 默认：同端口模式（后端 8000 端口同时服务前端静态文件）
+# 分离模式：DEV_MODE=separated ./scripts/dev.sh（后端 8000 + 前端 3000）
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-"$ROOT_DIR/scripts/check_env.sh"
-"$ROOT_DIR/scripts/init_db.sh"
+DEV_MODE="${DEV_MODE:-single}"
 
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
-export ENV="${ENV:-development}"
-export SERVE_FRONTEND="${SERVE_FRONTEND:-auto}"
+if [ "$DEV_MODE" = "separated" ]; then
+  # 前后端分离模式（开发热更新）
+  "$ROOT_DIR/scripts/check_env.sh"
+  "$ROOT_DIR/scripts/init_db.sh"
 
-printf '[OK] starting backend at http://%s:%s\n' "$HOST" "$PORT"
-exec python3 -m uvicorn main:app --host "$HOST" --port "$PORT" --reload
+  HOST="${HOST:-127.0.0.1}"
+  PORT="${PORT:-8000}"
+  export ENV="${ENV:-development}"
+  export SERVE_FRONTEND="false"
+
+  printf '[OK] starting backend at http://%s:%s (API only)\n' "$HOST" "$PORT"
+  printf '[OK] frontend dev server: http://localhost:3000\n'
+  python3 -m uvicorn main:app --host "$HOST" --port "$PORT" --reload &
+  BACKEND_PID=$!
+
+  cd frontend
+  if [ ! -d node_modules ]; then
+    npm install --no-audit --no-fund
+  fi
+  npm run dev &
+  FRONTEND_PID=$!
+
+  trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null || true" EXIT
+  wait
+else
+  # 同端口模式（构建前端 dist + 后端服务）
+  exec "$ROOT_DIR/scripts/start_single_process.sh"
+fi

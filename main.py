@@ -109,7 +109,7 @@ async def lifespan(app: FastAPI):
     logger.info("  Ops Platform v2.1.10 已启动")
     logger.info(f"  系统数: {len(systems)}  服务器数: {len(servers)}")
     logger.info(f"  访问地址: http://localhost:8000")
-    logger.info(f"  API 文档: http://localhost:8000/docs")
+    logger.info(f"  API 文档: http://localhost:8000/api/docs")
     try:
         from app.services.build_info import get_frontend_build_check
         frontend_check = get_frontend_build_check()
@@ -184,7 +184,10 @@ app = FastAPI(
     title="Ops Platform",
     version="2.1.10",
     description="运维发布平台 - 系统/服务中心化架构",
-    docs_url="/docs",
+    # 把 Swagger UI 迁到 /api/docs，腾出 /docs 给项目文档（docs/*.md）使用
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
 
@@ -311,6 +314,15 @@ if _serve_frontend == "true" and os.path.isdir(_frontend_dist):
 elif _serve_frontend == "false":
     logger.info("  前端静态文件: 独立部署模式或 dist 已过期 (后端仅提供 API)")
 
+# /docs 提供项目根目录下 docs/ 的 markdown 文档（如集成文档 / 巡检 spec 等）。
+# 仅在 docs 目录存在时挂载，避免空目录导致 500。
+_docs_dir = os.path.join(REAL_DIR, "docs")
+if os.path.isdir(_docs_dir):
+    app.mount("/docs", StaticFiles(directory=_docs_dir, html=False), name="project-docs")
+    logger.info("  项目文档: 由后端提供 /docs/  (markdown 文件)")
+else:
+    logger.info("  项目文档: docs/ 目录不存在，跳过 /docs 静态服务")
+
 from app.api.deploy_v2 import deploy_v2_router, pipeline_v2_router, resource_v2_router
 from app.api.auth_v2 import auth_v2_router
 from app.api.groups import groups_v2_router
@@ -329,13 +341,14 @@ from app.api.db_tools import router as db_tools_router
 from app.api.dashboard import router as dashboard_router
 from app.api.mcp_gateway import router as mcp_gateway_router
 from app.api.ai_analysis import router as ai_analysis_router
+from app.api.approvals import router as approvals_router
 from app.api.v2.status import router as status_aggregate_router
 
 _v2_routers = [
     deploy_v2_router, pipeline_v2_router, resource_v2_router,
     auth_v2_router, groups_v2_router,
     servers_v2_router, jump_hosts_v2_router, admin_ops_router, sftp_router,
-    maintenance_router, task_center_router, audit_router, tools_router, mcp_router, capabilities_router, system_router, reports_router, inspection_router, db_tools_router, dashboard_router, mcp_gateway_router, status_aggregate_router, ai_analysis_router,
+    maintenance_router, task_center_router, audit_router, tools_router, mcp_router, capabilities_router, system_router, reports_router, inspection_router, db_tools_router, dashboard_router, mcp_gateway_router, status_aggregate_router, ai_analysis_router, approvals_router,
 ]
 _v2_routers_ws = [
     terminal_ws_router,

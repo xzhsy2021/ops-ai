@@ -31,6 +31,16 @@ RUNTIME_DIR = _runtime_path("RUNTIME_DIR", "runtime")
 REPORT_DIR = _runtime_path("REPORT_DIR", "reports")
 DATABASE_PATH = get_database_path()
 
+# ── Element Approval integration (通用 claw 接入) ──
+# APPROVAL_STAGING_DIR 为通用配置名，QCLAW_STAGING_DIR 保留向后兼容。
+_approval_staging = os.getenv("APPROVAL_STAGING_DIR") or os.getenv("QCLAW_STAGING_DIR")
+APPROVAL_STAGING_DIR = os.path.abspath(_approval_staging) if _approval_staging else os.path.join(get_app_data_dir(), "claw-staging")
+QCLAW_STAGING_DIR = APPROVAL_STAGING_DIR  # 向后兼容别名
+APPROVAL_SIGNING_KEY = os.getenv("APPROVAL_SIGNING_KEY") or os.getenv("QCLAW_APPROVAL_SIGNING_KEY", "")
+QCLAW_APPROVAL_SIGNING_KEY = APPROVAL_SIGNING_KEY  # 向后兼容别名
+APPROVAL_TTL_SECONDS = int(os.getenv("APPROVAL_TTL_SECONDS") or os.getenv("QCLAW_APPROVAL_TTL_SECONDS", "900"))
+QCLAW_APPROVAL_TTL_SECONDS = APPROVAL_TTL_SECONDS  # 向后兼容别名
+
 
 def get_initial_admin_credentials_path() -> str:
     """Return the runtime-scoped one-time bootstrap credential file path.
@@ -53,5 +63,6 @@ def ensure_runtime_dirs() -> None:
         _runtime_path("LOG_DIR", "logs"),
         _runtime_path("RUNTIME_DIR", "runtime"),
         _runtime_path("REPORT_DIR", "reports"),
+        APPROVAL_STAGING_DIR,
     ):
         os.makedirs(path, exist_ok=True)

@@ -122,11 +122,20 @@ export default function DeploymentRunPanel({
     taskDetails?.step_tasks?.some((t: any) => t.captured_config) ||
     taskDetails?.steps?.some((s: any) => s.captured_config)
 
+  const successServerCount = serverExecutionRows.filter((r) => r.status === 'success').length
+  const failedServerCount = serverExecutionRows.filter((r) => r.status === 'failed').length
+
   const runStats = [
     { label: '状态', value: statusLabel, tone: (status === 'success' ? 'success' : status === 'failed' || status === 'partial_failed' ? 'danger' : 'default') as any },
     { label: '任务 ID', value: taskId ? `#${taskId.slice(0, 8)}` : '-' },
     { label: '部署 ID', value: deploymentId ? deploymentId.slice(0, 8) : '-' },
     { label: '服务器', value: `${serverExecutionRows.length} 台` },
+    ...(serverExecutionRows.length > 0
+      ? [
+          { label: '成功', value: `${successServerCount} 台`, tone: (successServerCount > 0 ? 'success' : 'default') as any },
+          { label: '失败', value: `${failedServerCount} 台`, tone: (failedServerCount > 0 ? 'danger' : 'default') as any },
+        ]
+      : []),
     { label: '耗时', value: report?.duration_seconds != null ? `${report.duration_seconds}s` : '-' },
     {
       label: '可回滚',

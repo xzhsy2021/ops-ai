@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { useFavoriteStore } from '../stores/favoriteStore'
+import type { RiskActionResult } from './RiskActionGuard'
 
 export function PageHeader({
   title,
@@ -132,6 +134,7 @@ export function RiskConfirmDialog({
   confirmDisabled = false,
   confirmMode = 'type',
   showConfirmTextInOneClick = true,
+  result,
 }: {
   open: boolean
   title: string
@@ -152,50 +155,123 @@ export function RiskConfirmDialog({
   confirmDisabled?: boolean
   confirmMode?: 'type' | 'one-click'
   showConfirmTextInOneClick?: boolean
+  result?: RiskActionResult | null
 }) {
   if (!open) return null
+
   const reasonReady = !reasonRequired || Boolean((reason || '').trim())
   const matched = confirmMode === 'one-click' ? reasonReady : value.trim() === confirmText && reasonReady
+  const showResult = Boolean(result)
+
   return (
     <div className="risk-confirm-overlay" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}>
       <div className="risk-confirm-dialog" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="risk-confirm-header">
-          <RiskBadge level={riskLevel} />
-          <strong>{title}</strong>
-        </div>
-        {description && <p>{description}</p>}
-        <div className="risk-confirm-target">影响对象：<code>{target}</code></div>
-        {details && details.length > 0 && (
-          <div className="risk-confirm-details">
-            {details.map((item) => (
-              <div key={item.label}><strong>{item.label}：</strong>{item.value || '-'}</div>
+        {!showResult ? (
+          <>
+            <div className="risk-confirm-header">
+              <RiskBadge level={riskLevel} />
+              <strong>{title}</strong>
+            </div>
+            {description && <p>{description}</p>}
+            <div className="risk-confirm-target">影响对象：<code>{target}</code></div>
+            {details && details.length > 0 && (
+              <div className="risk-confirm-details">
+                {details.map((item) => (
+                  <div key={item.label}><strong>{item.label}：</strong>{item.value || '-'}</div>
+                ))}
+              </div>
+            )}
+            {onReasonChange && (
+              <label className="risk-confirm-label risk-confirm-reason">
+                {reasonLabel}{reasonRequired ? '（必填）' : ''}
+                <textarea value={reason || ''} onChange={(e) => onReasonChange(e.target.value)} placeholder="例如：恢复前验证失败 / 清理过期备份 / 常规发布" />
+              </label>
+            )}
+            {confirmMode === 'type' ? (
+              <label className="risk-confirm-label">
+                输入 <code>{confirmText}</code> 确认执行
+                <input autoFocus value={value} onChange={(e) => onValueChange(e.target.value)} placeholder={confirmText} />
+              </label>
+            ) : (
+              <div className="risk-confirm-oneclick-note">
+                <strong>一键确认模式</strong>
+                <span>请核对影响对象和风险信息。当前页面采用快捷确认，无需手动输入确认短语。</span>
+                {showConfirmTextInOneClick && confirmText && <code>{confirmText}</code>}
+              </div>
+            )}
+            <div className="risk-confirm-actions">
+              <button className="btn btn-subtle" onClick={onCancel}>取消</button>
+              <button className="btn btn-danger" disabled={!matched || confirmDisabled} onClick={onConfirm}>{confirmButtonLabel}</button>
+            </div>
+          </>
+        ) : (
+          <RiskConfirmResult
+            title={title}
+            result={result!}
+            target={target}
+            onClose={onCancel}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function RiskConfirmResult({
+  title,
+  result,
+  target,
+  onClose,
+}: {
+  title: string
+  result: RiskActionResult
+  target: string
+  onClose: () => void
+}) {
+  const ok = result.success !== false
+  const links = result.links || []
+  const ids = [
+    result.auditId && { label: '审计 ID', value: result.auditId },
+    result.taskId && { label: '任务 ID', value: result.taskId },
+    result.reportId && { label: '报告 ID', value: result.reportId },
+  ].filter(Boolean) as Array<{ label: string; value: string }>
+
+  return (
+    <>
+      <div className="risk-confirm-header">
+        <span className={`risk-confirm-result-icon risk-confirm-result-icon--${ok ? 'success' : 'error'}`} aria-hidden="true">
+          {ok ? '✓' : '✕'}
+        </span>
+        <strong>{ok ? `${title} 已执行` : `${title} 失败`}</strong>
+      </div>
+      <div className={`risk-confirm-result-card risk-confirm-result-card--${ok ? 'success' : 'error'}`}>
+        <div className="risk-confirm-result-message">{result.message || (ok ? '操作已完成' : '操作执行失败')}</div>
+        {target && <div className="risk-confirm-result-target">影响对象：<code>{target}</code></div>}
+        {ids.length > 0 && (
+          <div className="risk-confirm-result-ids">
+            {ids.map((id) => (
+              <div key={id.label}><strong>{id.label}</strong><code>{id.value}</code></div>
             ))}
           </div>
         )}
-        {onReasonChange && (
-          <label className="risk-confirm-label risk-confirm-reason">
-            {reasonLabel}{reasonRequired ? '（必填）' : ''}
-            <textarea value={reason || ''} onChange={(e) => onReasonChange(e.target.value)} placeholder="例如：恢复前验证失败 / 清理过期备份 / 常规发布" />
-          </label>
-        )}
-        {confirmMode === 'type' ? (
-          <label className="risk-confirm-label">
-            输入 <code>{confirmText}</code> 确认执行
-            <input autoFocus value={value} onChange={(e) => onValueChange(e.target.value)} placeholder={confirmText} />
-          </label>
-        ) : (
-          <div className="risk-confirm-oneclick-note">
-            <strong>一键确认模式</strong>
-            <span>请核对影响对象和风险信息。当前页面采用快捷确认，无需手动输入确认短语。</span>
-            {showConfirmTextInOneClick && confirmText && <code>{confirmText}</code>}
+        {links.length > 0 && (
+          <div className="risk-confirm-result-links">
+            {links.map((link) => (
+              <Link key={link.to + link.label} to={link.to} className={`risk-confirm-result-link risk-confirm-result-link--${link.tone || 'neutral'}`}>
+                {link.label}
+                <span aria-hidden="true">→</span>
+              </Link>
+            ))}
           </div>
         )}
-        <div className="risk-confirm-actions">
-          <button className="btn btn-subtle" onClick={onCancel}>取消</button>
-          <button className="btn btn-danger" disabled={!matched || confirmDisabled} onClick={onConfirm}>{confirmButtonLabel}</button>
-        </div>
       </div>
-    </div>
+      <div className="risk-confirm-actions">
+        <button className="btn btn-subtle" onClick={onClose}>关闭</button>
+        {!ok && (
+          <button className="btn btn-primary" onClick={onClose}>返回重试</button>
+        )}
+      </div>
+    </>
   )
 }
 

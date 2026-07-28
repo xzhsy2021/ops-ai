@@ -143,6 +143,24 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
     # hard block for every other requires_human_approval=True / high-risk
     # write tool, so deploy / rollback / config_write / db_write / etc. stay
     # admin-only.
+    #
+    # EXCEPTION: qclaw Element approval categories (approval_prepare /
+    # approval_execute / approval_reject / approval_read / approval_maintenance /
+    # routing) are an explicit carve-out for the qclaw integration. The human
+    # approval short_code (one-time, 15min, room+event bound) is the real
+    # security gate, not the tool-token scope. qclaw's MCP token only needs
+    # ops:read to call these. Actual destructive operations (deploy/rollback/
+    # DML/cleanup) run via the internal ApprovalExecutor using OPS internal
+    # credentials, NOT the caller's token. This preserves the design boundary:
+    # qclaw never holds deploy:execute / package:write / db:write scopes.
+    QCLAW_APPROVAL_CATEGORIES = {
+        "routing",
+        "approval_prepare",
+        "approval_execute",
+        "approval_reject",
+        "approval_read",
+        "approval_maintenance",
+    }
     if getattr(ctx, "auth_type", "") == "tool_token" and (
         getattr(tool_def, "requires_human_approval", False)
         or (getattr(tool_def, "write", False) and str(getattr(tool_def, "risk", "low")).lower() in {"high", "critical"})
@@ -151,7 +169,8 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
             getattr(tool_def, "category", "") == "inspection_execute"
             and settings.get("allow_ai_token_to_run_inspection_execute", True)
         )
-        if not is_inspection_execute:
+        is_qclaw_approval = getattr(tool_def, "category", "") in QCLAW_APPROVAL_CATEGORIES
+        if not is_inspection_execute and not is_qclaw_approval:
             raise HTTPException(status_code=403, detail="This tool requires human approval and cannot be executed directly by AI/MCP token")
 
     if tool_def.category == "deploy_plan" and not settings.get("allow_deploy_plan", True):

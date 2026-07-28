@@ -22,6 +22,9 @@ PUBLIC_PATHS = frozenset({
 })
 PUBLIC_PREFIXES = (
     "/assets/",
+    # /docs 提供 docs/*.md 静态文档（集成文档、巡检 spec 等），允许未登录访问。
+    # 仅暴露项目根 docs/ 下的只读 markdown，避免误暴露敏感文件。
+    "/docs/",
     "/api/v2/auth",
     # Tool-token based endpoints must reach their route handlers so the
     # Tool Token validator can authenticate Authorization: Bearer ops_tool_*.

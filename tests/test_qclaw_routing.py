@@ -1,0 +1,257 @@
+"""测试 qclaw 路由解析和签名票据。"""
+import pytest
+from datetime import datetime, timezone, timedelta
+
+from app.services.qclaw_routing import (
+    RoutingOutcome,
+    resolve_message_target,
+    issue_ticket,
+    verify_ticket,
+    normalize_text,
+    compute_routing_revision,
+)
+
+
+# ── 测试用的系统配置 ──
+
+SYSTEMS = [
+    {
+        "name": "crypto-trader",
+        "message_routing": {
+            "enabled": True,
+            "aliases": ["量化", "量化交易"],
+            "keywords": ["btc strategy", "crypto deploy"],
+            "priority": 100,
+        },
+        "services": [
+            {
+                "name": "trader-api",
+                "template_variables": {
+                    "message_routing": {
+                        "enabled": True,
+                        "aliases": ["交易接口"],
+                        "keywords": ["trader api"],
+                        "priority": 80,
+                    }
+                },
+            }
+        ],
+    },
+    {
+        "name": "dovo",
+        "message_routing": {
+            "enabled": True,
+            "aliases": ["印尼", "idn"],
+            "keywords": ["dovo deploy", "印尼游戏"],
+            "priority": 50,
+        },
+        "services": [],
+    },
+    {
+        "name": "disabled-system",
+        "message_routing": {
+            "enabled": False,
+            "aliases": ["禁用"],
+            "keywords": ["禁用关键词"],
+            "priority": 200,
+        },
+        "services": [],
+    },
+]
+
+
+# ── 路由解析测试 ──
+
+def test_exact_system_name_wins_over_keyword():
+    """精确系统名匹配优先于关键词匹配。"""
+    # "crypto-trader" 既是系统名也包含关键词 "crypto deploy"
+    decision = resolve_message_target("crypto-trader", SYSTEMS)
+    assert decision.outcome == RoutingOutcome.RESOLVED
+    assert decision.system_name == "crypto-trader"
+    assert decision.matched_by == "system_name"
+
+
+def test_exact_system_alias_resolves():
+    """精确匹配系统别名。"""
+    decision = resolve_message_target("量化", SYSTEMS)
+    assert decision.outcome == RoutingOutcome.RESOLVED
+    assert decision.system_name == "crypto-trader"
+    assert decision.matched_by == "system_alias"
+
+
+def test_unique_service_alias_resolves_parent_system():
+    """唯一服务别名解析到父系统。"""
+    decision = resolve_message_target("交易接口", SYSTEMS)
+    assert decision.outcome == RoutingOutcome.RESOLVED
+    assert decision.system_name == "crypto-trader"
+    assert decision.service_name == "trader-api"
+    assert decision.matched_by == "service_alias"
+
+
+def test_unique_highest_priority_keyword_resolves():
+    """唯一最高优先级关键词匹配。"""
+    # "btc strategy" 只在 crypto-trader (priority=100) 中
+    decision = resolve_message_target("请执行 btc strategy 更新", SYSTEMS)
+    assert decision.outcome == RoutingOutcome.RESOLVED
+    assert decision.system_name == "crypto-trader"
+    assert decision.matched_by == "system_keyword"
+
+
+def test_equal_priority_keyword_match_is_ambiguous():
+    """同优先级关键词多匹配为 AMBIGUOUS。"""
+    systems = [
+        {
+            "name": "sys-a",
+            "message_routing": {
+                "enabled": True,
+                "aliases": [],
+                "keywords": ["共享关键词"],
+                "priority": 100,
+            },
+            "services": [],
+        },
+        {
+            "name": "sys-b",
+            "message_routing": {
+                "enabled": True,
+                "aliases": [],
+                "keywords": ["共享关键词"],
+                "priority": 100,
+            },
+            "services": [],
+        },
+    ]
+    decision = resolve_message_target("共享关键词部署", systems)
+    assert decision.outcome == RoutingOutcome.AMBIGUOUS
+    assert len(decision.candidates) == 2
+
+
+def test_unknown_message_is_unmatched():
+    """未知消息为 UNMATCHED。"""
+    decision = resolve_message_target("完全无关的消息内容", SYSTEMS)
+    assert decision.outcome == RoutingOutcome.UNMATCHED
+
+
+def test_disabled_routing_entry_is_ignored():
+    """禁用的路由配置被忽略。"""
+    # "禁用关键词" 只在 disabled-system 中，但该系统路由被禁用
+    decision = resolve_message_target("禁用关键词", SYSTEMS)
+    assert decision.outcome == RoutingOutcome.UNMATCHED
+
+
+# ── 签名票据测试 ──
+
+def test_ticket_is_bound_to_room_event_content_and_revision():
+    """票据绑定 room/event/content/revision，验证通过。"""
+    revision = compute_routing_revision(SYSTEMS)
+    ticket = issue_ticket(
+        room_id="!room1:example.com",
+        event_id="$evt1:example.com",
+        content_sha256="abc123",
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+    assert ticket.ticket
+    assert ticket.digest
+    assert ticket.expires_at > datetime.now(timezone.utc).replace(tzinfo=None)
+
+    ok = verify_ticket(
+        ticket.ticket,
+        expected_room_id="!room1:example.com",
+        expected_event_id="$evt1:example.com",
+        expected_content_sha256="abc123",
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+        expected_revision=revision,
+    )
+    assert ok is True
+
+
+def test_ticket_expires_after_fifteen_minutes():
+    """票据 15 分钟后过期。"""
+    revision = compute_routing_revision(SYSTEMS)
+    ticket = issue_ticket(
+        room_id="!room1:example.com",
+        event_id="$evt1:example.com",
+        content_sha256="abc123",
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+    # 模拟过期：直接检查 expires_at 是否在 ~15 分钟后
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    delta = ticket.expires_at - now
+    assert 890 < delta.total_seconds() < 910  # 约 900 秒 = 15 分钟
+
+
+def test_ticket_rejects_modified_content_hash():
+    """篡改 content_sha256 后验证失败。"""
+    revision = compute_routing_revision(SYSTEMS)
+    ticket = issue_ticket(
+        room_id="!room1:example.com",
+        event_id="$evt1:example.com",
+        content_sha256="original_hash",
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+    ok = verify_ticket(
+        ticket.ticket,
+        expected_room_id="!room1:example.com",
+        expected_event_id="$evt1:example.com",
+        expected_content_sha256="tampered_hash",  # 篡改
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+        expected_revision=revision,
+    )
+    assert ok is False
+
+
+def test_ticket_rejects_wrong_room():
+    """错误 room_id 验证失败。"""
+    revision = compute_routing_revision(SYSTEMS)
+    ticket = issue_ticket(
+        room_id="!room1:example.com",
+        event_id="$evt1:example.com",
+        content_sha256="abc123",
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+    ok = verify_ticket(
+        ticket.ticket,
+        expected_room_id="!wrong:example.com",
+        expected_event_id="$evt1:example.com",
+        expected_content_sha256="abc123",
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+        expected_revision=revision,
+    )
+    assert ok is False
+
+
+def test_ticket_rejects_tampered_signature():
+    """篡改签名后验证失败。"""
+    revision = compute_routing_revision(SYSTEMS)
+    ticket = issue_ticket(
+        room_id="!room1:example.com",
+        event_id="$evt1:example.com",
+        content_sha256="abc123",
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+    # 篡改签名
+    parts = ticket.ticket.rsplit(".", 1)
+    tampered = f"{parts[0]}.deadbeef"
+    ok = verify_ticket(
+        tampered,
+        expected_room_id="!room1:example.com",
+        expected_event_id="$evt1:example.com",
+        expected_content_sha256="abc123",
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+        expected_revision=revision,
+    )
+    assert ok is False

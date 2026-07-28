@@ -39,7 +39,7 @@ def apply_host_key_policy(client: paramiko.SSHClient):
 class SSHClient:
     def __init__(self, host: str, port: int = 22, user: str = "root",
                  key: str = None, password: str = None,
-                 jump: dict = None, jumps: list = None, key_content: str = None,
+                 jumps: list = None, key_content: str = None,
                  connect_timeout: int = 15):
         self.host = host
         self.port = port
@@ -47,73 +47,81 @@ class SSHClient:
         self.key_path = key
         self.key_content = key_content
         self.password = password
-        self.jump_config = jump
-        self.jump_hosts = jumps or ([jump] if jump else [])
+        # 统一只保留 jumps 链，单跳也包装成 list
+        self.jump_hosts = jumps or []
         self.connect_timeout = connect_timeout
 
         self._client: Optional[paramiko.SSHClient] = None
         self._jump_clients: list = []
         self._jump_channels: list = []
 
-    def connect(self, max_retries: int = 3, retry_delay: float = 2.0):
+    def connect(self, max_retries: int = 3, retry_delay: float = 2.0,
+                per_attempt_timeout: Optional[int] = None):
         """
         连接 SSH 服务器，支持重试机制
-        
+
         Args:
             max_retries: 最大重试次数
             retry_delay: 重试间隔（秒）
+            per_attempt_timeout: 每次连接的单次超时秒数（None = 使用 self.connect_timeout）
         """
         if self._client is not None:
             return
 
         last_exception = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                self._client = paramiko.SSHClient()
-                apply_host_key_policy(self._client)
+        # K1 修复：单次超时可在调用点覆盖（用于"添加服务器"探测性场景，
+        # 让"网络不可达"快速失败而不卡 45s+）
+        original_timeout = self.connect_timeout
+        if per_attempt_timeout is not None and per_attempt_timeout > 0:
+            self.connect_timeout = min(per_attempt_timeout, self.connect_timeout)
+        try:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    self._client = paramiko.SSHClient()
+                    apply_host_key_policy(self._client)
 
-                pkey = self._load_key(self.key_path) if self.key_path else None
+                    pkey = self._load_key(self.key_path) if self.key_path else None
 
-                if self.jump_hosts:
-                    self._connect_via_hops(pkey)
-                else:
-                    self._connect_direct(pkey)
+                    if self.jump_hosts:
+                        self._connect_via_hops(pkey)
+                    else:
+                        self._connect_direct(pkey)
 
-                logger.info(f"SSH connected to {self.user}@{self.host}:{self.port}")
-                return
+                    logger.info(f"SSH connected to {self.user}@{self.host}:{self.port}")
+                    return
 
-            except (paramiko.SSHException, ConnectionRefusedError, TimeoutError, OSError) as e:
-                last_exception = e
-                if attempt < max_retries:
-                    logger.warning(f"SSH connection attempt {attempt}/{max_retries} failed: {e}. Retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    if self._client:
-                        try:
-                            self._client.close()
-                        except Exception:
-                            logger.warning("Failed to close client during retry", exc_info=True)
-                        self._client = None
-                else:
-                    logger.error(f"All {max_retries} connection attempts failed")
+                except (paramiko.SSHException, ConnectionRefusedError, TimeoutError, OSError) as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        logger.warning(f"SSH connection attempt {attempt}/{max_retries} failed: {e}. Retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        if self._client:
+                            try:
+                                self._client.close()
+                            except Exception:
+                                logger.warning("Failed to close client during retry", exc_info=True)
+                            self._client = None
+                    else:
+                        logger.error(f"All {max_retries} connection attempts failed")
+        finally:
+            # K1 修复：恢复原 connect_timeout（避免污染重试过程中的中间状态）
+            self.connect_timeout = original_timeout
 
         raise ConnectionError(
             f"Failed to connect to {self.user}@{self.host}:{self.port} after {max_retries} attempts: {last_exception}"
         )
 
-    def _load_key(self, key_path: str) -> paramiko.PKey:
-        from config_manager import get_key_file_path
-        resolved = get_key_file_path(key_path)
-        return self._load_key_from_file(resolved)
-    
-    def _load_key_from_file(self, key_path: str) -> paramiko.PKey:
+    @staticmethod
+    def _load_key_from_file(key_path: str) -> paramiko.PKey:
         for key_cls in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
             try:
                 return key_cls.from_private_key_file(key_path)
             except (paramiko.SSHException, ValueError):
                 continue
         raise ValueError(f"Cannot load SSH key from {key_path}")
-    
-    def _load_key_from_content(self, key_content: str) -> paramiko.PKey:
+
+    @staticmethod
+    def _load_key_from_content(key_content: str) -> paramiko.PKey:
         from io import StringIO
         for key_cls in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
             try:
@@ -122,26 +130,57 @@ class SSHClient:
                 continue
         raise ValueError("Cannot load SSH key from content")
 
+    def _load_key(self, key_path: str) -> paramiko.PKey:
+        from config_manager import get_key_file_path
+        resolved = get_key_file_path(key_path)
+        return self._load_key_from_file(resolved)
+
+    def _build_auth_kwargs(self, pkey: paramiko.PKey = None) -> dict:
+        """构建目标机的认证参数，优先 key_content > pkey > password。"""
+        if self.key_content:
+            return {"pkey": self._load_key_from_content(self.key_content)}
+        if pkey:
+            return {"pkey": pkey}
+        if self.password:
+            return {"password": self.password}
+        raise paramiko.SSHException(
+            f"No authentication method available for {self.user}@{self.host}:{self.port}. "
+            "Provide password, key file, or key content."
+        )
+
     def _connect_direct(self, pkey: paramiko.PKey = None):
         kwargs = {
             "hostname": self.host,
             "port": self.port,
             "username": self.user,
             "timeout": self.connect_timeout,
+            **self._build_auth_kwargs(pkey),
         }
-        key_content = getattr(self, 'key_content', None)
-        if key_content:
-            kwargs["pkey"] = self._load_key_from_content(key_content)
-        elif pkey:
-            kwargs["pkey"] = pkey
-        elif self.password:
-            kwargs["password"] = self.password
-        else:
-            raise paramiko.SSHException(
-                f"No authentication method available for {self.user}@{self.host}:{self.port}. "
-                "Provide password, key file, or key content."
-            )
         self._client.connect(**kwargs)
+
+
+    def _build_hop_auth_kwargs(self, hop: dict) -> dict:
+        """构建单个跳板机的认证参数，缺少凭据时直接抛错。"""
+        hop_key_content = hop.get("key_content")
+        hop_key_path = hop.get("key") or hop.get("key_file")
+        hop_password = hop.get("password")
+
+        if hop_key_content:
+            return {"pkey": self._load_key_from_content(hop_key_content)}
+        if hop_key_path:
+            # 跳板机 key_path 也需要经过 get_key_file_path 解析（keys 目录/绝对路径）
+            return {"pkey": self._load_key(hop_key_path)}
+        if hop_password:
+            return {"password": hop_password}
+
+        hop_host = hop.get("host") or hop.get("name")
+        hop_port = hop.get("port", 22)
+        hop_user = hop.get("user", hop.get("username", "root"))
+        raise ConnectionError(
+            f"跳板机 {hop_user}@{hop_host}:{hop_port} 缺少认证凭据"
+            f"（密码、密钥文件、密钥内容均为空）。"
+            f"请在服务器配置的 jump_host 中添加 key 或 password 字段。"
+        )
 
     def _connect_via_hops(self, pkey: paramiko.PKey = None):
         prev_sock = None
@@ -149,37 +188,18 @@ class SSHClient:
             hop_host = hop.get("host") or hop.get("name")
             hop_port = hop.get("port", 22)
             hop_user = hop.get("user", hop.get("username", "root"))
-            hop_key_path = hop.get("key") or hop.get("key_file")
-            hop_key_content = hop.get("key_content")
-            hop_password = hop.get("password")
 
-            hop_pkey = None
-            if hop_key_content:
-                hop_pkey = self._load_key_from_content(hop_key_content)
-            elif hop_key_path:
-                hop_pkey = self._load_key(hop_key_path)
-
-            if not hop_pkey and not hop_password:
-                raise ConnectionError(
-                    f"跳板机 {hop_user}@{hop_host}:{hop_port} 缺少认证凭据"
-                    f"（密码、密钥文件、密钥内容均为空）。"
-                    f"请在服务器配置的 jump_host 中添加 key 或 password 字段。"
-                )
-
-            hop_client = paramiko.SSHClient()
-            apply_host_key_policy(hop_client)
             hop_kwargs = {
                 "hostname": hop_host,
                 "port": hop_port,
                 "username": hop_user,
+                **self._build_hop_auth_kwargs(hop),
             }
-            if hop_pkey:
-                hop_kwargs["pkey"] = hop_pkey
-            elif hop_password:
-                hop_kwargs["password"] = hop_password
             if prev_sock:
                 hop_kwargs["sock"] = prev_sock
 
+            hop_client = paramiko.SSHClient()
+            apply_host_key_policy(hop_client)
             hop_client.connect(**hop_kwargs)
             self._jump_clients.append(hop_client)
 
@@ -208,83 +228,10 @@ class SSHClient:
             "port": self.port,
             "username": self.user,
             "sock": prev_sock,
+            **self._build_auth_kwargs(pkey),
         }
-        if pkey:
-            kwargs["pkey"] = pkey
-        elif self.key_content:
-            kwargs["pkey"] = self._load_key_from_content(self.key_content)
-        elif self.password:
-            kwargs["password"] = self.password
-        else:
-            raise ConnectionError(
-                f"目标服务器 {self.user}@{self.host}:{self.port} 缺少认证凭据"
-                f"（密码、密钥文件、密钥内容均为空）。"
-                f"请编辑服务器配置添加认证信息。"
-            )
         self._client.connect(**kwargs)
         logger.info(f"SSH connected via {len(self.jump_hosts)} hops to {self.host}")
-
-    def _connect_via_jump(self, pkey: paramiko.PKey = None):
-        jump_host = self.jump_config.get("host") or self.jump_config.get("name")
-        jump_port = self.jump_config.get("port", 22)
-        jump_user = self.jump_config.get("user", "root")
-        jump_key_path = self.jump_config.get("key")
-        jump_key_content = self.jump_config.get("key_content")
-
-        jump_pkey = None
-        if jump_key_content:
-            jump_pkey = self._load_key_from_content(jump_key_content)
-        elif jump_key_path:
-            jump_pkey = self._load_key(jump_key_path)
-
-        jump_password = self.jump_config.get("password")
-        if not jump_pkey and not jump_password:
-            raise ConnectionError(
-                f"跳板机 {jump_user}@{jump_host}:{jump_port} 缺少认证凭据"
-                f"（密码、密钥文件、密钥内容均为空）。"
-                f"请在服务器配置的 jump_host 中添加 key 或 password 字段。"
-            )
-
-        self._jump_client = paramiko.SSHClient()
-        apply_host_key_policy(self._jump_client)
-        jump_kwargs = {
-            "hostname": jump_host,
-            "port": jump_port,
-            "username": jump_user,
-        }
-        if jump_pkey:
-            jump_kwargs["pkey"] = jump_pkey
-        elif jump_password:
-            jump_kwargs["password"] = jump_password
-        self._jump_client.connect(**jump_kwargs)
-
-        transport = self._jump_client.get_transport()
-        dest_addr = (self.host, self.port)
-        local_addr = ("127.0.0.1", 0)
-        self._jump_channel = transport.open_channel("direct-tcpip", dest_addr, local_addr)
-
-        kwargs = {
-            "hostname": self.host,
-            "port": self.port,
-            "username": self.user,
-            "sock": self._jump_channel,
-        }
-        if pkey:
-            kwargs["pkey"] = pkey
-        elif self.key_content:
-            kwargs["pkey"] = self._load_key_from_content(self.key_content)
-        elif self.password:
-            kwargs["password"] = self.password
-        else:
-            raise ConnectionError(
-                f"目标服务器 {self.user}@{self.host}:{self.port} 缺少认证凭据"
-                f"（密码、密钥文件、密钥内容均为空）。"
-                f"请编辑服务器配置添加认证信息。"
-            )
-        self._client.connect(**kwargs)
-
-        self._jump_transport = transport
-        logger.info(f"SSH connected via jump {jump_host} -> {self.host}")
 
     def exec(self, command: str, timeout: int = 300, on_output=None) -> Tuple[int, str, str]:
         if self._client is None:
@@ -445,12 +392,21 @@ class SSHClient:
         return False
 
 
+def _has_auth(config: dict) -> bool:
+    """检查 SSH 配置是否包含任一认证凭据。"""
+    return bool(
+        config.get("key") or config.get("key_file")
+        or config.get("key_content") or config.get("password")
+    )
+
+
 def _server_to_jump_config(srv: dict) -> dict:
+    """将 servers 表中的记录转换为跳板机可用配置，字段统一为 user。"""
     result = {
         "name": srv.get("name"),
         "host": srv.get("host"),
         "port": srv.get("port", 22),
-        "username": srv.get("user") or srv.get("username", "root"),
+        "user": srv.get("user") or srv.get("username", "root"),
     }
     for k in ("key", "key_file", "password", "key_content"):
         if srv.get(k):
@@ -458,10 +414,19 @@ def _server_to_jump_config(srv: dict) -> dict:
     return result
 
 
-def create_ssh_client(server_config: dict) -> SSHClient:
-    """从连接池获取或创建 SSH 客户端"""
+def create_ssh_client(server_config: dict, max_retries: int = 3,
+                      retry_delay: float = 2.0,
+                      per_attempt_timeout: Optional[int] = None) -> SSHClient:
+    """从连接池获取或创建 SSH 客户端
+
+    K1 修复：支持短超时参数（用于"添加服务器"探测性场景，避免网络不可达时卡 45s+）。
+    生产环境默认 15s × 3 次 = 45s+；探测场景可传 (max_retries=1, per_attempt_timeout=5) 让
+    失败在 5s 内返回。
+    """
     pool = SSHConnectionPool.get_instance()
-    return pool.get(server_config)
+    return pool.get(server_config, max_retries=max_retries,
+                    retry_delay=retry_delay,
+                    per_attempt_timeout=per_attempt_timeout)
 
 
 class SSHConnectionPool:
@@ -491,64 +456,65 @@ class SSHConnectionPool:
             [server_config.get("jump") or server_config.get("jump_host")]
             if (server_config.get("jump") or server_config.get("jump_host")) else []
         )
+        # 只有 dict 才算"已解析的跳板机"；字符串说明解析失败/未解析，应按直连算
+        resolved_jumps = [j for j in jumps if isinstance(j, dict)]
+        if not resolved_jumps:
+            return f"{user}@{host}:{port}:direct"
         jump_chain = "|".join(
             f"{j.get('user') or j.get('username', 'root')}@{j.get('host', '')}:{j.get('port', 22)}"
-            for j in jumps if isinstance(j, dict)
-        ) if jumps else "direct"
+            for j in resolved_jumps
+        )
         return f"{user}@{host}:{port}:{jump_chain}"
 
-    def get(self, server_config: dict) -> SSHClient:
-        pool_key = self._make_key(server_config)
-        with self._pool_lock:
-            if pool_key in self._pool:
-                client = self._pool[pool_key]
-                if client._client is not None:
-                    try:
-                        transport = client._client.get_transport()
-                        if transport and transport.is_active():
-                            self._last_access[pool_key] = time.time()
-                            logger.info("ssh pool HIT key=%s", pool_key)
-                            return client
-                    except Exception:
-                        logger.warning("Failed to check transport for pooled client", exc_info=True)
-                del self._pool[pool_key]
-                self._last_access.pop(pool_key, None)
-                try:
-                    client.close()
-                except Exception:
-                    logger.warning("Failed to close stale pooled client", exc_info=True)
-
-        # 直接创建 SSHClient，避免与 create_ssh_client 形成循环递归
-        host = server_config.get("host")
-        port = server_config.get("port", 22)
-        user = server_config.get("user") or server_config.get("username", "root")
-        ssh_key_path = server_config.get("key") or server_config.get("key_file")
-        password = server_config.get("password")
-        key_content = server_config.get("key_content")
-        jump = server_config.get("jump") or server_config.get("jump_host")
-        logger.debug(f"SSHConnectionPool.get() config: host={host}, port={port}, user={user}, "
-                     f"has_key={bool(ssh_key_path)}, has_password={bool(password)}, "
-                     f"has_key_content={bool(key_content)}, jump={jump}, "
-                     f"jump_hosts={server_config.get('jump_hosts')}")
-        jump_hosts = server_config.get("jump_hosts")
+    def _resolve_jump_config(self, server_config: dict) -> dict:
+        """复制 server_config 并将 jump_host（字符串）解析为 dict，
+        让后续的 pool_key 计算和连接创建都使用已解析后的凭据信息。
+        旧 config_kv 查不到时回退到 jump_hosts DB 表（Phase 3.g SSOT）。
+        """
+        resolved = dict(server_config)
+        jump = resolved.get("jump") or resolved.get("jump_host")
+        if not isinstance(jump, (str, dict)):
+            return resolved
 
         if isinstance(jump, str):
             from config_manager import load_config_cached
             cfg = load_config_cached()
+            found = False
             for jh in cfg.get("jump_hosts", []):
                 if jh.get("name") == jump:
-                    jump = jh
+                    resolved["jump"] = jh
+                    resolved["jump_host"] = jh
+                    found = True
                     break
-            else:
+            if not found:
                 for srv in cfg.get("servers", []):
                     if srv.get("name") == jump:
-                        jump = _server_to_jump_config(srv)
+                        j = _server_to_jump_config(srv)
+                        resolved["jump"] = j
+                        resolved["jump_host"] = j
+                        found = True
                         break
-        elif isinstance(jump, dict):
+            # Phase 3.g SSOT fallback: 旧 config_kv 查不到时，去新 jump_hosts DB 表查
+            if not found:
+                try:
+                    from app.config.servers import get_jump_host_by_name
+                    db_jh = get_jump_host_by_name(jump)
+                    if db_jh and _has_auth(db_jh):
+                        resolved["jump"] = db_jh
+                        resolved["jump_host"] = db_jh
+                    elif db_jh:
+                        # 仅当 DB 条目带凭据时才采纳，否则回退到老行为（直连）
+                        # 避免一条没配齐凭据的孤儿跳板机把所有走该名称的服务器都打挂
+                        logger.warning(
+                            f"jump_host '{jump}' 在 DB 中存在但缺少认证凭据，"
+                            f"将按直连处理以兼容老配置"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to resolve jump_host '{jump}' from DB: {e}")
+        else:  # isinstance(jump, dict)
             from config_manager import load_config_cached
             cfg = load_config_cached()
-            has_auth = jump.get("key") or jump.get("key_file") or jump.get("password") or jump.get("key_content")
-            if not has_auth:
+            if not _has_auth(jump):
                 jump_name = jump.get("name")
                 jump_host = jump.get("host")
                 jump_port = jump.get("port", 22)
@@ -578,7 +544,50 @@ class SSHConnectionPool:
                     for k in ("key", "key_file", "password", "key_content"):
                         if not merged.get(k) and matched.get(k):
                             merged[k] = matched[k]
-                    jump = merged
+                    resolved["jump"] = merged
+                    resolved["jump_host"] = merged
+        return resolved
+
+    def get(self, server_config: dict, max_retries: int = 3,
+            retry_delay: float = 2.0,
+            per_attempt_timeout: Optional[int] = None) -> SSHClient:
+        # 先解析 jump_host（字符串 → dict），让池键包含真实跳板机身份
+        resolved_config = self._resolve_jump_config(server_config)
+        pool_key = self._make_key(resolved_config)
+        with self._pool_lock:
+            if pool_key in self._pool:
+                client = self._pool[pool_key]
+                if client._client is not None:
+                    try:
+                        transport = client._client.get_transport()
+                        if transport and transport.is_active():
+                            self._last_access[pool_key] = time.time()
+                            logger.info("ssh pool HIT key=%s", pool_key)
+                            return client
+                    except Exception:
+                        logger.warning("Failed to check transport for pooled client", exc_info=True)
+                del self._pool[pool_key]
+                self._last_access.pop(pool_key, None)
+                try:
+                    client.close()
+                except Exception:
+                    logger.warning("Failed to close stale pooled client", exc_info=True)
+
+        # 直接创建 SSHClient，避免与 create_ssh_client 形成循环递归
+        # 使用已解析过 jump 的 resolved_config，确保凭据 / 跳板机链一致
+        host = resolved_config.get("host")
+        port = resolved_config.get("port", 22)
+        user = resolved_config.get("user") or resolved_config.get("username", "root")
+        ssh_key_path = resolved_config.get("key") or resolved_config.get("key_file")
+        password = resolved_config.get("password")
+        key_content = resolved_config.get("key_content")
+        logger.debug(f"SSHConnectionPool.get() config: host={host}, port={port}, user={user}, "
+                     f"has_key={bool(ssh_key_path)}, has_password={bool(password)}, "
+                     f"has_key_content={bool(key_content)}, "
+                     f"jump={resolved_config.get('jump') or resolved_config.get('jump_host')}, "
+                     f"jump_hosts={resolved_config.get('jump_hosts')}")
+        jump_hosts = resolved_config.get("jump_hosts")
+        jump = resolved_config.get("jump") or resolved_config.get("jump_host")
 
         if isinstance(jump_hosts, list) and jump_hosts:
             jumps = jump_hosts
@@ -587,7 +596,7 @@ class SSHConnectionPool:
         else:
             jumps = None
 
-        if not any([ssh_key_path, password, key_content]):
+        if not _has_auth(resolved_config):
             raise ConnectionError(
                 f"无法连接到 {host}:{port}：缺少认证凭据（密码、密钥文件、密钥内容均为空）。"
                 f"请编辑服务器配置添加认证信息后重试。"
@@ -596,7 +605,11 @@ class SSHConnectionPool:
         client = SSHClient(host, port, user, key=ssh_key_path, password=password,
                           jumps=jumps, key_content=key_content)
         _connect_started = time.time()
-        client.connect()
+        client.connect(
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            per_attempt_timeout=per_attempt_timeout,
+        )
         logger.info("ssh pool MISS key=%s connect_ms=%d", pool_key, int((time.time() - _connect_started) * 1000))
         with self._pool_lock:
             self._pool[pool_key] = client

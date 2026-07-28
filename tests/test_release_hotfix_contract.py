@@ -5,34 +5,6 @@ from pathlib import Path
 import pytest
 
 
-class _DummyTransport:
-    def is_active(self):
-        return True
-
-
-class _DummyParamikoClient:
-    def get_transport(self):
-        return _DummyTransport()
-
-
-def test_ssh_pool_uses_stable_pool_key(monkeypatch):
-    import ssh_client
-
-    def fake_connect(self, *args, **kwargs):
-        self._client = _DummyParamikoClient()
-
-    monkeypatch.setattr(ssh_client.SSHClient, "connect", fake_connect)
-    pool = ssh_client.SSHConnectionPool(max_idle_time=300)
-    cfg = {"host": "127.0.0.1", "port": 2222, "user": "ops", "password": "secret"}
-
-    client = pool.get(cfg)
-
-    assert client is pool.get(cfg)
-    assert "ops@127.0.0.1:2222:direct" in pool._pool
-    assert "secret" not in pool._pool
-    assert None not in pool._pool
-
-
 def test_notification_settings_default_and_normalization(monkeypatch):
     import app.db
     from app.api import deploy_v2

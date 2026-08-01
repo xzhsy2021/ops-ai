@@ -111,6 +111,8 @@ class ApprovalExecutor:
             return self._execute_dml(approval, payload)
         elif action_type == "PACKAGE_CLEANUP":
             return self._execute_package_cleanup(approval, payload)
+        elif action_type == "SERVICE_CONTROL":
+            return self._execute_service_control(approval, payload)
         else:
             raise ValueError(f"未知的操作类型: {action_type}")
 
@@ -288,3 +290,124 @@ class ApprovalExecutor:
             "removed_packages": removed[:50],  # 限制返回数量
             "message": f"已清理 {summary.get('cleanup_count', 0)} 个包",
         }
+
+    # ── 服务控制执行 ──
+
+    def _execute_service_control(self, approval: AiActionApproval, payload: dict) -> dict[str, Any]:
+        """执行服务控制操作（重启/停止/启动/更新）。
+
+        通过 SSH 连接到目标服务器，使用服务配置中的控制命令执行操作。
+        支持 Docker Compose / PM2 / process_keyword 三种服务类型。
+        """
+        action_parameters = payload.get("action_parameters", {})
+        control_action = action_parameters.get("control_action", "restart")
+        compose_service = action_parameters.get("compose_service", "")
+        system_name = payload.get("system_name", "")
+        service_name = payload.get("service_name", "")
+        targets = payload.get("targets", [])
+
+        if not targets:
+            raise ValueError("服务控制操作需要指定目标服务器列表")
+        if not system_name or not service_name:
+            raise ValueError("服务控制操作需要指定 system_name 和 service_name")
+
+        # 构建一个简单的 ctx 对象用于传递上下文
+        class _Ctx:
+            username = approval.approved_by or "system"
+            token_owner = approval.approved_by or "system"
+
+        ctx = _Ctx()
+
+        results = []
+        for server_name in targets:
+            try:
+                result = self._control_single_server(
+                    server_name, system_name, service_name, control_action, ctx,
+                    compose_service=compose_service,
+                )
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    "server": server_name,
+                    "ok": False,
+                    "error": str(e),
+                })
+
+        success_count = sum(1 for r in results if r.get("ok"))
+        fail_count = len(results) - success_count
+
+        return {
+            "action": "SERVICE_CONTROL",
+            "control_action": control_action,
+            "system": system_name,
+            "service": service_name,
+            "targets": targets,
+            "results": results,
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "message": f"服务控制完成: {success_count}/{len(targets)} 成功, {fail_count} 失败",
+        }
+
+    def _control_single_server(self, server_name: str, system: str, service: str, action: str, ctx, *, compose_service: str = "") -> dict:
+        """在单台服务器上执行服务控制。"""
+        from app.services.tool_adapters.server_tools import (
+            _resolve_service_control_command,
+            _check_remote_dir_exists,
+            _connect,
+            get_service_config,
+            run_health_check,
+        )
+
+        cfg = get_service_config({"system": system, "service": service}, ctx, self.db)
+        if not cfg.get("found"):
+            return {"server": server_name, "ok": False, "error": f"服务配置未找到: {system}/{service}"}
+
+        command = _resolve_service_control_command(cfg, action, compose_service=compose_service)
+        tv = cfg.get("template_variables") or {}
+        base_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
+
+        ssh, srv = _connect(server_name)
+        try:
+            # 执行前健康检查
+            pre_health = {}
+            try:
+                hc = run_health_check({"server": server_name, "system": system, "service": service}, ctx, self.db)
+                pre_health = {"healthy": hc.get("healthy"), "exit_code": hc.get("exit_code")}
+            except Exception:
+                pre_health = {"note": "pre-check skipped"}
+
+            # 部署前路径校验：compose_dir 不存在时跳过该服务器，避免 cd 脏错误混入批次结果
+            ok, err_msg = _check_remote_dir_exists(ssh, base_dir)
+            if not ok:
+                return {"server": server_name, "ok": False, "error": err_msg}
+
+            # 执行控制命令（update 操作需要更长超时，因为要拉取镜像）
+            import shlex
+            full_cmd = f"cd {shlex.quote(base_dir)} && {command}" if base_dir else command
+            timeout = 300 if action == "update" else 120
+            code, out, err = ssh.exec(full_cmd, timeout=timeout)
+
+            # 执行后健康检查
+            post_health = {}
+            if action in ("restart", "start", "update"):
+                import time
+                time.sleep(5 if action == "update" else 3)
+                try:
+                    hc = run_health_check({"server": server_name, "system": system, "service": service}, ctx, self.db)
+                    post_health = {"healthy": hc.get("healthy"), "exit_code": hc.get("exit_code")}
+                except Exception:
+                    post_health = {"note": "post-check skipped"}
+
+            return {
+                "server": server_name,
+                "ok": code == 0,
+                "action": action,
+                "command": full_cmd,
+                "exit_code": code,
+                "stdout": out[:500],
+                "stderr": err[:500],
+                "pre_health": pre_health,
+                "post_health": post_health,
+            }
+        finally:
+            ssh.close()

@@ -471,753 +471,423 @@ def get_server_tool(args, ctx, db):
     }
 
 
-@registry.register(
-    name="ops.create_server",
-    description="创建服务器配置。High risk; requires human approval. 中文: 创建服务器/新增服务器.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "服务器名称（唯一标识）"},
-            "host": {"type": "string", "description": "服务器地址"},
-            "port": {"type": "integer", "description": "SSH端口", "default": 22},
-            "user": {"type": "string", "description": "SSH用户名"},
-            "auth_type": {"type": "string", "description": "认证方式: key/password", "enum": ["key", "password"]},
-            "key": {"type": "string", "description": "SSH密钥名称（auth_type=key时）"},
-            "password": {"type": "string", "description": "SSH密码（auth_type=password时）"},
-            "jump_host": {"type": "string", "description": "跳板机名称"},
-            "description": {"type": "string", "description": "服务器描述"},
-            "tags": {"type": "string", "description": "标签，逗号分隔"},
-            "group": {"type": "string", "description": "所属分组"},
-        },
-        "required": ["name", "host"],
-    },
-)
-def create_server_tool(args, ctx, db):
-    from config_manager import save_server
-    name = args.get("name", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    server_data = {"name": name}
-    for k in ["host", "port", "user", "auth_type", "key", "password", "jump_host", "description", "tags", "group"]:
-        if args.get(k) is not None:
-            server_data[k] = args[k]
-    try:
-        save_server(server_data)
-        return {"ok": True, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.update_server",
-    description="更新服务器配置。High risk; requires human approval. 中文: 更新服务器/修改服务器配置.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "服务器名称"},
-            "host": {"type": "string", "description": "服务器地址"},
-            "port": {"type": "integer", "description": "SSH端口"},
-            "user": {"type": "string", "description": "SSH用户名"},
-            "auth_type": {"type": "string", "description": "认证方式: key/password", "enum": ["key", "password"]},
-            "key": {"type": "string", "description": "SSH密钥名称"},
-            "password": {"type": "string", "description": "SSH密码"},
-            "jump_host": {"type": "string", "description": "跳板机名称"},
-            "description": {"type": "string", "description": "服务器描述"},
-            "tags": {"type": "string", "description": "标签，逗号分隔"},
-            "group": {"type": "string", "description": "所属分组"},
-        },
-        "required": ["name"],
-    },
-)
-def update_server_tool(args, ctx, db):
-    from config_manager import save_server, get_server_by_name
-    name = args.get("name", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    existing = get_server_by_name(name) or {}
-    server_data = dict(existing)
-    server_data["name"] = name
-    for k in ["host", "port", "user", "auth_type", "key", "password", "jump_host", "description", "tags", "group"]:
-        if args.get(k) is not None:
-            server_data[k] = args[k]
-    try:
-        save_server(server_data)
-        return {"ok": True, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.delete_server",
-    description="删除服务器配置。Critical risk; requires human approval. 中文: 删除服务器/移除服务器.",
-    scopes=["server:write"],
-    risk="critical",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "服务器名称"},
-            "confirm_text": {"type": "string", "description": "确认短语: DELETE <name>"},
-        },
-        "required": ["name", "confirm_text"],
-    },
-)
-def delete_server_tool(args, ctx, db):
-    from config_manager import delete_server as cfg_delete_server
-    name = args.get("name", "")
-    confirm = args.get("confirm_text", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    expected = f"DELETE {name}"
-    if confirm != expected:
-        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
-    try:
-        cfg_delete_server(name, db=db)
-        return {"ok": True, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.batch_update_servers",
-    description="批量更新服务器属性。High risk; requires human approval. 中文: 批量更新服务器/批量修改服务器.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "names": {"type": "array", "items": {"type": "string"}, "description": "服务器名称列表"},
-            "updates": {"type": "object", "description": "要更新的属性"},
-        },
-        "required": ["names", "updates"],
-    },
-)
-def batch_update_servers_tool(args, ctx, db):
-    from config_manager import save_server, get_server_by_name
-    names = args.get("names", [])
-    updates = args.get("updates", {})
-    if not names or not updates:
-        return {"ok": False, "error": "names and updates are required"}
-    results = []
-    for name in names:
-        try:
-            existing = get_server_by_name(name) or {}
-            server_data = dict(existing)
-            server_data.update(updates)
-            server_data["name"] = name
-            save_server(server_data)
-            results.append({"name": name, "ok": True})
-        except Exception as e:
-            results.append({"name": name, "ok": False, "error": str(e)})
-    return {"results": results}
-
-
 # ─── System CRUD ────────────────────────────────────────────────────────────
-
-
-@registry.register(
-    name="ops.create_system",
-    description="创建系统/项目配置。High risk; requires human approval. 中文: 创建系统/新增项目.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "系统名称（唯一标识）"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "description": {"type": "string", "description": "系统描述"},
-            "owner": {"type": "string", "description": "负责人"},
-        },
-        "required": ["name"],
-    },
-)
-def create_system_tool(args, ctx, db):
-    from config_manager import save_system, get_system_by_name
-    name = args.get("name", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    if get_system_by_name(name):
-        return {"ok": False, "error": f"system '{name}' already exists"}
-    system_data = {}
-    for k in ["display_name", "description", "owner"]:
-        if args.get(k) is not None:
-            system_data[k] = args[k]
-    system_data.setdefault("servers", [])
-    system_data.setdefault("services", [])
-    system_data.setdefault("environments", {})
-    system_data.setdefault("variables", {})
-    try:
-        save_system(name, system_data)
-        return {"ok": True, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.update_system",
-    description="更新系统/项目配置。High risk; requires human approval. 中文: 更新系统/修改项目配置.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "系统名称"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "description": {"type": "string", "description": "系统描述"},
-            "owner": {"type": "string", "description": "负责人"},
-        },
-        "required": ["name"],
-    },
-)
-def update_system_tool(args, ctx, db):
-    from config_manager import save_system, get_system_by_name
-    name = args.get("name", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    existing = get_system_by_name(name) or {}
-    system_data = dict(existing)
-    for k in ["display_name", "description", "owner"]:
-        if args.get(k) is not None:
-            system_data[k] = args[k]
-    try:
-        save_system(name, system_data)
-        return {"ok": True, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.delete_system",
-    description="删除系统/项目配置。Critical risk; requires human approval. 中文: 删除系统/移除项目.",
-    scopes=["server:write"],
-    risk="critical",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "系统名称"},
-            "confirm_text": {"type": "string", "description": "确认短语: DELETE <name>"},
-        },
-        "required": ["name", "confirm_text"],
-    },
-)
-def delete_system_tool(args, ctx, db):
-    from config_manager import delete_system as cfg_delete_system
-    name = args.get("name", "")
-    confirm = args.get("confirm_text", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    expected = f"DELETE {name}"
-    if confirm != expected:
-        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
-    try:
-        cfg_delete_system(name)
-        return {"ok": True, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # ─── Service CRUD ───────────────────────────────────────────────────────────
 
 
-@registry.register(
-    name="ops.create_service",
-    description="创建服务配置。High risk; requires human approval. 中文: 创建服务/新增服务.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "所属系统名称"},
-            "name": {"type": "string", "description": "服务名称（唯一标识）"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "deploy_type": {"type": "string", "description": "部署类型"},
-            "health_check_command": {"type": "string", "description": "健康检查命令"},
-            "description": {"type": "string", "description": "服务描述"},
-        },
-        "required": ["system", "name"],
-    },
-)
-def create_service_tool(args, ctx, db):
-    from app.db.models import Service
-    system = args.get("system", "")
-    name = args.get("name", "")
-    if not system or not name:
-        return {"ok": False, "error": "system and name are required"}
-    existing = db.query(Service).filter(Service.system_name == system, Service.name == name).first()
-    if existing:
-        return {"ok": False, "error": f"service '{name}' already exists in system '{system}'"}
-    svc = Service(
-        system_name=system,
-        name=name,
-        display_name=args.get("display_name"),
-        template=args.get("deploy_type"),
-        template_variables={},
-    )
-    if args.get("health_check_command"):
-        svc.template_variables["health_check_command"] = args.get("health_check_command")
-    if args.get("description"):
-        svc.template_variables["description"] = args.get("description")
-    try:
-        db.add(svc)
-        db.commit()
-        return {"ok": True, "system": system, "name": name}
-    except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.update_service",
-    description="更新服务配置。High risk; requires human approval. 中文: 更新服务/修改服务配置.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "所属系统名称"},
-            "name": {"type": "string", "description": "服务名称"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "deploy_type": {"type": "string", "description": "部署类型"},
-            "health_check_command": {"type": "string", "description": "健康检查命令"},
-            "description": {"type": "string", "description": "服务描述"},
-        },
-        "required": ["system", "name"],
-    },
-)
-def update_service_tool(args, ctx, db):
-    from app.db.models import Service
-    system = args.get("system", "")
-    name = args.get("name", "")
-    if not system or not name:
-        return {"ok": False, "error": "system and name are required"}
-    svc = db.query(Service).filter(Service.system_name == system, Service.name == name).first()
-    if not svc:
-        return {"ok": False, "error": f"service '{name}' not found in system '{system}'"}
-    if args.get("display_name") is not None:
-        svc.display_name = args["display_name"]
-    if args.get("deploy_type") is not None:
-        svc.template = args["deploy_type"]
-    if args.get("health_check_command") is not None or args.get("description") is not None:
-        tv = svc.template_variables or {}
-        if args.get("health_check_command") is not None:
-            tv["health_check_command"] = args["health_check_command"]
-        if args.get("description") is not None:
-            tv["description"] = args["description"]
-        svc.template_variables = tv
-    try:
-        db.commit()
-        return {"ok": True, "system": system, "name": name}
-    except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.delete_service",
-    description="删除服务配置。Critical risk; requires human approval. 中文: 删除服务/移除服务.",
-    scopes=["server:write"],
-    risk="critical",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "所属系统名称"},
-            "name": {"type": "string", "description": "服务名称"},
-            "confirm_text": {"type": "string", "description": "确认短语: DELETE <system>/<name>"},
-        },
-        "required": ["system", "name", "confirm_text"],
-    },
-)
-def delete_service_tool(args, ctx, db):
-    from app.db.models import Service
-    system = args.get("system", "")
-    name = args.get("name", "")
-    confirm = args.get("confirm_text", "")
-    if not system or not name:
-        return {"ok": False, "error": "system and name are required"}
-    expected = f"DELETE {system}/{name}"
-    if confirm != expected:
-        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
-    svc = db.query(Service).filter(Service.system_name == system, Service.name == name).first()
-    if not svc:
-        return {"ok": False, "error": f"service '{name}' not found in system '{system}'"}
-    try:
-        db.delete(svc)
-        db.commit()
-        return {"ok": True, "system": system, "name": name}
-    except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
-
-
 # ─── Environment CRUD ───────────────────────────────────────────────────────
-
-
-@registry.register(
-    name="ops.create_environment",
-    description="创建环境配置。High risk; requires human approval. 中文: 创建环境/新增环境.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "所属系统名称"},
-            "name": {"type": "string", "description": "环境名称（唯一标识）"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "description": {"type": "string", "description": "环境描述"},
-        },
-        "required": ["system", "name"],
-    },
-)
-def create_environment_tool(args, ctx, db):
-    from config_manager import save_environment, get_environment
-    system = args.get("system", "")
-    name = args.get("name", "")
-    if not system or not name:
-        return {"ok": False, "error": "system and name are required"}
-    if get_environment(system, name):
-        return {"ok": False, "error": f"environment '{name}' already exists in system '{system}'"}
-    env_data = {}
-    if args.get("display_name"):
-        env_data["display_name"] = args["display_name"]
-    variables = {}
-    if args.get("description"):
-        variables["description"] = args["description"]
-    if variables:
-        env_data["variables"] = variables
-    try:
-        save_environment(system, name, env_data)
-        return {"ok": True, "system": system, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.update_environment",
-    description="更新环境配置。High risk; requires human approval. 中文: 更新环境/修改环境配置.",
-    scopes=["server:write"],
-    risk="high",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "所属系统名称"},
-            "name": {"type": "string", "description": "环境名称"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "description": {"type": "string", "description": "环境描述"},
-        },
-        "required": ["system", "name"],
-    },
-)
-def update_environment_tool(args, ctx, db):
-    from config_manager import save_environment, get_environment
-    system = args.get("system", "")
-    name = args.get("name", "")
-    if not system or not name:
-        return {"ok": False, "error": "system and name are required"}
-    existing = get_environment(system, name) or {}
-    env_data = dict(existing)
-    if args.get("display_name") is not None:
-        env_data["display_name"] = args["display_name"]
-    if args.get("description") is not None:
-        variables = env_data.get("variables", {})
-        variables["description"] = args["description"]
-        env_data["variables"] = variables
-    try:
-        save_environment(system, name, env_data)
-        return {"ok": True, "system": system, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@registry.register(
-    name="ops.delete_environment",
-    description="删除环境配置。Critical risk; requires human approval. 中文: 删除环境/移除环境.",
-    scopes=["server:write"],
-    risk="critical",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "所属系统名称"},
-            "name": {"type": "string", "description": "环境名称"},
-            "confirm_text": {"type": "string", "description": "确认短语: DELETE <system>/<name>"},
-        },
-        "required": ["system", "name", "confirm_text"],
-    },
-)
-def delete_environment_tool(args, ctx, db):
-    from config_manager import delete_environment as cfg_delete_environment
-    system = args.get("system", "")
-    name = args.get("name", "")
-    confirm = args.get("confirm_text", "")
-    if not system or not name:
-        return {"ok": False, "error": "system and name are required"}
-    expected = f"DELETE {system}/{name}"
-    if confirm != expected:
-        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
-    try:
-        cfg_delete_environment(system, name)
-        return {"ok": True, "system": system, "name": name}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # ─── Server Group Write Operations ──────────────────────────────────────────
 
 
-@registry.register(
-    name="ops.create_server_group",
-    description="创建服务器分组。Medium risk. 中文: 创建服务器分组/新增分组.",
-    scopes=["server:write"],
-    risk="medium",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="internal",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "分组名称（唯一标识）"},
-            "display_name": {"type": "string", "description": "显示名称"},
-            "description": {"type": "string", "description": "分组描述"},
-            "server_names": {"type": "array", "items": {"type": "string"}, "description": "服务器名称列表"},
-        },
-        "required": ["name"],
-    },
-)
-def create_server_group_tool(args, ctx, db):
-    from app.db.models import ServerGroup
-    name = args.get("name", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    existing = db.query(ServerGroup).filter(ServerGroup.name == name).first()
-    if existing:
-        return {"ok": False, "error": f"server group '{name}' already exists"}
-    group = ServerGroup(
-        name=name,
-        display_name=args.get("display_name"),
-        description=args.get("description"),
-        server_names=args.get("server_names", []),
-    )
+# ─── Service Control (restart / stop / start / update) ──────────────────────
+
+def _resolve_service_control_command(cfg: dict, action: str, compose_service: str = "") -> str:
+    """根据服务配置解析控制命令。
+
+    优先级：
+    1. 配置中显式指定的 restart_command / stop_command / start_command / update_command
+    2. Docker Compose 服务：
+       - restart: docker compose -f <file> restart [service]
+       - stop:    docker compose -f <file> stop [service]
+       - start:   docker compose -f <file> up -d [service]
+       - update:  docker compose -f <file> pull [service] && docker compose -f <file> up -d [service]
+    3. PM2 服务：pm2 restart/stop/start/reload <pm2_name>
+    4. process_keyword：pkill / 启动命令（不支持 update）
+    """
+    tv = cfg.get("template_variables") or {}
+    cmd_key = f"{action}_command"
+    explicit = tv.get(cmd_key)
+    if explicit:
+        return str(explicit)
+
+    template = cfg.get("template") or ""
+    compose_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
+
+    # compose_service 优先从参数取，否则从 template_variables 取
+    svc_target = compose_service or tv.get("compose_service") or ""
+    svc_arg = shlex.quote(svc_target) if svc_target else ""
+
+    if template in ("docker_compose", "crypto_docker_compose") or compose_dir:
+        compose_file = tv.get("compose_file", "docker-compose.yml")
+        if action == "restart":
+            return f"docker compose -f {shlex.quote(compose_file)} restart {svc_arg}".strip()
+        elif action == "stop":
+            return f"docker compose -f {shlex.quote(compose_file)} stop {svc_arg}".strip()
+        elif action == "start":
+            return f"docker compose -f {shlex.quote(compose_file)} up -d {svc_arg}".strip()
+        elif action == "update":
+            # 拉取最新镜像并重建容器（--no-deps 避免影响依赖服务）
+            return (
+                f"docker compose -f {shlex.quote(compose_file)} pull {svc_arg}".strip()
+                + " && "
+                + f"docker compose -f {shlex.quote(compose_file)} up -d --no-deps {svc_arg}".strip()
+            )
+
+    pm2_name = tv.get("pm2_name") or ""
+    if pm2_name:
+        if action == "restart":
+            return f"pm2 restart {shlex.quote(pm2_name)}"
+        elif action == "stop":
+            return f"pm2 stop {shlex.quote(pm2_name)}"
+        elif action == "start":
+            return f"pm2 start {shlex.quote(pm2_name)}"
+        elif action == "update":
+            # PM2 的 reload 实现零停机更新（需配合 cluster mode）
+            return f"pm2 reload {shlex.quote(pm2_name)}"
+
+    keyword = tv.get("process_keyword") or tv.get("service_name") or ""
+    if keyword:
+        if action == "restart":
+            return f"pkill -f {shlex.quote(keyword)} && sleep 2 && cd {shlex.quote(compose_dir or '.')} && nohup {shlex.quote(keyword)} > /dev/null 2>&1 &"
+        elif action == "stop":
+            return f"pkill -f {shlex.quote(keyword)}"
+        elif action == "start":
+            return f"cd {shlex.quote(compose_dir or '.')} && nohup {shlex.quote(keyword)} > /dev/null 2>&1 &"
+        elif action == "update":
+            # process_keyword 部署方式不支持镜像更新，退化为 restart
+            return f"pkill -f {shlex.quote(keyword)} && sleep 2 && cd {shlex.quote(compose_dir or '.')} && nohup {shlex.quote(keyword)} > /dev/null 2>&1 &"
+
+    raise HTTPException(status_code=400, detail=f"无法确定 {action} 命令：请配置 {action}_command 或 compose_dir/pm2_name/process_keyword")
+
+
+def _check_remote_dir_exists(ssh, base_dir: str) -> tuple:
+    """执行控制命令前校验目标目录存在于远端服务器。
+
+    与 full_cmd 拼装条件保持一致：base_dir 为空时跳过校验。
+    返回 (ok, error_msg)；ok=False 时 error_msg 含路径上下文，供调用方决定抛异常或返回错误。
+    """
+    if not base_dir:
+        return True, ""
     try:
-        db.add(group)
-        db.commit()
-        return {"ok": True, "name": name}
-    except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
+        code, _, _ = ssh.exec(f"test -d {shlex.quote(base_dir)}", timeout=10)
+    except Exception as exc:
+        return False, f"校验 compose_dir 失败: {base_dir} ({exc})"
+    if code != 0:
+        return False, f"目标服务器上 compose_dir 不存在: {base_dir}"
+    return True, ""
 
 
-@registry.register(
-    name="ops.assign_server_group",
-    description="分配服务器到分组。Medium risk. 中文: 分配服务器到分组/设置分组服务器.",
-    scopes=["server:write"],
-    risk="medium",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="internal",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "group_name": {"type": "string", "description": "分组名称"},
-            "server_names": {"type": "array", "items": {"type": "string"}, "description": "服务器名称列表"},
-        },
-        "required": ["group_name", "server_names"],
-    },
-)
-def assign_server_group_tool(args, ctx, db):
-    from app.db.models import ServerGroup
-    group_name = args.get("group_name", "")
-    server_names = args.get("server_names", [])
-    if not group_name or not server_names:
-        return {"ok": False, "error": "group_name and server_names are required"}
-    group = db.query(ServerGroup).filter(ServerGroup.name == group_name).first()
-    if not group:
-        return {"ok": False, "error": f"server group '{group_name}' not found"}
-    group.server_names = server_names
+def _check_docker_status(ssh, base_dir: str, compose_file: str, compose_svc: str) -> dict:
+    """通过 docker compose ps 检查容器状态，检测重启循环、架构错误等异常。
+
+    返回 {'restart_loop': bool, 'status': str, 'containers': [...], 'restart_count': int}
+    """
+    result = {"restart_loop": False, "status": "unknown", "containers": [], "restart_count": 0}
+    if not base_dir:
+        return result
+
     try:
-        db.commit()
-        return {"ok": True, "group_name": group_name, "server_names": server_names}
+        svc_filter = f" {shlex.quote(compose_svc)}" if compose_svc else ""
+        ps_cmd = f"cd {shlex.quote(base_dir)} && docker compose -f {shlex.quote(compose_file)} ps{svc_filter} 2>&1"
+        code, out, err = ssh.exec(ps_cmd, timeout=15)
+        if code != 0:
+            result["status"] = f"ps_failed: {err[:200]}"
+            return result
+
+        result["ps_raw"] = out[:2000]
+        lines = out.strip().split("\n")
+
+        # 解析 docker compose ps 输出，检测状态关键字
+        restarting_count = 0
+        unhealthy_count = 0
+        exited_count = 0
+        running_count = 0
+        for line in lines:
+            lower = line.lower()
+            if "restarting" in lower:
+                restarting_count += 1
+                result["containers"].append({"line": line.strip(), "status": "restarting"})
+            elif "unhealthy" in lower:
+                unhealthy_count += 1
+                result["containers"].append({"line": line.strip(), "status": "unhealthy"})
+            elif "exited" in lower or "dead" in lower:
+                exited_count += 1
+                result["containers"].append({"line": line.strip(), "status": "exited"})
+            elif "up " in lower or "running" in lower:
+                running_count += 1
+
+        result["restart_count"] = restarting_count
+        result["unhealthy_count"] = unhealthy_count
+        result["exited_count"] = exited_count
+        result["running_count"] = running_count
+
+        if restarting_count > 0:
+            result["restart_loop"] = True
+            result["status"] = "RESTARTING"
+        elif unhealthy_count > 0:
+            result["status"] = "UNHEALTHY"
+        elif exited_count > 0 and running_count == 0:
+            result["status"] = "EXITED"
+        elif running_count > 0:
+            result["status"] = "RUNNING"
+        else:
+            result["status"] = "NO_CONTAINERS"
+
     except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
+        result["status"] = f"check_error: {e}"
+    return result
 
 
-@registry.register(
-    name="ops.rename_server_group",
-    description="重命名服务器分组。Medium risk. 中文: 重命名服务器分组/修改分组名称.",
-    scopes=["server:write"],
-    risk="medium",
-    category="server_write",
-    write=True,
-    requires_confirmation=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="internal",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "old_name": {"type": "string", "description": "原分组名称"},
-            "new_name": {"type": "string", "description": "新分组名称"},
-        },
-        "required": ["old_name", "new_name"],
-    },
-)
-def rename_server_group_tool(args, ctx, db):
-    from app.db.models import ServerGroup
-    old_name = args.get("old_name", "")
-    new_name = args.get("new_name", "")
-    if not old_name or not new_name:
-        return {"ok": False, "error": "old_name and new_name are required"}
-    group = db.query(ServerGroup).filter(ServerGroup.name == old_name).first()
-    if not group:
-        return {"ok": False, "error": f"server group '{old_name}' not found"}
-    existing = db.query(ServerGroup).filter(ServerGroup.name == new_name).first()
-    if existing:
-        return {"ok": False, "error": f"server group '{new_name}' already exists"}
-    group.name = new_name
+def _get_container_logs(ssh, base_dir: str, compose_file: str, compose_svc: str) -> str:
+    """获取容器最近日志，用于诊断重启原因。"""
+    if not base_dir:
+        return ""
     try:
-        db.commit()
-        return {"ok": True, "old_name": old_name, "new_name": new_name}
+        svc_filter = f" {shlex.quote(compose_svc)}" if compose_svc else ""
+        logs_cmd = f"cd {shlex.quote(base_dir)} && docker compose -f {shlex.quote(compose_file)} logs --tail 30{svc_filter} 2>&1"
+        code, out, err = ssh.exec(logs_cmd, timeout=15)
+        if code != 0 and err:
+            return f"logs_failed: {err[:200]}"
+        return out[:3000] if out else (err[:2000] if err else "")
     except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
+        return f"logs_error: {e}"
+
+
+def _execute_service_control(server_key: str, system: str, service: str, action: str, ctx, db, compose_service: str = "") -> dict:
+    """在指定服务器上执行服务控制操作（restart/stop/start/update）。
+
+    返回执行结果，包含前后健康检查对比。
+    Docker Compose 部署会在操作后通过 docker compose ps 验证容器状态，
+    检测重启循环、架构不匹配等异常，并自动获取容器日志。
+    """
+    cfg = get_service_config({"system": system, "service": service}, ctx, db)
+    if not cfg.get("found"):
+        raise HTTPException(status_code=404, detail=f"服务配置未找到: {system}/{service}")
+
+    command = _resolve_service_control_command(cfg, action, compose_service=compose_service)
+    tv = cfg.get("template_variables") or {}
+    base_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
+    template = cfg.get("template") or ""
+    is_docker = template in ("docker_compose", "crypto_docker_compose") or bool(tv.get("compose_dir"))
+    compose_file = tv.get("compose_file", "docker-compose.yml")
+    compose_svc = compose_service or tv.get("compose_service") or ""
+
+    ssh, srv = _connect(server_key)
+    try:
+        # 执行前健康检查
+        pre_health = {}
+        try:
+            hc = run_health_check({"server": server_key, "system": system, "service": service}, ctx, db)
+            pre_health = {"healthy": hc.get("healthy"), "stdout": hc.get("stdout", ""), "exit_code": hc.get("exit_code")}
+        except Exception:
+            pre_health = {"note": "pre-check skipped"}
+
+        # 部署前路径校验：compose_dir 不存在时提前失败，避免 cd 脏错误混入 stdout
+        ok, err_msg = _check_remote_dir_exists(ssh, base_dir)
+        if not ok:
+            raise HTTPException(status_code=400, detail=f"[{server_key}] {err_msg}")
+
+        # 执行控制命令（update 操作需要更长超时，因为要拉取镜像）
+        full_cmd = f"cd {shlex.quote(base_dir)} && {command}" if base_dir else command
+        timeout = 300 if action == "update" else 120
+        code, out, err = ssh.exec(full_cmd, timeout=timeout)
+
+        # 执行后健康检查（重启/启动/更新后等待服务稳定）
+        import time
+        post_health = {}
+        container_status = None
+        if action in ("restart", "start", "update"):
+            # 等待更长时间让服务稳定：update 需要拉镜像和重建容器，耗时更长
+            wait_sec = 15 if action == "update" else 8
+            time.sleep(wait_sec)
+
+            # Docker Compose 部署：通过 docker compose ps 验证容器状态，
+            # 检测重启循环、架构错误、OOM 等问题
+            if is_docker:
+                container_status = _check_docker_status(ssh, base_dir, compose_file, compose_svc)
+
+            # 检测到重启循环时，自动获取容器日志辅助诊断
+            if container_status and container_status.get("restart_loop"):
+                container_status["logs_tail"] = _get_container_logs(
+                    ssh, base_dir, compose_file, compose_svc
+                )
+
+            try:
+                hc = run_health_check({"server": server_key, "system": system, "service": service}, ctx, db)
+                post_health = {"healthy": hc.get("healthy"), "stdout": hc.get("stdout", ""), "exit_code": hc.get("exit_code")}
+            except Exception:
+                post_health = {"note": "post-check skipped"}
+
+        return {
+            "server": server_key,
+            "system": system,
+            "service": service,
+            "action": action,
+            "command": full_cmd,
+            "exit_code": code,
+            "stdout": out,
+            "stderr": err,
+            "pre_health": pre_health,
+            "post_health": post_health,
+            "container_status": container_status,
+            "success": code == 0 and (not container_status or not container_status.get("restart_loop")),
+        }
+    finally:
+        ssh.close()
 
 
 @registry.register(
-    name="ops.delete_server_group",
-    description="删除服务器分组。High risk; requires human approval. 中文: 删除服务器分组/移除分组.",
-    scopes=["server:write"],
+    name="ops.restart_service",
+    title="重启服务",
+    description="在指定服务器上重启服务。支持 Docker Compose / PM2 / process_keyword。高危操作，需要人工审批。中文: 重启服务/重启应用.",
+    scopes=["ops:read", "server:read"],
     risk="high",
     category="server_write",
     write=True,
     requires_confirmation=True,
     requires_human_approval=True,
-    ai_callable=True,
-    ai_auto_callable=False,
-    data_sensitivity="internal",
+    data_sensitivity="sensitive",
     input_schema={
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "分组名称"},
-            "confirm_text": {"type": "string", "description": "确认短语: DELETE <name>"},
+            "server": {"type": "string", "description": "服务器名称"},
+            "system": {"type": "string", "description": "系统名称"},
+            "service": {"type": "string", "description": "服务名称"},
+            "confirm_text": {"type": "string", "description": "确认短语: RESTART <server>/<service>"},
         },
-        "required": ["name", "confirm_text"],
+        "required": ["server", "system", "service", "confirm_text"],
+        "additionalProperties": False,
     },
 )
-def delete_server_group_tool(args, ctx, db):
-    from app.db.models import ServerGroup
-    name = args.get("name", "")
+def restart_service(args, ctx, db):
+    server = args.get("server", "")
+    system = args.get("system", "")
+    service = args.get("service", "")
     confirm = args.get("confirm_text", "")
-    if not name:
-        return {"ok": False, "error": "name is required"}
-    expected = f"DELETE {name}"
+    expected = f"RESTART {server}/{service}"
     if confirm != expected:
         return {"ok": False, "error": f"confirm_text must be '{expected}'"}
-    group = db.query(ServerGroup).filter(ServerGroup.name == name).first()
-    if not group:
-        return {"ok": False, "error": f"server group '{name}' not found"}
-    try:
-        db.delete(group)
-        db.commit()
-        return {"ok": True, "name": name}
-    except Exception as e:
-        db.rollback()
-        return {"ok": False, "error": str(e)}
+    result = _execute_service_control(server, system, service, "restart", ctx, db)
+    result["ok"] = result.get("success", False)
+    return result
+
+
+@registry.register(
+    name="ops.stop_service",
+    title="停止服务",
+    description="在指定服务器上停止服务。支持 Docker Compose / PM2 / process_keyword。高危操作，需要人工审批。中文: 停止服务/关闭应用.",
+    scopes=["ops:read", "server:read"],
+    risk="high",
+    category="server_write",
+    write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "服务器名称"},
+            "system": {"type": "string", "description": "系统名称"},
+            "service": {"type": "string", "description": "服务名称"},
+            "confirm_text": {"type": "string", "description": "确认短语: STOP <server>/<service>"},
+        },
+        "required": ["server", "system", "service", "confirm_text"],
+        "additionalProperties": False,
+    },
+)
+def stop_service(args, ctx, db):
+    server = args.get("server", "")
+    system = args.get("system", "")
+    service = args.get("service", "")
+    confirm = args.get("confirm_text", "")
+    expected = f"STOP {server}/{service}"
+    if confirm != expected:
+        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
+    result = _execute_service_control(server, system, service, "stop", ctx, db)
+    result["ok"] = result.get("success", False)
+    return result
+
+
+@registry.register(
+    name="ops.start_service",
+    title="启动服务",
+    description="在指定服务器上启动服务。支持 Docker Compose / PM2 / process_keyword。高危操作，需要人工审批。中文: 启动服务/开启应用.",
+    scopes=["ops:read", "server:read"],
+    risk="high",
+    category="server_write",
+    write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "服务器名称"},
+            "system": {"type": "string", "description": "系统名称"},
+            "service": {"type": "string", "description": "服务名称"},
+            "confirm_text": {"type": "string", "description": "确认短语: START <server>/<service>"},
+        },
+        "required": ["server", "system", "service", "confirm_text"],
+        "additionalProperties": False,
+    },
+)
+def start_service(args, ctx, db):
+    server = args.get("server", "")
+    system = args.get("system", "")
+    service = args.get("service", "")
+    confirm = args.get("confirm_text", "")
+    expected = f"START {server}/{service}"
+    if confirm != expected:
+        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
+    result = _execute_service_control(server, system, service, "start", ctx, db)
+    result["ok"] = result.get("success", False)
+    return result
+
+
+@registry.register(
+    name="ops.update_service_runtime",
+    title="拉取镜像并重新部署容器（docker pull + docker compose up）",
+    description=(
+        "拉取最新 Docker 镜像并重新部署容器：执行 docker pull + docker compose up -d 重建服务容器。"
+        "用于更新服务到新版本、滚动更新、容器重启部署。"
+        "Docker Compose: docker compose pull [service] && docker compose up -d --no-deps [service]；"
+        "PM2: pm2 reload <name>。高危操作，需要人工审批。"
+        "keywords: docker pull, 拉镜像, 重新部署, 重新部署容器, 重启容器, 滚动更新, container restart, redeploy, update image."
+    ),
+    scopes=["ops:read", "server:read"],
+    risk="high",
+    category="server_write",
+    write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
+    keywords=[
+        "docker pull", "拉镜像", "拉取镜像", "重新部署", "重新部署容器",
+        "重启容器", "滚动更新", "container restart", "redeploy", "update image",
+        "docker compose up", "重建容器", "更新服务",
+    ],
+    aliases=["docker_pull", "redeploy_container", "pull_and_restart"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "服务器名称"},
+            "system": {"type": "string", "description": "系统名称"},
+            "service": {"type": "string", "description": "服务名称"},
+            "compose_service": {
+                "type": "string",
+                "description": "Docker Compose 服务名（可选）。指定时只拉取并更新该服务，不指定则更新所有服务。",
+            },
+            "confirm_text": {"type": "string", "description": "确认短语: UPDATE <server>/<service>"},
+        },
+        "required": ["server", "system", "service", "confirm_text"],
+        "additionalProperties": False,
+    },
+)
+def update_service_runtime(args, ctx, db):
+    server = args.get("server", "")
+    system = args.get("system", "")
+    service = args.get("service", "")
+    confirm = args.get("confirm_text", "")
+    compose_service = args.get("compose_service", "")
+    expected = f"UPDATE {server}/{service}"
+    if confirm != expected:
+        return {"ok": False, "error": f"confirm_text must be '{expected}'"}
+    result = _execute_service_control(
+        server, system, service, "update", ctx, db, compose_service=compose_service
+    )
+    result["ok"] = result.get("success", False)
+    return result

@@ -12,7 +12,7 @@ from app.domain.inventory import inventory
 from app.config.servers import redact_server_secrets
 from app.api.helpers import api_response, audit
 from app.db import get_db
-from app.db.models import Server
+from app.db.models import Server, Service
 from app.db.repository import ServerGroupRepository
 from app.core.auth_v2 import require_auth, require_admin
 from app.core.command_security import validate_command, sanitize_command_output
@@ -612,20 +612,28 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
     password = incoming_password if incoming_password not in (None, "", "********") else existing.get("password")
     key_file = data.get("key") or data.get("key_file") or existing.get("key")
     key_content = incoming_key_content if incoming_key_content not in (None, "", "********") else existing.get("key_content")
-    jump_host = data.get("jump_host") if data.get("jump_host") is not None else existing.get("jump_host")
-    description = data.get("description") if data.get("description") is not None else existing.get("description", "")
-    tags = data.get("tags") if data.get("tags") is not None else existing.get("tags", [])
-    sftp_allowed_roots = (
-        data.get("sftp_allowed_roots")
-        if data.get("sftp_allowed_roots") is not None
-        else data.get("allowed_roots")
-        if data.get("allowed_roots") is not None
-        else existing.get("sftp_allowed_roots")
-        or existing.get("allowed_roots")
-        or ["/"]
-    )
+    jump_host = existing.get("jump_host")
+    if "jump_host" in data:
+        jh = data["jump_host"]
+        if jh is None or jh == "" or jh == "__clear__":
+            jump_host = None
+        else:
+            jump_host = jh
+    description = existing.get("description", "")
+    if "description" in data:
+        description = data["description"] or ""
+    tags = existing.get("tags", [])
+    if "tags" in data:
+        tags = data["tags"] or []
+    sftp_allowed_roots = existing.get("sftp_allowed_roots") or existing.get("allowed_roots") or ["/"]
+    if "sftp_allowed_roots" in data:
+        sftp_allowed_roots = data["sftp_allowed_roots"] or ["/"]
+    elif "allowed_roots" in data:
+        sftp_allowed_roots = data["allowed_roots"] or ["/"]
 
-    status = data.get("status") if data.get("status") is not None else existing.get("status", "online")
+    status = existing.get("status", "online")
+    if "status" in data:
+        status = data["status"]
     status = str(status or "online").strip().lower()
     if status not in {"online", "disabled", "offline"}:
         status = "online"
@@ -642,7 +650,7 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
         "jump_host": jump_host,
         "description": description,
         "tags": tags,
-        "group": data.get("group") if data.get("group") is not None else existing.get("group", ""),
+        "group": data.get("group") if "group" in data else existing.get("group", ""),
         "sftp_allowed_roots": sftp_allowed_roots,
         "status": status,
         "enabled": status != "disabled",
@@ -721,19 +729,190 @@ def server_exec_history(
     })
 
 
+def _detect_server_deployment(db: Session, server_name: str) -> dict:
+    """根据服务器名查找关联的 Service 配置，推断部署方式。
+
+    返回:
+        {
+            "mode": "docker_compose" | "pm2" | "process_keyword" | "unknown",
+            "services": [ {name, system, template, template_variables, ...} ],
+        }
+    服务器可能同时承载多个服务，全部返回，由前端决定如何展示。
+    """
+    services = []
+    try:
+        rows = db.query(Service).all()
+    except Exception:
+        rows = []
+    for svc in rows:
+        try:
+            servers = svc.servers or []
+            if server_name not in servers:
+                continue
+            tv = svc.template_variables or {}
+            template = svc.template or ""
+            compose_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
+            pm2_name = tv.get("pm2_name") or ""
+            keyword = tv.get("process_keyword") or tv.get("service_name") or ""
+            if template in ("docker_compose", "crypto_docker_compose") or compose_dir:
+                mode = "docker_compose"
+            elif pm2_name:
+                mode = "pm2"
+            elif keyword:
+                mode = "process_keyword"
+            else:
+                mode = "unknown"
+            services.append({
+                "name": svc.name,
+                "display_name": svc.display_name or svc.name,
+                "system": svc.system_name,
+                "template": template,
+                "mode": mode,
+                "compose_dir": compose_dir,
+                "compose_file": tv.get("compose_file", "docker-compose.yml"),
+                "pm2_name": pm2_name,
+                "process_keyword": keyword,
+                "template_variables": tv,
+            })
+        except Exception:
+            continue
+    # 优先级：docker_compose > pm2 > process_keyword > unknown
+    priority = {"docker_compose": 3, "pm2": 2, "process_keyword": 1, "unknown": 0}
+    if services:
+        top = max(services, key=lambda s: priority.get(s["mode"], 0))
+        return {"mode": top["mode"], "services": services}
+    return {"mode": "unknown", "services": []}
+
+
 @servers_v2_router.get("/{name}/processes")
 def server_processes(request: Request, name: str, db: Session = Depends(get_db)):
     require_admin(request, db)
     started = time.time()
+    deployment = _detect_server_deployment(db, name)
+    mode = deployment["mode"]
+    services = deployment["services"]
+    import json as _json
+
     with _ssh_session(name) as (ssh, srv):
-        exit_code, out, _ = ssh.exec(
-            "pm2 jlist 2>/dev/null || echo '[]'",
-            timeout=15
-        )
-        import json
+        if mode == "docker_compose":
+            # 取第一个 docker_compose 服务的目录与文件作为默认
+            svc = next((s for s in services if s["mode"] == "docker_compose"), None)
+            compose_dir = (svc or {}).get("compose_dir") or ""
+            compose_file = (svc or {}).get("compose_file") or "docker-compose.yml"
+            base_cmd = f"cd {shlex.quote(compose_dir or '.')} && " if compose_dir else ""
+            # docker compose ps --format json 输出每行一个 JSON 对象
+            exit_code, out, err = ssh.exec(
+                f"{base_cmd} docker compose -f {shlex.quote(compose_file)} ps --format json 2>/dev/null || "
+                f"{base_cmd} docker-compose -f {shlex.quote(compose_file)} ps 2>/dev/null",
+                timeout=20,
+            )
+            result = []
+            # 尝试解析 JSON 行格式
+            for line in (out or "").splitlines():
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    p = _json.loads(line)
+                except Exception:
+                    continue
+                state = (p.get("State") or p.get("status") or "unknown").lower()
+                result.append({
+                    "name": p.get("Service") or p.get("Name") or p.get("name") or "",
+                    "pid": p.get("PID") or p.get("PIDs") or 0,
+                    "status": state,
+                    "image": p.get("Image") or p.get("image") or "",
+                    "ports": p.get("Ports") or p.get("Publishers") or "",
+                    "uptime": p.get("RunningFor") or p.get("Status") or "",
+                    "restarts": 0,
+                })
+            # 如果 JSON 解析为空，尝试文本解析 docker-compose ps 的表格输出
+            if not result and out and not out.lstrip().startswith("{"):
+                lines = [l for l in (out or "").splitlines() if l.strip()]
+                if len(lines) > 1:
+                    for line in lines[1:]:
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            result.append({
+                                "name": parts[0],
+                                "pid": 0,
+                                "status": parts[2].lower() if len(parts) > 2 else "unknown",
+                                "image": parts[1] if len(parts) > 1 else "",
+                                "ports": "",
+                                "uptime": " ".join(parts[3:]) if len(parts) > 3 else "",
+                                "restarts": 0,
+                            })
+            audit("server.processes", "server", name, request.state.username)
+            return api_response(data={
+                "processes": result,
+                "deployment_mode": "docker_compose",
+                "services": services,
+                "duration_ms": int((time.time() - started) * 1000),
+            })
+
+        if mode == "pm2":
+            exit_code, out, _ = ssh.exec("pm2 jlist 2>/dev/null || echo '[]'", timeout=15)
+            try:
+                processes = _json.loads(out) if out else []
+            except Exception:
+                processes = []
+            result = []
+            for p in processes:
+                result.append({
+                    "name": p.get("name", ""),
+                    "pid": p.get("pid", 0),
+                    "status": p.get("pm2_env", {}).get("status", "unknown"),
+                    "cpu": p.get("monit", {}).get("cpu", 0),
+                    "memory": p.get("monit", {}).get("memory", 0),
+                    "uptime": p.get("pm2_env", {}).get("pm_uptime", 0),
+                    "restarts": p.get("pm2_env", {}).get("restart_time", 0),
+                })
+            audit("server.processes", "server", name, request.state.username)
+            return api_response(data={
+                "processes": result,
+                "deployment_mode": "pm2",
+                "services": services,
+                "duration_ms": int((time.time() - started) * 1000),
+            })
+
+        if mode == "process_keyword":
+            # 用 ps + 关键字查进程
+            svc = next((s for s in services if s["mode"] == "process_keyword"), None)
+            keyword = (svc or {}).get("process_keyword") or ""
+            result = []
+            if keyword:
+                exit_code, out, _ = ssh.exec(
+                    f"ps -eo pid,pcpu,pmem,etime,comm,args --no-headers 2>/dev/null | grep -E {shlex.quote(keyword)} | grep -v grep",
+                    timeout=15,
+                )
+                for line in (out or "").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(None, 4)
+                    if len(parts) >= 5:
+                        result.append({
+                            "name": parts[4].split()[0] if parts[4] else keyword,
+                            "pid": int(parts[0]) if parts[0].isdigit() else 0,
+                            "status": "online",
+                            "cpu": float(parts[1]) if _is_float(parts[1]) else 0,
+                            "memory": float(parts[2]) if _is_float(parts[2]) else 0,
+                            "uptime": parts[3],
+                            "restarts": 0,
+                        })
+            audit("server.processes", "server", name, request.state.username)
+            return api_response(data={
+                "processes": result,
+                "deployment_mode": "process_keyword",
+                "services": services,
+                "duration_ms": int((time.time() - started) * 1000),
+            })
+
+        # 未知模式，回退到 PM2 兼容旧逻辑
+        exit_code, out, _ = ssh.exec("pm2 jlist 2>/dev/null || echo '[]'", timeout=15)
         try:
-            processes = json.loads(out) if out else []
-        except:
+            processes = _json.loads(out) if out else []
+        except Exception:
             processes = []
         result = []
         for p in processes:
@@ -749,11 +928,54 @@ def server_processes(request: Request, name: str, db: Session = Depends(get_db))
         audit("server.processes", "server", name, request.state.username)
         return api_response(data={
             "processes": result,
+            "deployment_mode": "unknown",
+            "services": services,
             "duration_ms": int((time.time() - started) * 1000),
         })
 
 
-_PM2_ACTIONS = {"start", "stop", "restart", "reload"}
+def _is_float(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+_PROCESS_ACTIONS = {"start", "stop", "restart"}
+
+
+def _resolve_action_command(action: str, process: str, mode: str, services: list) -> str:
+    """根据部署方式和动作解析实际执行命令。
+
+    Docker Compose:
+      - restart: docker compose -f {file} restart [service]
+      - stop:    docker compose -f {file} stop [service]
+      - start:   docker compose -f {file} up -d [service]
+    PM2:
+      - 复用旧逻辑 pm2 {action} {process}
+    process_keyword:
+      - 不支持单进程控制，回退提示
+    """
+    if mode == "docker_compose":
+        svc = next((s for s in services if s["mode"] == "docker_compose"), None)
+        compose_dir = (svc or {}).get("compose_dir") or ""
+        compose_file = (svc or {}).get("compose_file") or "docker-compose.yml"
+        base = f"cd {shlex.quote(compose_dir or '.')} && " if compose_dir else ""
+        # process 可以是 docker compose 服务名（如 strategy / web），也可能为空（控制整个 compose 项目）
+        target = shlex.quote(process) if process else ""
+        if action == "restart":
+            return f"{base} docker compose -f {shlex.quote(compose_file)} restart {target}".strip()
+        if action == "stop":
+            return f"{base} docker compose -f {shlex.quote(compose_file)} stop {target}".strip()
+        if action == "start":
+            return f"{base} docker compose -f {shlex.quote(compose_file)} up -d {target}".strip()
+
+    if mode == "pm2":
+        return f"pm2 {action} {shlex.quote(process)}"
+
+    # 默认回退到 PM2
+    return f"pm2 {action} {shlex.quote(process)}"
 
 
 @servers_v2_router.post("/{name}/processes/action")
@@ -762,39 +984,57 @@ async def server_process_action(request: Request, name: str, db: Session = Depen
     data = await request.json()
     action = str(data.get("action", "")).strip().lower()
     process = str(data.get("process", "")).strip()
-    if action not in _PM2_ACTIONS:
-        raise HTTPException(status_code=400, detail=f"action must be one of {sorted(_PM2_ACTIONS)}")
-    if not process:
+    # mode 可由前端显式传入（来自 /processes 返回的 deployment_mode），
+    # 不传则自动检测
+    mode = str(data.get("mode", "")).strip().lower()
+    if action not in _PROCESS_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"action must be one of {sorted(_PROCESS_ACTIONS)}")
+    if not process and mode != "docker_compose":
         raise HTTPException(status_code=400, detail="process is required")
-    if len(process) > 200 or not _re.match(r"^[A-Za-z0-9._\-:/@]+$", process):
+    if process and (len(process) > 200 or not _re.match(r"^[A-Za-z0-9._\-:/@]+$", process)):
         raise HTTPException(status_code=400, detail="process contains invalid characters")
+
+    if not mode:
+        deployment = _detect_server_deployment(db, name)
+        mode = deployment["mode"]
+        services = deployment["services"]
+    else:
+        services = _detect_server_deployment(db, name)["services"]
+
+    if mode == "process_keyword":
+        raise HTTPException(
+            status_code=400,
+            detail="process_keyword 部署方式不支持单进程操作，请使用服务控制工具或 SSH 执行",
+        )
 
     started = time.time()
     with _ssh_session(name) as (ssh, srv):
-        command = f"pm2 {action} {shlex.quote(process)}"
-        exit_code, out, err = ssh.exec(command, timeout=30)
+        command = _resolve_action_command(action, process, mode, services)
+        exit_code, out, err = ssh.exec(command, timeout=60)
         out = sanitize_command_output(out, _MAX_OUTPUT_LENGTH)
         err = sanitize_command_output(err, _MAX_OUTPUT_LENGTH)
         duration_ms = int((time.time() - started) * 1000)
         ac = build_audit_context(srv, name)
         audit(
-            f"server.pm2.{action}",
+            f"server.process.{action}",
             "server",
             name,
             format_audit_detail(
                 ac,
                 user=request.state.username,
-                process=process,
+                process=process or "(all)",
+                mode=mode,
                 exit=exit_code,
                 dur=f"{duration_ms}ms",
             ),
         )
         if exit_code != 0:
-            detail = err or out or f"pm2 {action} failed"
+            detail = err or out or f"{action} failed"
             raise HTTPException(status_code=502, detail=detail.strip()[:500])
         return api_response(data={
             "process": process,
             "action": action,
+            "mode": mode,
             "exit_code": exit_code,
             "stdout": out,
             "stderr": err,

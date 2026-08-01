@@ -167,6 +167,9 @@ export default function ToolAccessPage() {
   const [deleteToolRecordsOpen, setDeleteToolRecordsOpen] = useState(false)
   const [deletingToolRecords, setDeletingToolRecords] = useState(false)
   const [toolDetailOpen, setToolDetailOpen] = useState(false)
+  const [showSwitchModal, setShowSwitchModal] = useState(false)
+  const [showRiskPolicyModal, setShowRiskPolicyModal] = useState(false)
+  const [showManifestModal, setShowManifestModal] = useState(false)
 
   const loadInitial = async () => {
     setLoading(true)
@@ -431,123 +434,33 @@ export default function ToolAccessPage() {
               { label: '高风险', value: tools.filter((t) => t.risk === 'high' || t.risk === 'critical').length, tone: 'danger' },
               { label: '写操作', value: tools.filter((t) => t.write).length, tone: 'warning' },
             ]}
+            actions={
+              <>
+                <button className="btn btn-subtle" onClick={() => setShowSwitchModal(true)}>能力开关</button>
+                <button className="btn btn-subtle" onClick={() => setShowRiskPolicyModal(true)}>风险策略</button>
+                <button className="btn btn-subtle" onClick={() => setShowManifestModal(true)}>Manifest</button>
+              </>
+            }
           />
-          <ToolRiskPolicyPanel
-            rules={riskPolicy?.rules
-              ? Object.entries(riskPolicy.rules).map(([risk, config]: [string, any]) => ({
-                risk,
-                action: config?.require_confirmation ? 'confirm' : 'allow',
-                description: config?.description || '',
-                affected_tools: config?.affected_tools,
-              }))
-              : [
-                { risk: 'critical', action: 'confirm' as const, description: '危险 CLI、写入文件、执行远程命令' },
-                { risk: 'high', action: 'confirm' as const, description: '发布执行、回滚、配置变更、备份恢复' },
-                { risk: 'medium', action: 'confirm' as const, description: '发布计划、预检、SQL 写操作' },
-                { risk: 'low', action: 'allow' as const, description: '只读查询、巡检、状态检查' },
-              ]}
-          />
-          <div className="grid-2">
-            <div className="card">
-              <div className="card-header"><h2>能力开关</h2><span>默认只读，写操作逐项开启</span></div>
-              <div className="tool-switch-groups">
-                {[
-                  {
-                    title: '基础接入',
-                    keys: [
-                      { key: 'enabled', label: '总开关', desc: '启用全部工具能力' },
-                      { key: 'http_tools_enabled', label: 'HTTP 工具', desc: '通过 HTTP 调用工具' },
-                      { key: 'mcp_enabled', label: 'MCP 协议', desc: '启用 MCP 接入' },
-                      { key: 'read_only', label: '只读模式', desc: '默认禁止写入操作' },
-                    ],
-                  },
-                  {
-                    title: '风险管控',
-                    keys: [
-                      { key: 'require_confirmation', label: '需要确认', desc: '高风险操作需人工确认' },
-                      { key: 'taskize_high_risk_tools', label: '任务化高风险', desc: '将高风险转为任务执行' },
-                      { key: 'allow_high_risk_tools', label: '允许高风险', desc: '开放高风险工具调用' },
-                      { key: 'allow_critical_risk_tools', label: '允许危险级', desc: '开放危险级工具调用' },
-                      { key: 'allow_ai_token_to_run_inspection_execute', label: 'AI token 可跑巡检', desc: '允许 AI/MCP tool-token 跑 Path A 巡检（带 confirm_text 二次确认）' },
-                    ],
-                  },
-                  {
-                    title: '发布与部署',
-                    keys: [
-                      { key: 'allow_deploy_plan', label: '发布计划', desc: '允许创建发布计划' },
-                      { key: 'allow_deploy_execute', label: '发布执行', desc: '允许执行发布部署' },
-                      { key: 'allow_prod_deploy', label: '生产发布', desc: '允许发布到生产环境' },
-                      { key: 'allow_rollback', label: '回滚操作', desc: '允许执行回滚' },
-                    ],
-                  },
-                  {
-                    title: '配置与维护',
-                    keys: [
-                      { key: 'allow_config_write', label: '配置写入', desc: '允许修改系统配置' },
-                      { key: 'allow_backup_write', label: '备份创建', desc: '允许创建备份' },
-                      { key: 'allow_backup_restore', label: '备份恢复', desc: '允许从备份恢复' },
-                      { key: 'allow_runtime_cleanup', label: '运行时清理', desc: '允许清理运行时数据' },
-                    ],
-                  },
-                  {
-                    title: '服务器与包',
-                    keys: [
-                      { key: 'allow_server_read', label: '服务器读取', desc: '允许读取服务器信息' },
-                      { key: 'allow_server_write', label: '服务器写入', desc: '允许修改服务器配置' },
-                      { key: 'allow_package_write', label: '包管理', desc: '允许上传/管理发布包' },
-                      { key: 'allow_package_cleanup', label: '包清理', desc: '允许清理过期包' },
-                    ],
-                  },
-                  {
-                    title: '数据库',
-                    keys: [
-                      { key: 'allow_db_read_tools', label: '数据库只读工具', desc: '允许数据库只读工具' },
-                      { key: 'allow_db_export_tools', label: '数据库导出工具', desc: '允许数据库导出工具' },
-                      { key: 'allow_db_write_tools', label: '数据库写入工具', desc: '允许数据库写入工具' },
-                    ],
-                  },
-                  {
-                    title: '运行时与安全',
-                    keys: [
-                      { key: 'agent_runtime_enabled', label: 'Agent 运行时', desc: 'Agent 运行时' },
-                      { key: 'strict_prod_confirmation', label: '严格生产环境确认', desc: '严格生产环境确认' },
-                    ],
-                  },
-                ].map((group) => (
-                  <div key={group.title} className="tool-switch-group">
-                    <div className="tool-switch-group-title">{group.title}</div>
-                    <div className="tool-switch-grid">
-                      {group.keys.map(({ key, label, desc }) => (
-                        <label key={key} className="tool-switch" title={desc}>
-                          <input type="checkbox" checked={settings[key] !== undefined ? !!settings[key] : (CAPABILITY_DEFAULTS[key] ?? false)} onChange={(e) => updateSetting(key, e.target.checked)} />
-                          <span>{label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
 
-            <div className="card">
-              <div className="card-header"><h2>自动发现接入</h2><span>HTTP / MCP</span></div>
-              <div className="endpoint-list endpoint-list--canonical">
-                {[
-                  { title: '正式 MCP 主入口', method: 'POST', path: '/api/v2/mcp', desc: 'Streamable HTTP JSON-RPC：initialize / tools/list / tools/call' },
-                  { title: 'HTTP Tool Catalog', method: 'GET', path: '/api/v2/tools?format=mcp', desc: 'MCP / AI 客户端与前端页面使用的工具目录' },
-                  { title: 'HTTP Tool Call', method: 'POST', path: '/api/v2/tools/call', desc: '用于非 MCP 客户端，仍走同一 Tool Registry' },
-                  { title: 'Legacy Gateway', method: 'GET', path: '/api/v2/mcp/legacy/capabilities', desc: '仅兼容旧脚本，新接入不要使用' },
-                ].map((ep) => (
-                  <div key={ep.path} className="endpoint-card">
-                    <div className="endpoint-card-header">
-                      <strong>{ep.title}</strong>
-                      <span className="endpoint-method">{ep.method}</span>
-                    </div>
-                    <code className="endpoint-path">{ep.path}</code>
-                    <small>{ep.desc}</small>
+          <div className="card">
+            <div className="card-header"><h2>自动发现接入</h2><span>HTTP / MCP</span></div>
+            <div className="endpoint-list endpoint-list--canonical">
+              {[
+                { title: '正式 MCP 主入口', method: 'POST', path: '/api/v2/mcp', desc: 'Streamable HTTP JSON-RPC：initialize / tools/list / tools/call' },
+                { title: 'HTTP Tool Catalog', method: 'GET', path: '/api/v2/tools?format=mcp', desc: 'MCP / AI 客户端与前端页面使用的工具目录' },
+                { title: 'HTTP Tool Call', method: 'POST', path: '/api/v2/tools/call', desc: '用于非 MCP 客户端，仍走同一 Tool Registry' },
+                { title: 'Legacy Gateway', method: 'GET', path: '/api/v2/mcp/legacy/capabilities', desc: '仅兼容旧脚本，新接入不要使用' },
+              ].map((ep) => (
+                <div key={ep.path} className="endpoint-card">
+                  <div className="endpoint-card-header">
+                    <strong>{ep.title}</strong>
+                    <span className="endpoint-method">{ep.method}</span>
                   </div>
-                ))}
-              </div>
+                  <code className="endpoint-path">{ep.path}</code>
+                  <small>{ep.desc}</small>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -575,24 +488,148 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
             }
           />
 
-          <div className="card manifest-card">
-            <div className="card-header"><h2>Manifest 摘要</h2><span>当前能力发现元数据</span></div>
-            <JsonBlock value={{
-              server: capabilities?.server,
-              features: capabilities?.features || settings,
-              policies: capabilities?.policies,
-              risk_policy: riskPolicy?.rules,
-              resources: capabilities?.resources,
-              prompts: capabilities?.prompts,
-              endpoints: manifest?.tools_endpoint ? {
-                tools_endpoint: manifest.tools_endpoint,
-                capabilities_endpoint: manifest.capabilities_endpoint,
-                call_endpoint: manifest.call_endpoint,
-                mcp_stdio: 'Windows: venv\\Scripts\\python.exe scripts\\mcp_server_entry.py; macOS/Linux: scripts/mcp-server.sh',
-                api_base_url: apiBaseUrl,
-              } : undefined,
-            }} />
-          </div>
+          {/* 能力开关弹窗 */}
+          {showSwitchModal && (
+            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }} onClick={() => setShowSwitchModal(false)}>
+              <div className="card" style={{ width: 'min(820px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }} onClick={(e) => e.stopPropagation()}>
+                <div className="card-header">
+                  <div><h2>能力开关</h2><span>默认只读，写操作逐项开启</span></div>
+                  <button className="btn btn-subtle" onClick={() => setShowSwitchModal(false)}>关闭</button>
+                </div>
+                <div className="tool-switch-groups">
+                  {[
+                    {
+                      title: '基础接入',
+                      keys: [
+                        { key: 'enabled', label: '总开关', desc: '启用全部工具能力' },
+                        { key: 'http_tools_enabled', label: 'HTTP 工具', desc: '通过 HTTP 调用工具' },
+                        { key: 'mcp_enabled', label: 'MCP 协议', desc: '启用 MCP 接入' },
+                        { key: 'read_only', label: '只读模式', desc: '默认禁止写入操作' },
+                      ],
+                    },
+                    {
+                      title: '风险管控',
+                      keys: [
+                        { key: 'require_confirmation', label: '需要确认', desc: '高风险操作需人工确认' },
+                        { key: 'taskize_high_risk_tools', label: '任务化高风险', desc: '将高风险转为任务执行' },
+                        { key: 'allow_high_risk_tools', label: '允许高风险', desc: '开放高风险工具调用' },
+                        { key: 'allow_critical_risk_tools', label: '允许危险级', desc: '开放危险级工具调用' },
+                        { key: 'allow_ai_token_to_run_inspection_execute', label: 'AI token 可跑巡检', desc: '允许 AI/MCP tool-token 跑 Path A 巡检（带 confirm_text 二次确认）' },
+                      ],
+                    },
+                    {
+                      title: '发布与部署',
+                      keys: [
+                        { key: 'allow_deploy_plan', label: '发布计划', desc: '允许创建发布计划' },
+                        { key: 'allow_deploy_execute', label: '发布执行', desc: '允许执行发布部署' },
+                        { key: 'allow_prod_deploy', label: '生产发布', desc: '允许发布到生产环境' },
+                        { key: 'allow_rollback', label: '回滚操作', desc: '允许执行回滚' },
+                      ],
+                    },
+                    {
+                      title: '配置与维护',
+                      keys: [
+                        { key: 'allow_config_write', label: '配置写入', desc: '允许修改系统配置' },
+                        { key: 'allow_backup_write', label: '备份创建', desc: '允许创建备份' },
+                        { key: 'allow_backup_restore', label: '备份恢复', desc: '允许从备份恢复' },
+                        { key: 'allow_runtime_cleanup', label: '运行时清理', desc: '允许清理运行时数据' },
+                      ],
+                    },
+                    {
+                      title: '服务器与包',
+                      keys: [
+                        { key: 'allow_server_read', label: '服务器读取', desc: '允许读取服务器信息' },
+                        { key: 'allow_server_write', label: '服务器写入', desc: '允许修改服务器配置' },
+                        { key: 'allow_package_write', label: '包管理', desc: '允许上传/管理发布包' },
+                        { key: 'allow_package_cleanup', label: '包清理', desc: '允许清理过期包' },
+                      ],
+                    },
+                    {
+                      title: '数据库',
+                      keys: [
+                        { key: 'allow_db_read_tools', label: '数据库只读工具', desc: '允许数据库只读工具' },
+                        { key: 'allow_db_export_tools', label: '数据库导出工具', desc: '允许数据库导出工具' },
+                        { key: 'allow_db_write_tools', label: '数据库写入工具', desc: '允许数据库写入工具' },
+                      ],
+                    },
+                    {
+                      title: '运行时与安全',
+                      keys: [
+                        { key: 'agent_runtime_enabled', label: 'Agent 运行时', desc: 'Agent 运行时' },
+                        { key: 'strict_prod_confirmation', label: '严格生产环境确认', desc: '严格生产环境确认' },
+                      ],
+                    },
+                  ].map((group) => (
+                    <div key={group.title} className="tool-switch-group">
+                      <div className="tool-switch-group-title">{group.title}</div>
+                      <div className="tool-switch-grid">
+                        {group.keys.map(({ key, label, desc }) => (
+                          <label key={key} className="tool-switch" title={desc}>
+                            <input type="checkbox" checked={settings[key] !== undefined ? !!settings[key] : (CAPABILITY_DEFAULTS[key] ?? false)} onChange={(e) => updateSetting(key, e.target.checked)} />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 风险策略弹窗 */}
+          {showRiskPolicyModal && (
+            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }} onClick={() => setShowRiskPolicyModal(false)}>
+              <div className="card" style={{ width: 'min(820px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }} onClick={(e) => e.stopPropagation()}>
+                <div className="card-header">
+                  <div><h2>风险策略</h2><span>工具风险分级与确认规则</span></div>
+                  <button className="btn btn-subtle" onClick={() => setShowRiskPolicyModal(false)}>关闭</button>
+                </div>
+                <ToolRiskPolicyPanel
+                  rules={riskPolicy?.rules
+                    ? Object.entries(riskPolicy.rules).map(([risk, config]: [string, any]) => ({
+                      risk,
+                      action: config?.require_confirmation ? 'confirm' : 'allow',
+                      description: config?.description || '',
+                      affected_tools: config?.affected_tools,
+                    }))
+                    : [
+                      { risk: 'critical', action: 'confirm' as const, description: '危险 CLI、写入文件、执行远程命令' },
+                      { risk: 'high', action: 'confirm' as const, description: '发布执行、回滚、配置变更、备份恢复' },
+                      { risk: 'medium', action: 'confirm' as const, description: '发布计划、预检、SQL 写操作' },
+                      { risk: 'low', action: 'allow' as const, description: '只读查询、巡检、状态检查' },
+                    ]}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Manifest 弹窗 */}
+          {showManifestModal && (
+            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }} onClick={() => setShowManifestModal(false)}>
+              <div className="card" style={{ width: 'min(920px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }} onClick={(e) => e.stopPropagation()}>
+                <div className="card-header">
+                  <div><h2>Manifest 摘要</h2><span>当前能力发现元数据</span></div>
+                  <button className="btn btn-subtle" onClick={() => setShowManifestModal(false)}>关闭</button>
+                </div>
+                <JsonBlock value={{
+                  server: capabilities?.server,
+                  features: capabilities?.features || settings,
+                  policies: capabilities?.policies,
+                  risk_policy: riskPolicy?.rules,
+                  resources: capabilities?.resources,
+                  prompts: capabilities?.prompts,
+                  endpoints: manifest?.tools_endpoint ? {
+                    tools_endpoint: manifest.tools_endpoint,
+                    capabilities_endpoint: manifest.capabilities_endpoint,
+                    call_endpoint: manifest.call_endpoint,
+                    mcp_stdio: 'Windows: venv\\Scripts\\python.exe scripts\\mcp_server_entry.py; macOS/Linux: scripts/mcp-server.sh',
+                    api_base_url: apiBaseUrl,
+                  } : undefined,
+                }} />
+              </div>
+            </div>
+          )}
         </section>
       )}
 

@@ -13,12 +13,6 @@ MCP_ALIAS_TO_TOOL: Dict[str, str] = {}
 
 
 MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
-    "ops.workflow.inspect": (
-        "Natural-language first inspection workflow. Use for server inspection requests including all servers, "
-        "grouped batch inspection, routine inspection, and inspection reports. Preview first; for all-server "
-        "grouped requests it returns grouped_preview with per-group next actions. Execution is delegated to audited "
-        "inspection tools and can generate a merged report after collecting run_ids."
-    ),
     "ops.inspection.preview_servers_batch": (
         "Preview server batch inspection targets before execution. Resolves server_ids, groups, group, or all_servers; "
         "returns skipped targets, batch_size/concurrency plan, and the exact Chinese confirmation phrase."
@@ -104,6 +98,17 @@ def mcp_tool_payload(tool: Dict[str, Any], description_overrides: Dict[str, str]
     annotations["title"] = ascii_only(annotations.get("title"), fallback=alias) if not ASCII_DESCRIPTIONS else alias
     if alias != original:
         annotations["ops.originalToolName"] = original
+
+    # Inject ai_level + approval_hint so AI agents can discover authorization
+    # requirements at discovery time, not just at call time.
+    existing_annotations = payload.get("annotations") or {}
+    ai_level = existing_annotations.get("x_ops_ai_level") or payload.get("ai_level") or ""
+    approval_hint = existing_annotations.get("x_ops_approval_hint") or payload.get("approval_hint") or ""
+    if ai_level:
+        annotations["x_ops_ai_level"] = ai_level
+    if approval_hint:
+        annotations["x_ops_approval_hint"] = ascii_only(approval_hint) if ASCII_DESCRIPTIONS else approval_hint
+
     if ASCII_DESCRIPTIONS:
         for key, value in list(annotations.items()):
             if isinstance(value, str):
@@ -292,22 +297,16 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
         data = {
             "items": [
                 {
-                    "tool": "ops.workflow.inspect",
-                    "description": "Natural-language server inspection workflow for single group, explicit targets, and all-server grouped batch inspection.",
+                    "tool": "ops.inspection.run_servers_batch",
+                    "description": "Batch server inspection with preview-first confirmation flow.",
                     "recommended_before": ["ops.list_server_groups", "ops.inspection.preview_servers_batch"],
                     "recommended_after": ["ops.inspection.get_run", "ops.inspection.list_issues", "ops.inspection.generate_report_for_runs"],
-                    "output_modes": ["preview", "grouped_preview", "run"],
                     "natural_language_examples": [
                         "巡检 crypto 分组并输出报告",
                         "巡检全部服务器，按分组分批巡检并输出报告",
                         "Run all servers by group with batch size 8 and generate a merged report",
                     ],
                 },
-                {"tool": "ops.workflow.generate_project_health_brief", "description": "Project health brief"},
-                {"tool": "ops.workflow.analyze_failed_deploy", "description": "Failed deployment analysis"},
-                {"tool": "ops.workflow.inspect_project_security", "description": "Project security inspection analysis"},
-                {"tool": "ops.workflow.triage_open_risks", "description": "Open risk triage"},
-                {"tool": "ops.workflow.generate_monthly_ops_report", "description": "Monthly operations report"},
             ]
         }
     else:
@@ -395,10 +394,9 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     elif name == "ops_inspection_workflow":
         text = (
             "Use OPS Path A inspection tools for any request that says inspection, 巡检, 检查服务器, grouped batch, "
-            "all servers, or compliance check. Prefer ops.workflow.inspect first.\n\n"
+            "all servers, or compliance check.\n\n"
             "Natural-language routing:\n"
-            "- all servers / 全部服务器 / 按分组 / grouped -> call ops.workflow.inspect with request, batch_size, concurrency, generate_report=true.\n"
-            "- If response mode=grouped_preview, follow its per-group next_actions. Each group still needs preview-first confirmation.\n"
+            "- all servers / 全部服务器 / 按分组 / grouped -> use ops.inspection.preview_servers_batch then ops.inspection.run_servers_batch.\n"
             "- Ask the user to approve the exact confirmation phrase `确认巡检 <fingerprint>` before execution.\n"
             "- After all groups finish, collect all run_ids and call ops.inspection.generate_report_for_runs for one merged report.\n"
             "- Do not fall back to single-shot probes unless the user explicitly asks for one metric or Path A is blocked.\n\n"
@@ -421,18 +419,18 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     elif name == "ops_project_health_brief":
         text = (
             "Use MCP resources first: ops://projects, ops://status/overview, ops://risks/open, ops://inspection/recent. "
-            "Then call ops.workflow.generate_project_health_brief. Output facts, inferences, recommendations and evidence separately. "
+            "Then use ops.inspection.list_runs and ops.risk.list to analyze project health. Output facts, inferences, recommendations and evidence separately. "
             "Do not execute high-risk actions. project_id=" + str(args.get("project_id") or "")
         )
     elif name == "ops_risk_triage":
         text = (
-            "Use ops.risk.list and ops.workflow.triage_open_risks to prioritize open risks. Only generate a plan; "
+            "Use ops.risk.list and ops.risk.triage to prioritize open risks. Only generate a plan; "
             "do not update risk status, verify, ignore, deploy, rollback, or run shell. request="
             + str(args.get("request") or "")
         )
     elif name == "ops_monthly_ops_report":
         text = (
-            "Use ops.workflow.generate_monthly_ops_report. The output must separate facts, inferences, recommendations and evidence. "
+            "Use ops.list_reports, ops.risk.list and ops.inspection.list_runs to generate monthly report. The output must separate facts, inferences, recommendations and evidence. "
             "Generate reports only from saved evidence and do not execute high-risk actions. month="
             + str(args.get("month") or "")
         )

@@ -58,11 +58,23 @@ const STEP_TYPES = [
       timeout: '600',
     },
   },
+  {
+    type: 'docker_compose_update',
+    label: 'Docker Compose',
+    defaults: {
+      compose_dir: '/data/crypto-trader',
+      compose_file: 'docker-compose.yml',
+      wait_after_up: '10',
+      log_tail_lines: '30',
+      timeout: '600',
+    },
+  },
 ]
 
 const STRATEGIES = [
   { value: 'DIRECT', label: '直接部署' },
   { value: 'BLUE_GREEN', label: '蓝绿发布' },
+  { value: 'DOCKER_COMPOSE', label: 'Docker Compose' },
 ]
 
 const BUILTIN_STEP_TYPES = new Set(['checkout', 'build', 'upload', 'deploy', 'switch', 'restart', 'health_check', 'command', 'wait'])
@@ -86,6 +98,14 @@ const STEP_RUNBOOKS: Record<string, string[]> = {
     '上传本地包到 deploy_path，默认 /data/www',
     '在 deploy_path 目录执行 ./www.sh',
     '执行后检查 /data/www 目录结果',
+  ],
+  docker_compose_update: [
+    '检查 compose_dir 是否存在',
+    '执行 docker compose -f compose_file pull 拉取最新镜像',
+    '执行 docker compose -f compose_file up -d --remove-orphans 启动/重启容器',
+    '等待 wait_after_up 秒后做容器稳定观察',
+    '执行 docker compose -f compose_file ps 检查容器状态',
+    '执行 docker compose -f compose_file logs --tail=log_tail_lines 查看最近日志',
   ],
 }
 
@@ -127,6 +147,13 @@ const STEP_FIELD_LABELS: Record<string, Record<string, string>> = {
     timeout: '超时时间',
     remote_path: '远程包路径',
     local_path: '本地包路径',
+  },
+  docker_compose_update: {
+    compose_dir: 'compose 目录',
+    compose_file: 'compose 文件名',
+    wait_after_up: '启动后等待秒数',
+    log_tail_lines: '日志显示行数',
+    timeout: '操作超时(秒)',
   },
 }
 
@@ -373,6 +400,7 @@ export default function PipelinePage() {
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null)
   const [pendingRiskDelete, setPendingRiskDelete] = useState<any | null>(null)
   const [riskConfirmValue, setRiskConfirmValue] = useState('')
+  const [creatingNew, setCreatingNew] = useState(false)
 
   useEffect(() => {
     loadPipelines()
@@ -466,6 +494,25 @@ export default function PipelinePage() {
     setMessage('')
     setFieldModes({})
     setFieldBoundVars({})
+    setCreatingNew(false)
+  }
+
+  const handleCreateNew = () => {
+    setSelectedId(null)
+    setPipelineName('')
+    setSystemName(systems[0]?.name || '')
+    setDescription('')
+    setStrategy('DIRECT')
+    setSteps([])
+    setDirty(false)
+    setMessage('')
+    setFieldModes({})
+    setFieldBoundVars({})
+    setCreatingNew(true)
+    setTimeout(() => {
+      const el = document.getElementById('pipeline-editor-anchor')
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 100)
   }
 
   const getBindingInfo = (stepIndex: number, fieldKey: string) => {
@@ -811,7 +858,7 @@ export default function PipelinePage() {
             </>
           ) : (
             <>
-              <button className="btn btn-success" onClick={resetForm}>
+              <button className="btn btn-success" onClick={handleCreateNew}>
                 + 新建
               </button>
               {templates.length > 0 && (
@@ -948,7 +995,7 @@ export default function PipelinePage() {
       )}
 
       <div id="pipeline-editor-anchor" />
-      {(selectedId || steps.length > 0) && !batchMode && (
+      {(selectedId || steps.length > 0 || creatingNew) && !batchMode && (
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
             <h2 style={{ margin: 0 }}>
@@ -1111,7 +1158,7 @@ export default function PipelinePage() {
                   {step.type === 'wait' && (
                     <StepField label="等待秒数" value={step.config.seconds || '5'} onChange={(v) => updateStep(i, 'seconds', v)} />
                   )}
-                  {(step.type === 'dovo_bluegreen_update' || step.type === 'scripted_service_update' || step.type === 'web_script_update') && (() => {
+                  {(step.type === 'dovo_bluegreen_update' || step.type === 'scripted_service_update' || step.type === 'web_script_update' || step.type === 'docker_compose_update') && (() => {
                     const def = STEP_TYPES.find((s) => s.type === step.type)
                     const labels = STEP_FIELD_LABELS[step.type] || {}
                     const bindable = bindingMeta[step.type] || []

@@ -15,20 +15,26 @@ function BrandMark({ size = 22 }: { size?: number }) {
       aria-hidden="true"
       style={{ display: 'block' }}
     >
+      <defs>
+        <linearGradient id="login-energy-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#22E08A" />
+          <stop offset="100%" stopColor="#16A96A" />
+        </linearGradient>
+      </defs>
       <path
         d="M16 4 L27 10.5 L27 21.5 L16 28 L5 21.5 L5 10.5 Z"
-        stroke="currentColor"
-        strokeWidth="1.6"
+        stroke="url(#login-energy-grad)"
+        strokeWidth="1.8"
         strokeLinejoin="round"
         opacity="0.95"
       />
       <path
         d="M16 4 L16 28 M5 10.5 L27 21.5 M27 10.5 L5 21.5"
-        stroke="currentColor"
+        stroke="url(#login-energy-grad)"
         strokeWidth="1"
-        opacity="0.55"
+        opacity="0.45"
       />
-      <circle cx="16" cy="16" r="2.6" fill="currentColor" />
+      <circle cx="16" cy="16" r="2.6" fill="#22E08A" />
     </svg>
   )
 }
@@ -124,7 +130,7 @@ export default function LoginPage() {
               <BrandMark size={22} />
             </span>
             <span className="brand-copy">
-              <strong>OPS</strong>
+              <strong style={{ background: 'linear-gradient(135deg, #22E08A 0%, #16A96A 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>AI</strong>
               <small>Command Center</small>
             </span>
           </div>
@@ -184,11 +190,11 @@ export default function LoginPage() {
         </div>
       </section>
 
-      <section className="login-card">
+      <section className="login-card glass-panel">
         <div className="login-card-head">
           <span className="eyebrow">Sign In · 控制台准入</span>
           <h2>欢迎回来</h2>
-          <p>使用内部账号登录 OPS · Command Center</p>
+          <p>使用内部账号登录 AI · Command Center</p>
         </div>
 
         {error && <div className="alert-card alert-card--danger" role="alert">{error}</div>}

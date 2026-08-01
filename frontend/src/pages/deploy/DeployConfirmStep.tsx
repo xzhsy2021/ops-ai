@@ -13,6 +13,7 @@ interface DeployConfirmStepProps {
   parallelism: number
   failFast: boolean
   selectedService: any
+  isDockerCompose: boolean
   isProdEnvironment: (env: any) => boolean
 }
 
@@ -27,6 +28,7 @@ export default function DeployConfirmStep({
   parallelism,
   failFast,
   selectedService,
+  isDockerCompose,
   isProdEnvironment,
 }: DeployConfirmStepProps) {
   const isProd = isProdEnvironment(environment)
@@ -36,7 +38,8 @@ export default function DeployConfirmStep({
     { label: '系统', value: system || '-' },
     { label: '服务', value: selectedService?.display_name || service || '-' },
     { label: '环境', value: environment || '-', tone: isProd ? 'danger' : 'default' },
-    { label: '发布包', value: fileName || '-' },
+    { label: '部署方式', value: isDockerCompose ? '🐳 容器 (Docker Compose) — 镜像自动拉取' : '传统发布 — 上传包' },
+    { label: '发布包', value: isDockerCompose ? '—（容器部署无需发布包）' : (fileName || '-') },
     { label: 'Pipeline', value: pipelineId || '默认流程' },
     { label: '服务器', value: `${selectedServerNames.length} 台` },
     { label: '并发度', value: parallelism },

@@ -123,7 +123,9 @@ def format_audit_detail(audit_ctx: Dict[str, Any], **extra) -> str:
     return " ".join(parts)
 
 
-def create_exec_client(server_config: Dict[str, Any]):
+def create_exec_client(server_config: Dict[str, Any],
+                        max_retries: int = 3,
+                        per_attempt_timeout: Optional[int] = None):
     from ssh_client import create_ssh_client
 
     auth_mode = _detect_auth_mode(server_config)
@@ -135,7 +137,9 @@ def create_exec_client(server_config: Dict[str, Any]):
             f"请在服务器管理中设置密码、密钥文件或密钥内容后重试。"
         )
 
-    return create_ssh_client(server_config)
+    return create_ssh_client(server_config,
+                             max_retries=max_retries,
+                             per_attempt_timeout=per_attempt_timeout)
 
 
 def open_shell_channel(server_config: Dict[str, Any], cols: int = 80, rows: int = 24):

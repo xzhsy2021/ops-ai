@@ -198,6 +198,17 @@ class ActionApprovalService:
         # 验证房间一致，防止跨房间重放
         if approval.room_id != room_id:
             return None
+        # 验证授权审批人：如果工单指定了 authorized_matrix_users，审批人必须在列表中
+        action_data = approval.request_payload or {}
+        authorized_users = action_data.get("authorized_matrix_users") or []
+        if authorized_users and approver_matrix_id not in authorized_users:
+            # 记录被拒绝的审批尝试
+            approval.status = "REJECTED"
+            approval.rejected_by = approver_matrix_id
+            approval.rejected_at = _utcnow()
+            approval.failure_reason = f"approver {approver_matrix_id} not in authorized list: {','.join(authorized_users)}"
+            self.db.commit()
+            return None
         # 验证是否过期
         if approval.expires_at and _utcnow() > approval.expires_at:
             approval.status = "EXPIRED"

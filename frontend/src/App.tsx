@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom'
 import { ToastContainer } from './components/ToastContainer'
 import { KeyboardShortcutsPanel } from './components/KeyboardShortcutsPanel'
 import { usePreferenceStore } from './stores/preferenceStore'
+import { applyTheme, applyFxMode } from './theme/engine'
 
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
@@ -41,50 +42,39 @@ const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 const SystemListPage = lazy(() => import('./pages/SystemListPage'))
 const SystemEditPage = lazy(() => import('./pages/SystemEditPage'))
 const ServiceEditPage = lazy(() => import('./pages/ServiceEditPage'))
+const NeuralLabPage = lazy(() => import('./pages/NeuralLabPage'))
 
 function BrandMark({ size = 22 }: { size?: number }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 32 32"
-      fill="none"
+    <span
+      className="app-brand-mark"
       aria-hidden="true"
-      style={{ display: 'block' }}
+      style={{
+        width: size + 18,
+        height: size + 18,
+        fontSize: Math.max(13, size - 4),
+      }}
     >
-      <path
-        d="M16 4 L27 10.5 L27 21.5 L16 28 L5 21.5 L5 10.5 Z"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinejoin="round"
-        opacity="0.95"
-      />
-      <path
-        d="M16 4 L16 28 M5 10.5 L27 21.5 M27 10.5 L5 21.5"
-        stroke="currentColor"
-        strokeWidth="1"
-        opacity="0.55"
-      />
-      <circle cx="16" cy="16" r="2.6" fill="currentColor" />
-    </svg>
+      AI
+    </span>
   )
 }
 
-type ThemeMode = 'light' | 'dark'
+type ThemeMode = 'crystal' | 'jade' | 'light'
+
+const THEME_NAMES: Record<ThemeMode, string> = { crystal: '水晶', jade: '翡翠', light: '浅色' }
+const THEME_CYCLE: ThemeMode[] = ['crystal', 'jade', 'light']
 
 const THEME_STORAGE_KEY = 'ops-theme'
 const SHELL_STORAGE_KEY = 'ops-sidebar-collapsed'
 const PERF_STORAGE_KEY = 'ops-performance-mode'
 
-
-
 function getInitialTheme(): ThemeMode {
   try {
     const saved = localStorage.getItem(THEME_STORAGE_KEY)
-    if (saved === 'light' || saved === 'dark') return saved
+    if (saved === 'crystal' || saved === 'jade' || saved === 'light') return saved
   } catch { }
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches) return 'light'
-  return 'dark'
+  return 'crystal'
 }
 
 function getInitialSidebarCollapsed() {
@@ -235,7 +225,7 @@ function CommandPalette({
         {filtered.length === 0 && <div className="command-empty">没有匹配结果</div>}
         <div className="command-section-title">快速操作</div>
         <div className="command-actions">
-          <button onClick={onToggleTheme}>切换浅色 / 深色主题</button>
+          <button onClick={onToggleTheme}>切换主题（水晶 / 翡翠 / 浅色）</button>
           <button onClick={() => window.location.reload()}>刷新当前页面</button>
         </div>
       </div>
@@ -285,11 +275,20 @@ function App() {
   const isServerWorkbench = location.pathname.startsWith(`${ROUTES.servers}/`)
 
   const toggleTheme = useCallback(() => {
-    setTheme((prev) => prev === 'dark' ? 'light' : 'dark')
+    setTheme((prev) => {
+      const idx = THEME_CYCLE.indexOf(prev)
+      const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length]
+      applyTheme(next)
+      return next
+    })
   }, [])
 
   const togglePerformance = useCallback(() => {
-    setPerformanceMode((prev) => prev === 'standard' ? 'low-resource' : 'standard')
+    setPerformanceMode((prev) => {
+      const next = prev === 'standard' ? 'low-resource' : 'standard'
+      applyFxMode(next === 'low-resource' ? 'low' : 'balanced')
+      return next
+    })
   }, [])
 
   const checkBackend = useCallback(async () => {
@@ -307,7 +306,7 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    document.documentElement.classList.toggle('dark', theme === 'dark')
+    document.documentElement.classList.toggle('dark', theme === 'crystal' || theme === 'jade')
     try { localStorage.setItem(THEME_STORAGE_KEY, theme) } catch { }
   }, [theme])
 
@@ -412,6 +411,21 @@ function App() {
     )
   }
 
+  // 神经突触实验室：独立全屏渲染（参照参考的 rail+topbar+content 布局，不套用 App 外壳）
+  if (user && location.pathname === ROUTES.neuralLab) {
+    return (
+      <>
+        <DistStaleBanner />
+        <ErrorBoundary key={location.pathname} title="神经突触实验室加载失败">
+          <Suspense fallback={loadingFallback}>
+            <NeuralLabPage />
+          </Suspense>
+        </ErrorBoundary>
+        {createPortal(<ToastContainer />, document.body)}
+      </>
+    )
+  }
+
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--collapsed' : ''} ${isServerWorkbench ? 'app-shell--server' : ''}`}>
       <div className="shell-ambient shell-ambient--cyan" />
@@ -434,7 +448,7 @@ function App() {
                   <BrandMark size={22} />
                 </span>
                 <span className="brand-copy">
-                  <strong>OPS</strong>
+                  <strong className="energy-gradient">AI</strong>
                   <small>Command Center</small>
                 </span>
               </Link>
@@ -467,7 +481,7 @@ function App() {
               })}
             </nav>
 
-            <div className="sidebar-health-card">
+            <div className="sidebar-health-card glass-panel">
               <span className={`status-dot ${backendOnline ? 'online' : 'offline'}`} />
               <div>
                 <strong>{backendOnline ? 'System Online' : 'Backend Offline'}</strong>
@@ -485,8 +499,8 @@ function App() {
                   {mobileMenuOpen ? '✕' : '☰'}
                 </button>
                 <div className="topbar-title">
-                  <span className="breadcrumb">OPS / {activeNavItem?.label || '工作台'}</span>
-                  <strong>{activeNavItem?.desc || 'Engineering Command Center'}</strong>
+                  <span className="breadcrumb"><span className="energy-text">AI</span> / {activeNavItem?.label || '工作台'}</span>
+                  <strong>{activeNavItem?.desc || 'Enterprise Command Center'}</strong>
                 </div>
               </div>
 
@@ -500,9 +514,9 @@ function App() {
                   </span>
                   <kbd>Ctrl K</kbd>
                 </button>
-                <button className="theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'} aria-label={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}>
-                  <span>{theme === 'dark' ? '☀️' : '🌙'}</span>
-                  <span className="mobile-hide">{theme === 'dark' ? '浅色' : '深色'}</span>
+                <button className="theme-toggle" onClick={toggleTheme} title={`切换主题（当前：${THEME_NAMES[theme]}）`} aria-label="切换主题">
+                  <span className="theme-toggle-icon">{theme === 'crystal' ? '🌑' : theme === 'jade' ? '🌿' : '☀️'}</span>
+                  <span className="mobile-hide">{THEME_NAMES[theme]}</span>
                 </button>
                 <button
                   className={`performance-toggle${performanceMode === 'low-resource' ? ' performance-toggle--low' : ''}`}
@@ -576,6 +590,7 @@ function App() {
                   <Route path={ROUTES.inspection} element={requireAuth(hasMinRole('readonly') ? <InspectionCenterPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.database} element={requireAuth(hasMinRole('readonly') ? <DatabaseToolsPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.tools} element={requireAuth(hasMinRole('readonly') ? <ToolAccessPage /> : <NotFoundPage />)} />
+                  <Route path={ROUTES.neuralLab} element={requireAuth(hasMinRole('readonly') ? <NeuralLabPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.mcpTools} element={requireAuth(hasMinRole('readonly') ? <McpToolsPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.mcpAudit} element={requireAuth(hasMinRole('admin') ? <McpAuditPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.aiWorkflows} element={requireAuth(hasMinRole('readonly') ? <AiWorkflowsPage /> : <NotFoundPage />)} />

@@ -864,6 +864,57 @@ MIGRATIONS: List[Dict[str, str]] = [
         "column": "description",
         "sql": "ALTER TABLE tool_tokens ADD COLUMN description TEXT",
     },
+    {
+        "version": "081_001_cleanup_legacy_kv",
+        "name": "Cleanup legacy KV keys (servers/jump_hosts/settings) migrated to DB tables (Phase 3a/3.g)",
+        "table": "config_kv",
+        "sql": "DELETE FROM config_kv WHERE key IN ('servers', 'jump_hosts', 'settings')",
+    },
+    {
+        "version": "081_002_migrate_audit_logs_to_records",
+        "name": "Migrate audit_logs data to ORM audit_records table before dropping legacy table",
+        "table": "audit_logs",
+        "sql": "INSERT OR IGNORE INTO audit_records (action, target_type, target_name, details, created_at) SELECT action, target_type, target_name, details, created_at FROM audit_logs",
+    },
+    {
+        "version": "081_003_drop_legacy_tables",
+        "name": "Drop legacy tables: audit_logs, deploy_logs_old, deploy_locks (migrated or dead code)",
+        "sql": "DROP TABLE IF EXISTS audit_logs",
+    },
+    {
+        "version": "081_004_drop_deploy_logs_old",
+        "name": "Drop legacy table deploy_logs_old (dead code, no INSERT/SELECT)",
+        "sql": "DROP TABLE IF EXISTS deploy_logs_old",
+    },
+    {
+        "version": "081_005_drop_deploy_locks",
+        "name": "Drop legacy table deploy_locks (dead code, locks use ORM deployment_lock_records)",
+        "sql": "DROP TABLE IF EXISTS deploy_locks",
+    },
+    {
+        "version": "082_001_create_systems_table",
+        "name": "Create systems table for Phase 3e SSOT (replace config_kv['systems'] blob)",
+        "sql": """CREATE TABLE IF NOT EXISTS systems (
+            id VARCHAR(32) PRIMARY KEY,
+            name VARCHAR(64) UNIQUE NOT NULL,
+            display_name VARCHAR(128),
+            strategy VARCHAR(32) DEFAULT 'WORKFLOW',
+            base_path VARCHAR(255) DEFAULT '/data/web/app',
+            description TEXT,
+            variables JSON DEFAULT '{}',
+            servers JSON DEFAULT '[]',
+            environments JSON DEFAULT '{}',
+            services JSON DEFAULT '[]',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""",
+    },
+    {
+        "version": "082_002_migrate_systems_blob_to_table",
+        "name": "Migrate systems data from config_kv blob to systems table (Phase 3e SSOT, Python-driven)",
+        "table": "config_kv",
+        "sql": "SELECT 1",  # placeholder, actual migration is data-driven via Python
+    },
 
     # ── qclaw Element Approval: AiActionApproval extension ──
     {

@@ -79,6 +79,42 @@ def ai_tool_level(tool_def) -> str:
     return "L1"
 
 
+# Map tool categories/names to the approval tool that unlocks them.
+APPROVAL_TOOL_MAP: Dict[str, str] = {
+    "server_write": "ops.approval.prepare_service_control",
+    "deploy_execute": "ops.approval.prepare_release",
+    "package_cleanup": "ops.approval.prepare_package_cleanup",
+    "db_write": "ops.approval.prepare_dml",
+}
+
+# Specific tool name overrides (for tools that don't fit category mapping).
+APPROVAL_TOOL_NAME_MAP: Dict[str, str] = {
+    "ops.execute_rollback_plan": "ops.approval.prepare_rollback",
+    "ops.execute_deploy_plan": "ops.approval.prepare_release",
+}
+
+
+def _find_approval_tool_for(tool_def) -> str:
+    """Return the approval tool name that unlocks this tool, or empty string."""
+    name = getattr(tool_def, "name", "")
+    if name in APPROVAL_TOOL_NAME_MAP:
+        return APPROVAL_TOOL_NAME_MAP[name]
+    category = getattr(tool_def, "category", "")
+    return APPROVAL_TOOL_MAP.get(category, "")
+
+
+def _approval_hint_for_tool(tool_def, level: str) -> str:
+    """Generate a human-readable hint about how to get authorization for this tool."""
+    if level == "L4":
+        approval_tool = _find_approval_tool_for(tool_def)
+        if approval_tool:
+            return f"需人工审批。调用 {approval_tool} 创建审批工单，人工批准后系统自动执行。"
+        return "需人工审批。联系管理员或通过 Web UI 执行。"
+    if level == "L3":
+        return "需 confirm_text 确认后执行。"
+    return ""
+
+
 def ai_tool_policy_metadata(tool_def) -> Dict[str, Any]:
     level = ai_tool_level(tool_def)
     return {
@@ -86,6 +122,7 @@ def ai_tool_policy_metadata(tool_def) -> Dict[str, Any]:
         "ai_callable": bool(getattr(tool_def, "ai_callable", True)),
         "ai_auto_callable": bool(getattr(tool_def, "ai_auto_callable", False)) and level in {"L1", "L2"},
         "requires_human_approval": bool(getattr(tool_def, "requires_human_approval", False) or getattr(tool_def, "requires_confirmation", False) or level == "L4"),
+        "approval_hint": _approval_hint_for_tool(tool_def, level),
         "data_sensitivity": getattr(tool_def, "data_sensitivity", "internal"),
         "output_masking": bool(getattr(tool_def, "output_masking", True)),
     }
@@ -171,7 +208,19 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
         )
         is_qclaw_approval = getattr(tool_def, "category", "") in QCLAW_APPROVAL_CATEGORIES
         if not is_inspection_execute and not is_qclaw_approval:
-            raise HTTPException(status_code=403, detail="This tool requires human approval and cannot be executed directly by AI/MCP token")
+            approval_tool = _find_approval_tool_for(tool_def)
+            guidance = _approval_hint_for_tool(tool_def, "L4")
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "blocked": True,
+                    "reason": "requires_human_approval",
+                    "approval_tool": approval_tool,
+                    "guidance": guidance,
+                    "tool_name": tool_def.name,
+                    "ai_level": "L4",
+                },
+            )
 
     if tool_def.category == "deploy_plan" and not settings.get("allow_deploy_plan", True):
         raise HTTPException(status_code=403, detail="Deploy plan tools are disabled")

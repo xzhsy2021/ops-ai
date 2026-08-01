@@ -13,6 +13,7 @@ from .steps import (
     ScriptedServiceUpdateStep,
     WebScriptUpdateStep,
     DovoBlueGreenUpdateStep,
+    DockerComposeUpdateStep,
 )
 
 _registry = {
@@ -29,6 +30,7 @@ _registry = {
     "scripted_service_update": ScriptedServiceUpdateStep,
     "web_script_update": WebScriptUpdateStep,
     "dovo_bluegreen_update": DovoBlueGreenUpdateStep,
+    "docker_compose_update": DockerComposeUpdateStep,
 }
 
 

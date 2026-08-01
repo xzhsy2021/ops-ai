@@ -68,56 +68,12 @@ def _init_db():
             value TEXT NOT NULL
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deployment_records (
-            id TEXT PRIMARY KEY,
-            system TEXT NOT NULL,
-            server TEXT NOT NULL,
-            strategy TEXT NOT NULL DEFAULT 'DIRECT',
-            status TEXT NOT NULL DEFAULT 'running',
-            steps TEXT DEFAULT '[]',
-            output TEXT DEFAULT '',
-            message TEXT DEFAULT '',
-            started_at TEXT,
-            finished_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deploy_logs_old (
-            id TEXT PRIMARY KEY,
-            system TEXT NOT NULL,
-            server TEXT NOT NULL,
-            strategy TEXT NOT NULL DEFAULT 'DIRECT',
-            status TEXT NOT NULL DEFAULT 'running',
-            steps TEXT DEFAULT '[]',
-            output TEXT DEFAULT '',
-            message TEXT DEFAULT '',
-            started_at TEXT,
-            finished_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS deploy_locks (
-            lock_key TEXT PRIMARY KEY,
-            locked_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            action TEXT NOT NULL,
-            target_type TEXT,
-            target_name TEXT,
-            details TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_deployment_records_system ON deployment_records(system, started_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_deployment_records_status ON deployment_records(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_system ON deploy_logs_old(system, started_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_status ON deploy_logs_old(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC)")
+    # audit_logs/deployment_records/deploy_logs_old/deploy_locks 已废弃：
+    # - audit_logs → 迁移到 ORM audit_records 表
+    # - deployment_records → 无运行时写入，ORM DeploymentRecord 模型已删除
+    # - deploy_logs_old → 死代码，无任何 INSERT/SELECT
+    # - deploy_locks → 死代码，发布锁走 ORM deployment_lock_records 表
+    # 旧表由 schema migration 081_002 自动 DROP。
     conn.commit()
     logger.info("Database tables ensured")
     from app.config.migration import _migrate_legacy_default_config_to_db, _migrate_json_to_db
@@ -126,44 +82,25 @@ def _init_db():
         _migrate_json_to_db()
 
 def load_config() -> Dict[str, Any]:
-    conn = get_db_connection()
-    result = {}
-    try:
-        rows = conn.execute("SELECT key, value FROM config_kv").fetchall()
-    except sqlite3.OperationalError:
-        logger.exception("Failed to load config from config_kv")
-        raise
-    for row in rows:
-        try:
-            result[row["key"]] = json.loads(row["value"])
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning("Invalid config json for key=%s: %s", row["key"], e)
-            from app.config.defaults import DEFAULT_CONFIG
-            result[row["key"]] = copy.deepcopy(DEFAULT_CONFIG.get(row["key"], {}))
+    result = _load_config_unsafe()
     from app.config.defaults import DEFAULT_CONFIG
     for key in DEFAULT_CONFIG:
         if key not in result:
             result[key] = copy.deepcopy(DEFAULT_CONFIG[key])
-    from app.config.migration import _migrate_dovo_regions
-    result = _migrate_dovo_regions(result)
     return result
 
 def save_config(config: Dict[str, Any]) -> bool:
-    # Phase 3d SSOT guard: 'systems' key is read-only legacy data after
-    # Phase 3a/3b/3c. Detect & warn when callers attempt to mutate it.
+    # Phase 3e SSOT guard: 'systems' key 已迁移到 systems DB 表，禁止写入 config_kv。
+    # 写 system 必须走 SystemRepository / save_system()。
     if "systems" in config:
-        try:
-            current_systems = _load_config_unsafe().get("systems", {})
-        except Exception:
-            current_systems = {}
-        if config.get("systems") != current_systems:
-            import traceback
-            logger.warning(
-                "Phase 3d: 'systems' key in config is read-only legacy. "
-                "Diff detected (callers should migrate to DB tables). "
-                "Stack trace:\n%s",
-                "".join(traceback.format_stack(limit=6)),
-            )
+        import traceback
+        logger.error(
+            "Phase 3e: 'systems' key is SSOT-migrated to DB table. "
+            "Writing to config_kv is blocked. Use SystemRepository / save_system() instead. "
+            "Stack trace:\n%s",
+            "".join(traceback.format_stack(limit=6)),
+        )
+        return False
     # Phase 3.g SSOT guard: 'jump_hosts' key in config is read-only legacy
     # after the JumpHost table became SSOT. Detect & warn when callers attempt
     # to mutate it; CRUD must go through JumpHostRepository / /api/v2/jump-hosts.
@@ -206,8 +143,7 @@ def _load_config_unsafe() -> Dict[str, Any]:
     for key in DEFAULT_CONFIG:
         if key not in result:
             result[key] = copy.deepcopy(DEFAULT_CONFIG[key])
-    from app.config.migration import _migrate_dovo_regions
-    result = _migrate_dovo_regions(result)
+    # Phase 3e: _migrate_dovo_regions 已退役，dovo 区域数据由 ServerGroup 表管理
     return result
 
 

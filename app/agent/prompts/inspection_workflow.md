@@ -17,7 +17,7 @@ Path A is the default for any "巡检" / "inspect" / "检查服务器" / "健康
 
 | Path | Use |
 |---|---|
-| **A1 - custom inspection** | `ops.workflow.inspect`, `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.generate_report_for_runs`, `ops.inspection.summarize_run` |
+| **A1 - custom inspection** | `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.generate_report_for_runs`, `ops.inspection.summarize_run` |
 | **A2 - profile inspection** | `ops.inspection.profile.list`, `ops.inspection.profile.preview`, `ops.inspection.profile.run`, `ops.inspection.profile.retry_issues` |
 | **B - fallback probes** | `ops.check_disk`, `ops.check_process`, `ops.list_service_directory`, `ops.tail_service_log`, `ops.run_health_check` |
 
@@ -56,7 +56,7 @@ Path A is the default for any "巡检" / "inspect" / "检查服务器" / "健康
 
 ## Scheduling
 
-Daily / weekly / monthly inspection schedules are managed by `ops.tier.*` tools. They are separate from the inspection execution path.
+Inspection schedules are configured via inspection profiles. See `ops.inspection.profile.*` tools.
 
 ## Output
 

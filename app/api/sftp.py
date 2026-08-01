@@ -1,4 +1,5 @@
 """服务器工作台 SFTP 文件管理 API - 管理员专用"""
+import asyncio
 import base64
 import os
 import posixpath
@@ -199,7 +200,7 @@ async def file_upload(request: Request, name: str,
     require_admin(request, db)
     remote_path = _safe_path(remote_path)
     safe_name = _safe_filename(file.filename or "upload.bin")
-    sftp, ssh, srv = _get_sftp(name)
+    sftp, ssh, srv = await asyncio.to_thread(_get_sftp, name)
     tmp_name = None
     total_size = 0
     try:
@@ -288,7 +289,7 @@ def file_download(request: Request, name: str, path: str = "", db: Session = Dep
 @sftp_router.post("/{name}/files/download")
 async def file_download_post(request: Request, name: str, db: Session = Depends(get_db)):
     data = await request.json()
-    return file_download(request, name, data.get("path", ""), db)
+    return await asyncio.to_thread(file_download, request, name, data.get("path", ""), db)
 
 
 @sftp_router.get("/{name}/files/download-stream")
@@ -395,7 +396,7 @@ async def file_delete(request: Request, name: str, path: str = "", db: Session =
     path = _safe_path(path)
     if _safe_path(confirm_path or "") != path:
         raise HTTPException(status_code=400, detail="Deleting files requires matching confirm_path")
-    sftp, ssh, srv = _get_sftp(name)
+    sftp, ssh, srv = await asyncio.to_thread(_get_sftp, name)
     try:
         path = _ensure_path_allowed(path, srv)
         if path in _server_allowed_roots(srv):
@@ -429,7 +430,7 @@ async def file_mkdir(request: Request, name: str, db: Session = Depends(get_db))
     if not remote_path:
         raise HTTPException(status_code=400, detail="path is required")
     remote_path = _safe_path(remote_path)
-    sftp, ssh, srv = _get_sftp(name)
+    sftp, ssh, srv = await asyncio.to_thread(_get_sftp, name)
     try:
         remote_path = _ensure_path_allowed(remote_path, srv)
         sftp.mkdir(remote_path)
@@ -455,7 +456,7 @@ async def file_rename(request: Request, name: str, db: Session = Depends(get_db)
         raise HTTPException(status_code=400, detail="old_path and new_path are required")
     old_path = _safe_path(old_path)
     new_path = _safe_path(new_path)
-    sftp, ssh, srv = _get_sftp(name)
+    sftp, ssh, srv = await asyncio.to_thread(_get_sftp, name)
     try:
         old_path = _ensure_path_allowed(old_path, srv)
         new_path = _ensure_path_allowed(new_path, srv)
@@ -489,7 +490,7 @@ async def file_chmod(request: Request, name: str, db: Session = Depends(get_db))
         mode = int(mode_str, 8)
     except ValueError:
         raise HTTPException(status_code=400, detail="mode must be an octal string like '755'")
-    sftp, ssh, srv = _get_sftp(name)
+    sftp, ssh, srv = await asyncio.to_thread(_get_sftp, name)
     try:
         remote_path = _ensure_path_allowed(remote_path, srv)
         sftp.chmod(remote_path, mode)
@@ -552,7 +553,7 @@ async def file_content_save(request: Request, name: str, db: Session = Depends(g
     if len(content.encode("utf-8")) > _MAX_TEXT_PREVIEW:
         raise HTTPException(status_code=400,
             detail=f"Content too large, max {_MAX_TEXT_PREVIEW // 1024}KB")
-    sftp, ssh, srv = _get_sftp(name)
+    sftp, ssh, srv = await asyncio.to_thread(_get_sftp, name)
     try:
         remote_path = _ensure_path_allowed(remote_path, srv)
         with sftp.file(remote_path, "wb") as f:

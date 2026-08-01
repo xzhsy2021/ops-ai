@@ -1,10 +1,50 @@
+"""系统配置 SSOT — Phase 3e: 优先读 systems DB 表，config_kv blob 作为过渡期回退。
+
+迁移完成后 config_kv['systems'] 可清理（由 _ensure_defaults 保护防止 re-seed）。
+"""
 import copy
 import logging
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# ── DB SSOT 读写 ──
+
+def _system_row_to_dict(row) -> Dict[str, Any]:
+    """ORM System row → legacy system cfg dict（保持向后兼容）。"""
+    return {
+        "display_name": row.display_name or row.name,
+        "strategy": row.strategy or "WORKFLOW",
+        "base_path": row.base_path or "/data/web/app",
+        "description": row.description or "",
+        "servers": list(row.servers or []),
+        "services": list(row.services or []),
+        "environments": dict(row.environments or {}),
+        "variables": dict(row.variables or {}),
+        # groups 已迁移到 ServerGroup 表（Phase 3b），这里不返回
+        "source": "db",
+    }
+
+
 def get_all_systems() -> Dict[str, Any]:
+    """优先从 DB 读取所有 system，回退到 config_kv blob。"""
+    # 先查 DB
+    try:
+        from app.db.base import SessionLocal
+        from app.db.repository import SystemRepository
+        with SessionLocal() as db:
+            rows = SystemRepository(db).list_all()
+            if rows:
+                result = {}
+                for row in rows:
+                    sys_cfg = _system_row_to_dict(row)
+                    result[row.name] = sys_cfg
+                return result
+    except Exception as e:
+        logger.debug(f"Failed to load systems from DB, falling back to blob: {e}")
+
+    # 回退到 blob
     from app.config.cache import load_config_cached
     systems = load_config_cached().get("systems", {})
     for sys_cfg in systems.values():
@@ -12,11 +52,14 @@ def get_all_systems() -> Dict[str, Any]:
             sys_cfg["variables"] = {}
     return systems
 
+
 def get_system_by_name(name: str) -> Optional[Dict[str, Any]]:
     return get_all_systems().get(name)
 
+
 def get_system_config(system_name: str) -> Optional[Dict[str, Any]]:
     return get_all_systems().get(system_name)
+
 
 def get_servers_for_system(system_name: str, environment: str = None) -> List[Dict[str, Any]]:
     from app.config.servers import get_server_by_name
@@ -28,26 +71,74 @@ def get_servers_for_system(system_name: str, environment: str = None) -> List[Di
         return [get_server_by_name(n) for n in env_cfg.get("servers", []) if get_server_by_name(n)]
     return [get_server_by_name(n) for n in cfg.get("servers", []) if get_server_by_name(n)]
 
+
 def save_system(name: str, system: Dict[str, Any]) -> bool:
-    from app.config.repository import load_config, save_config
-    config = load_config()
-    systems = config.get("systems", {})
-    is_new = name not in systems
-    systems[name] = system
-    config["systems"] = systems
-    logger.info(f"{'Added' if is_new else 'Updated'} system: {name}")
-    return save_config(config)
+    """写 DB systems 表。"""
+    if "groups" in system:
+        logger.debug("groups field ignored (migrated to ServerGroup table, Phase 3b)")
+    try:
+        from app.db.base import SessionLocal
+        from app.db.repository import SystemRepository
+        with SessionLocal() as db:
+            repo = SystemRepository(db)
+            existing = repo.get_by_name(name)
+            if existing:
+                existing.display_name = system.get("display_name") or name
+                existing.strategy = system.get("strategy", "WORKFLOW")
+                existing.base_path = system.get("base_path", "/data/web/app")
+                existing.description = system.get("description")
+                existing.variables = system.get("variables", {}) or {}
+                existing.servers = system.get("servers", []) or []
+                existing.environments = system.get("environments", {}) or {}
+                existing.services = system.get("services", []) or []
+                repo.update(existing)
+                logger.info(f"Updated system: {name}")
+            else:
+                repo.create(
+                    name=name,
+                    display_name=system.get("display_name") or name,
+                    strategy=system.get("strategy", "WORKFLOW"),
+                    base_path=system.get("base_path", "/data/web/app"),
+                    description=system.get("description"),
+                    variables=system.get("variables", {}) or {},
+                    servers=system.get("servers", []) or [],
+                    environments=system.get("environments", {}) or {},
+                    services=system.get("services", []) or [],
+                )
+                logger.info(f"Added system: {name}")
+        try:
+            from app.config.cache import invalidate_config_cache
+            invalidate_config_cache()
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        logger.exception(f"Failed to save system '{name}' to DB")
+        return False
+
 
 def delete_system(name: str) -> bool:
-    from app.config.repository import load_config, save_config
-    config = load_config()
-    systems = config.get("systems", {})
-    if name in systems:
-        del systems[name]
-        config["systems"] = systems
-        logger.info(f"Deleted system: {name}")
-        return save_config(config)
-    return False
+    """从 DB systems 表删除。"""
+    try:
+        from app.db.base import SessionLocal
+        from app.db.repository import SystemRepository
+        with SessionLocal() as db:
+            repo = SystemRepository(db)
+            if repo.delete_by_name(name):
+                logger.info(f"Deleted system: {name}")
+                try:
+                    from app.config.cache import invalidate_config_cache
+                    invalidate_config_cache()
+                except Exception:
+                    pass
+                return True
+            return False
+    except Exception:
+        logger.exception(f"Failed to delete system '{name}' from DB")
+        return False
+
+
+# ── deep-merge 逻辑（保持不变）──
 
 def _deep_merge(base: dict, override: dict) -> dict:
     result = copy.deepcopy(base)
@@ -57,6 +148,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = copy.deepcopy(value)
     return result
+
 
 def _apply_service_overrides(sys_services: list, env_service_overrides: dict) -> list:
     if not env_service_overrides:
@@ -76,6 +168,7 @@ def _apply_service_overrides(sys_services: list, env_service_overrides: dict) ->
                         svc[key] = copy.deepcopy(value)
     return result
 
+
 def _apply_group_overrides(sys_groups: dict, env_group_overrides: dict) -> dict:
     if not env_group_overrides:
         return sys_groups
@@ -87,6 +180,7 @@ def _apply_group_overrides(sys_groups: dict, env_group_overrides: dict) -> dict:
                 for key, value in override.items():
                     result[gcode][key] = copy.deepcopy(value)
     return result
+
 
 def resolve_system_config(system_name: str, environment: str = None) -> Dict[str, Any]:
     system = get_system_config(system_name)
@@ -122,6 +216,7 @@ def resolve_system_config(system_name: str, environment: str = None) -> Dict[str
         elif "groups" in env_cfg:
             result["groups"] = copy.deepcopy(env_cfg.get("groups") or {})
     return result
+
 
 def get_variable_inheritance(system_name: str, service_name: str = None, environment: str = None) -> Dict[str, Any]:
     system = get_system_config(system_name)
@@ -162,13 +257,11 @@ def get_variable_inheritance(system_name: str, service_name: str = None, environ
                 break
     return chain
 
-def get_all_groups(system_name: str, environment: str = None) -> Dict[str, Any]:
-    """Phase 3b SSOT: 从 ServerGroup 表读取所有该 system 的分组。
 
-    命名约定:ServerGroup.name = '{system_name}-{group_code}'
-    返回 dict keyed by group_code,value 为兼容 legacy shape 的 dict
-    (含 display_name / server(single)/servers/ variables 等)。
-    """
+# ── ServerGroup SSOT（Phase 3b，保持不变）──
+
+def get_all_groups(system_name: str, environment: str = None) -> Dict[str, Any]:
+    """Phase 3b SSOT: 从 ServerGroup 表读取所有该 system 的分组。"""
     if environment:
         logger.debug("get_all_groups(%s) ignores environment=%r (Phase 3b flat model)",
                      system_name, environment)
@@ -190,7 +283,7 @@ def get_all_groups(system_name: str, environment: str = None) -> Dict[str, Any]:
 
 
 def get_group(system_name: str, group_code: str, environment: str = None) -> Optional[Dict[str, Any]]:
-    """Phase 3b SSOT: 从 ServerGroup 表读取单个分组(按 system_name-group_code 命名)。"""
+    """Phase 3b SSOT: 从 ServerGroup 表读取单个分组。"""
     if environment:
         logger.debug("get_group(%s,%s) ignores environment=%r (Phase 3b flat model)",
                      system_name, group_code, environment)
@@ -206,11 +299,7 @@ def get_group(system_name: str, group_code: str, environment: str = None) -> Opt
 
 
 def save_group(system_name: str, group_code: str, group_cfg: Dict[str, Any], environment: str = None) -> bool:
-    """Phase 3b SSOT: 写入 ServerGroup 表(不再写 config_kv)。
-
-    入参 group_cfg 是 legacy dict 形态(display_name / server / servers / variables / ...)。
-    'servers' 列表映射到 ServerGroup.server_names;其他字段写入 metadata_json。
-    """
+    """Phase 3b SSOT: 写入 ServerGroup 表。"""
     if environment:
         logger.debug("save_group(%s,%s) ignores environment=%r (Phase 3b flat model)",
                      system_name, group_code, environment)
@@ -228,7 +317,6 @@ def save_group(system_name: str, group_code: str, group_cfg: Dict[str, Any], env
     if cfg.get("server") and cfg.get("server") not in server_names:
         server_names.append(cfg["server"])
 
-    # 其它字段入 metadata_json(包括 description / variables / tags / 单 server 等)
     meta: Dict[str, Any] = {}
     for k, v in cfg.items():
         if k in ("servers", "display_name"):
@@ -247,7 +335,6 @@ def save_group(system_name: str, group_code: str, group_cfg: Dict[str, Any], env
                 server_names=server_names,
                 tags=meta.pop("tags", None) or [],
             )
-            # `create` doesn't take metadata_json, set it post-hoc.
             existing = repo.get_by_name(name)
             existing.metadata_json = meta or None
             db.commit()
@@ -314,7 +401,7 @@ def delete_group(system_name: str, group_code: str, environment: str = None) -> 
 
 
 def _server_group_to_legacy_dict(g) -> Dict[str, Any]:
-    """ORM ServerGroup row → legacy group cfg dict (兼容 deploy_v2.py 的访问形态)。"""
+    """ORM ServerGroup row → legacy group cfg dict。"""
     meta = g.metadata_json or {}
     result: Dict[str, Any] = {
         "display_name": g.display_name or g.name,
@@ -324,7 +411,6 @@ def _server_group_to_legacy_dict(g) -> Dict[str, Any]:
         "tags": list(g.tags or []) + list(meta.get("tags", []) or []),
         "description": g.description or meta.get("description", ""),
     }
-    # 透传 metadata_json 中其它未知字段
     for k, v in meta.items():
         if k in result and not result[k]:
             result[k] = v

@@ -628,6 +628,8 @@ def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Reques
             token.expires_at = _utcnow() + timedelta(days=min(max(days, 1), 3650))
     if payload.revoke is not None:
         token.revoked_at = _utcnow() if payload.revoke else None
+    if payload.bound_room_ids is not None:
+        token.bound_room_ids = _normalize_bound_room_ids(payload.bound_room_ids)
 
     db.commit()
     db.refresh(token)
@@ -979,10 +981,9 @@ def mcp_tool_recommend(request: Request, scenario: str = "", db: Session = Depen
     register_builtin_tools()
     scenario_key = (scenario or "").lower()
     mapping = {
-        "project_health": ["ops.workflow.generate_project_health_brief", "ops.get_system_status", "ops.inspection.list_runs", "ops.risk.list"],
-        "risk_triage": ["ops.workflow.triage_open_risks", "ops.risk.list", "ops.risk.generate_fix_plan"],
+        "project_health": ["ops.get_system_status", "ops.inspection.list_runs", "ops.risk.list"],
+        "risk_triage": ["ops.risk.list", "ops.risk.generate_fix_plan"],
         "inspection": [
-            "ops.workflow.inspect",
             "ops.list_server_groups",
             "ops.inspection.preview_servers_batch",
             "ops.inspection.run_servers_batch",
@@ -992,8 +993,8 @@ def mcp_tool_recommend(request: Request, scenario: str = "", db: Session = Depen
             "ops.inspection.generate_report",
             "ops.inspection.generate_report_for_runs",
         ],
-        "failed_deploy": ["ops.workflow.analyze_failed_deploy", "ops.get_deployment_report", "ops.get_deployment_tasks", "ops.get_deployment_logs"],
-        "monthly_report": ["ops.workflow.generate_monthly_ops_report", "ops.list_reports", "ops.risk.list", "ops.inspection.list_runs"],
+        "failed_deploy": ["ops.get_deployment_report", "ops.get_deployment_tasks", "ops.get_deployment_logs"],
+        "monthly_report": ["ops.list_reports", "ops.risk.list", "ops.inspection.list_runs"],
     }
     tools = mapping.get(scenario_key) or [t.name for t in registry._tools.values() if scenario_key and scenario_key in f"{t.name} {t.description} {t.category}".lower()][:20]
     return api_response(data={"scenario": scenario, "tools": tools})

@@ -100,9 +100,13 @@ type UseDeployServerSelectionArgs = {
   servers: string
   serverGroup: string
   serverAutoMode: boolean
+  pipelineId: string
+  pipelineSteps?: any[]
+  pipelines?: any[]
   setService: (value: string) => void
   setServers: (value: string) => void
   setServerAutoMode: (value: boolean) => void
+  setPipelineId: (value: string) => void
 }
 
 export function useDeployServerSelection(args: UseDeployServerSelectionArgs) {
@@ -116,9 +120,13 @@ export function useDeployServerSelection(args: UseDeployServerSelectionArgs) {
     servers,
     serverGroup,
     serverAutoMode,
+    pipelineId,
+    pipelineSteps,
+    pipelines,
     setService,
     setServers,
     setServerAutoMode,
+    setPipelineId,
   } = args
 
   const stringifyServerList = (items: any[]): string => uniqueServers(items).join(', ')
@@ -215,7 +223,28 @@ export function useDeployServerSelection(args: UseDeployServerSelectionArgs) {
     })
   }
 
+  const isDockerCompose = (svc?: ServiceOption | null, steps?: any[] | null) => {
+    if (svc) {
+      if (svc.template === 'docker_compose' || svc.template === 'crypto_docker_compose') return true
+      const vars = svc.template_variables || {}
+      if (vars.compose_dir || vars.compose_file) return true
+    }
+    if (Array.isArray(steps) && steps.length > 0) {
+      return steps.some((s: any) => {
+        const t = s?.step_type || s?.type
+        return t === 'docker_compose_update' || t === 'docker_compose'
+      })
+    }
+    // pipelineSteps 异步加载期间，通过 pipeline strategy 同步判断
+    if (pipelineId && Array.isArray(pipelines)) {
+      const selectedPipeline = pipelines.find((p: any) => p.id === pipelineId)
+      if (selectedPipeline?.strategy === 'DOCKER_COMPOSE') return true
+    }
+    return false
+  }
+
   const selectedService = findServiceByHint(service)
+  const isSelectedDockerCompose = isDockerCompose(selectedService, pipelineSteps)
   const selectedServerNames = parseServerList(servers)
   const selectedServerSet = new Set(selectedServerNames)
 
@@ -355,12 +384,20 @@ export function useDeployServerSelection(args: UseDeployServerSelectionArgs) {
     setSelectedServers(next, false)
   }
 
-  const applyServiceDefaults = (serviceName: string, options?: { keepServers?: boolean, forceAuto?: boolean }) => {
+  const applyServiceDefaults = (serviceName: string, options?: { keepServers?: boolean, forceAuto?: boolean, keepPipeline?: boolean }) => {
     const svc = findServiceByHint(serviceName) || services.find((s) => s.name === serviceName)
     setService(svc?.name || serviceName)
     if (!svc) return
     if (!options?.keepServers) {
       autoFillServers({ svc, force: options?.forceAuto ?? true })
+    }
+    // 若当前未选 Pipeline 或已选的 Pipeline 不属于新服务，自动切到该服务的默认 Pipeline
+    if (!options?.keepPipeline) {
+      const defaultPipelineId = (svc as any).pipeline_id || ''
+      const pipelineBelongsToService = defaultPipelineId && pipelineId === defaultPipelineId
+      if (!pipelineId || (defaultPipelineId && !pipelineBelongsToService)) {
+        setPipelineId(defaultPipelineId || '')
+      }
     }
   }
 
@@ -372,6 +409,8 @@ export function useDeployServerSelection(args: UseDeployServerSelectionArgs) {
     isProdEnvironment,
     isTestEnvironment,
     serverLooksLikeTest,
+    isDockerCompose,
+    isSelectedDockerCompose,
     selectedService,
     selectedServerNames,
     selectedServerSet,

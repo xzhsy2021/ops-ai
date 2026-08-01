@@ -102,12 +102,19 @@ async def lifespan(app: FastAPI):
         db.close()
 
     config = load_config()
-    systems = config.get("systems", {})
-    servers = config.get("servers", [])
+    # 系统数和服务器数从 DB 表查询（Phase 3a/3e SSOT）
+    try:
+        from app.db import ServerRepository, SystemRepository, SessionLocal
+        with SessionLocal() as _db:
+            server_count = len(ServerRepository(_db).list_all())
+            system_count = len(SystemRepository(_db).list_all())
+    except Exception:
+        server_count = 0
+        system_count = 0
 
     logger.info("=" * 50)
     logger.info("  Ops Platform v2.1.10 已启动")
-    logger.info(f"  系统数: {len(systems)}  服务器数: {len(servers)}")
+    logger.info(f"  系统数: {system_count} 服务器数: {server_count}")
     logger.info(f"  访问地址: http://localhost:8000")
     logger.info(f"  API 文档: http://localhost:8000/api/docs")
     try:

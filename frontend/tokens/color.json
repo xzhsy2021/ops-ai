@@ -1,0 +1,134 @@
+{
+  "dark": {
+    "energy": {
+      "primary": "#22E08A",
+      "hover": "#4AE3A0",
+      "soft": "#A8F0CC",
+      "deep": "#16A96A",
+      "surface": "rgba(34,224,138,0.12)",
+      "surface-strong": "rgba(34,224,138,0.22)",
+      "glow": "rgba(34,224,138,0.35)",
+      "gradient": "linear-gradient(135deg, #22E08A 0%, #16A96A 55%, #0D8B56 100%)"
+    },
+    "bg": {
+      "page": "#070b16",
+      "shell": "#0a1020",
+      "surface": "#0f1729",
+      "surface-2": "#0a1224",
+      "surface-3": "#131c33",
+      "hover": "#18233e",
+      "elevated": "rgba(15,23,41,0.84)",
+      "panel-deep": "#050912"
+    },
+    "text": {
+      "strong": "#f4f7ff",
+      "primary": "#d6dde9",
+      "secondary": "#8b97ad",
+      "muted": "#5d6a82",
+      "faint": "#3e4a63"
+    },
+    "border": {
+      "default": "rgba(148,163,184,0.12)",
+      "strong": "#1f2a44",
+      "stronger": "#2a3756",
+      "bright": "rgba(34,224,138,0.34)"
+    },
+    "status": {
+      "success": "#34d399",
+      "success-soft": "#6ee7b7",
+      "success-surface": "rgba(6,78,59,0.55)",
+      "danger": "#fb7185",
+      "danger-soft": "#fda4af",
+      "danger-surface": "rgba(76,5,25,0.62)",
+      "warning": "#fbbf24",
+      "warning-soft": "#fde68a",
+      "warning-surface": "rgba(67,20,7,0.62)"
+    },
+    "risk": {
+      "read": "#38bdf8",
+      "read-surface": "rgba(56,189,248,0.15)",
+      "write": "#fb923c",
+      "write-surface": "rgba(251,146,60,0.15)",
+      "destructive": "#f43f5e",
+      "destructive-surface": "rgba(244,63,94,0.15)"
+    },
+    "glass": {
+      "bg": "rgba(255,255,255,0.06)",
+      "border": "rgba(255,255,255,0.12)",
+      "hover-bg": "rgba(255,255,255,0.10)",
+      "hover-border": "rgba(255,255,255,0.18)",
+      "blur": "20px"
+    },
+    "ambient": {
+      "cyan": "rgba(34,211,238,0.08)",
+      "violet": "rgba(139,92,246,0.06)",
+      "energy": "rgba(34,224,138,0.06)"
+    }
+  },
+  "light": {
+    "energy": {
+      "primary": "#16A96A",
+      "hover": "#1BC47D",
+      "soft": "#34D399",
+      "deep": "#0D8B56",
+      "surface": "rgba(22,169,106,0.10)",
+      "surface-strong": "rgba(22,169,106,0.20)",
+      "glow": "rgba(22,169,106,0.25)",
+      "gradient": "linear-gradient(135deg, #16A96A 0%, #0D8B56 55%, #0A6E43 100%)"
+    },
+    "bg": {
+      "page": "#f0f4f8",
+      "shell": "#f8fafc",
+      "surface": "#ffffff",
+      "surface-2": "#f1f5f9",
+      "surface-3": "#e2e8f0",
+      "hover": "#e2e8f0",
+      "elevated": "rgba(255,255,255,0.84)",
+      "panel-deep": "#f8fafc"
+    },
+    "text": {
+      "strong": "#0f172a",
+      "primary": "#1e293b",
+      "secondary": "#475569",
+      "muted": "#64748b",
+      "faint": "#94a3b8"
+    },
+    "border": {
+      "default": "rgba(0,0,0,0.08)",
+      "strong": "#cbd5e1",
+      "stronger": "#94a3b8",
+      "bright": "rgba(22,169,106,0.34)"
+    },
+    "status": {
+      "success": "#10b981",
+      "success-soft": "#34d399",
+      "success-surface": "rgba(209,250,229,0.8)",
+      "danger": "#e11d48",
+      "danger-soft": "#fb7185",
+      "danger-surface": "rgba(255,228,232,0.8)",
+      "warning": "#d97706",
+      "warning-soft": "#f59e0b",
+      "warning-surface": "rgba(254,243,199,0.8)"
+    },
+    "risk": {
+      "read": "#0284c7",
+      "read-surface": "rgba(2,132,199,0.10)",
+      "write": "#ea580c",
+      "write-surface": "rgba(234,88,12,0.10)",
+      "destructive": "#dc2626",
+      "destructive-surface": "rgba(220,38,38,0.10)"
+    },
+    "glass": {
+      "bg": "rgba(255,255,255,0.50)",
+      "border": "rgba(0,0,0,0.08)",
+      "hover-bg": "rgba(255,255,255,0.70)",
+      "hover-border": "rgba(0,0,0,0.12)",
+      "blur": "20px"
+    },
+    "ambient": {
+      "cyan": "rgba(34,211,238,0.05)",
+      "violet": "rgba(139,92,246,0.04)",
+      "energy": "rgba(34,224,138,0.04)"
+    }
+  }
+}

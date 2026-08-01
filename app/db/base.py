@@ -162,6 +162,12 @@ def init_db():
     except Exception:
         import logging
         logging.getLogger(__name__).exception("Failed to apply read_only default migration")
+    try:
+        from app.db.migrations.systems_migration import migrate_systems_blob_to_table
+        migrate_systems_blob_to_table()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Failed to migrate systems blob to table")
     _ensure_indexes()
 
 

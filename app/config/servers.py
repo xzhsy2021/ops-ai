@@ -422,6 +422,68 @@ def get_jump_host_by_name(name: str) -> Optional[Dict[str, Any]]:
         }
 
 
+def get_jump_host_by_host(host: str, port: int = 22) -> Optional[Dict[str, Any]]:
+    """Phase 3.g: 按 host:port 查 jump_hosts DB 表。用于 dict 形式 jump_host 缺凭据时的补全。"""
+    from app.db import SessionLocal
+    from app.db.models import JumpHost
+    if not host:
+        return None
+    with SessionLocal() as db:
+        row = db.query(JumpHost).filter(JumpHost.host == host, JumpHost.port == port).first()
+        if row is None:
+            return None
+        return {
+            "name": row.name,
+            "host": row.host,
+            "port": row.port,
+            "user": row.user,
+            "username": row.user,
+            "key": row.key,
+            "key_content": row.key_content,
+            "password": row.password,
+            "status": row.status,
+        }
+
+
+def get_server_as_jump_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """按 name 查 servers DB 表并转为 jump config dict（供 jump_host 名称 fallback）。"""
+    from app.db import SessionLocal, ServerRepository
+    if not name:
+        return None
+    with SessionLocal() as db:
+        srv = ServerRepository(db).get_by_name(name)
+        if srv is None:
+            return None
+        return _server_to_jump_dict(srv)
+
+
+def get_server_as_jump_by_host(host: str, port: int = 22) -> Optional[Dict[str, Any]]:
+    """按 host:port 查 servers DB 表并转为 jump config dict。"""
+    from app.db import SessionLocal
+    from app.db.models import Server
+    if not host:
+        return None
+    with SessionLocal() as db:
+        row = db.query(Server).filter(Server.host == host, Server.port == port).first()
+        if row is None:
+            return None
+        return _server_to_jump_dict(row)
+
+
+def _server_to_jump_dict(srv) -> Dict[str, Any]:
+    """把 Server ORM 行转为 jump config dict 形态。"""
+    return {
+        "name": srv.name,
+        "host": srv.host,
+        "port": srv.port,
+        "user": srv.user,
+        "username": srv.user,
+        "key": srv.key,
+        "key_content": srv.key_content,
+        "password": srv.password,
+    }
+
+
 def resolve_jump_host_config(server_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     jh_name = server_config.get("jump_host")
     if not jh_name or isinstance(jh_name, dict):

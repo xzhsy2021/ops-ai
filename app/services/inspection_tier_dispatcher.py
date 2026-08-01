@@ -4,7 +4,7 @@
 - 目标统一为全量在线服务器（按 Server.status != "deleted" + ACTIVE 状态过滤），
   不再使用 target_filter 字段。
 - 真正区分三级的是 `categories`（巡检项组合）。
-- 月巡检 (MONTHLY) 默认 `require_approval=True`，首跑前需走 `ops.tier.approve`。
+- 月巡检 (MONTHLY) 默认 `require_approval=True`，首跑前需手动审批解锁。
 - 配置文件不再依赖 yaml；DB 中的 3 行 tier 走 seed 脚本初始化。
 
 使用方式（worker）：

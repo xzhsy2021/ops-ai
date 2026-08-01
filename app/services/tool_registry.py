@@ -89,6 +89,13 @@ class ToolDefinition:
         return data
 
     def to_mcp_dict(self) -> Dict[str, Any]:
+        try:
+            from app.services.tool_policy import ai_tool_level, _approval_hint_for_tool
+            level = ai_tool_level(self)
+            hint = _approval_hint_for_tool(self, level)
+        except Exception:
+            level = "L4" if self.write and self.risk in {"high", "critical"} else "L1"
+            hint = ""
         return {
             "name": self.name,
             "description": self.description,
@@ -105,6 +112,8 @@ class ToolDefinition:
                 "x_ops_ai_auto_callable": self.ai_auto_callable,
                 "x_ops_requires_human_approval": self.requires_human_approval or self.requires_confirmation,
                 "x_ops_data_sensitivity": self.data_sensitivity,
+                "x_ops_ai_level": level,
+                "x_ops_approval_hint": hint,
             },
         }
 
@@ -155,12 +164,6 @@ def _default_output_schema() -> Dict[str, Any]:
 
 
 DAILY_OPS_TOOL_NAMES = frozenset({
-    "ops.workflow.inspect",
-    "ops.workflow.generate_project_health_brief",
-    "ops.workflow.analyze_failed_deploy",
-    "ops.workflow.inspect_project_security",
-    "ops.workflow.triage_open_risks",
-    "ops.workflow.generate_monthly_ops_report",
     "ops.describe_capabilities",
     "ops.get_tool_risk_policy",
     "ops.analyze_diagnostics",
@@ -180,24 +183,24 @@ DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.list_services",
     "ops.list_environments",
     "ops.check_disk",
+    "ops.check_process",
     "ops.run_health_check",
     "ops.log.search",
     "ops.log.summarize_errors",
     "ops.log.get_recent_exceptions",
+    "ops.log.tail",
     "ops.inspection.profile.list",
     "ops.inspection.profile.preview",
     "ops.inspection.profile.run",
+    "ops.inspection.profile.retry_issues",
+    "ops.inspection.list_runs",
+    "ops.inspection.get_run_raw_output",
+    "ops.inspection.generate_report",
+    "ops.inspection.run_server",
+    "ops.inspection.list_item_configs",
     "ops.inspection.preview_servers_batch",
     "ops.inspection.run_servers_batch",
-    "ops.inspection.list_runs",
-    "ops.inspection.get_run",
-    "ops.inspection.get_run_raw_output",
-    "ops.inspection.list_issues",
-    "ops.inspection.get_issue",
-    "ops.inspection.generate_report",
     "ops.inspection.generate_report_for_runs",
-    "ops.inspection.summarize_run",
-    "ops.inspection.run_server",
     "ops.risk.list",
     "ops.risk.get",
     "ops.risk.triage",
@@ -206,7 +209,6 @@ DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.get_report",
     "ops.get_report_summary",
     "ops.list_report_types",
-    "ops.generate_report",
     "ops.list_deployments",
     "ops.deploy.aggregate_status",
     "ops.get_deployment_status",
@@ -228,6 +230,12 @@ DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.db.get_export",
     "ops.list_backups",
     "ops.verify_backup",
+    "ops.file_read",
+    "ops.list_audit_logs",
+    "ops.list_connections",
+    "ops.get_connection",
+    "ops.list_ssh_keys",
+    "ops.get_ssh_key",
 })
 
 
@@ -239,6 +247,8 @@ TOOL_PROFILE_ALIASES = {
     "ops": "daily_ops",
     "expert": "expert",
     "advanced": "expert",
+    "ai": "ai_full",
+    "ai_full": "ai_full",
     "admin": "admin_full",
     "admin_full": "admin_full",
     "full": "admin_full",
@@ -273,6 +283,15 @@ def tool_matches_profile(tool: ToolDefinition, profile: str | None = None) -> bo
     profile_name = normalize_tool_profile(profile)
     if profile_name == "admin_full":
         return True
+    if profile_name == "ai_full":
+        # ai_full: all tools visible to AI; execution permission is enforced
+        # separately by enforce_tool_policy. Only hide explicitly disabled
+        # tools and agent-runtime tools (when agent runtime is off).
+        if not tool.enabled:
+            return False
+        if tool.category == "agent":
+            return False
+        return True
     if profile_name == "daily_ops":
         return tool.name in DAILY_OPS_TOOL_NAMES
     if profile_name == "expert":
@@ -301,6 +320,12 @@ def tool_profile_manifest() -> List[Dict[str, Any]]:
             "name": "Expert",
             "default": False,
             "description": "Expanded non-destructive catalog for troubleshooting and advanced analysis.",
+        },
+        {
+            "key": "ai_full",
+            "name": "AI Full",
+            "default": False,
+            "description": "Full tool catalog visible to AI agents; execution permissions enforced per-call with structured guidance.",
         },
         {
             "key": "admin_full",
@@ -409,7 +434,10 @@ class ToolRegistry:
             if risk and tool.risk != risk:
                 continue
             policy = self.evaluate_policy(tool, ctx, db)
-            if not include_disabled and not policy.get("allowed"):
+            # L4 工具（requires_human_approval）即使不允许直接执行也保留展示，
+            # 让 AI agent 能发现这些能力并通过审批流程获取授权。
+            needs_approval = bool(tool.requires_human_approval or tool.requires_confirmation)
+            if not include_disabled and not policy.get("allowed") and not needs_approval:
                 continue
             if output_format == "mcp":
                 item = tool.to_mcp_dict()
@@ -716,6 +744,44 @@ class ToolRegistry:
             }
         except HTTPException as exc:
             duration_ms = round((time.monotonic() - started) * 1000)
+            # Structured 403 from enforce_tool_policy: return guidance instead
+            # of raising, so AI agent receives actionable next-step info.
+            if exc.status_code == 403 and isinstance(exc.detail, dict) and exc.detail.get("approval_tool"):
+                guidance = exc.detail.get("guidance", "")
+                approval_tool = exc.detail.get("approval_tool", "")
+                try:
+                    record_tool_call_async(
+                        tool_name=tool_name,
+                        ctx=ctx,
+                        input_args=arguments or {},
+                        normalized_args=normalized,
+                        result={"detail": exc.detail},
+                        status="blocked",
+                        risk_level=tool.risk,
+                        policy_result=policy_result,
+                        blocked_reason=guidance,
+                        duration_ms=duration_ms,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "tool": tool_name,
+                    "blocked": True,
+                    "blocked_reason": exc.detail.get("reason", "requires_human_approval"),
+                    "approval_tool": approval_tool,
+                    "guidance": guidance,
+                    "ai_level": exc.detail.get("ai_level", "L4"),
+                    "risk": tool.risk,
+                    "message": guidance,
+                    "next_actions": [
+                        {
+                            "type": "call_approval_tool",
+                            "tool": approval_tool,
+                            "description": f"调用 {approval_tool} 创建审批工单，人工批准后系统自动执行。",
+                        }
+                    ],
+                }
             try:
                 record_tool_call_async(
                     tool_name=tool_name,
@@ -765,7 +831,7 @@ def ensure_builtin_registered():
     with _builtin_lock:
         if _builtin_registered:
             return registry
-        from app.services.tool_adapters import deploy_tools, file_tools, server_tools, audit_tools, config_tools, capability_tools, runtime_tools, diagnostic_tools, backup_tools, job_tools, ai_tools, report_tools, db_tools, inspection_tools, risk_tools, agent_tools, log_tools, workflow_tools, ai_analysis_tools, connection_tools, ssh_key_tools, pipeline_tools, tier_tools, approval_tools  # noqa: F401
+        from app.services.tool_adapters import deploy_tools, file_tools, server_tools, audit_tools, capability_tools, diagnostic_tools, backup_tools, job_tools, ai_tools, report_tools, db_tools, inspection_tools, risk_tools, log_tools, ai_analysis_tools, connection_tools, ssh_key_tools, pipeline_tools, approval_tools, remote_exec_tools  # noqa: F401
         _builtin_registered = True
         registry.invalidate_capability_cache()
         return registry

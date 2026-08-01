@@ -108,14 +108,8 @@ def expected_confirmation_text(tool_def, args: Dict[str, Any], db=None) -> str:
         return f"RESTORE {file_name}" if file_name else "RESTORE <file>"
     if name == "ops.delete_backup":
         return f"DELETE {file_name}" if file_name else "DELETE <file>"
-    if name in {"ops.execute_deploy_plan", "ops.execute_rollback_plan", "ops.apply_config_change_plan"}:
+    if name in {"ops.execute_deploy_plan", "ops.execute_rollback_plan"}:
         return _plan_confirm_text(db, plan_id) or f"CONFIRM {name}"
-    if name == "ops.cleanup_runtime_artifacts":
-        try:
-            from app.services.runtime_resources import CLEANUP_CONFIRM_TEXT
-            return CLEANUP_CONFIRM_TEXT
-        except Exception:
-            return "确认清理运行时资源"
     if name == "ops.cleanup_packages":
         return "CLEANUP PACKAGES"
     if name == "ops.protect_package":
@@ -210,7 +204,7 @@ def _is_non_destructive_plan_creation(tool_def) -> bool:
     category = getattr(tool_def, "category", "") or ""
     if category == "deploy_plan":
         return True
-    return name in {"ops.create_config_change_plan", "ops.create_rollback_plan", "ops.create_deploy_plan"}
+    return name in {"ops.create_rollback_plan", "ops.create_deploy_plan"}
 
 
 def _is_dry_run(args: Dict[str, Any]) -> bool:

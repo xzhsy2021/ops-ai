@@ -1,0 +1,35 @@
+{
+  "canvas": {
+    "dpr": 2,
+    "particles": 90,
+    "particle-size": 2.5,
+    "particle-opacity": 0.6,
+    "connection-distance": 120,
+    "connection-opacity": 0.15,
+    "glow-radius": 60,
+    "glow-intensity": 1.1,
+    "nebula-blobs": 3,
+    "nebula-opacity": 0.06,
+    "parallax-strength": 46
+  },
+  "webgl": {
+    "dpr": 2,
+    "bloom": true,
+    "bloom-strength": 0.6,
+    "bloom-radius": 0.2,
+    "tonemap": "ACESFilmic"
+  },
+  "pulse": {
+    "speed": 1.2,
+    "trail-length": 12,
+    "particle-burst": 8,
+    "glow-expand": 1.5,
+    "duration": 600
+  },
+  "quality": {
+    "shadow-map-size": 2048,
+    "anisotropy": 16,
+    "mipmaps": true,
+    "anti-aliasing": true
+  }
+}

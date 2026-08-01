@@ -196,7 +196,7 @@ async def import_config(request: Request, db: Session = Depends(get_db)):
     diff = _config_import_diff(data, db)
     current_config = load_config()
 
-    for key in ("systems", "settings", "global_variables", "deploy_defaults"):
+    for key in ("systems", "global_variables", "deploy_defaults"):
         if key in imported_config:
             current_config[key] = imported_config[key]
 

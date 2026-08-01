@@ -471,6 +471,68 @@ class WebScriptUpdateStep(Step):
         ctx.log("info", "Web 发布完成", "web_script_update")
 
 
+class DockerComposeUpdateStep(Step):
+    """Docker Compose deployment: pull latest images from registry, restart containers, check status."""
+    step_type = "docker_compose_update"
+
+    async def run(self, ctx: StepContext, config: Dict[str, Any]):
+        config = _interpolate(config, ctx)
+        compose_dir = _first_non_empty(config.get("compose_dir"), ctx.variables.get("compose_dir"), ctx.deploy_path)
+        if not compose_dir:
+            raise RuntimeError("compose_dir is required")
+        compose_file = _first_non_empty(config.get("compose_file"), ctx.variables.get("compose_file"), default="docker-compose.yml")
+        timeout = int(config.get("timeout", 600))
+
+        ctx.log("info", f"Docker Compose 发布: {compose_dir}", "docker_compose_update")
+        if not ctx.ssh_client:
+            ctx.log("warning", "无 SSH 连接，跳过 Docker Compose 发布", "docker_compose_update")
+            return
+
+        # 确保 compose 目录存在
+        await _run_required(ctx, f"test -d {_shell_quote(compose_dir)}", "检查 compose 目录", timeout=15, tail_output=False)
+
+        # 拉取最新镜像
+        await _run_required(
+            ctx,
+            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} pull 2>&1",
+            "拉取最新镜像",
+            timeout=timeout,
+        )
+
+        # 启动/重启容器
+        await _run_required(
+            ctx,
+            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} up -d --remove-orphans 2>&1",
+            "启动容器",
+            timeout=timeout,
+        )
+
+        # 等待容器稳定
+        wait_seconds = int(config.get("wait_after_up", 10))
+        if wait_seconds > 0:
+            ctx.log("info", f"等待 {wait_seconds} 秒容器稳定...", "docker_compose_update")
+            await asyncio.sleep(wait_seconds)
+
+        # 检查容器状态
+        await _run_required(
+            ctx,
+            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} ps 2>&1",
+            "容器状态",
+            timeout=30,
+        )
+
+        # 检查最近日志
+        log_lines = int(config.get("log_tail_lines", 30))
+        await _run_required(
+            ctx,
+            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} logs --tail={log_lines} 2>&1",
+            "容器日志",
+            timeout=60,
+        )
+
+        ctx.log("info", "Docker Compose 发布完成", "docker_compose_update")
+
+
 class DovoBlueGreenUpdateStep(Step):
     """Dovo actual operation: detect standby instance, binupdate, log check, portupdate, log check."""
     step_type = "dovo_bluegreen_update"

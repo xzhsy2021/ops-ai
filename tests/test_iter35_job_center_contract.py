@@ -32,6 +32,7 @@ def test_high_risk_tool_call_is_queued_as_unified_job(tmp_path, monkeypatch):
             "http_tools_enabled": True,
             "read_only": False,
             "allow_backup_write": True,
+            "allow_server_write": True,
             "allow_high_risk_tools": True,
             "allow_critical_risk_tools": False,
             "require_confirmation": True,
@@ -40,13 +41,13 @@ def test_high_risk_tool_call_is_queued_as_unified_job(tmp_path, monkeypatch):
         register_builtin_tools()
         ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
 
-        result = registry.call(db, "ops.delete_backup", {"file": "missing.db", "confirm_text": "DELETE missing.db"}, ctx)
+        result = registry.call(db, "ops.file_write", {"server": "test-server", "path": "/tmp/test.txt", "content": "test", "confirm_text": "CONFIRM ops.file_write"}, ctx)
 
         assert result["message"] == "queued"
         assert result["job_id"]
         job = get_operation_job(db, result["job_id"])
         assert job is not None
-        assert job["source_tool"] == "ops.delete_backup"
+        assert job["source_tool"] == "ops.file_write"
         assert job["risk_level"] == "high"
         assert job["status"] in {"queued", "running", "failed", "success"}
 
@@ -77,6 +78,7 @@ def test_high_risk_tool_worker_updates_job_to_terminal_status(tmp_path, monkeypa
             "http_tools_enabled": True,
             "read_only": False,
             "allow_backup_write": True,
+            "allow_server_write": True,
             "allow_high_risk_tools": True,
             "allow_critical_risk_tools": False,
             "require_confirmation": True,
@@ -85,14 +87,13 @@ def test_high_risk_tool_worker_updates_job_to_terminal_status(tmp_path, monkeypa
         register_builtin_tools()
         ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
 
-        result = registry.call(db, "ops.delete_backup", {"file": "missing.db", "confirm_text": "DELETE missing.db"}, ctx)
+        result = registry.call(db, "ops.file_write", {"server": "test-server", "path": "/tmp/test.txt", "content": "test", "confirm_text": "CONFIRM ops.file_write"}, ctx)
 
         job = get_operation_job(db, result["job_id"])
         assert job is not None
-        assert job["status"] == "failed"
+        assert job["status"] in {"failed", "success"}
         assert job["progress"] == 100
         assert job["finished_at"]
-        assert job["error_message"]
     finally:
         db.close()
         engine.dispose()

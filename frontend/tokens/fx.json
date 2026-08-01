@@ -1,0 +1,41 @@
+{
+  "full": {
+    "label": "FULL",
+    "description": "高性能设备 - 完整视觉效果",
+    "particles": 90,
+    "glow": 1.1,
+    "dpr": 2,
+    "nebula": 1.1,
+    "parallax": 46,
+    "pulse-speed": 1.2,
+    "pulse-trail": 12,
+    "bloom": true,
+    "shadow-quality": "high"
+  },
+  "balanced": {
+    "label": "BALANCED",
+    "description": "默认 - 平衡性能与效果",
+    "particles": 48,
+    "glow": 0.75,
+    "dpr": 1.5,
+    "nebula": 0.7,
+    "parallax": 24,
+    "pulse-speed": 1.0,
+    "pulse-trail": 8,
+    "bloom": false,
+    "shadow-quality": "medium"
+  },
+  "low": {
+    "label": "LOW",
+    "description": "低功耗 - 最小视觉效果",
+    "particles": 0,
+    "glow": 0.4,
+    "dpr": 1,
+    "nebula": 0.3,
+    "parallax": 0,
+    "pulse-speed": 0.8,
+    "pulse-trail": 4,
+    "bloom": false,
+    "shadow-quality": "low"
+  }
+}

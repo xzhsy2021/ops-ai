@@ -153,18 +153,28 @@ def _migrate_json_to_db():
 
 
 def _ensure_defaults():
+    """启动期补齐 DEFAULT_CONFIG 中缺失的 key 到 config_kv。
+
+    Sentinel 策略：用 `__seeded` 标记 key 判断 DB 是否已初始化，
+    不再依赖业务 key（如 jump_hosts）的存在性 —— 后者已迁移到 DB 表，
+    KV 中的 legacy 桶可被安全清理而不会触发误判。
+    """
     from app.config.repository import get_db_connection
     from app.config.defaults import DEFAULT_CONFIG
     _migrate_legacy_default_config_to_db(remove_source=True)
     conn = get_db_connection()
-    row = conn.execute("SELECT value FROM config_kv WHERE key = 'jump_hosts'").fetchone()
-    if row is None:
+    seeded = conn.execute("SELECT 1 FROM config_kv WHERE key = '__seeded'").fetchone()
+    if seeded is None:
         logger.info("No data in DB, inserting DEFAULT_CONFIG seed")
         for key, value in DEFAULT_CONFIG.items():
             conn.execute(
                 "INSERT OR IGNORE INTO config_kv (key, value) VALUES (?, ?)",
                 (key, json.dumps(value, ensure_ascii=False))
             )
+        conn.execute(
+            "INSERT OR IGNORE INTO config_kv (key, value) VALUES (?, ?)",
+            ("__seeded", json.dumps({"v": 1}, ensure_ascii=False))
+        )
         conn.commit()
         logger.info(f"Inserted {len(DEFAULT_CONFIG)} default config keys into DB")
     else:
@@ -259,11 +269,6 @@ def _ensure_group_servers(config: dict):
 
 
 def _apply_migrations_and_save():
+    """Phase 3e: 已退役，dovo 区域数据由 ServerGroup 表管理，systems 数据由 systems 表管理。"""
     _ensure_defaults()
     _migrate_json_to_db()
-    from app.config.repository import load_config, save_config
-    config = load_config()
-    config = _migrate_dovo_regions(config)
-    _ensure_group_field_defaults(config.get("systems", {}))
-    _ensure_group_servers(config)
-    save_config(config)

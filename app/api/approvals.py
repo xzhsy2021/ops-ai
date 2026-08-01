@@ -170,6 +170,7 @@ class MessageRoutingConfig(BaseModel):
     aliases: list[str] = []
     keywords: list[str] = []
     priority: int = 0
+    approvers: list[str] = []
 
 
 @router.get("/routing/systems", summary="查询所有系统的路由配置")
@@ -186,6 +187,7 @@ def list_routing_configs(
             "aliases": routing.get("aliases", []),
             "keywords": routing.get("keywords", []),
             "priority": routing.get("priority", 0),
+            "approvers": routing.get("approvers", []),
             "services": [
                 {
                     "service_name": svc.get("name", ""),
@@ -193,6 +195,7 @@ def list_routing_configs(
                     "aliases": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("aliases", []),
                     "keywords": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("keywords", []),
                     "priority": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("priority", 0),
+                    "approvers": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("approvers", []),
                 }
                 for svc in cfg.get("services", [])
             ],

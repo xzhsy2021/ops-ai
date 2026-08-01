@@ -49,7 +49,7 @@ type PolicyPreviewResult = {
   required_scopes?: string[]
 }
 
-export type TokenTemplate = {
+type TokenTemplate = {
   key: string
   name: string
   description?: string
@@ -57,96 +57,97 @@ export type TokenTemplate = {
   scopes: string[]
   allow_write: boolean
   allow_prod: boolean
-  expires_in_days?: number
+  expires_in_days: number
 }
 
+const DEFAULT_SCOPES = ['ops:read', 'ops:write']
 const FALLBACK_TOKEN_TEMPLATES: TokenTemplate[] = [
   {
     key: 'readonly-ai',
     name: 'Readonly AI',
-    description: 'Read-only diagnostics, server inventory, reports, audit and risk context.',
-    notes: 'Path A inspection execution is blocked.',
+    description: '只读 AI/Agent 接入',
+    notes: '仅 ops:read，不能跑巡检 execute、不能写入',
+    scopes: ['ops:read'],
     allow_write: false,
     allow_prod: false,
     expires_in_days: 90,
-    scopes: ['ops:read', 'audit:read', 'server:read'],
   },
   {
     key: 'inspection-ai',
     name: 'Inspection AI',
-    description: 'Routine MCP inspection assistant with Path A1 (custom) and Path A2 (profile) entry points plus read evidence tools.',
-    notes: 'Path A1 (run_server/run_servers_batch) and Path A2 (profile.preview + profile.run) both require exact confirm_text. Use A1 for custom scope, A2 for daily/weekly/monthly preset profiles.',
+    description: '巡检 Agent 接入',
+    notes: 'ops:read + ops:write + server:read + audit:read，可跑 Path A 巡检',
+    scopes: ['ops:read', 'ops:write', 'server:read', 'audit:read'],
     allow_write: true,
     allow_prod: false,
     expires_in_days: 90,
-    scopes: ['ops:read', 'ops:write', 'server:read', 'audit:read'],
   },
   {
     key: 'operator-human',
     name: 'Operator Human',
-    description: 'Human-operated token for planning, precheck and queued operational actions.',
-    notes: 'Does not include deploy:execute.',
+    description: '运维人员接入',
+    notes: '允许发布计划/预检/执行，不含生产环境',
+    scopes: ['ops:read', 'ops:write', 'server:read', 'audit:read', 'package:write', 'deploy:plan', 'deploy:precheck', 'deploy:execute'],
     allow_write: true,
     allow_prod: false,
-    expires_in_days: 30,
-    scopes: ['ops:read', 'ops:write', 'server:read', 'audit:read', 'deploy:plan', 'deploy:precheck'],
+    expires_in_days: 90,
   },
   {
     key: 'admin-breakglass',
     name: 'Admin Breakglass',
-    description: 'Short-lived emergency token for admin-only operations.',
-    notes: 'Use only for emergency windows; revoke immediately after use.',
+    description: '管理员紧急接入',
+    notes: '全部权限，含生产环境，仅在紧急情况下使用',
+    scopes: ['ops:read', 'ops:write', 'server:read', 'server:write', 'audit:read', 'package:write', 'package:cleanup', 'deploy:plan', 'deploy:precheck', 'deploy:execute', 'db:write'],
     allow_write: true,
     allow_prod: true,
     expires_in_days: 7,
-    scopes: ['*'],
   },
 ]
 
-const DANGEROUS_SCOPES = ['deploy:execute', 'config:write', 'server:write', 'package:write', 'package:cleanup', 'db:write', '*']
-const DEFAULT_SCOPES = FALLBACK_TOKEN_TEMPLATES[0].scopes
 const SCOPE_LABELS: Record<string, string> = {
-  '*': '全部权限',
-  'ops:read': '运维读取',
-  'ops:write': '运维写入',
-  'audit:read': '审计读取',
-  'server:read': '服务器读取',
-  'server:write': '服务器写入',
-  'deploy:plan': '发布计划',
-  'deploy:precheck': '发布预检',
-  'deploy:execute': '发布执行',
-  'config:write': '配置写入',
-  'package:write': '包写入',
-  'package:cleanup': '包清理',
-  'db:write': '数据库写入',
+  'ops:read': 'ops:读',
+  'ops:write': 'ops:写',
+  'server:read': '服务器:读',
+  'server:write': '服务器:写',
+  'audit:read': '审计:读',
+  'package:write': '包:写',
+  'package:cleanup': '包:清理',
+  'deploy:plan': '部署:计划',
+  'deploy:precheck': '部署:预检',
+  'deploy:execute': '部署:执行',
+  'db:write': 'DB:写',
 }
 
-function scopesToText(scopes?: string[]) {
+const DANGEROUS_SCOPES = new Set(['server:write', 'package:cleanup', 'deploy:execute', 'db:write'])
+
+function scopesToText(scopes: string[]): string {
   return (scopes || []).join('\n')
 }
 
-function textToScopes(text: string) {
+function textToScopes(text: string): string[] {
   return text
     .split(/[\n,\s]+/)
-    .map((x) => x.trim())
+    .map((s) => s.trim())
     .filter(Boolean)
 }
 
-function formatTime(value?: string) {
-  return value ? new Date(value).toLocaleString() : '-'
-}
-
-function hasDangerousScope(text: string) {
-  return textToScopes(text).some((scope) => DANGEROUS_SCOPES.includes(scope.trim()))
-}
-
-function formatScopeLabel(scope: string) {
+function formatScopeLabel(scope: string): string {
   return SCOPE_LABELS[scope] || scope
 }
 
-function templateTitle(tpl: TokenTemplate) {
-  const labels = (tpl.scopes || []).map(formatScopeLabel).join('、')
-  return [tpl.description, tpl.notes, labels ? `权限：${labels}` : ''].filter(Boolean).join(' ')
+function hasDangerousScope(text: string): boolean {
+  return textToScopes(text).some((s) => DANGEROUS_SCOPES.has(s))
+}
+
+function templateTitle(tpl: TokenTemplate): string {
+  return [tpl.description, tpl.notes].filter(Boolean).join(' — ')
+}
+
+function formatTime(s?: string): string {
+  if (!s) return '-'
+  const d = new Date(s)
+  if (isNaN(d.getTime())) return s
+  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 export function ToolTokenPanel({
@@ -194,16 +195,16 @@ export function ToolTokenPanel({
   const [editRoomInput, setEditRoomInput] = useState('')
   const [previewing, setPreviewing] = useState(false)
   const [policyPreview, setPolicyPreview] = useState<PolicyPreviewResult | null>(null)
+  const [showCreateModal, setShowCreateModal] = useState(false)
   const activeCount = useMemo(() => tokens.filter((x) => x.status === 'active').length, [tokens])
 
-  // Room-ID chip helpers: accept a single room id (raw, no chip syntax) per
-  // submission. Backend normalizes (strips blanks, dedupes), so we just
-  // mirror that contract here to keep the UI consistent.
+  // Room-ID chip helpers
   const pushRoom = (setter: (v: (prev: string[]) => string[]) => void) => {
-    const raw = (editing ? editRoomInput : roomInput).trim()
+    const isEdit = editing !== null
+    const raw = (isEdit ? editRoomInput : roomInput).trim()
     if (!raw) return
     setter((prev) => (prev.includes(raw) ? prev : [...prev, raw]))
-    if (editing) setEditRoomInput('')
+    if (isEdit) setEditRoomInput('')
     else setRoomInput('')
   }
   const popRoom = (
@@ -304,6 +305,20 @@ export function ToolTokenPanel({
     setEditBoundRooms(Array.isArray(token.bound_room_ids) ? [...token.bound_room_ids] : [])
   }
 
+  const openCreate = () => {
+    // 重置新建表单为默认值
+    setName('')
+    setDescription('')
+    setScopesText(scopesToText(DEFAULT_SCOPES))
+    setAllowWrite(false)
+    setAllowProd(false)
+    setExpiresDays(90)
+    setBoundRooms([])
+    setRoomInput('')
+    setPolicyPreview(null)
+    setShowCreateModal(true)
+  }
+
   const handleGenerate = async () => {
     if (!name.trim()) return
     setGenerating(true)
@@ -321,6 +336,7 @@ export function ToolTokenPanel({
       setDescription('')
       setBoundRooms([])
       setRoomInput('')
+      setShowCreateModal(false)
     } finally {
       setGenerating(false)
     }
@@ -384,86 +400,9 @@ export function ToolTokenPanel({
       <div className="card-header">
         <div>
           <h2>Tool Token</h2>
-          <span>{tokens.length} 个令牌，{activeCount} 个可用。全局开关决定能力可见性，Token 权限范围决定 MCP/AI 实际可调用能力。</span>
+          <span>{tokens.length} 个令牌，{activeCount} 个可用</span>
         </div>
-      </div>
-
-      <div className="alert alert-info">
-        <strong>推荐模板：</strong>
-        <span style={{ marginLeft: 8 }}>
-          日常巡检优先使用 Inspection AI。执行类工具仍需精确 <code>confirm_text</code>；只读令牌不能创建巡检任务。
-        </span>
-      </div>
-
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        {templates.map((tpl) => (
-          <button key={tpl.key} className="btn btn-subtle" type="button" title={templateTitle(tpl)} onClick={() => applyTemplate(tpl)}>
-            使用 {tpl.name}
-          </button>
-        ))}
-      </div>
-
-      <div className="form-compact">
-        <div className="form-grid form-grid--compact">
-          <div className="field-item">
-            <label>Token 名称</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="输入令牌名称..." />
-          </div>
-          <div className="field-item">
-            <label>用途说明</label>
-            <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="可选，说明令牌用途..." />
-          </div>
-          <div className="field-item">
-            <label>有效天数</label>
-            <input type="number" min={0} max={3650} value={expiresDays} onChange={(e) => setExpiresDays(Number(e.target.value || 0))} />
-          </div>
-        </div>
-        <div className="field-item">
-          <label>权限范围</label>
-          <textarea rows={5} value={scopesText} onChange={(e) => setScopesText(e.target.value)} placeholder="ops:read&#10;ops:write&#10;server:read" />
-          <div className="scope-chip-row">
-            {textToScopes(scopesText).map((scope) => <span className="scope-chip" key={scope} title={scope}>{formatScopeLabel(scope)}</span>)}
-          </div>
-          {hasDangerousScope(scopesText) && (
-            <div style={{ color: 'var(--text-warning)', fontSize: 13, marginTop: 4 }}>
-              检测到高危权限，创建或修改该令牌需要管理员权限。
-            </div>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-            <input type="checkbox" checked={allowWrite} onChange={(e) => setAllowWrite(e.target.checked)} />
-            允许写操作工具
-          </label>
-          <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-            <input type="checkbox" checked={allowProd} onChange={(e) => setAllowProd(e.target.checked)} />
-            允许生产操作
-          </label>
-        </div>
-        <div className="field-item">
-          <label>绑定 Element 房间 ID（qclaw 限定）</label>
-          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
-            留空表示不限制；填写后，此 Token 仅能在指定 Element 房间被 qclaw 用于路由/审批调用。
-            推荐每个 qclaw Token 只绑定一个房间。
-          </div>
-          {renderRoomChips(boundRooms, setBoundRooms, roomInput, setRoomInput)}
-        </div>
-        <button className="btn btn-primary" disabled={!name.trim() || generating} onClick={handleGenerate}>
-          {generating ? '生成中...' : '生成 Token'}
-        </button>
-        <div className="alert alert-info">
-          <strong>权限预览</strong>
-          <span style={{ marginLeft: 8 }}>检查当前草稿是否可调用 <code>ops.inspection.run_server</code>。</span>
-          <button className="btn btn-subtle" style={{ marginLeft: 8 }} type="button" disabled={previewing} onClick={previewCurrentPolicy}>
-            {previewing ? '检查中...' : '预览'}
-          </button>
-          {policyPreview && (
-            <div style={{ marginTop: 8 }}>
-              <span className={`tag ${policyPreview.allowed ? 'tag-success' : 'tag-warning'}`}>{policyPreview.allowed ? '允许' : '拦截'}</span>
-              <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>{policyPreview.blocked_reason || `${policyPreview.risk || '-'} / ${policyPreview.category || '-'}`}</span>
-            </div>
-          )}
-        </div>
+        <button className="btn btn-primary" onClick={openCreate}>+ 新建 Token</button>
       </div>
 
       <div className="table-scroll">
@@ -481,7 +420,7 @@ export function ToolTokenPanel({
           </thead>
           <tbody>
             {loading && tokens.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</td></tr>}
-            {!loading && tokens.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无 Token</td></tr>}
+            {!loading && tokens.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无 Token，点击右上角「新建 Token」创建</td></tr>}
             {tokens.map((token) => (
               <tr key={token.id || token.name}>
                 <td>
@@ -539,6 +478,106 @@ export function ToolTokenPanel({
         </table>
       </div>
 
+      {/* 新建 Token 弹窗 */}
+      {showCreateModal && (
+        <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }}>
+          <div className="card" style={{ width: 'min(920px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }}>
+            <div className="card-header">
+              <div>
+                <h2>新建 Tool Token</h2>
+                <span>创建后 Token 字符串仅展示一次，请妥善保存。</span>
+              </div>
+              <button className="btn btn-subtle" onClick={() => setShowCreateModal(false)}>关闭</button>
+            </div>
+
+            <div className="alert alert-info">
+              <strong>推荐模板：</strong>
+              <span style={{ marginLeft: 8 }}>
+                日常巡检优先使用 Inspection AI。执行类工具仍需精确 <code>confirm_text</code>；只读令牌不能创建巡检任务。
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {templates.map((tpl) => (
+                <button key={tpl.key} className="btn btn-subtle" type="button" title={templateTitle(tpl)} onClick={() => applyTemplate(tpl)}>
+                  使用 {tpl.name}
+                </button>
+              ))}
+            </div>
+
+            <div className="form-grid form-grid--compact">
+              <div className="field-item">
+                <label>Token 名称</label>
+                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="输入令牌名称..." />
+              </div>
+              <div className="field-item">
+                <label>用途说明</label>
+                <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="可选，说明令牌用途..." />
+              </div>
+              <div className="field-item">
+                <label>有效天数</label>
+                <input type="number" min={0} max={3650} value={expiresDays} onChange={(e) => setExpiresDays(Number(e.target.value || 0))} />
+              </div>
+            </div>
+
+            <div className="field-item">
+              <label>权限范围</label>
+              <textarea rows={5} value={scopesText} onChange={(e) => setScopesText(e.target.value)} placeholder="ops:read&#10;ops:write&#10;server:read" />
+              <div className="scope-chip-row">
+                {textToScopes(scopesText).map((scope) => <span className="scope-chip" key={scope} title={scope}>{formatScopeLabel(scope)}</span>)}
+              </div>
+              {hasDangerousScope(scopesText) && (
+                <div style={{ color: 'var(--text-warning)', fontSize: 13, marginTop: 4 }}>
+                  检测到高危权限，创建或修改该令牌需要管理员权限。
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={allowWrite} onChange={(e) => setAllowWrite(e.target.checked)} />
+                允许写操作工具
+              </label>
+              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <input type="checkbox" checked={allowProd} onChange={(e) => setAllowProd(e.target.checked)} />
+                允许生产操作
+              </label>
+            </div>
+
+            <div className="field-item">
+              <label>绑定 Element 房间 ID（qclaw 限定）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+                留空表示不限制；填写后，此 Token 仅能在指定 Element 房间被 qclaw 用于路由/审批调用。
+                推荐每个 qclaw Token 只绑定一个房间。
+              </div>
+              {renderRoomChips(boundRooms, setBoundRooms, roomInput, setRoomInput)}
+            </div>
+
+            <div className="alert alert-info">
+              <strong>权限预览</strong>
+              <span style={{ marginLeft: 8 }}>检查当前草稿是否可调用 <code>ops.inspection.run_server</code>。</span>
+              <button className="btn btn-subtle" style={{ marginLeft: 8 }} type="button" disabled={previewing} onClick={previewCurrentPolicy}>
+                {previewing ? '检查中...' : '预览'}
+              </button>
+              {policyPreview && (
+                <div style={{ marginTop: 8 }}>
+                  <span className={`tag ${policyPreview.allowed ? 'tag-success' : 'tag-warning'}`}>{policyPreview.allowed ? '允许' : '拦截'}</span>
+                  <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>{policyPreview.blocked_reason || `${policyPreview.risk || '-'} / ${policyPreview.category || '-'}`}</span>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="btn btn-subtle" onClick={() => setShowCreateModal(false)}>取消</button>
+              <button className="btn btn-primary" disabled={!name.trim() || generating} onClick={handleGenerate}>
+                {generating ? '生成中...' : '生成 Token'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 编辑 Token 弹窗 */}
       {editing && (
         <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }}>
           <div className="card" style={{ width: 'min(920px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }}>

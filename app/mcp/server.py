@@ -144,6 +144,12 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.tail_service_log": "【路径 B 补充】Read recent lines from an allowed service log path. 中文: 查看服务日志/读取日志尾行.",
     "ops.run_health_check": "【路径 B 补充】Run configured health checks for a service or deployment target. 中文: 运行健康检查/服务健康检测.",
 
+    # ── Service Control (restart / stop / start / update) ──
+    "ops.restart_service": "Restart a service on a specified server. Supports Docker Compose / PM2 / process_keyword. High risk; requires human approval. 中文: 重启服务/重启应用.",
+    "ops.stop_service": "Stop a service on a specified server. Supports Docker Compose / PM2 / process_keyword. High risk; requires human approval. 中文: 停止服务/关闭应用.",
+    "ops.start_service": "Start a service on a specified server. Supports Docker Compose / PM2 / process_keyword. High risk; requires human approval. 中文: 启动服务/开启应用.",
+    "ops.update_service_runtime": "Update service runtime: pull latest image and recreate container (Docker Compose) or reload (PM2). Optional compose_service targets a single Docker Compose service. High risk; requires human approval. 中文: 更新服务/拉取镜像/重新部署容器/滚动更新.",
+
     # ── Audit & History ──
     "ops.list_audit_logs": "List audit logs with filters. 中文: 查看审计日志/操作审计/操作记录.",
     "ops.list_tool_calls": "List historical OPS tool calls and their audit status. 中文: 查看工具调用历史/AI操作记录.",
@@ -157,10 +163,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.list_report_types": "List available report types that can be generated. 中文: 查看可生成报告类型.",
     "ops.generate_report": "Generate a report artifact (diagnostics, AI analysis, operation chain, or deployment). Low risk. 中文: 生成报告/创建报告.",
 
-    # ── Runtime & Storage ──
-    "ops.get_runtime_usage": "Read runtime directory usage and cache statistics. 中文: 查看运行时使用/缓存统计.",
-    "ops.get_storage_usage": "Read OPS storage usage including database, backups, exports, packages, and logs. 中文: 查看存储使用/磁盘占用.",
-    "ops.cleanup_runtime_artifacts": "Clean expired runtime artifacts. Low risk. 中文: 清理运行时文件/清理缓存.",
+    # ── Runtime & Storage (removed - use ops.exec_remote for remote operations) ──
 
     # ── MCP Connection ──
     "ops.connection_status": "Check whether the local MCP bridge can reach the OPS API using the configured base URL and token. 中文: 连接状态/MCP连通性检查.",
@@ -230,22 +233,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.ai.generate_report_from_analysis": "Generate a report from an AI analysis result. Low risk. 中文: 从AI分析生成报告/分析报告.",
     "ops.ai.find_similar_analysis": "Find similar AI analysis records. Low risk. 中文: 查找相似分析/相似分析记录.",
 
-    # ── Agent Tools ──
-    "ops.agent.list": "List registered agents and their online status. Currently disabled. 中文: 查看Agent列表/Agent状态.",
-    "ops.agent.get": "Get agent detail by id. Currently disabled. 中文: 查看Agent详情.",
-    "ops.agent.get_status": "Get agent online status summary. Currently disabled. 中文: 查看Agent在线状态.",
-    "ops.agent.list_tasks": "List agent tasks. Currently disabled. 中文: 查看Agent任务列表.",
-    "ops.agent.get_task": "Get one agent task detail. Currently disabled. 中文: 查看Agent任务详情.",
-    "ops.agent.get_logs": "Get agent log summary. Currently disabled. 中文: 查看Agent日志.",
-    "ops.agent.health_check": "Check if agent functionality is enabled. Currently disabled. 中文: Agent健康检查/Agent功能状态.",
-
-    # ── Workflow Tools ──
-    "ops.workflow.inspect": MCP_TOOL_DESCRIPTION_OVERRIDES["ops.workflow.inspect"],
-    "ops.workflow.generate_project_health_brief": "Generate a lightweight project health brief using read-only tools. Low risk. 中文: 项目健康分析/项目状态简报.",
-    "ops.workflow.analyze_failed_deploy": "Analyze a failed deployment using logs, diagnostics, and risk data. Medium risk. 中文: 发布失败分析/部署失败分析.",
-    "ops.workflow.inspect_project_security": "Inspect project security posture using inspection and risk data. Medium risk. 中文: 项目安全巡检分析/安全评估.",
-    "ops.workflow.triage_open_risks": "Triage open risks by severity and generate prioritized action items. Low risk. 中文: 风险分流工作流/风险优先处理.",
-    "ops.workflow.generate_monthly_ops_report": "Generate a monthly OPS report covering deployments, inspections, risks, and system health. Low risk. 中文: 月度运维报告/月报.",
+    # ── Agent & Workflow Tools (removed - pseudo-orchestration, use direct tools instead) ──
 
     # ── Connection Management ──
     "ops.list_connections": "List database connections with optional keyword and environment filters. 中文: 查看数据库连接列表/连接列表.",
@@ -293,20 +281,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.update_pipeline": "Update pipeline configuration. High risk; requires human approval. 中文: 更新Pipeline/修改流程.",
     "ops.delete_pipeline": "Delete a pipeline. Critical risk; requires human approval and confirm_text. 中文: 删除Pipeline/移除流程.",
 
-    # ── Inspection Tier Schedule (3-tier DAILY/WEEKLY/MONTHLY, DB-driven) ──
-    # 配置存储在 DB（inspection_tier_schedules / inspection_notification_routes /
-    # inspection_cascade_policies），不再依赖 yaml。同一目标服务器池，
-    # 真正区分三级的是 categories 巡检项组合。
-    "ops.tier.list": "List 3-tier inspection schedules (DAILY/WEEKLY/MONTHLY) stored in DB. Returns cron, categories, thresholds, retention, last_run info. Read-only. 中文: 查询三级巡检调度/日周月配置.",
-    "ops.tier.upsert": "Create or update a 3-tier inspection schedule by name. DB single source. High risk; requires admin + human approval. 中文: 新建/更新三级巡检调度.",
-    "ops.tier.delete": "Soft-delete a 3-tier inspection schedule (sets enabled=False). High risk; requires admin + human approval. 中文: 禁用三级巡检调度.",
-    "ops.notif_route.list": "List inspection notification routes (severity -> channels/recipients/SLA). Read-only. 中文: 查询巡检通知路由.",
-    "ops.notif_route.upsert": "Create or update a notification route by (severity, tier). High risk; requires admin + human approval. 中文: 新建/更新通知路由.",
-    "ops.cascade.list": "List cross-tier cascade policies (high_count -> trigger_monthly, etc). Read-only. 中文: 查询跨级联策略.",
-    "ops.cascade.upsert": "Create or update a cascade policy by name. High risk; requires admin + human approval. 中文: 新建/更新跨级联策略.",
-    "ops.tier.run_now": "Trigger a 3-tier inspection immediately, bypassing cron. Returns path A run_id. High risk; requires admin + human approval. 中文: 立即触发一次三级巡检.",
-    "ops.tier.approve": "Unlock a tier that requires_approval (e.g. MONTHLY first run). High risk; requires admin + human approval. 中文: 审批解锁月巡检.",
-    "ops.tier.history": "Query historical inspection runs for a specific tier (DAILY/WEEKLY/MONTHLY). Read-only. 中文: 查三级巡检历史/日周月执行记录.",
+    # ── Inspection Tier Schedule (removed - use direct inspection tools instead) ──
 }
 
 
@@ -466,8 +441,11 @@ def _tools_for_mcp(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     global _cached_capability_etag, _cached_capability_data
     params = params or {}
     cursor = params.get("cursor")
-    profile = str(params.get("profile") or "daily_ops")
-    path = "/api/v2/tools?format=mcp&limit=100&profile=" + urllib.parse.quote(profile)
+    # Default to ai_full: AI agent sees all tools; execution permission is
+    # enforced per-call with structured guidance. Override with OPS_MCP_PROFILE.
+    default_profile = os.getenv("OPS_MCP_PROFILE", "ai_full")
+    profile = str(params.get("profile") or default_profile)
+    path = "/api/v2/tools?format=mcp&limit=200&profile=" + urllib.parse.quote(profile)
     if cursor is not None:
         path += "&cursor=" + str(cursor)
     try:

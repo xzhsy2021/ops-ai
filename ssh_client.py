@@ -469,7 +469,7 @@ class SSHConnectionPool:
     def _resolve_jump_config(self, server_config: dict) -> dict:
         """复制 server_config 并将 jump_host（字符串）解析为 dict，
         让后续的 pool_key 计算和连接创建都使用已解析后的凭据信息。
-        旧 config_kv 查不到时回退到 jump_hosts DB 表（Phase 3.g SSOT）。
+        Phase 3.g SSOT: 跳板机和服务器均从 DB 表查询，不再读 config_kv legacy 桶。
         """
         resolved = dict(server_config)
         jump = resolved.get("jump") or resolved.get("jump_host")
@@ -477,68 +477,46 @@ class SSHConnectionPool:
             return resolved
 
         if isinstance(jump, str):
-            from config_manager import load_config_cached
-            cfg = load_config_cached()
-            found = False
-            for jh in cfg.get("jump_hosts", []):
-                if jh.get("name") == jump:
-                    resolved["jump"] = jh
-                    resolved["jump_host"] = jh
-                    found = True
-                    break
-            if not found:
-                for srv in cfg.get("servers", []):
-                    if srv.get("name") == jump:
-                        j = _server_to_jump_config(srv)
-                        resolved["jump"] = j
-                        resolved["jump_host"] = j
-                        found = True
-                        break
-            # Phase 3.g SSOT fallback: 旧 config_kv 查不到时，去新 jump_hosts DB 表查
-            if not found:
-                try:
-                    from app.config.servers import get_jump_host_by_name
-                    db_jh = get_jump_host_by_name(jump)
-                    if db_jh and _has_auth(db_jh):
-                        resolved["jump"] = db_jh
-                        resolved["jump_host"] = db_jh
-                    elif db_jh:
-                        # 仅当 DB 条目带凭据时才采纳，否则回退到老行为（直连）
-                        # 避免一条没配齐凭据的孤儿跳板机把所有走该名称的服务器都打挂
-                        logger.warning(
-                            f"jump_host '{jump}' 在 DB 中存在但缺少认证凭据，"
-                            f"将按直连处理以兼容老配置"
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to resolve jump_host '{jump}' from DB: {e}")
+            # 字符串 jump_host：先查 jump_hosts DB 表，再查 servers DB 表
+            try:
+                from app.config.servers import get_jump_host_by_name, get_server_as_jump_by_name
+                db_jh = get_jump_host_by_name(jump)
+                if db_jh and _has_auth(db_jh):
+                    resolved["jump"] = db_jh
+                    resolved["jump_host"] = db_jh
+                elif db_jh:
+                    # 仅当 DB 条目带凭据时才采纳，否则回退到老行为（直连）
+                    logger.warning(
+                        f"jump_host '{jump}' 在 DB 中存在但缺少认证凭据，"
+                        f"将按直连处理以兼容老配置"
+                    )
+                else:
+                    # jump_hosts 表查不到，尝试在 servers 表中找同名 server 作为跳板
+                    srv_jump = get_server_as_jump_by_name(jump)
+                    if srv_jump and _has_auth(srv_jump):
+                        resolved["jump"] = srv_jump
+                        resolved["jump_host"] = srv_jump
+            except Exception as e:
+                logger.warning(f"Failed to resolve jump_host '{jump}' from DB: {e}")
         else:  # isinstance(jump, dict)
-            from config_manager import load_config_cached
-            cfg = load_config_cached()
             if not _has_auth(jump):
                 jump_name = jump.get("name")
                 jump_host = jump.get("host")
                 jump_port = jump.get("port", 22)
                 matched = None
-                if jump_name:
-                    for jh in cfg.get("jump_hosts", []):
-                        if jh.get("name") == jump_name:
-                            matched = jh
-                            break
-                    if not matched:
-                        for srv in cfg.get("servers", []):
-                            if srv.get("name") == jump_name:
-                                matched = _server_to_jump_config(srv)
-                                break
-                if not matched and jump_host:
-                    for jh in cfg.get("jump_hosts", []):
-                        if jh.get("host") == jump_host and jh.get("port", 22) == jump_port:
-                            matched = jh
-                            break
-                    if not matched:
-                        for srv in cfg.get("servers", []):
-                            if srv.get("host") == jump_host and srv.get("port", 22) == jump_port:
-                                matched = _server_to_jump_config(srv)
-                                break
+                try:
+                    from app.config.servers import (
+                        get_jump_host_by_name,
+                        get_jump_host_by_host,
+                        get_server_as_jump_by_name,
+                        get_server_as_jump_by_host,
+                    )
+                    if jump_name:
+                        matched = get_jump_host_by_name(jump_name) or get_server_as_jump_by_name(jump_name)
+                    if not matched and jump_host:
+                        matched = get_jump_host_by_host(jump_host, jump_port) or get_server_as_jump_by_host(jump_host, jump_port)
+                except Exception as e:
+                    logger.warning(f"Failed to resolve jump_host dict from DB: {e}")
                 if matched:
                     merged = dict(jump)
                     for k in ("key", "key_file", "password", "key_content"):

@@ -111,35 +111,25 @@ def get_package_checksum(args, ctx, db):
 
 
 @registry.register(
-    name="ops.upload_package",
-    title="Upload local deploy package",
-    description="上传发布包到 OPS 文件中心。stdio MCP 可传 local_path；HTTP 工具可传 content_base64。上传成功后返回 package_name 和 sha256。",
-    scopes=["package:write"],
-    risk="high",
-    category="package_write",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    data_sensitivity="sensitive",
+    name="ops.get_package_retention_preview",
+    description="预览发布包清理候选，不删除文件。会保护运行中、失败重试、回滚候选和最近成功发布包。",
+    scopes=["ops:read"],
+    risk="medium",
+    category="package_retention",
     input_schema={
         "type": "object",
-        "properties": {
-            "local_path": {"type": "string", "description": "stdio MCP 本地路径，例如 D:\\packages\\system.tar.gz"},
-            "filename": {"type": "string", "description": "HTTP/base64 上传时的文件名，可选"},
-            "content_base64": {"type": "string", "description": "HTTP 工具上传使用的 base64 内容；大文件建议使用 stdio MCP local_path"},
-            "system": {"type": "string"},
-            "service": {"type": "string"},
-            "overwrite": {"type": "boolean"},
-            "dry_run": {"type": "boolean", "description": "stdio MCP 本地上传预检，不实际上传"},
-            "calculate_sha256": {"type": "boolean", "description": "stdio MCP 预检/上传前是否计算 SHA256"},
-        },
+        "properties": {"policy": {"type": "object"}},
         "additionalProperties": False,
     },
 )
+def get_package_retention_preview(args, ctx, db):
+    return preview_package_cleanup(db, args.get("policy") or {})
+
+
+# ─── Utility: upload_package (used by deploy_tools.py, not registered as AI tool) ───
+
 def upload_package(args, ctx, db):
-    # stdio MCP intercepts local_path and uploads via multipart before reaching
-    # this handler. This backend handler keeps HTTP/base64 and server-local path
-    # support for non-MCP clients.
+    """上传发布包到 OPS 文件中心。供 deploy_tools.py 内部调用。"""
     system = args.get("system") or ""
     service = args.get("service") or ""
     uploaded_by = ctx.username or ctx.token_owner or "tool"
@@ -190,68 +180,3 @@ def upload_package(args, ctx, db):
     raise HTTPException(status_code=400, detail="Provide local_path for stdio MCP or content_base64 for HTTP tools")
 
 
-@registry.register(
-    name="ops.get_package_retention_preview",
-    description="预览发布包清理候选，不删除文件。会保护运行中、失败重试、回滚候选和最近成功发布包。",
-    scopes=["ops:read"],
-    risk="medium",
-    category="package_retention",
-    input_schema={
-        "type": "object",
-        "properties": {"policy": {"type": "object"}},
-        "additionalProperties": False,
-    },
-)
-def get_package_retention_preview(args, ctx, db):
-    return preview_package_cleanup(db, args.get("policy") or {})
-
-
-@registry.register(
-    name="ops.cleanup_packages",
-    description="按保留策略清理可安全删除的本地发布包。默认 dry_run；真实清理需要 dry_run=false、写权限和能力开关。",
-    scopes=["package:cleanup"],
-    risk="critical",
-    category="package_cleanup",
-    write=True,
-    requires_confirmation=True,
-    requires_human_approval=True,
-    data_sensitivity="sensitive",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "policy": {"type": "object"},
-            "dry_run": {"type": "boolean"},
-            "confirm_text": {"type": "string", "description": "dry_run=false 真实清理时必须填写：CLEANUP PACKAGES"},
-        },
-        "additionalProperties": False,
-    },
-)
-def cleanup_packages_tool(args, ctx, db):
-    return cleanup_packages(db, args.get("policy") or {}, dry_run=bool(args.get("dry_run", True)), actor=ctx.username or ctx.token_owner)
-
-
-@registry.register(
-    name="ops.protect_package",
-    description="手动保护或取消保护某个发布包，受保护包不会被清理。",
-    scopes=["package:write"],
-    risk="high",
-    category="package_write",
-    write=True,
-    requires_confirmation=True,
-    input_schema={
-        "type": "object",
-        "properties": {"package_name": {"type": "string"}, "protected": {"type": "boolean"}, "confirm_text": {"type": "string", "description": "确认短语：PROTECT PACKAGE <package> 或 UNPROTECT PACKAGE <package>"}},
-        "required": ["package_name", "confirm_text"],
-        "additionalProperties": False,
-    },
-)
-def protect_package(args, ctx, db):
-    name = safe_package_name(args.get("package_name"))
-    row = db.query(DeployPackage).filter(DeployPackage.package_name == name).first()
-    if not row and os.path.isfile(package_path(name)):
-        row = upsert_package_metadata(db, name, uploaded_by=ctx.username or ctx.token_owner)
-    if not row:
-        raise HTTPException(status_code=404, detail="Package not found")
-    row.protected = bool(args.get("protected", True))
-    db.commit()
-    return {"package_name": name, "protected": bool(row.protected)}

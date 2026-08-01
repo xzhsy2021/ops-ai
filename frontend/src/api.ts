@@ -370,8 +370,8 @@ export const maintenance = {
 export const serverWorkbench = {
   info: (name: string) => api.get(`/servers/${encodeURIComponent(name)}/info`),
   processes: (name: string) => api.get(`/servers/${encodeURIComponent(name)}/processes`),
-  processAction: (name: string, process: string, action: 'start' | 'stop' | 'restart' | 'reload') =>
-    api.post(`/servers/${encodeURIComponent(name)}/processes/action`, { process, action }),
+  processAction: (name: string, process: string, action: 'start' | 'stop' | 'restart', mode?: string) =>
+    api.post(`/servers/${encodeURIComponent(name)}/processes/action`, { process, action, mode }),
   exec: (name: string, command: string, timeout?: number) =>
     api.post(`/servers/${encodeURIComponent(name)}/exec`, { command, timeout }),
 

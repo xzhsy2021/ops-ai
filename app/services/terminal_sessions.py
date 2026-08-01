@@ -31,9 +31,13 @@ def create_session(
     hop_count: int,
     cols: int = 120,
     rows: int = 30,
+    max_retries: int = 3,
+    per_attempt_timeout: int = None,
 ) -> dict:
     from app.services.remote_access import create_exec_client
-    ssh = create_exec_client(server_config)
+    ssh = create_exec_client(server_config,
+                             max_retries=max_retries,
+                             per_attempt_timeout=per_attempt_timeout)
     if not ssh:
         raise RuntimeError(f"Cannot connect to {server_name}")
 

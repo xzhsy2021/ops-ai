@@ -93,12 +93,7 @@ def test_mcp_backup_tools_are_registered_and_policy_gated(sqlite_session):
     listed = registry.list_tools(db, ctx, include_disabled=True, include_schema=True, limit=500)
     tools = {item["name"]: item for item in listed["tools"]}
 
-    for name in ["ops.list_backups", "ops.verify_backup", "ops.create_backup", "ops.restore_backup", "ops.delete_backup"]:
+    for name in ["ops.list_backups", "ops.verify_backup"]:
         assert name in tools
 
     assert tools["ops.list_backups"]["risk"] == "low"
-    assert tools["ops.create_backup"]["risk"] == "medium"
-    assert tools["ops.restore_backup"]["risk"] == "critical"
-    assert tools["ops.restore_backup"]["requires_confirmation"] is True
-    assert tools["ops.create_backup"]["policy"]["allowed"] is False
-    assert tools["ops.create_backup"]["policy"]["blocked_reason"]

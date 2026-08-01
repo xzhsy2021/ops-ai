@@ -29,7 +29,7 @@ The default capability profile is no longer "read-only only".
 - Inspection profile execution (`ops.inspection.profile.run` and `ops.inspection.profile.retry_issues`) is preview-first and requires the returned `RUN <profile> <count> <fingerprint>` confirmation phrase.
 - Agent runtime tools (`ops.agent.*`) stay hidden unless `agent_runtime_enabled=true`.
 - Deploy execution, rollback, config write, server write, package cleanup, runtime cleanup, DB write/DML, and destructive deletes remain behind explicit capability gates, scopes, and confirmation.
-- `ops.workflow.inspect` is the preferred natural-language inspection entry for AI agents. It previews first and delegates execution to the audited `ops.inspection.*` tools, so `inspection_runs`, issues, reports, operation jobs, tool-call logs, and audit logs are preserved. When the user asks for all servers grouped/batched, it returns a `grouped_preview` plan and per-group next actions before any execution.
+- `ops.inspection.run_servers_batch` is the preferred inspection entry for AI agents. It works with `ops.inspection.preview_servers_batch` for preview-first confirmation. All inspection execution is audited through `inspection_runs`, issues, reports, operation jobs, tool-call logs, and audit logs.
 
 ## Release And Deployment Tools
 
@@ -66,7 +66,6 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 | HTTP tool | MCP alias | Type | Scope(s) | Needs backend | stdio offline | Risk | Recommended before | Recommended after |
 |---|---|---:|---|---:|---:|---|---|---|
 | `ops.list_servers` | `ops_list_servers` | read | `ops:read`, `server:read` | yes | no | low | - | `ops.list_server_groups`, `ops.inspection.run_servers_batch` |
-| `ops.workflow.inspect` | `ops_workflow_inspect` | workflow | `ops:read` for preview; child execution still requires `ops:write` | yes | no | medium | natural-language request | grouped preview, `ops.inspection.run_servers_batch`, merged reports |
 | `ops.list_server_groups` | `ops_list_server_groups` | read | `ops:read`, `server:read` | yes | no | low | - | filter by `group` in `ops.list_servers` |
 | `ops.inspection.overview` | `ops_inspection_overview` | read | `ops:read` | yes | no | low | - | choose inspection target |
 | `ops.inspection.categories` | `ops_inspection_categories` | read | `ops:read` | yes | no | low | - | select category codes |
@@ -95,8 +94,8 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 
 ### Recommended Inspection Workflow
 
-0. For natural-language requests such as "巡检 crypto 测试服务器并生成报告", call `ops.workflow.inspect(request=...)` first. If it returns `mode=preview`, ask the user to confirm the returned short phrase, then call `ops.workflow.inspect` again with `confirm_text`.
-1. For all-server requests such as "巡检全部服务器，按分组分批巡检并输出报告", call `ops.workflow.inspect(request=..., batch_size=..., concurrency=..., generate_report=true)`. It should route to `all_servers=true` and return `mode=grouped_preview` with one next action per group. Execute those group actions one by one; each group still uses preview-first confirmation.
+0. For natural-language requests such as "巡检 crypto 测试服务器并生成报告", call `ops.inspection.preview_servers_batch(groups=["crypto"])` first. If it returns a confirmation phrase, ask the user to confirm, then call `ops.inspection.run_servers_batch` with `confirm_text`.
+1. For all-server requests such as "巡检全部服务器，按分组分批巡检并输出报告", use `ops.inspection.preview_servers_batch(all_servers=True)` and `ops.inspection.run_servers_batch` with appropriate batch_size and concurrency.
 2. For routine grouped inspections, call `ops.inspection.profile.list`, choose a profile such as `crypto-test-daily`, then call `ops.inspection.profile.preview`.
 3. Ask the user for the returned confirmation phrase, then call `ops.inspection.profile.run` with `confirm_text`.
 4. For ad-hoc target checks, use `ops.list_server_groups`, `ops.list_servers(group="crypto")`, and `ops.inspection.list_item_configs(scope_type="SERVER")`, then call `ops.inspection.preview_servers_batch`.
@@ -110,7 +109,7 @@ Notes:
 
 - `ops.inspection.preview_servers_batch` accepts `server_ids`, `groups`, `group`, and `all_servers`, then merges targets and returns the exact short Chinese confirmation phrase for `ops.inspection.run_servers_batch`.
 - `ops.inspection.run_servers_batch` now requires the preview phrase so AI agents do not have to ask users to type a long tool-name string.
-- For all-server grouped inspections, `ops.workflow.inspect` does not blindly run every server in one high-risk call. It returns group-level next actions so each group has a visible target count, skipped count, confirmation phrase, execution record, and report path.
+- For all-server grouped inspections, use `ops.inspection.preview_servers_batch(all_servers=True)` and `ops.inspection.run_servers_batch` with groups to ensure each group has a visible target count, skipped count, confirmation phrase, execution record, and report path.
 - `ops.inspection.profile.retry_issues` keeps the selected profile categories and runtime knobs, but replaces targets with servers that still have OPEN / PROCESSING inspection issues.
 - UI one-click confirmation only changes the browser workflow. AI agents must keep using the preview-first MCP flow: read `confirmation.confirm_text` from `ops.inspection.profile.preview`, `ops.inspection.profile.retry_issues`, or `ops.inspection.preview_servers_batch`; get explicit user approval; then pass that exact value as `confirm_text` to the execution call.
 - Category values must use full uppercase codes such as `LOGIN_SECURITY`, `ACCOUNT_SECURITY`, `PROCESS_PORT`, `DISK_USAGE`, and `BACKUP`.
@@ -129,7 +128,6 @@ These tools manage DB-backed DAILY / WEEKLY / MONTHLY inspection schedules. The 
 | `ops.notif_route.upsert` | `ops_notif_route_upsert` | write | `ops:write`, `ops:admin` | high | Upsert a notification route by severity and optional tier |
 | `ops.cascade.list` | `ops_cascade_list` | read | `ops:read` | low | List cross-tier cascade policies |
 | `ops.cascade.upsert` | `ops_cascade_upsert` | write | `ops:write`, `ops:admin` | high | Upsert one cascade policy by `name` |
-| `ops.tier.run_now` | `ops_tier_run_now` | execute | `ops:write` | high | Trigger a tier inspection immediately and return the Path A run result |
 | `ops.tier.approve` | `ops_tier_approve` | write | `ops:write`, `ops:admin` | high | Approve/unlock a tier that requires approval, usually MONTHLY first run |
 | `ops.tier.history` | `ops_tier_history` | read | `ops:read` | low | Query historical inspection runs for one tier |
 

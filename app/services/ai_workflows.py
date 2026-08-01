@@ -43,7 +43,7 @@ def project_health_brief(db, ctx, registry, *, project_id: str = "", time_range:
     recommendations.append({"action": "将该分析结果保存为 AI 分析记录并在报告中心生成项目健康简报。", "risk": "low", "requires_human_approval": False})
     payload = {
         "ok": True,
-        "workflow": "ops.workflow.generate_project_health_brief",
+        "workflow": "project_health_brief",
         "target": {"type": "project", "id": project_id},
         "summary": f"项目 {project_id or '-'} 健康评分约 {score}，未闭环风险 {len(risk_items)} 个。",
         "score": score,
@@ -73,7 +73,7 @@ def failed_deploy_analysis(db, ctx, registry, *, deployment_id: str, include_log
         facts.append({"id": "fact-logs", "source_tool": "ops.get_deployment_logs", "ref": deployment_id, "content": str(logs)[:1500]})
     payload = {
         "ok": True,
-        "workflow": "ops.workflow.analyze_failed_deploy",
+        "workflow": "failed_deploy_analysis",
         "target": {"type": "deployment", "id": deployment_id},
         "summary": "已完成发布失败证据收集，请结合任务状态与日志关键错误判断根因。",
         "facts": facts,
@@ -95,7 +95,7 @@ def inspect_project_security(db, ctx, registry, *, project_id: str, time_range: 
     facts = [{"id": "fact-security-issues", "source_tool": "ops.inspection.list_issues", "ref": f"project_id={project_id}", "content": f"巡检风险 {len(issue_items or [])} 个。"}]
     payload = {
         "ok": True,
-        "workflow": "ops.workflow.inspect_project_security",
+        "workflow": "inspect_project_security",
         "target": {"type": "project", "id": project_id},
         "summary": f"项目 {project_id} 安全巡检风险 {len(issue_items or [])} 个。",
         "facts": facts,
@@ -130,7 +130,7 @@ def monthly_ops_report(db, ctx, registry, *, month: str = "", generate_report: b
     ]
     payload = {
         "ok": True,
-        "workflow": "ops.workflow.generate_monthly_ops_report",
+        "workflow": "monthly_ops_report",
         "target": {"type": "month", "id": month or "current"},
         "summary": f"{month or '当前月份'} 运维复盘已生成，包含状态、风险、巡检和报告摘要。",
         "facts": facts,

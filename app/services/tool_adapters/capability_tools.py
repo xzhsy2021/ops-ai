@@ -12,6 +12,8 @@ from app.services.tool_registry import registry
         "返回当前 Token/用户可自动发现和调用的 OPS 能力清单。"
         "可按 category 过滤；include_schema=true 时返回完整参数 schema。"
         "此工具用于不支持 MCP tools/list 的 Agent 先了解自己能调用哪些工具。"
+        "默认 profile=ai_full 返回全部工具（含 L4 高危工具的授权引导），"
+        "与 MCP tools/list 保持一致；可传 profile=daily_ops 仅返回日常运维白名单。"
     ),
     scopes=["ops:read"],
     risk="low",
@@ -30,11 +32,17 @@ from app.services.tool_registry import registry
     },
 )
 def describe_capabilities(args: Dict[str, Any], ctx, db):
+    # 默认使用 ai_full：与 MCP bridge 的 tools/list 默认 profile 保持一致。
+    # 否则 AI agent 调用此工具时只能看到 daily_ops 白名单（73 个），
+    # 而 tools/list 返回 182 个，造成能力发现不一致。
+    # 可通过 OPS_DESCRIBE_DEFAULT_PROFILE 环境变量覆盖。
+    import os
+    default_profile = os.getenv("OPS_DESCRIBE_DEFAULT_PROFILE", "ai_full")
     return registry.describe_capabilities(
         db,
         ctx,
         category=args.get("category") or "",
-        profile=args.get("profile") or "daily_ops",
+        profile=args.get("profile") or default_profile,
         include_schema=bool(args.get("include_schema", True)),
         include_disabled=bool(args.get("include_disabled", False)),
         limit=int(args.get("limit") or 200),

@@ -170,8 +170,10 @@ export default function TaskCenterPage() {
 
   async function openDetail(item: TaskItem) {
     try {
+      // axios 响应拦截器已 unwrap 到 res.data，所以 res 形如 {success, message, data: {kind, id, detail, request, result, ...}}
       const res: any = await taskCenter.detail(item.kind, item.id)
-      setSelected(res.data)
+      const payload = res?.data ?? res
+      setSelected(payload)
     } catch (e: any) {
       setSelected({ error: e?.message || String(e) })
     }
@@ -294,7 +296,7 @@ export default function TaskCenterPage() {
       {error && <div className="alert alert-error">{error}</div>}
       {actionMsg && <div className="alert">{actionMsg}</div>}
       {!items.length && !loading ? <EmptyState title="暂无任务" description="执行发布、SQL、清理或 MCP/工具任务后会在这里统一展示。" /> : (
-        <div className="card table-card task-center-content">
+        <div className="card table-card task-center-content" style={{ overflow: 'auto', padding: 0, maxHeight: 'calc(100vh - 280px)' }}>
           <table className="data-table">
             <thead><tr><th><input type="checkbox" aria-label="选择当前页任务" checked={allPageTasksSelected} disabled={!selectableItems.length} onChange={(e) => togglePageTaskSelection(e.target.checked)} /></th><th>类型</th><th>标题</th><th>状态</th><th>风险</th><th>目标</th><th>操作人</th><th>时间</th><th>操作</th></tr></thead>
             <tbody>
@@ -316,7 +318,7 @@ export default function TaskCenterPage() {
                       <em>{times.duration}</em>
                     </div>
                   </td>
-                  <td style={{ display: 'flex', gap: 8 }}>
+                  <td className="task-actions-cell">
                     <button className="btn small" onClick={() => openDetail(item)}>详情</button>
                     {item.kind === 'deploy' && ['failed', 'success', 'cancelled'].includes(item.status) && <button className="btn small" onClick={() => retryDeploy(item)}>重试</button>}
                     {item.kind === 'deploy' && <a className="btn small" href={deployment.reportTextUrl(item.id)} target="_blank" rel="noreferrer">报告</a>}
@@ -360,24 +362,35 @@ export default function TaskCenterPage() {
       />
 
       {selected && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-            <h3>任务详情</h3>
-            <button className="btn small" onClick={() => setSelected(null)}>关闭</button>
-          </div>
-          {selected.error ? <div className="alert alert-error">{selected.error}</div> : (
-            <div>
-              {selected.kind === 'tool' && selected.item && (
-                <div className="grid-4" style={{ marginBottom: 12 }}>
-                  <div className="stat-card"><div className="stat-label">工具</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.item.detail?.source_tool || '-'}</div></div>
-                  <div className="stat-card"><div className="stat-label">进度</div><div className="stat-value">{selected.item.detail?.progress ?? 0}%</div></div>
-                  <div className="stat-card"><div className="stat-label">风险</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.item.detail?.risk_level || '-'}</div></div>
-                  <div className="stat-card"><div className="stat-label">审计</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.item.detail?.audit_id || '-'}</div></div>
+        <div className="task-detail-overlay" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setSelected(null) }}>
+          <div className="task-detail-modal" role="dialog" aria-modal="true" aria-label="任务详情">
+            <div className="task-detail-header">
+              <h3>任务详情</h3>
+              <button className="btn small" onClick={() => setSelected(null)}>关闭</button>
+            </div>
+            <div className="task-detail-body">
+              {selected.error ? <div className="alert alert-error">{selected.error}</div> : (
+                <div>
+                  <div className="grid-4" style={{ marginBottom: 12 }}>
+                    <div className="stat-card"><div className="stat-label">类型</div><div className="stat-value" style={{ fontSize: 14 }}>{KIND_LABEL[selected.kind] || selected.kind || '-'}</div></div>
+                    <div className="stat-card"><div className="stat-label">状态</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.status || '-'}</div></div>
+                    <div className="stat-card"><div className="stat-label">操作人</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.operator || '-'}</div></div>
+                    <div className="stat-card"><div className="stat-label">目标</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.target || '-'}</div></div>
+                  </div>
+                  {selected.kind === 'tool' && (
+                    <div className="grid-4" style={{ marginBottom: 12 }}>
+                      <div className="stat-card"><div className="stat-label">工具</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.source_tool || '-'}</div></div>
+                      <div className="stat-card"><div className="stat-label">进度</div><div className="stat-value">{selected.progress ?? 0}%</div></div>
+                      <div className="stat-card"><div className="stat-label">风险</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.risk_level || '-'}</div></div>
+                      <div className="stat-card"><div className="stat-label">审计</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.audit_id || '-'}</div></div>
+                    </div>
+                  )}
+                  {selected.error_message && <div className="alert alert-error">错误：{selected.error_message}</div>}
+                  <pre className="code-block">{JSON.stringify(selected, null, 2)}</pre>
                 </div>
               )}
-              <pre className="code-block">{JSON.stringify(selected, null, 2)}</pre>
             </div>
-          )}
+          </div>
         </div>
       )}
     </div>

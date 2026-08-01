@@ -15,6 +15,7 @@ interface MessageRouting {
   aliases: string[]
   keywords: string[]
   priority: number
+  approvers: string[]
 }
 
 const DEFAULT_ROUTING: MessageRouting = {
@@ -22,6 +23,7 @@ const DEFAULT_ROUTING: MessageRouting = {
   aliases: [],
   keywords: [],
   priority: 0,
+  approvers: [],
 }
 
 export default function SystemEditPage() {
@@ -44,6 +46,7 @@ export default function SystemEditPage() {
   const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
   const [aliasInput, setAliasInput] = useState('')
   const [keywordInput, setKeywordInput] = useState('')
+  const [approverInput, setApproverInput] = useState('')
 
   useEffect(() => {
     if (!name) return
@@ -65,6 +68,7 @@ export default function SystemEditPage() {
         aliases: Array.isArray(r.aliases) ? r.aliases : [],
         keywords: Array.isArray(r.keywords) ? r.keywords : [],
         priority: typeof r.priority === 'number' ? r.priority : 0,
+        approvers: Array.isArray(r.approvers) ? r.approvers : [],
       })
     }).catch(() => {
       notify('无法加载系统配置', 'error')
@@ -120,6 +124,21 @@ export default function SystemEditPage() {
 
   const removeKeyword = (idx: number) => {
     setRouting({ ...routing, keywords: routing.keywords.filter((_, i) => i !== idx) })
+  }
+
+  const addApprover = () => {
+    const v = approverInput.trim()
+    if (!v) return
+    if (routing.approvers.includes(v)) {
+      notify('授权人已存在', 'error')
+      return
+    }
+    setRouting({ ...routing, approvers: [...routing.approvers, v] })
+    setApproverInput('')
+  }
+
+  const removeApprover = (idx: number) => {
+    setRouting({ ...routing, approvers: routing.approvers.filter((_, i) => i !== idx) })
   }
 
   const handleSubmit = async () => {
@@ -365,6 +384,49 @@ export default function SystemEditPage() {
                 />
                 <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '4px' }}>
                   多个系统匹配同关键词时，优先级高者优先；同优先级会判定为歧义（AMBIGUOUS）。
+                </div>
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label>授权审批人（Matrix user ID）</label>
+                <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '6px' }}>
+                  填写后，只有列表中的用户才能审批此系统的发布/回滚/DML/服务控制操作。留空表示不限制审批人。
+                </div>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1 }}
+                    value={approverInput}
+                    onChange={(e) => setApproverInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addApprover() } }}
+                    placeholder="如：@han:hubtel.xyz"
+                  />
+                  <button className="btn" onClick={addApprover} type="button">+</button>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {routing.approvers.map((a, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '4px',
+                        padding: '2px 8px', borderRadius: '12px',
+                        background: 'var(--bg-hover)', fontSize: '12px',
+                        fontFamily: 'monospace',
+                      }}
+                      title={a}
+                    >
+                      {a}
+                      <button
+                        onClick={() => removeApprover(i)}
+                        type="button"
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: 'var(--text-muted)', padding: 0, fontSize: '14px',
+                        }}
+                      >×</button>
+                    </span>
+                  ))}
+                  {routing.approvers.length === 0 && (
+                    <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>未配置（任何用户均可审批）</span>
+                  )}
                 </div>
               </div>
             </div>

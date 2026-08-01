@@ -22,11 +22,9 @@ from app.config.repository import (
 from app.config.defaults import DEFAULT_CONFIG
 from app.config.cache import (
     invalidate_config_cache, load_config_cached,
-    _cache_get, _cache_set,
 )
 from app.config.migration import (
-    _ensure_defaults, _migrate_dovo_regions, _ensure_group_field_defaults,
-    _ensure_group_servers, _apply_migrations_and_save, _migrate_json_to_db,
+    _ensure_defaults, _apply_migrations_and_save, _migrate_json_to_db,
 )
 from app.config.servers import (
     get_all_servers, get_server_by_name, get_server_by_id, resolve_server,
@@ -46,12 +44,6 @@ from app.config.environments import (
 )
 from app.config.audit import (
     save_audit_log, load_audit_logs, cleanup_audit_logs,
-)
-from app.config.locks import (
-    acquire_db_lock, release_db_lock, LOCK_EXPIRY_SECONDS,
-)
-from app.config.deploy_logs import (
-    save_deploy_log, load_deploy_logs, load_deploy_log_by_id, cleanup_deploy_logs,
 )
 from app.config.keys import (
     save_key_file, get_key_file_path, delete_key_file, list_key_files, read_key_file, key_file_exists,

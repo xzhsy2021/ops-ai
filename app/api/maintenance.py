@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Optional
+from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session

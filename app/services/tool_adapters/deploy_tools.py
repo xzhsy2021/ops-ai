@@ -242,34 +242,6 @@ def create_deploy_plan(args, ctx, db):
 
 
 @registry.register(
-    name="ops.get_deploy_confirmation",
-    description="获取发布计划确认信息。",
-    scopes=["ops:read", "deploy:plan"],
-    risk="medium",
-    category="deploy_plan",
-    input_schema={
-        "type": "object",
-        "properties": {"plan_id": {"type": "string"}},
-        "required": ["plan_id"],
-        "additionalProperties": False,
-    },
-)
-def get_deploy_confirmation(args, ctx, db):
-    plan = _get_plan(db, args.get("plan_id"))
-    confirmation = plan.confirmation or {}
-    return {
-        "plan_id": plan.id,
-        "confirmation": confirmation,
-        "ready": not bool(confirmation.get("blockers")),
-        "risk_level": plan.risk_level or confirmation.get("risk_level") or "medium",
-        "requires_confirmation": bool(confirmation.get("requires_confirmation") or plan.confirm_text),
-        "required_confirmation": plan.confirm_text or confirmation.get("required_confirmation") or confirmation.get("confirm_text") or "",
-        "blockers": confirmation.get("blockers") or [],
-        "warnings": confirmation.get("warnings") or [],
-    }
-
-
-@registry.register(
     name="ops.run_precheck",
     description="基于发布计划返回结构化预检摘要。此工具不执行发布。",
     scopes=["ops:read", "deploy:precheck"],
@@ -607,47 +579,6 @@ def list_deployments(args, ctx, db):
 
 
 @registry.register(
-    name="ops.deploy.aggregate_status",
-    title="查询发布聚合状态",
-    description="获取发布中心的聚合健康状态：最近发布、活动任务、运行中发布、回滚次数、worker 存活与预检开关。可按 system/environment 过滤。只读。",
-    scopes=["ops:read"],
-    risk="low",
-    category="deploy_read",
-    write=False,
-    ai_callable=True,
-    ai_auto_callable=True,
-    data_sensitivity="internal",
-    output_masking=True,
-    example_prompts=["当前发布中心整体健康状况", "有哪些发布正在运行", "最近 5 条发布记录"],
-    input_schema={
-        "type": "object",
-        "properties": {
-            "system": {"type": "string", "description": "按系统名过滤"},
-            "environment": {"type": "string", "description": "按环境过滤（dev/staging/prod 等）"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最近发布返回数量，默认 5"},
-        },
-        "additionalProperties": False,
-    },
-)
-def deploy_aggregate_status_tool(args, ctx, db):
-    from app.domain.runtime.snapshots import build_deployments_aggregate
-
-    payload = build_deployments_aggregate(
-        db,
-        system=args.get("system") or "",
-        environment=args.get("environment") or "",
-        limit=int(args.get("limit") or 5),
-    )
-    latest = payload.get("latest_deployments") or []
-    active = payload.get("active_jobs") or []
-    return tool_result(
-        data=payload,
-        summary=f"发布聚合状态：最近 {len(latest)} 条，活动 {len(active)} 条，运行中 {payload.get('running_count', 0)} 条",
-        message="deploy aggregate status",
-    )
-
-
-@registry.register(
     name="ops.get_deployment_report",
     description="查询发布报告，包含摘要、失败归因、建议、服务器任务、步骤任务和日志摘要。",
     scopes=["ops:read"],
@@ -687,60 +618,6 @@ def get_deployment_report(args, ctx, db):
         }
         return tool_result(data=data, summary=summary_text, message="deployment report markdown", suggestions=suggestions, deployment_id=payload.get("id"))
     return tool_result(data=payload, summary=summary_text, message="deployment report", suggestions=suggestions, deployment_id=payload.get("id"))
-
-
-@registry.register(
-    name="ops.get_deployment_tasks",
-    description="查询发布单的服务器任务、步骤任务和包分发状态。",
-    scopes=["ops:read"],
-    input_schema={
-        "type": "object",
-        "properties": {"deployment_id": {"type": "string"}},
-        "required": ["deployment_id"],
-        "additionalProperties": False,
-    },
-)
-def get_deployment_tasks(args, ctx, db):
-    deployment_id = args.get("deployment_id")
-    payload = deployment_tasks_payload(db, deployment_id)
-    dep = DeploymentRepository(db).get_by_id(deployment_id)
-    if not dep:
-        raise HTTPException(status_code=404, detail="Deployment not found")
-    payload["deployment_status"] = dep.status
-    return payload
-
-
-@registry.register(
-    name="ops.get_deployment_logs",
-    description="查询发布单日志，默认返回最近 200 行。",
-    scopes=["ops:read"],
-    streamable=True,
-    input_schema={
-        "type": "object",
-        "properties": {"deployment_id": {"type": "string"}, "limit": {"type": "integer"}, "level": {"type": "string"}},
-        "required": ["deployment_id"],
-        "additionalProperties": False,
-    },
-)
-def get_deployment_logs(args, ctx, db, stream_callback=None):
-    deployment_id = args.get("deployment_id")
-    limit = min(max(int(args.get("limit") or 200), 1), 1000)
-    payload = deployment_logs_payload(db, deployment_id, include_task_id=False, limit=limit)
-    logs = payload["logs"]
-    if args.get("level"):
-        logs = [x for x in logs if x.get("level") == args.get("level")]
-    rows = [
-        {"time": x.get("created_at"), "level": x.get("level"), "step_name": x.get("step_name"), "message": x.get("message")}
-        for x in logs
-    ]
-    if stream_callback:
-        for row in rows:
-            stream_callback({"event": "chunk", "data": row})
-    return tool_result(
-        data={"deployment_id": deployment_id, "logs": rows, "limit": limit, "count": len(rows)},
-        summary=f"返回最近 {len(rows)} 行发布日志",
-        message="deployment logs tail",
-    )
 
 
 @registry.register(
@@ -852,6 +729,149 @@ def execute_rollback_plan(args, ctx, db):
 # Iter36 read-only release orchestration tools
 # ---------------------------------------------------------------------------
 
+
+@registry.register(
+    name="ops.get_rollback_readiness",
+    description="只读检查指定发布单是否适合创建回滚计划，返回阻断项、警告和下一步建议。",
+    scopes=["ops:read", "deploy:plan"],
+    risk="low",
+    category="deploy_read",
+    input_schema={
+        "type": "object",
+        "properties": {"deployment_id": {"type": "string"}},
+        "required": ["deployment_id"],
+        "additionalProperties": False,
+    },
+)
+def get_rollback_readiness(args, ctx, db):
+    from app.services.release_plan import rollback_readiness
+
+    return rollback_readiness(db, args.get("deployment_id"))
+
+
+@registry.register(
+    name="ops.get_deploy_confirmation",
+    description="获取发布计划确认信息。",
+    scopes=["ops:read", "deploy:plan"],
+    risk="medium",
+    category="deploy_plan",
+    input_schema={
+        "type": "object",
+        "properties": {"plan_id": {"type": "string"}},
+        "required": ["plan_id"],
+        "additionalProperties": False,
+    },
+)
+def get_deploy_confirmation(args, ctx, db):
+    plan = _get_plan(db, args.get("plan_id"))
+    confirmation = plan.confirmation or {}
+    return {
+        "plan_id": plan.id,
+        "confirmation": confirmation,
+        "ready": not bool(confirmation.get("blockers")),
+        "risk_level": plan.risk_level or confirmation.get("risk_level") or "medium",
+        "requires_confirmation": bool(confirmation.get("requires_confirmation") or plan.confirm_text),
+        "required_confirmation": plan.confirm_text or confirmation.get("required_confirmation") or confirmation.get("confirm_text") or "",
+        "blockers": confirmation.get("blockers") or [],
+        "warnings": confirmation.get("warnings") or [],
+    }
+
+
+@registry.register(
+    name="ops.deploy.aggregate_status",
+    title="查询发布聚合状态",
+    description="获取发布中心的聚合健康状态：最近发布、活动任务、运行中发布、回滚次数、worker 存活与预检开关。可按 system/environment 过滤。只读。",
+    scopes=["ops:read"],
+    risk="low",
+    category="deploy_read",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    example_prompts=["当前发布中心整体健康状况", "有哪些发布正在运行", "最近 5 条发布记录"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "system": {"type": "string", "description": "按系统名过滤"},
+            "environment": {"type": "string", "description": "按环境过滤（dev/staging/prod 等）"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最近发布返回数量，默认 5"},
+        },
+        "additionalProperties": False,
+    },
+)
+def deploy_aggregate_status_tool(args, ctx, db):
+    from app.domain.runtime.snapshots import build_deployments_aggregate
+
+    payload = build_deployments_aggregate(
+        db,
+        system=args.get("system") or "",
+        environment=args.get("environment") or "",
+        limit=int(args.get("limit") or 5),
+    )
+    latest = payload.get("latest_deployments") or []
+    active = payload.get("active_jobs") or []
+    return tool_result(
+        data=payload,
+        summary=f"发布聚合状态：最近 {len(latest)} 条，活动 {len(active)} 条，运行中 {payload.get('running_count', 0)} 条",
+        message="deploy aggregate status",
+    )
+
+
+@registry.register(
+    name="ops.get_deployment_tasks",
+    description="查询发布单的服务器任务、步骤任务和包分发状态。",
+    scopes=["ops:read"],
+    input_schema={
+        "type": "object",
+        "properties": {"deployment_id": {"type": "string"}},
+        "required": ["deployment_id"],
+        "additionalProperties": False,
+    },
+)
+def get_deployment_tasks(args, ctx, db):
+    deployment_id = args.get("deployment_id")
+    payload = deployment_tasks_payload(db, deployment_id)
+    dep = DeploymentRepository(db).get_by_id(deployment_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    payload["deployment_status"] = dep.status
+    return payload
+
+
+@registry.register(
+    name="ops.get_deployment_logs",
+    description="查询发布单日志，默认返回最近 200 行。",
+    scopes=["ops:read"],
+    streamable=True,
+    input_schema={
+        "type": "object",
+        "properties": {"deployment_id": {"type": "string"}, "limit": {"type": "integer"}, "level": {"type": "string"}},
+        "required": ["deployment_id"],
+        "additionalProperties": False,
+    },
+)
+def get_deployment_logs(args, ctx, db, stream_callback=None):
+    deployment_id = args.get("deployment_id")
+    limit = min(max(int(args.get("limit") or 200), 1), 1000)
+    payload = deployment_logs_payload(db, deployment_id, include_task_id=False, limit=limit)
+    logs = payload["logs"]
+    if args.get("level"):
+        logs = [x for x in logs if x.get("level") == args.get("level")]
+    rows = [
+        {"time": x.get("created_at"), "level": x.get("level"), "step_name": x.get("step_name"), "message": x.get("message")}
+        for x in logs
+    ]
+    if stream_callback:
+        for row in rows:
+            stream_callback({"event": "chunk", "data": row})
+    return tool_result(
+        data={"deployment_id": deployment_id, "logs": rows, "limit": limit, "count": len(rows)},
+        summary=f"返回最近 {len(rows)} 行发布日志",
+        message="deployment logs tail",
+    )
+
+
 @registry.register(
     name="ops.list_deploy_plans",
     description="列出由 MCP/工具生成的发布或回滚计划，便于 AI/客户端查看待确认计划。",
@@ -923,22 +943,3 @@ def generate_release_runbook(args, ctx, db):
 
     plan = get_release_plan(db, args.get("plan_id"))
     return release_runbook(plan, include_events=bool(args.get("include_events")), db=db)
-
-
-@registry.register(
-    name="ops.get_rollback_readiness",
-    description="只读检查指定发布单是否适合创建回滚计划，返回阻断项、警告和下一步建议。",
-    scopes=["ops:read", "deploy:plan"],
-    risk="low",
-    category="deploy_read",
-    input_schema={
-        "type": "object",
-        "properties": {"deployment_id": {"type": "string"}},
-        "required": ["deployment_id"],
-        "additionalProperties": False,
-    },
-)
-def get_rollback_readiness(args, ctx, db):
-    from app.services.release_plan import rollback_readiness
-
-    return rollback_readiness(db, args.get("deployment_id"))

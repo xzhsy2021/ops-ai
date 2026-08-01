@@ -66,6 +66,7 @@ __all__ = [
     "_config_service_to_response",
     "_connect_ssh",
     "_db_pipeline_steps",
+    "_pipeline_is_docker_compose",
     "_db_service_to_response",
     "_default_release_steps",
     "_deploy_confirm_text",
@@ -674,6 +675,68 @@ def _remote_checks_for_service(ssh, topology: Dict[str, Any]) -> List[Dict[str, 
     return checks
 
 
+def _remote_checks_for_docker_compose(ssh, variables: Dict[str, Any], topology: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Docker Compose 部署的远程预检项。
+
+    只检查 compose 目录和 compose 文件是否存在；不检查 update_script / service_dir / log_path 等
+    传统后端服务相关字段。
+    """
+    checks: List[Dict[str, Any]] = []
+    if not ssh:
+        return checks
+    compose_dir = (
+        (variables or {}).get("compose_dir")
+        or (topology.get("template_variables") or {}).get("compose_dir")
+        or topology.get("deploy_path")
+        or ""
+    )
+    compose_file = (
+        (variables or {}).get("compose_file")
+        or (topology.get("template_variables") or {}).get("compose_file")
+        or "docker-compose.yml"
+    )
+    if compose_dir:
+        try:
+            code, out, _ = ssh.exec(f"test -d {shlex.quote(compose_dir)} && echo ok || echo missing", timeout=10)
+            ok = "ok" in (out or "")
+            checks.append({
+                "name": "Compose 目录",
+                "status": "ok" if ok else "error",
+                "detail": f"{compose_dir} {'存在' if ok else '不存在'}"
+            })
+        except Exception as e:
+            checks.append({"name": "Compose 目录", "status": "warn", "detail": f"无法检查 {compose_dir}: {e}"})
+        remote_compose = f"{compose_dir.rstrip('/')}/{compose_file}"
+        try:
+            code, out, _ = ssh.exec(f"test -f {shlex.quote(remote_compose)} && echo ok || echo missing", timeout=10)
+            ok = "ok" in (out or "")
+            checks.append({
+                "name": "Compose 文件",
+                "status": "ok" if ok else "error",
+                "detail": f"{remote_compose} {'存在' if ok else '不存在'}"
+            })
+        except Exception as e:
+            checks.append({"name": "Compose 文件", "status": "warn", "detail": f"无法检查 compose 文件: {e}"})
+        try:
+            cmd = f"docker compose -f {shlex.quote(remote_compose)} ps 2>&1 | head -5"
+            code, out, _ = ssh.exec(cmd, timeout=15)
+            has_docker = code == 0
+            checks.append({
+                "name": "Docker 可用性",
+                "status": "ok" if has_docker else "warn",
+                "detail": ("docker compose 命令可用" if has_docker else f"docker compose 调用异常: {(out or '').strip()[:120]}")
+            })
+        except Exception as e:
+            checks.append({"name": "Docker 可用性", "status": "warn", "detail": f"无法执行 docker compose: {e}"})
+    else:
+        checks.append({
+            "name": "Compose 目录",
+            "status": "warn",
+            "detail": "未在服务变量中配置 compose_dir，请到服务配置或 Pipeline 步骤中补充"
+        })
+    return checks
+
+
 def _deploy_confirm_text(req: DeployRequest) -> str:
     service_part = req.service or "-"
     env_part = req.environment or "-"
@@ -710,7 +773,19 @@ def _step_command_preview(step: Dict[str, Any], limit: int = 180) -> str:
 
 def _build_confirmation_execution_plan(steps: List[Dict[str, Any]], topology: Dict[str, Any]) -> List[Dict[str, Any]]:
     plan: List[Dict[str, Any]] = []
-    if topology.get("service_dir") or topology.get("deploy_path"):
+    is_docker = any(
+        (s.get("type") or s.get("step_type")) in ("docker_compose_update", "docker_compose")
+        for s in (steps or [])
+    ) or topology.get("template") in ("docker_compose", "crypto_docker_compose")
+    if is_docker:
+        compose_dir = topology.get("deploy_path") or topology.get("service_dir") or ""
+        if compose_dir:
+            plan.append({
+                "name": "确认 Compose 目录",
+                "type": "preflight",
+                "description": compose_dir,
+            })
+    elif topology.get("service_dir") or topology.get("deploy_path"):
         plan.append({
             "name": "确认目标目录",
             "type": "preflight",
@@ -754,6 +829,7 @@ def _build_confirmation_risk_reasons(
     steps: List[Dict[str, Any]],
     rollback_plan: Dict[str, Any],
     package_match: Dict[str, Any],
+    is_docker: bool = False,
 ) -> List[str]:
     reasons: List[str] = []
     if _env_alias(req.environment) == "prod":
@@ -766,7 +842,7 @@ def _build_confirmation_risk_reasons(
         reasons.append(f"一次影响 {len(req.servers)} 台服务器")
     if not (rollback_plan or {}).get("safe"):
         reasons.append("未发现自动安全回滚方案")
-    if package_match.get("status") == "warn":
+    if not is_docker and package_match.get("status") == "warn":
         reasons.append("发布包与服务名称不是强匹配")
     if not steps:
         reasons.append("未解析到发布步骤")
@@ -809,9 +885,10 @@ def _build_confirmation(req: DeployRequest, db: Session, user: Optional[Dict[str
     req.variables = _merge_release_variables(req, db)
     svc = _find_config_service(req.system, req.service, req.environment)
     topology = _service_topology(req.system, req.service, req.environment, req.server_group, db)
-    package_match = _package_service_match(req.file_name, svc, req.service)
     effective_pipeline_id = req.pipeline_id or (svc or {}).get("pipeline_id", "")
     steps = _db_pipeline_steps(db, effective_pipeline_id) or _default_release_steps(req, db)
+    is_docker = _pipeline_is_docker_compose(db, effective_pipeline_id, req.system, req.service, req.environment)
+    package_match = _package_service_match(req.file_name, svc, req.service)
     env_conflicts = _environment_server_conflicts(req.environment, req.servers)
     blockers: List[str] = []
     warnings: List[str] = []
@@ -825,14 +902,17 @@ def _build_confirmation(req: DeployRequest, db: Session, user: Optional[Dict[str
         blockers.append("未选择或未解析到发布服务器")
     if env_conflicts:
         blockers.append("环境与服务器不一致：" + ", ".join(f"{x['name']}({x['actual']})" for x in env_conflicts[:10]))
-    if package_match.get("status") == "error":
+    if is_docker:
+        # Docker Compose 部署无需发布包，镜像从仓库拉取
+        pass
+    elif package_match.get("status") == "error":
         blockers.append(package_match.get("message", "发布包错误"))
     elif package_match.get("status") == "warn":
         warnings.append(package_match.get("message", "发布包需要确认"))
     if not steps:
         blockers.append("未解析到可执行 Pipeline 步骤")
     rollback_plan = _rollback_plan_for(req.system, req.service, req.environment, req.servers, req.variables, db)
-    risk_reasons = _build_confirmation_risk_reasons(req, blockers, warnings, steps, rollback_plan, package_match)
+    risk_reasons = _build_confirmation_risk_reasons(req, blockers, warnings, steps, rollback_plan, package_match, is_docker=is_docker)
     risk_level = "high" if _env_alias(req.environment) == "prod" or blockers else "medium" if warnings or not rollback_plan.get("safe") else "low"
     if req.parallelism > 1 and _env_alias(req.environment) == "prod":
         risk_level = "high"
@@ -1070,6 +1150,26 @@ def _db_pipeline_steps(db: Session, pipeline_id: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _pipeline_is_docker_compose(db: Session, pipeline_id: str, system: str = "", service: str = "", environment: str = "") -> bool:
+    """判断当前 Pipeline 是否为 Docker Compose 容器部署。
+
+    优先看 DB pipeline 步骤；其次看服务 template；最后看服务 template_variables。
+    这样服务可以只配 docker_compose_update Pipeline 而不需要带 compose_dir 模板变量。
+    """
+    steps = _db_pipeline_steps(db, pipeline_id) if db and pipeline_id else []
+    if any((s.get("step_type") or s.get("type")) in ("docker_compose_update", "docker_compose") for s in steps):
+        return True
+    if system and service:
+        svc = _find_config_service(system, service, environment) or {}
+        template = svc.get("template") or ""
+        if template in ("docker_compose", "crypto_docker_compose"):
+            return True
+        tv = svc.get("template_variables") or {}
+        if tv.get("compose_dir") or tv.get("compose_file"):
+            return True
+    return False
+
+
 def _default_release_steps(req: DeployRequest, db: Session) -> List[Dict[str, Any]]:
     """Map real operational runbooks to executable pipeline steps when no pipeline is selected."""
     group = _find_dovo_group(req.system, req.service)
@@ -1094,6 +1194,20 @@ def _default_release_steps(req: DeployRequest, db: Session) -> List[Dict[str, An
     update_script = tv.get("update_script", "")
     service_dir = tv.get("service_dir", "")
     deploy_path = tv.get("deploy_path", "")
+    compose_dir = tv.get("compose_dir", "")
+
+    if template == "docker_compose" or compose_dir:
+        compose_file = tv.get("compose_file", "docker-compose.yml")
+        return [{
+            "type": "docker_compose_update",
+            "name": "Docker Compose 发布",
+            "config": {
+                "compose_dir": compose_dir or deploy_path or "/data/crypto-trader",
+                "compose_file": compose_file,
+                "wait_after_up": tv.get("wait_after_up", 10),
+                "log_tail_lines": tv.get("log_tail_lines", 30),
+            },
+        }]
 
     if template == "generic_frontend" or update_script.endswith("www.sh") or (deploy_path and req.service.endswith("frontend")):
         return [{

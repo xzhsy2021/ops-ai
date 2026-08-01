@@ -15,11 +15,33 @@ from app.services.qclaw_routing import (
     issue_ticket,
     verify_ticket,
     compute_routing_revision,
+    _extract_routing,
+    _extract_approvers,
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
 from app.services.package_intake import intake_package, list_staging_packages
 from app.config.systems import get_all_systems
+
+
+def _lookup_approvers(system_name: str, service_name: str | None = None) -> list[str]:
+    """从系统配置中查找授权审批人。
+
+    优先使用服务级 approvers（如果非空），否则回退到系统级 approvers。
+    """
+    if not system_name:
+        return []
+    systems = get_all_systems()
+    sys_cfg = systems.get(system_name)
+    if not sys_cfg:
+        return []
+    sys_routing = _extract_routing(sys_cfg)
+    if service_name:
+        for svc in sys_cfg.get("services", []) or []:
+            if svc.get("name") == service_name:
+                svc_routing = _extract_routing(svc)
+                return list(_extract_approvers(sys_routing, svc_routing))
+    return list(_extract_approvers(sys_routing))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -82,6 +104,7 @@ def routing_resolve_message_target(args, ctx, db):
             "service_name": None,
             "matched_by": None,
             "candidates": list(decision.candidates),
+            "approvers": list(decision.approvers),
             "ticket": None,
             "ticket_digest": None,
             "routing_config_revision": decision.routing_config_revision,
@@ -103,6 +126,7 @@ def routing_resolve_message_target(args, ctx, db):
         "service_name": decision.service_name,
         "matched_by": decision.matched_by,
         "candidates": list(decision.candidates),
+        "approvers": list(decision.approvers),
         "ticket": ticket.ticket,
         "ticket_digest": ticket.digest,
         "routing_config_revision": decision.routing_config_revision,
@@ -141,10 +165,14 @@ def _common_prepare_schema() -> dict:
     }
 
 
+# ──────────────────────────────────────────────────────────────
+# ops.approval.prepare_service_control — 服务控制审批
+# ──────────────────────────────────────────────────────────────
+
 @registry.register(
-    name="ops.approval.prepare_release",
-    title="准备发布审批",
-    description="为发布操作创建不可变审批工单，返回一次性审批短码。qclaw 将短码展示在 Element 房间，授权用户回复「批准 <短码>」来审批。",
+    name="ops.approval.prepare_service_control",
+    title="准备服务控制审批",
+    description="为服务控制操作（重启/停止/启动/更新）创建不可变审批工单，返回一次性审批短码。qclaw 将短码展示在 Element 房间，授权用户回复「批准 <短码>」来审批。",
     scopes=["ops:read"],
     risk="low",
     category="approval_prepare",
@@ -152,84 +180,34 @@ def _common_prepare_schema() -> dict:
         "type": "object",
         "properties": {
             **_common_prepare_schema()["properties"],
+            "control_action": {
+                "type": "string",
+                "enum": ["restart", "stop", "start", "update"],
+                "description": "控制操作类型：restart / stop / start / update（update=拉取镜像并重新部署）",
+            },
             "targets": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "目标服务器列表",
             },
-            "package_name": {"type": "string", "description": "部署包文件名"},
-            "package_sha256": {"type": "string", "description": "部署包 SHA-256"},
-            "package_size_bytes": {"type": "integer", "description": "部署包大小（字节）"},
             "action_parameters": {
                 "type": "object",
-                "description": "发布参数（pipeline、variables 等）",
+                "description": "额外参数（如 compose_service 指定 Docker Compose 服务名、命令覆盖等）",
             },
         },
-        "required": _common_prepare_schema()["required"] + ["targets"],
+        "required": _common_prepare_schema()["required"] + ["control_action", "targets"],
         "additionalProperties": False,
     },
 )
-def approval_prepare_release(args, ctx, db):
-    # Enforce Element room binding (mirror routing tool's check).
+def approval_prepare_service_control(args, ctx, db):
     enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
     service = ActionApprovalService(db)
+    control_action = args["control_action"]
+    action_label = {"restart": "重启", "stop": "停止", "start": "启动", "update": "更新"}.get(control_action, control_action)
+    approvers = _lookup_approvers(args["system_name"], args.get("service_name"))
     approval, short_code = service.prepare(
-        action_type="RELEASE",
-        tool_name="ops.approval.prepare_release",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
-        system_name=args["system_name"],
-        service_name=args.get("service_name"),
-        environment=args["environment"],
-        targets=args["targets"],
-        action_parameters=args.get("action_parameters", {}),
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
-        risk_level="high",
-        ai_reason=args.get("ai_reason", ""),
-        package_name=args.get("package_name"),
-        package_sha256=args.get("package_sha256"),
-        package_size_bytes=args.get("package_size_bytes"),
-    )
-    return {
-        "approval_id": approval.id,
-        "short_code": short_code,
-        "action_digest": approval.action_digest,
-        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-        "status": approval.status,
-    }
-
-
-@registry.register(
-    name="ops.approval.prepare_rollback",
-    title="准备回滚审批",
-    description="为回滚操作创建不可变审批工单，返回一次性审批短码。",
-    scopes=["ops:read"],
-    risk="low",
-    category="approval_prepare",
-    input_schema={
-        "type": "object",
-        "properties": {
-            **_common_prepare_schema()["properties"],
-            "deployment_id": {"type": "string", "description": "要回滚的部署 ID"},
-            "targets": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "目标服务器列表",
-            },
-            "action_parameters": {"type": "object"},
-        },
-        "required": _common_prepare_schema()["required"] + ["deployment_id", "targets"],
-        "additionalProperties": False,
-    },
-)
-def approval_prepare_rollback(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ActionApprovalService(db)
-    approval, short_code = service.prepare(
-        action_type="ROLLBACK",
-        tool_name="ops.approval.prepare_rollback",
+        action_type="SERVICE_CONTROL",
+        tool_name="ops.approval.prepare_service_control",
         room_id=args["room_id"],
         request_event_id=args["request_event_id"],
         content_sha256=args["content_sha256"],
@@ -238,13 +216,14 @@ def approval_prepare_rollback(args, ctx, db):
         environment=args["environment"],
         targets=args["targets"],
         action_parameters={
-            "deployment_id": args["deployment_id"],
+            "control_action": control_action,
             **args.get("action_parameters", {}),
         },
         routing_config_revision=args["routing_config_revision"],
         routing_ticket_digest=args["routing_ticket_digest"],
         risk_level="high",
         ai_reason=args.get("ai_reason", ""),
+        authorized_matrix_users=approvers,
     )
     return {
         "approval_id": approval.id,
@@ -252,113 +231,10 @@ def approval_prepare_rollback(args, ctx, db):
         "action_digest": approval.action_digest,
         "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
         "status": approval.status,
-    }
-
-
-@registry.register(
-    name="ops.approval.prepare_dml",
-    title="准备 DML 审批",
-    description="为数据库 DML 操作创建不可变审批工单，返回一次性审批短码。",
-    scopes=["ops:read"],
-    risk="low",
-    category="approval_prepare",
-    input_schema={
-        "type": "object",
-        "properties": {
-            **_common_prepare_schema()["properties"],
-            "database_connection_id": {"type": "string", "description": "数据库连接 ID"},
-            "sql_text": {"type": "string", "description": "要执行的 SQL 语句"},
-            "max_affected_rows": {"type": "integer", "description": "最大影响行数"},
-            "action_parameters": {"type": "object"},
-        },
-        "required": _common_prepare_schema()["required"]
-        + ["database_connection_id", "sql_text"],
-        "additionalProperties": False,
-    },
-)
-def approval_prepare_dml(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ActionApprovalService(db)
-    approval, short_code = service.prepare(
-        action_type="DML",
-        tool_name="ops.approval.prepare_dml",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
-        system_name=args["system_name"],
-        service_name=args.get("service_name"),
-        environment=args["environment"],
-        targets=[args["database_connection_id"]],
-        action_parameters={
-            "database_connection_id": args["database_connection_id"],
-            "sql_text": args["sql_text"],
-            "max_affected_rows": args.get("max_affected_rows", 100),
-            **args.get("action_parameters", {}),
-        },
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
-        risk_level="critical",
-        ai_reason=args.get("ai_reason", ""),
-    )
-    return {
-        "approval_id": approval.id,
-        "short_code": short_code,
-        "action_digest": approval.action_digest,
-        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-        "status": approval.status,
-    }
-
-
-@registry.register(
-    name="ops.approval.prepare_package_cleanup",
-    title="准备包清理审批",
-    description="为包清理操作创建不可变审批工单，返回一次性审批短码。",
-    scopes=["ops:read"],
-    risk="low",
-    category="approval_prepare",
-    input_schema={
-        "type": "object",
-        "properties": {
-            **_common_prepare_schema()["properties"],
-            "package_ids": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "要清理的包 ID 列表",
-            },
-            "action_parameters": {"type": "object"},
-        },
-        "required": _common_prepare_schema()["required"] + ["package_ids"],
-        "additionalProperties": False,
-    },
-)
-def approval_prepare_package_cleanup(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ActionApprovalService(db)
-    approval, short_code = service.prepare(
-        action_type="PACKAGE_CLEANUP",
-        tool_name="ops.approval.prepare_package_cleanup",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
-        system_name=args["system_name"],
-        service_name=args.get("service_name"),
-        environment=args["environment"],
-        targets=args["package_ids"],
-        action_parameters={
-            "package_ids": args["package_ids"],
-            **args.get("action_parameters", {}),
-        },
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
-        risk_level="high",
-        ai_reason=args.get("ai_reason", ""),
-    )
-    return {
-        "approval_id": approval.id,
-        "short_code": short_code,
-        "action_digest": approval.action_digest,
-        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-        "status": approval.status,
+        "control_action": control_action,
+        "action_label": action_label,
+        "targets": args["targets"],
+        "authorized_approvers": approvers,
     }
 
 
@@ -437,100 +313,6 @@ def approval_execute(args, ctx, db):
     }
 
 
-@registry.register(
-    name="ops.approval.reject",
-    title="拒绝审批",
-    description="拒绝审批工单，终态操作。拒绝后不可再消费。拒绝是状态变更而非生产写操作，只需 ops:read。",
-    scopes=["ops:read"],
-    risk="low",
-    category="approval_reject",
-    write=False,
-    input_schema={
-        "type": "object",
-        "properties": {
-            "approval_id": {"type": "string", "description": "审批工单 ID"},
-            "rejecter_matrix_id": {"type": "string", "description": "拒绝人的 Matrix user ID"},
-            # Optional: if the caller's token has room binding configured,
-            # passing room_id lets the MCP layer enforce that the reject
-            # comes from an allowed room. When the token is unbound, this
-            # field is ignored.
-            "room_id": {"type": "string", "description": "调用方所在 Element 房间 ID（用于 Token 房间绑定校验，可选）"},
-        },
-        "required": ["approval_id", "rejecter_matrix_id"],
-        "additionalProperties": False,
-    },
-)
-def approval_reject(args, ctx, db):
-    # Enforce Element room binding when room_id is provided. Tokens without
-    # binding are not restricted (backward compat). Tokens with binding but
-    # missing room_id are rejected by enforce_room_binding itself.
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ActionApprovalService(db)
-    approval = service.reject(
-        approval_id=args["approval_id"],
-        rejecter_matrix_id=args["rejecter_matrix_id"],
-    )
-    if not approval:
-        return {
-            "ok": False,
-            "error": "审批工单不存在或已不在 PENDING_APPROVAL 状态",
-            "approval_id": args["approval_id"],
-        }
-    return {
-        "ok": True,
-        "approval_id": approval.id,
-        "status": approval.status,
-        "rejected_by": approval.rejected_by,
-        "rejected_at": approval.rejected_at.isoformat() if approval.rejected_at else None,
-    }
-
-
-@registry.register(
-    name="ops.approval.get",
-    title="查询审批状态",
-    description="查询审批工单的当前状态、执行结果等信息。",
-    scopes=["ops:read"],
-    risk="low",
-    category="approval_read",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "approval_id": {"type": "string", "description": "审批工单 ID"},
-        },
-        "required": ["approval_id"],
-        "additionalProperties": False,
-    },
-)
-def approval_get(args, ctx, db):
-    service = ActionApprovalService(db)
-    approval = service.get(args["approval_id"])
-    if not approval:
-        return {"ok": False, "error": "审批工单不存在"}
-    return {
-        "ok": True,
-        "approval_id": approval.id,
-        "action_type": approval.action_type,
-        "status": approval.status,
-        "system_name": (approval.request_payload or {}).get("system_name"),
-        "service_name": (approval.request_payload or {}).get("service_name"),
-        "environment": (approval.request_payload or {}).get("environment"),
-        "targets": (approval.request_payload or {}).get("targets", []),
-        "risk_level": approval.risk_level,
-        "ai_reason": approval.ai_reason,
-        "requested_by": approval.requested_by,
-        "approved_by": approval.approved_by,
-        "rejected_by": approval.rejected_by,
-        "created_at": approval.created_at.isoformat() if approval.created_at else None,
-        "approved_at": approval.approved_at.isoformat() if approval.approved_at else None,
-        "consumed_at": approval.consumed_at.isoformat() if approval.consumed_at else None,
-        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-        "execution_job_id": approval.execution_job_id,
-        "execution_result": approval.execution_result,
-        "failure_reason": approval.failure_reason,
-        "package_name": approval.package_name,
-    }
-
-
 # ──────────────────────────────────────────────────────────────
 # ops.approval.list — 审批列表
 # ──────────────────────────────────────────────────────────────
@@ -589,21 +371,3 @@ def approval_list(args, ctx, db):
 # ops.approval.expire_stale — 过期清理
 # ──────────────────────────────────────────────────────────────
 
-@registry.register(
-    name="ops.approval.expire_stale",
-    title="清理过期审批",
-    description="将过期的 PENDING_APPROVAL 工单批量标记为 EXPIRED。状态变更而非生产写操作，只需 ops:read。",
-    scopes=["ops:read"],
-    risk="low",
-    category="approval_maintenance",
-    write=False,
-    input_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-)
-def approval_expire_stale(args, ctx, db):
-    service = ActionApprovalService(db)
-    count = service.expire_stale()
-    return {"ok": True, "expired_count": count}

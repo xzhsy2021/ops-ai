@@ -119,7 +119,7 @@ def test_batch_run_requires_preview_confirmation_not_generic_phrase(monkeypatch,
         assert captured["batch"]["server_ids"] == ["crypto-test-a", "crypto-test-b"]
         assert captured["batch"]["categories"] == ["DISK", "MEMORY"]
         assert result["run_ids"] == ["run-a", "run-b"]
-        assert result["confirmation"]["confirm_text"] == preview["confirmation"]["confirm_text"]
+        assert result["preview"]["confirmation"]["confirm_text"] == preview["confirmation"]["confirm_text"]
     finally:
         db.close()
         engine.dispose()

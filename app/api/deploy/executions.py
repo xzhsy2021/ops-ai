@@ -50,8 +50,15 @@ async def deploy_execute_v2(request: Request, db: Session = Depends(get_db)):
     require_deploy_for_env(user, req.environment)
     require_confirmed_high_risk(user, action="deploy", environment=req.environment, payload={**data, **(req.variables or {})})
 
-    if not req.system or not req.file_name:
-        raise HTTPException(status_code=400, detail="system and file_name are required")
+    if not req.system:
+        raise HTTPException(status_code=400, detail="system is required")
+
+    # Docker Compose 部署不需要上传文件，镜像直接从仓库拉取
+    svc = _find_config_service(req.system, req.service, req.environment) or {}
+    is_docker_compose = (svc.get("template") == "docker_compose" or
+                         (svc.get("template_variables") or {}).get("compose_dir"))
+    if not is_docker_compose and not req.file_name:
+        raise HTTPException(status_code=400, detail="file_name is required")
 
     req.servers = _derive_servers(req, db)
     req.variables = _merge_release_variables(req, db)

@@ -114,6 +114,7 @@ export default function DeployPage() {
     invertCandidateServers,
     toggleServerSelection,
     applyServiceDefaults,
+    isSelectedDockerCompose,
   } = useDeployServerSelection({
     services,
     environments,
@@ -124,9 +125,13 @@ export default function DeployPage() {
     servers,
     serverGroup,
     serverAutoMode,
+    pipelineId,
+    pipelineSteps,
+    pipelines,
     setService,
     setServers,
     setServerAutoMode,
+    setPipelineId,
   })
 
   const { optionsLoading } = useDeployOptionsLoader({
@@ -221,7 +226,7 @@ export default function DeployPage() {
   if (!service) deployDisabledReasons.push('请选择服务')
   if (!environment) deployDisabledReasons.push('请选择环境')
   if (!selectedServerNames.length) deployDisabledReasons.push('请选择至少一台服务器')
-  if (!fileName) deployDisabledReasons.push('请选择发布包')
+  if (!isSelectedDockerCompose && !fileName) deployDisabledReasons.push('请选择发布包')
   if (!precheckResult) deployDisabledReasons.push('请先执行预检')
   if (precheckResult && precheckResult.status === 'blocked') deployDisabledReasons.push('预检未通过')
   if (loading) deployDisabledReasons.push('发布正在进行中')
@@ -345,11 +350,14 @@ export default function DeployPage() {
                 />,
               },
               {
-                key: 'package', title: '发布包', description: 'Pipeline / 版本 / 文件名',
+                key: 'package', title: isSelectedDockerCompose ? '发布配置' : '发布包', description: isSelectedDockerCompose ? 'Pipeline / 容器配置' : 'Pipeline / 版本 / 文件名',
                 content: <DeployPackageStep
                   pipelines={pipelines} deployPackages={deployPackages}
                   system={system} fileName={fileName} pipelineId={pipelineId}
                   pipelineSteps={pipelineSteps} selectStyle={selectStyle}
+                  isDockerCompose={isSelectedDockerCompose}
+                  composeDir={selectedService?.template_variables?.compose_dir || ''}
+                  composeFile={selectedService?.template_variables?.compose_file || ''}
                   setFileName={setFileName} setPipelineId={setPipelineId}
                 />,
               },
@@ -394,6 +402,7 @@ export default function DeployPage() {
                   fileName={fileName} selectedServerNames={selectedServerNames}
                   pipelineId={pipelineId} parallelism={parallelism}
                   failFast={failFast} selectedService={selectedService}
+                  isDockerCompose={isSelectedDockerCompose}
                   isProdEnvironment={isProdEnvironment}
                 />,
               },
@@ -418,7 +427,8 @@ export default function DeployPage() {
               { label: '系统', value: system || '—' },
               { label: '服务', value: service || '—' },
               { label: '环境', value: environment || '—' },
-              { label: '发布包', value: fileName || '—' },
+              { label: '部署方式', value: isSelectedDockerCompose ? '🐳 容器 (Compose)' : '传统发布' },
+              { label: '发布包', value: isSelectedDockerCompose ? '—（容器无需）' : (fileName || '—') },
               { label: `目标服务器 · ${selectedServerNames.length}`, value: selectedServerNames.length > 0 ? selectedServerNames.join(', ') : '—' },
               { label: 'Pipeline', value: pipelineId || '默认' },
               { label: '并行度 / 快速失败', value: `${parallelism} / ${failFast ? '是' : '否'}` },
@@ -507,7 +517,8 @@ export default function DeployPage() {
         reasonRequired={false}
         riskLevel={pendingReleaseConfirmation?.risk_level || 'high'}
         details={[
-          { label: '发布包', value: pendingReleaseConfirmation?.summary?.file_name || fileName || '-' },
+          { label: '部署方式', value: isSelectedDockerCompose ? '🐳 容器 (Compose) — 镜像自动拉取' : '传统发布 — 上传包' },
+          { label: '发布包', value: pendingReleaseConfirmation?.summary?.file_name || (isSelectedDockerCompose ? '—（容器部署无需）' : fileName) || '-' },
           { label: '目标服务器', value: (pendingReleaseConfirmation?.summary?.servers || selectedServerNames || []).join(', ') || '-' },
           { label: '预检结果', value: pendingReleaseConfirmation?.precheck?.status || '-' },
           { label: '警告数量', value: String((pendingReleaseConfirmation?.warnings || []).length + (pendingReleaseConfirmation?.precheck?.warning_checks || []).length) },

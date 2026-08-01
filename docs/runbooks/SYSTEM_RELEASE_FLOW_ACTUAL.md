@@ -1,6 +1,6 @@
 # 系统发布流程（按当前实际操作落地）
 
-本流程已在发布中心中落地为默认发布逻辑：当未选择自定义 Pipeline 时，系统会根据“系统 + 服务/分组”自动推导发布步骤与服务器。
+本流程已在发布中心中落地为默认发布逻辑：当未选择自定义 Pipeline 时，系统会根据"系统 + 服务/分组"自动推导发布步骤与服务器。
 
 ## 1. Dovo 应用后台发布
 
@@ -25,7 +25,11 @@
 
 适用系统：`crypto-trader`。
 
-入口：发布中心选择系统 `crypto-trader`，服务选择具体后台服务，例如 `System`、`Strategy`、`Trader` 等。
+入口：发布中心选择系统 `crypto-trader`，服务选择具体后台服务。
+
+### 2.1 线上环境 (updatebin.sh 方式)
+
+适用服务：`Exchange`、`Monitor`、`Puller`、`Risk`、`Sender`、`Strategy`、`Supplier`、`System`、`Trader`、`Transaction` 等。
 
 系统默认执行：
 
@@ -34,7 +38,26 @@
 3. 切换到服务目录执行 `updatebin.sh`。
 4. 查看程序进程与 `logs` 下最近日志。
 
-如同一服务需要多台服务器更新，可在“服务器”输入框填写多台服务器，系统会按服务器逐台执行相同流程。
+如同一服务需要多台服务器更新，可在"服务器"输入框填写多台服务器，系统会按服务器逐台执行相同流程。
+
+### 2.2 测试环境 (Docker Compose 方式)
+
+适用服务：`Docker Compose 统一部署`。
+
+目标服务器：量化测试服务器 (`cc-test2`)、量化测试服务器2。
+
+部署路径：`/data/crypto-trader`，镜像直接从仓库拉取。
+
+系统默认执行：
+
+1. 检查 compose 目录 `/data/crypto-trader` 是否存在。
+2. 执行 `docker compose -f docker-compose.yml pull` 拉取最新镜像。
+3. 执行 `docker compose -f docker-compose.yml up -d --remove-orphans` 启动/重启容器。
+4. 等待容器稳定（默认 10 秒）。
+5. 执行 `docker compose -f docker-compose.yml ps` 检查容器状态。
+6. 执行 `docker compose -f docker-compose.yml logs --tail=30` 查看最近日志。
+
+如同一服务需要多台服务器更新，可在"服务器"输入框填写多台服务器，系统会按服务器逐台执行相同流程。
 
 ## 3. Web 发布
 

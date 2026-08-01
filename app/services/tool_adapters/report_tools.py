@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.report_center import generate_report, get_report, list_report_types, list_reports, report_to_dict, report_summary
+from app.services.report_center import get_report, list_report_types, list_reports, report_to_dict, report_summary
 from app.services.tool_registry import registry
 
 
@@ -72,37 +72,3 @@ def list_report_types_tool(args, ctx, db):
     return list_report_types()
 
 
-@registry.register(
-    name="ops.generate_report",
-    title="生成报告中心报告",
-    description="生成诊断、AI 分析、操作链路、发布等报告制品。低风险，只打包现有只读证据并进入审计。",
-    scopes=["ops:read", "audit:read"],
-    risk="low",
-    category="report_generate",
-    write=False,
-    input_schema={
-        "type": "object",
-        "properties": {
-            "report_type": {"type": "string", "enum": ["diagnostics", "ai_diagnostics", "ai_analysis", "operation_chain", "operation_chains_index", "deployment", "inspection"]},
-            "target_id": {"type": "string"},
-            "format": {"type": "string", "enum": ["json", "md"]},
-            "title": {"type": "string"},
-            "include_raw": {"type": "boolean"},
-            "focus": {"type": "string"},
-        },
-        "required": ["report_type"],
-        "additionalProperties": False,
-    },
-)
-def generate_report_tool(args, ctx, db):
-    actor = getattr(ctx, "username", "") or getattr(ctx, "token_owner", "") or "tool"
-    return generate_report(
-        db,
-        report_type=args.get("report_type") or "",
-        target_id=args.get("target_id") or "",
-        fmt=args.get("format") or "json",
-        title=args.get("title") or "",
-        created_by=actor,
-        include_raw=bool(args.get("include_raw")),
-        focus=args.get("focus") or "",
-    )

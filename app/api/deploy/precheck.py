@@ -26,6 +26,7 @@ from app.api.deploy._shared import (
     _merge_release_variables,
     _package_info,
     _package_service_match,
+    _pipeline_is_docker_compose,
     _remote_checks_for_service,
     _rollback_precheck_for,
     _rollback_plan_for,
@@ -139,10 +140,15 @@ def _collect_precheck_checks(
     variables: Dict[str, Any],
     server_group: str = "",
     db: Optional[Session] = None,
+    pipeline_id: str = "",
 ) -> tuple:
     """收集所有预检项，返回 (checks, ssh_fail, remote_disks, ssh_cache, topology, package_match)。"""
     svc = _find_config_service(system, service, environment)
     topology = _service_topology(system, service, environment, server_group, db)
+
+    is_docker_compose_deploy = _pipeline_is_docker_compose(
+        db, pipeline_id, system, service, environment
+    )
 
     if not servers_raw:
         try:
@@ -184,7 +190,19 @@ def _collect_precheck_checks(
 
     package_match = _package_service_match(file_name, svc, service)
     pkg = package_match.get("package", {})
-    if file_name and pkg.get("exists"):
+    if is_docker_compose_deploy:
+        # Docker Compose 流程不需要发布包，镜像从仓库拉取
+        checks.append({
+            "name": "部署包",
+            "status": "info",
+            "detail": "容器部署无需发布包，镜像从仓库自动拉取"
+        })
+        checks.append({
+            "name": "发布包匹配",
+            "status": "info",
+            "detail": "容器部署流程跳过包名校验"
+        })
+    elif file_name and pkg.get("exists"):
         checks.append({"name": "部署包", "status": "ok",
                         "detail": f"{file_name} ({pkg.get('size_mb', '-')}MB)"})
     elif file_name:
@@ -192,11 +210,11 @@ def _collect_precheck_checks(
                         "detail": f"文件不存在: {file_name}"})
     else:
         checks.append({"name": "部署包", "status": "warn", "detail": "未指定文件名"})
-    checks.append({
-        "name": "发布包匹配",
-        "status": package_match.get("status", "info"),
-        "detail": package_match.get("message", "")
-    })
+        checks.append({
+            "name": "发布包匹配",
+            "status": package_match.get("status", "info"),
+            "detail": package_match.get("message", "")
+        })
 
     lock_key = f"{system}:{service or 'default'}"
     if DeployLock.is_locked(lock_key):
@@ -248,11 +266,18 @@ def _collect_precheck_checks(
                             "used": parts[2], "avail": parts[3], "pct": parts[4]
                         })
                     if len([c for c in checks if str(c.get("name", "")).startswith("远程服务")]) < 12:
-                        for rc in _remote_checks_for_service(ssh, topology):
-                            checks.append({
-                                "name": f"远程服务/{srv_name}/{rc['name']}",
-                                "status": rc["status"], "detail": rc["detail"]
-                            })
+                        if is_docker_compose_deploy:
+                            for rc in _remote_checks_for_docker_compose(ssh, variables, topology):
+                                checks.append({
+                                    "name": f"远程服务/{srv_name}/{rc['name']}",
+                                    "status": rc["status"], "detail": rc["detail"]
+                                })
+                        else:
+                            for rc in _remote_checks_for_service(ssh, topology):
+                                checks.append({
+                                    "name": f"远程服务/{srv_name}/{rc['name']}",
+                                    "status": rc["status"], "detail": rc["detail"]
+                                })
                 else:
                     ssh_fail += 1
             else:
@@ -289,7 +314,7 @@ def _collect_precheck_checks(
             })
 
     deploy_path = variables.get("deploy_path", topology.get("deploy_path", ""))
-    if deploy_path and ssh_ok > 0:
+    if deploy_path and ssh_ok > 0 and not is_docker_compose_deploy:
         first_srv_name = (
             servers_raw[0] if isinstance(servers_raw[0], str)
             else servers_raw[0].get("name", "")
@@ -310,7 +335,7 @@ def _collect_precheck_checks(
                 checks.append({
                     "name": "目标路径", "status": "warn", "detail": "无法检查"
                 })
-    elif deploy_path:
+    elif deploy_path and not is_docker_compose_deploy:
         checks.append({
             "name": "目标路径", "status": "warn",
             "detail": deploy_path + " (无可用SSH)"
@@ -356,11 +381,13 @@ async def deploy_precheck(request: Request, db: Session = Depends(get_db)):
     environment: str = data.get("environment", "")
     service: str = data.get("service", "")
     variables: Dict[str, Any] = data.get("variables") or {}
+    pipeline_id: str = data.get("pipeline_id") or data.get("pipelineId") or ""
 
     checks, ssh_fail, remote_disks, _ssh_cache, topology, package_match = \
         _collect_precheck_checks(
             system, service, environment, file_name,
-            servers_raw, variables, data.get("server_group", ""), db
+            servers_raw, variables, data.get("server_group", ""), db,
+            pipeline_id=pipeline_id,
         )
 
     pkg = package_match.get("package", {})
@@ -376,6 +403,7 @@ async def deploy_precheck(request: Request, db: Session = Depends(get_db)):
         parallelism=int(data.get("parallelism", 1)),
         fail_fast=bool(data.get("fail_fast", True)),
         wave_size=data.get("wave_size"),
+        pipeline_id=pipeline_id,
     )
     confirmation = _build_confirmation(req_for_confirm, db, {})
 

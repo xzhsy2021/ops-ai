@@ -67,14 +67,20 @@ async def terminal_session_create(request: Request, name: str, db: Session = Dep
 
     hop_ctx = get_hop_summary(srv)
 
+    # 终端会话创建涉及同步阻塞的 SSH 连接（paramiko），必须放到线程池
+    # 执行，否则会阻塞 asyncio 事件循环导致整个系统所有请求卡死。
+    # 终端为交互式场景，使用短超时快速失败（5s/1次重试）。
     try:
-        session = create_session(
+        session = await asyncio.to_thread(
+            create_session,
             user=request.state.username,
             server_name=name,
             server_config=srv,
             hop_count=hop_ctx["hop_count"],
             cols=cols,
             rows=rows,
+            max_retries=1,
+            per_attempt_timeout=5,
         )
     except (RuntimeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=str(e))

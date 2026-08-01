@@ -136,7 +136,7 @@ function WidgetShell({ widget, onDragStart, onDragOver, onDrop, onToggle, draggi
   const isDropTarget = dropTargetId === widget.id && draggingId !== null && draggingId !== widget.id
   return (
     <section
-      className={`cc-widget cc-widget--${widget.size}${isDragging ? ' is-dragging' : ''}${isDropTarget ? ' is-drop-target' : ''}`}
+      className={`cc-widget cc-widget--${widget.size} glass-panel${isDragging ? ' is-dragging' : ''}${isDropTarget ? ' is-drop-target' : ''}`}
       data-widget-id={widget.id}
       onDragOver={(e) => { e.preventDefault(); onDragOver(widget.id) }}
       onDrop={(e) => { e.preventDefault(); onDrop(widget.id) }}
@@ -493,7 +493,7 @@ export default function DashboardPage() {
         <div>
           <div className="cc-command-hero-eyebrow">COMMAND · {backendOnline ? 'ONLINE' : 'OFFLINE'}</div>
           <h1 className="cc-command-hero-title">
-            {greeting}, <em>{user?.username || 'admin'}</em>
+            {greeting}, <em className="energy-gradient" style={{ fontStyle: 'normal' }}>{user?.username || 'admin'}</em>
           </h1>
           <p className="cc-command-hero-desc">
             统一查看系统健康、发布状态、服务器资产、备份、磁盘和待确认操作。小团队场景下，首页优先回答今天有没有必须处理的事。

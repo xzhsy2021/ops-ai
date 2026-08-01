@@ -68,11 +68,23 @@ export const STEP_TYPES = [
       timeout: '600',
     },
   },
+  {
+    type: 'docker_compose_update',
+    label: 'Docker Compose',
+    defaults: {
+      compose_dir: '/data/crypto-trader',
+      compose_file: 'docker-compose.yml',
+      wait_after_up: '10',
+      log_tail_lines: '30',
+      timeout: '600',
+    },
+  },
 ] as const
 
 export const STRATEGIES = [
   { value: 'DIRECT', label: '直接部署' },
   { value: 'BLUE_GREEN', label: '蓝绿发布' },
+  { value: 'DOCKER_COMPOSE', label: 'Docker Compose' },
 ]
 
 export const BUILTIN_STEP_TYPES = new Set([
@@ -99,6 +111,14 @@ export const STEP_RUNBOOKS: Record<string, string[]> = {
     '上传本地包到 deploy_path',
     '在 deploy_path 目录执行 ./www.sh',
     '执行后检查 /data/www 目录结果',
+  ],
+  docker_compose_update: [
+    '检查 compose_dir 是否存在',
+    '执行 docker compose -f compose_file pull 拉取最新镜像',
+    '执行 docker compose -f compose_file up -d --remove-orphans 启动/重启容器',
+    '等待 wait_after_up 秒后做容器稳定观察',
+    '执行 docker compose -f compose_file ps 检查容器状态',
+    '执行 docker compose -f compose_file logs --tail=log_tail_lines 查看最近日志',
   ],
 }
 
@@ -139,6 +159,13 @@ export const STEP_FIELD_LABELS: Record<string, Record<string, string>> = {
     timeout: '超时时间',
     remote_path: '远程包路径',
     local_path: '本地包路径',
+  },
+  docker_compose_update: {
+    compose_dir: 'compose 目录',
+    compose_file: 'compose 文件名',
+    wait_after_up: '启动后等待秒数',
+    log_tail_lines: '日志显示行数',
+    timeout: '操作超时(秒)',
   },
 }
 

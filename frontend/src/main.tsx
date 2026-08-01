@@ -3,13 +3,19 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import './index.css'
+import './theme/tokens.css'
+import { initThemeEngine } from './theme/engine'
 
 
 try {
-  const savedTheme = localStorage.getItem('ops-theme')
-  document.documentElement.dataset.theme = savedTheme === 'light' ? 'light' : 'dark'
+  const savedTheme = localStorage.getItem('ops-theme') as 'light' | 'dark' | null
+  const savedPerf = localStorage.getItem('ops-performance-mode') as string | null
+  initThemeEngine({
+    theme: savedTheme === 'light' ? 'light' : 'dark',
+    fx: savedPerf === 'low-resource' ? 'low' : 'balanced',
+  })
 } catch {
-  document.documentElement.dataset.theme = 'dark'
+  initThemeEngine({ theme: 'dark' })
 }
 
 if (import.meta.env.DEV) {

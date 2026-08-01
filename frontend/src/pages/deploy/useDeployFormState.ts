@@ -19,6 +19,7 @@ export interface ServiceOption {
   servers?: string[]
   servers_by_env?: Record<string, string[]>
   server_keywords?: string[]
+  pipeline_id?: string
   source?: string
 }
 

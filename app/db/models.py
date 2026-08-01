@@ -57,6 +57,28 @@ class Environment(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class System(Base):
+    """Phase 3e SSOT: 系统配置主表，替代 config_kv['systems'] blob。
+
+    每个 system 独立行，消除 blob 整体改写的并发问题。
+    environments/services 作为 JSON 字段存储，保留 deep-merge 逻辑。
+    """
+    __tablename__ = "systems"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    name = Column(String(64), unique=True, nullable=False, index=True)
+    display_name = Column(String(128), nullable=True)
+    strategy = Column(String(32), default="WORKFLOW")
+    base_path = Column(String(255), default="/data/web/app")
+    description = Column(Text, nullable=True)
+    variables = Column(JSON, default=dict)
+    servers = Column(JSON, default=list)
+    environments = Column(JSON, default=dict)  # per-system 环境配置（含 service_overrides/group_overrides）
+    services = Column(JSON, default=list)  # 服务列表（legacy 形态，Service 表是独立 SSOT）
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class Service(Base):
     __tablename__ = "services"
 
@@ -1007,8 +1029,7 @@ class InspectionTierSchedule(Base):
     - 目标统一为"全量服务器"，不在此处做 server/group 过滤；
       真正区分三级的是 `categories` 字段（巡检项组合）。
     - `target_filter` 字段保留以兼容旧数据；dispatcher 忽略。
-    - `require_approval=True` 的 tier（默认 MONTHLY）首跑前需走
-      `ops.tier.approve` 解锁。
+    - `require_approval=True` 的 tier（默认 MONTHLY）首跑前需手动审批解锁。
     """
     __tablename__ = "inspection_tier_schedules"
 

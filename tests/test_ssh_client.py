@@ -177,24 +177,36 @@ def test_ssh_pool_falls_back_to_direct_when_db_jump_lacks_creds(monkeypatch):
     assert client.jump_hosts == []
 
 
-def test_ssh_pool_resolves_dict_jump_without_auth_from_config_kv(monkeypatch):
-    """dict 类型 jump 缺少凭据时，应从 config_kv 同名跳板机补齐。"""
+def test_ssh_pool_resolves_dict_jump_without_auth_from_db(monkeypatch):
+    """dict 类型 jump 缺少凭据时，应从 jump_hosts DB 表同名跳板机补齐。"""
     ssh_client = _patch_connect(monkeypatch)
+    from app.config import servers as app_servers
 
     monkeypatch.setattr(
-        "config_manager.load_config_cached",
-        lambda: {
-            "jump_hosts": [
-                {
-                    "name": "bastion",
-                    "host": "1.2.3.4",
-                    "port": 22,
-                    "user": "ops",
-                    "password": "bastion_pwd",
-                }
-            ],
-            "servers": [],
-        },
+        app_servers,
+        "get_jump_host_by_name",
+        lambda name: {
+            "name": name,
+            "host": "1.2.3.4",
+            "port": 22,
+            "user": "ops",
+            "password": "bastion_pwd",
+        } if name == "bastion" else None,
+    )
+    monkeypatch.setattr(
+        app_servers,
+        "get_jump_host_by_host",
+        lambda host, port=22: None,
+    )
+    monkeypatch.setattr(
+        app_servers,
+        "get_server_as_jump_by_name",
+        lambda name: None,
+    )
+    monkeypatch.setattr(
+        app_servers,
+        "get_server_as_jump_by_host",
+        lambda host, port=22: None,
     )
 
     pool = ssh_client.SSHConnectionPool(max_idle_time=300)
@@ -203,7 +215,7 @@ def test_ssh_pool_resolves_dict_jump_without_auth_from_config_kv(monkeypatch):
         "port": 22,
         "user": "root",
         "password": "target_pwd",
-        # dict 类型 jump 已声明 host/user，仅缺少凭据，应从 config_kv 补齐
+        # dict 类型 jump 已声明 host/user，仅缺少凭据，应从 DB 补齐
         "jump_host": {"name": "bastion", "host": "1.2.3.4", "port": 22, "user": "ops"},
     }
 

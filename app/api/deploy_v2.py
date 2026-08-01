@@ -121,6 +121,15 @@ PIPELINE_TEMPLATES = [
         ],
     },
     {
+        "id": "crypto_docker_compose",
+        "name": "量化 Docker Compose 发布",
+        "strategy": "DOCKER_COMPOSE",
+        "description": "拉取最新镜像 → docker compose up -d → 检查容器状态与日志",
+        "steps": [
+            {"type": "docker_compose_update", "name": "Docker Compose 发布", "config": {"compose_dir": "${compose_dir}", "compose_file": "${compose_file}", "timeout": "600", "wait_after_up": 10, "log_tail_lines": 30}},
+        ],
+    },
+    {
         "id": "web_www_script",
         "name": "Web /data/www 发布",
         "strategy": "WEB_SCRIPT",
@@ -490,6 +499,7 @@ async def create_system_v2(payload: Dict[str, Any], request: Request, db: Sessio
             "aliases": [str(a).strip() for a in routing.get("aliases", []) if str(a).strip()],
             "keywords": [str(k).strip() for k in routing.get("keywords", []) if str(k).strip()],
             "priority": int(routing.get("priority", 0)),
+            "approvers": [str(u).strip() for u in routing.get("approvers", []) if str(u).strip()],
         }
     groups = payload.get("groups") or payload.get("regions") or {}
     if isinstance(groups, dict) and groups:

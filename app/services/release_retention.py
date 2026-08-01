@@ -257,27 +257,13 @@ def _audit_record_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[List[
 
 
 def _audit_log_candidates(policy: Dict[str, Any]) -> Tuple[List[int], Dict[str, Any]]:
+    """audit_logs 已迁移到 ORM audit_records 表，委托给 _audit_record_candidates 保持前端兼容。"""
+    from app.db.base import SessionLocal
     try:
-        from app.config.repository import get_db_connection
-        conn = get_db_connection()
-        rows = conn.execute("SELECT id, action, target_type, target_name, created_at FROM audit_logs ORDER BY created_at DESC").fetchall()
+        with SessionLocal() as db:
+            return _audit_record_candidates(db, policy)
     except Exception:
-        return [], {"count": 0, "total": 0, "error": "audit_logs unavailable"}
-
-    candidates: Dict[int, Dict[str, Any]] = {}
-    for row in rows:
-        data = dict(row)
-        cutoff = _audit_cutoff_for_action(data.get("action"), policy).isoformat(sep=" ")
-        created = data.get("created_at") or ""
-        if created and created < cutoff:
-            candidates[data["id"]] = {**data, "reason": "age_high_risk" if _is_high_risk_action(data.get("action")) else "age"}
-    keep_max = int(policy.get("audit_keep_max", 5000) or 0)
-    if keep_max > 0 and len(rows) > keep_max:
-        for row in rows[keep_max:]:
-            data = dict(row)
-            candidates.setdefault(data["id"], {**data, "reason": f"exceed_max>{keep_max}"})
-    by_reason = Counter(item.get("reason") for item in candidates.values())
-    return list(candidates.keys()), {"count": len(candidates), "total": len(rows), "by_reason": dict(by_reason), "sample": _sample(list(candidates.values()))}
+        return [], {"count": 0, "total": 0, "error": "audit_records unavailable"}
 
 
 def _tool_call_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
@@ -343,16 +329,17 @@ def preview_release_cleanup(db: Session) -> Dict[str, Any]:
 
 
 def _delete_config_audit_logs(ids: Iterable[int]) -> int:
+    """audit_logs 已迁移到 ORM audit_records 表，用 ORM 删除。"""
     ids = list(ids)
     if not ids:
         return 0
     try:
-        from app.config.repository import get_db_connection
-        conn = get_db_connection()
-        placeholders = ",".join("?" for _ in ids)
-        cur = conn.execute(f"DELETE FROM audit_logs WHERE id IN ({placeholders})", ids)
-        conn.commit()
-        return int(cur.rowcount or 0)
+        from app.db.base import SessionLocal
+        from app.db.models import AuditRecord
+        with SessionLocal() as db:
+            count = db.query(AuditRecord).filter(AuditRecord.id.in_(ids)).delete(synchronize_session=False)
+            db.commit()
+            return int(count or 0)
     except Exception:
         return 0
 
@@ -408,7 +395,7 @@ def cleanup_release_history(db: Session, dry_run: bool = True) -> Dict[str, Any]
         result["deleted"]["tool_call_logs"] = db.query(ToolCallLog).filter(ToolCallLog.id.in_(tool_call_ids)).delete(synchronize_session=False)
     if audit_record_ids:
         result["deleted"]["audit_records"] = db.query(AuditRecord).filter(AuditRecord.id.in_(audit_record_ids)).delete(synchronize_session=False)
-    if audit_log_ids:
-        result["deleted"]["audit_logs"] = _delete_config_audit_logs(audit_log_ids)
+    # audit_logs 已迁移到 audit_records 表，不再单独删除（保持前端 key 兼容）
+    result["deleted"]["audit_logs"] = 0
     db.commit()
     return result

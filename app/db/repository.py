@@ -6,13 +6,13 @@ from typing import List, Optional, Dict, Any
 from app.deploy.state import TERMINAL_STATUSES, normalize_status
 from sqlalchemy.orm import Session
 from .models import (
-    User, Server, Service, Environment,
+    User, Server, Service, Environment, System,
     Deployment, Pipeline, PipelineStep,
     DeployTask, DeployLog, ServerGroup,
     ConfigKV, DeploymentRecord, AuditRecord,
     DeploymentServerTask, DeploymentStepTask, DeploymentPackageDistribution,
     DeploymentLockRecord, NotificationEvent,
-    JumpHost,
+    JumpHost, SshKey,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,68 @@ class ServerRepository:
         return False
 
 
+class SystemRepository:
+    """Phase 3e SSOT: 系统配置 CRUD — systems 表。"""
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_by_id(self, system_id: str) -> Optional[System]:
+        return self.db.query(System).filter(System.id == system_id).first()
+
+    def get_by_name(self, name: str) -> Optional[System]:
+        return self.db.query(System).filter(System.name == name).first()
+
+    def list_all(self) -> List[System]:
+        return self.db.query(System).order_by(System.name).all()
+
+    def create(self, name: str, display_name: str = None, strategy: str = "WORKFLOW",
+               base_path: str = "/data/web/app", description: str = None,
+               variables: dict = None, servers: list = None,
+               environments: dict = None, services: list = None) -> System:
+        system = System(
+            name=name,
+            display_name=display_name or name,
+            strategy=strategy,
+            base_path=base_path,
+            description=description,
+            variables=variables or {},
+            servers=servers or [],
+            environments=environments or {},
+            services=services or [],
+        )
+        self.db.add(system)
+        self.db.commit()
+        self.db.refresh(system)
+        return system
+
+    def update(self, system: System) -> System:
+        """Commit changes to an attached System object.
+
+        NOTE: The caller must pass an attached object (e.g. returned by
+        get_by_name/get_by_id). Passing a detached object will silently
+        no-op — the commit succeeds but writes nothing to the database.
+        """
+        self.db.commit()
+        self.db.refresh(system)
+        return system
+
+    def delete(self, system_id: str) -> bool:
+        system = self.get_by_id(system_id)
+        if system:
+            self.db.delete(system)
+            self.db.commit()
+            return True
+        return False
+
+    def delete_by_name(self, name: str) -> bool:
+        system = self.get_by_name(name)
+        if system:
+            self.db.delete(system)
+            self.db.commit()
+            return True
+        return False
+
+
 class ServiceRepository:
     def __init__(self, db: Session):
         self.db = db
@@ -150,7 +212,24 @@ class ServiceRepository:
         query = self.db.query(Service).filter(Service.name == name)
         if system_name:
             query = query.filter(Service.system_name == system_name)
-        return query.first()
+        row = query.first()
+        if row:
+            return row
+        # 模糊匹配：精确匹配失败后，尝试 endswith 和 display_name
+        target = name.strip().lower()
+        if not target:
+            return None
+        candidates = self.db.query(Service)
+        if system_name:
+            candidates = candidates.filter(Service.system_name == system_name)
+        for svc in candidates.all():
+            svc_name = (svc.name or "").strip().lower()
+            svc_display = (svc.display_name or "").strip().lower()
+            if svc_name == target or svc_display == target:
+                return svc
+            if svc_name.endswith(f"-{target}") or target.endswith(f"-{svc_name}"):
+                return svc
+        return None
 
     def list_all(self) -> List[Service]:
         return self.db.query(Service).all()
@@ -658,6 +737,75 @@ class JumpHostRepository:
         Used by the API to refuse deletion of a still-referenced bastion.
         """
         return self.db.query(Server).filter(Server.jump_host == name).count()
+
+
+class SshKeyRepository:
+    """SSH 私钥 SSOT CRUD — ssh_keys 表（加密存储）。
+
+    私钥材料加密后存入 private_key_encrypted 字段；
+    passphrase 同理加密后存入 passphrase_encrypted。
+    读路径返回解密后的明文供 SSH 客户端使用。
+    """
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_by_name(self, name: str) -> Optional[SshKey]:
+        return self.db.query(SshKey).filter(SshKey.name == name).first()
+
+    def list_all(self, limit: int = 100) -> List[SshKey]:
+        return self.db.query(SshKey).order_by(SshKey.name).limit(limit).all()
+
+    def create(self, name: str, private_key: str, passphrase: str = None, description: str = None) -> SshKey:
+        from app.core.secret_store import encrypt_secret
+        key = SshKey(
+            name=name,
+            private_key_encrypted=encrypt_secret(private_key),
+            passphrase_encrypted=encrypt_secret(passphrase) if passphrase else None,
+            description=description,
+        )
+        self.db.add(key)
+        self.db.commit()
+        self.db.refresh(key)
+        return key
+
+    def update(self, name: str, private_key: str = None, passphrase: str = None, description: str = None,
+               new_name: str = None) -> Optional[SshKey]:
+        from app.core.secret_store import encrypt_secret
+        row = self.get_by_name(name)
+        if not row:
+            return None
+        if private_key is not None:
+            row.private_key_encrypted = encrypt_secret(private_key)
+        if passphrase is not None:
+            row.passphrase_encrypted = encrypt_secret(passphrase) if passphrase else None
+        if description is not None:
+            row.description = description
+        if new_name and new_name != name:
+            row.name = new_name
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def delete(self, name: str) -> bool:
+        row = self.get_by_name(name)
+        if row:
+            self.db.delete(row)
+            self.db.commit()
+            return True
+        return False
+
+    def get_decrypted(self, name: str) -> Optional[Dict[str, Any]]:
+        """返回解密后的私钥和 passphrase dict。"""
+        from app.core.secret_store import decrypt_secret
+        row = self.get_by_name(name)
+        if not row:
+            return None
+        return {
+            "name": row.name,
+            "private_key": decrypt_secret(row.private_key_encrypted) if row.private_key_encrypted else "",
+            "passphrase": decrypt_secret(row.passphrase_encrypted) if row.passphrase_encrypted else None,
+            "description": row.description,
+        }
 
 
 class ConfigRepository:

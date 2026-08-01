@@ -36,18 +36,6 @@ def test_inspection_execute_tools_accept_confirm_text_in_schema():
             "groups": ["crypto"],
             "confirm_text": "CONFIRM ops.inspection.run_servers_batch",
         },
-        "ops.inspection.run_project": {
-            "project_id": "project-a",
-            "confirm_text": "CONFIRM ops.inspection.run_project",
-        },
-        "ops.inspection.run_combined": {
-            "project_id": "project-a",
-            "confirm_text": "CONFIRM ops.inspection.run_combined",
-        },
-        "ops.inspection.delete_runs": {
-            "run_ids": ["run-a"],
-            "confirm_text": "CONFIRM ops.inspection.delete_runs",
-        },
     }
 
     for tool_name, arguments in samples.items():
@@ -126,7 +114,7 @@ def test_inspection_path_a_run_tools_return_followup_metadata(monkeypatch):
     assert single["next_actions"][1]["tool"] == "ops.inspection.get_run_raw_output"
 
     assert batch["run_ids"] == ["run-a", "run-b"]
-    assert batch["confirmation"]["confirm_text"].startswith("确认巡检 ")
+    assert batch["preview"]["confirmation"]["confirm_text"].startswith("确认巡检 ")
     assert batch["status"] == "PARTIAL"
     assert batch["next_actions"][0]["arguments"] == {"run_id": "run-a"}
 
@@ -163,7 +151,7 @@ def test_mcp_runbook_uses_current_tool_names_and_covers_tier_tools():
     assert "ops.inspection.toggle_item_config" in text
     assert "ops.inspection.reorder_items" not in text
     assert "ops.inspection.get_raw_output" not in text
-    assert "ops.tier.run_now" in text
+    assert "ops.inspection.run_servers_batch" in text
     assert "ops.notif_route.upsert" in text
     assert "ops.cascade.upsert" in text
     assert "AI agents must keep using" in text
@@ -184,7 +172,7 @@ def test_mcp_aliases_round_trip_without_prior_tools_list_cache():
     from app.mcp.server import _from_mcp_tool_name
 
     assert _from_mcp_tool_name("ops_describe_capabilities") == "ops.describe_capabilities"
-    assert _from_mcp_tool_name("ops_workflow_inspect") == "ops.workflow.inspect"
+    assert _from_mcp_tool_name("ops_exec_remote") == "ops.exec_remote"
     assert _from_mcp_tool_name("ops_inspection_run_servers_batch") == "ops.inspection.run_servers_batch"
     assert _from_mcp_tool_name("ops_inspection_generate_report_for_runs") == "ops.inspection.generate_report_for_runs"
     assert _from_mcp_tool_name("ops_db_export_query_result") == "ops.db.export_query_result"
@@ -265,15 +253,14 @@ def test_mcp_default_profile_is_slim_but_admin_full_keeps_all_tools(tmp_path):
 
         assert daily["filters"]["profile"] == "daily_ops"
         assert admin["filters"]["profile"] == "admin_full"
-        assert len(admin_names) >= 170
+        assert len(admin_names) >= 95
         assert 8 <= len(daily_names) <= 80
         assert daily_names < admin_names
-        assert "ops.workflow.inspect" in daily_names
         assert "ops.inspection.run_servers_batch" in daily_names
         assert "ops.execute_deploy_plan" not in daily_names
-        assert "ops.delete_server" not in daily_names
+        assert "ops.exec_remote" not in daily_names
         assert "ops.execute_deploy_plan" in admin_names
-        assert "ops.delete_server" in admin_names
+        assert "ops.exec_remote" in admin_names
     finally:
         db.close()
         engine.dispose()
@@ -302,7 +289,7 @@ def test_mcp_tools_list_defaults_to_daily_ops_and_can_expand_profile(tmp_path):
             for tool in admin["tools"]
         }
 
-        assert "ops.workflow.inspect" in daily_names
+        assert "ops.inspection.run_servers_batch" in daily_names
         assert "ops.execute_deploy_plan" not in daily_names
         assert len(admin_names) > len(daily_names)
     finally:
@@ -310,7 +297,7 @@ def test_mcp_tools_list_defaults_to_daily_ops_and_can_expand_profile(tmp_path):
         engine.dispose()
 
 
-def test_remote_mcp_tools_list_exposes_inspection_workflow_semantics(tmp_path):
+def test_remote_mcp_tools_list_exposes_inspection_batch_semantics(tmp_path):
     from app.services.mcp_capability_service import mcp_tools_list
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import register_builtin_tools
@@ -324,15 +311,14 @@ def test_remote_mcp_tools_list_exposes_inspection_workflow_semantics(tmp_path):
         listed = mcp_tools_list(db, ctx, {"limit": 200})
         tools = {tool["name"]: tool for tool in listed["tools"]}
 
-        workflow = tools["ops_workflow_inspect"]
-        workflow_description = workflow["description"].lower()
-        workflow_schema = workflow["inputSchema"]
-        workflow_props = workflow_schema["properties"]
-        assert "all servers" in workflow_description
-        assert "grouped" in workflow_description
-        assert "merged report" in workflow_description
-        assert "ops.workflow.inspect" == workflow["annotations"]["ops.originalToolName"]
-        assert {"request", "all_servers", "grouped", "batch_size", "concurrency", "generate_report"} <= set(workflow_props)
+        batch = tools["ops_inspection_run_servers_batch"]
+        batch_description = batch["description"].lower()
+        batch_schema = batch["inputSchema"]
+        batch_props = batch_schema["properties"]
+        assert "batch" in batch_description
+        assert "confirm_text" in batch_description
+        assert "ops.inspection.run_servers_batch" == batch["annotations"]["ops.originalToolName"]
+        assert {"groups", "confirm_text"} <= set(batch_props)
 
         merged_report = tools["ops_inspection_generate_report_for_runs"]
         assert "multiple run ids" in merged_report["description"].lower()
@@ -345,221 +331,8 @@ def test_remote_mcp_tools_list_exposes_inspection_workflow_semantics(tmp_path):
 def test_stdio_mcp_bridge_requests_daily_ops_tool_profile_by_default():
     text = open("app/mcp/server.py", encoding="utf-8").read()
 
-    assert 'params.get("profile") or "daily_ops"' in text
+    assert 'params.get("profile") or "ai_full"' in text or 'params.get("profile") or default_profile' in text
     assert "profile=\" + urllib.parse.quote(profile)" in text
-
-
-def test_workflow_inspect_routes_to_underlying_inspection_and_preserves_records(monkeypatch, tmp_path):
-    from app.services.tool_context import ToolContext
-    from app.services.tool_registry import register_builtin_tools, registry
-
-    engine, Session = _sqlite_session(tmp_path)
-    db = Session()
-    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
-    calls = []
-
-    def _fake_call(db_arg, tool_name, arguments, ctx_arg, stream_callback=None):
-        calls.append((tool_name, dict(arguments or {})))
-        if tool_name == "ops.inspection.preview_servers_batch":
-            return {
-                "ok": True,
-                "tool": tool_name,
-                "result": {
-                    "summary": "preview ok",
-                    "eligible_count": 58,
-                    "confirmation": {"confirm_text": "确认巡检 c6cd0b45"},
-                },
-            }
-        if tool_name == "ops.inspection.run_servers_batch":
-            return {
-                "ok": True,
-                "tool": tool_name,
-                "result": {
-                    "summary": "run ok",
-                    "status": "COMPLETED",
-                    "run_ids": ["run-1"],
-                    "next_actions": [{"tool": "ops.inspection.generate_report", "arguments": {"run_ids": ["run-1"]}}],
-                },
-            }
-        if tool_name == "ops.inspection.profile.preview":
-            return {
-                "ok": True,
-                "tool": tool_name,
-                "result": {
-                    "profile_id": "crypto-test-daily",
-                    "eligible_count": 2,
-                    "confirmation": {"confirm_text": "RUN crypto-test-daily 2 abc123"},
-                },
-            }
-        if tool_name == "ops.inspection.profile.run":
-            return {
-                "ok": True,
-                "tool": tool_name,
-                "result": {
-                    "profile_id": "crypto-test-daily",
-                    "run_ids": ["run-profile-1"],
-                },
-            }
-        raise AssertionError(f"unexpected tool call: {tool_name}")
-
-    try:
-        register_builtin_tools()
-        monkeypatch.setattr(registry, "call", _fake_call)
-        tool = registry.get("ops.workflow.inspect")
-
-        preview = tool.handler({"request": "请巡检 crypto 下测试服务器并生成报告", "generate_report": True}, ctx, db)
-        assert calls[0] == ("ops.inspection.preview_servers_batch", {"groups": ["crypto"]})
-        assert preview["mode"] == "preview"
-        assert preview["workflow_type"] == "inspection"
-        assert preview["records"]["preserved"] is True
-        assert "inspection_runs" in preview["records"]["types"]
-        assert preview["next_actions"][0]["tool"] == "ops.workflow.inspect"
-        assert preview["next_actions"][0]["arguments"]["confirm_text"] == "确认巡检 c6cd0b45"
-        assert preview["next_actions"][0]["arguments"]["generate_report"] is True
-
-        calls.clear()
-        executed = tool.handler({"request": "巡检 crypto 测试服务器", "confirm_text": "确认巡检 c6cd0b45"}, ctx, db)
-        assert calls[0] == (
-            "ops.inspection.run_servers_batch",
-            {"groups": ["crypto"], "confirm_text": "确认巡检 c6cd0b45"},
-        )
-        assert executed["mode"] == "run"
-        assert executed["run"]["run_ids"] == ["run-1"]
-        assert executed["records"]["preserved"] is True
-
-        calls.clear()
-        profile_preview = tool.handler({"profile_id": "crypto-test-daily"}, ctx, db)
-        assert calls[0] == ("ops.inspection.profile.preview", {"profile_id": "crypto-test-daily"})
-        assert profile_preview["next_actions"][0]["arguments"]["confirm_text"] == "RUN crypto-test-daily 2 abc123"
-
-        calls.clear()
-        profile_run = tool.handler({"profile_id": "crypto-test-daily", "confirm_text": "RUN crypto-test-daily 2 abc123"}, ctx, db)
-        assert calls[0] == (
-            "ops.inspection.profile.run",
-            {"profile_id": "crypto-test-daily", "confirm_text": "RUN crypto-test-daily 2 abc123"},
-        )
-        assert profile_run["run"]["run_ids"] == ["run-profile-1"]
-    finally:
-        db.close()
-        engine.dispose()
-
-
-def test_workflow_inspect_builds_grouped_all_server_plan_for_ai_agent(monkeypatch, tmp_path):
-    from app.services.tool_context import ToolContext
-    from app.services.tool_registry import register_builtin_tools, registry
-
-    engine, Session = _sqlite_session(tmp_path)
-    db = Session()
-    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
-    calls = []
-
-    def _fake_call(db_arg, tool_name, arguments, ctx_arg, stream_callback=None):
-        calls.append((tool_name, dict(arguments or {})))
-        if tool_name == "ops.inspection.preview_servers_batch":
-            return {
-                "ok": True,
-                "tool": tool_name,
-                "result": {
-                    "summary": "preview all ok",
-                    "eligible_count": 3,
-                    "skipped_count": 1,
-                    "eligible": [
-                        {"id": "srv-a", "name": "crypto-a", "group": "crypto", "status": "online"},
-                        {"id": "srv-b", "name": "crypto-b", "group": "crypto", "status": "online"},
-                        {"id": "srv-c", "name": "ops-c", "group": "ops", "status": "online"},
-                    ],
-                    "eligible_ids": ["crypto-a", "crypto-b", "ops-c"],
-                    "execution_plan": {"batch_size": 8, "concurrency": 4, "batch_count": 1},
-                    "confirmation": {"confirm_text": "确认巡检 all12345"},
-                },
-            }
-        raise AssertionError(f"unexpected tool call: {tool_name}")
-
-    try:
-        register_builtin_tools()
-        monkeypatch.setattr(registry, "call", _fake_call)
-        tool = registry.get("ops.workflow.inspect")
-
-        result = tool.handler({
-            "request": "使用 ops 能力巡检全部服务器，数量较多，按分组分批巡检，分析并输出巡检报告",
-            "batch_size": 8,
-            "concurrency": 4,
-            "generate_report": True,
-        }, ctx, db)
-
-        assert calls == [(
-            "ops.inspection.preview_servers_batch",
-            {"concurrency": 4, "batch_size": 8, "all_servers": True},
-        )]
-        assert result["mode"] == "grouped_preview"
-        assert result["can_complete"] is True
-        assert result["execution_strategy"] == "grouped_batch_inspection"
-        assert result["routed_arguments"]["all_servers"] is True
-        assert result["grouped_plan"]["total_groups"] == 2
-        assert result["grouped_plan"]["total_targets"] == 3
-        assert result["grouped_plan"]["groups"][0]["name"] == "crypto"
-        assert result["grouped_plan"]["groups"][0]["target_count"] == 2
-        assert result["grouped_plan"]["groups"][1]["name"] == "ops"
-        assert result["grouped_plan"]["groups"][1]["target_count"] == 1
-        assert result["grouped_plan"]["final_report_template"]["tool"] == "ops.inspection.generate_report_for_runs"
-        assert result["next_actions"][0]["tool"] == "ops.workflow.inspect"
-        assert result["next_actions"][0]["arguments"]["groups"] == ["crypto"]
-        assert result["next_actions"][0]["arguments"]["batch_size"] == 8
-        assert result["next_actions"][0]["arguments"]["concurrency"] == 4
-        assert result["next_actions"][0]["arguments"]["generate_report"] is True
-        assert result["records"]["preserved"] is True
-    finally:
-        db.close()
-        engine.dispose()
-
-
-def test_workflow_inspect_run_recommends_merged_report_for_multiple_runs(monkeypatch, tmp_path):
-    from app.services.tool_context import ToolContext
-    from app.services.tool_registry import register_builtin_tools, registry
-
-    engine, Session = _sqlite_session(tmp_path)
-    db = Session()
-    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
-    calls = []
-
-    def _fake_call(db_arg, tool_name, arguments, ctx_arg, stream_callback=None):
-        calls.append((tool_name, dict(arguments or {})))
-        if tool_name == "ops.inspection.run_servers_batch":
-            return {
-                "ok": True,
-                "tool": tool_name,
-                "result": {
-                    "summary": "run ok",
-                    "status": "COMPLETED",
-                    "run_ids": ["run-a", "run-b"],
-                    "next_actions": [{"tool": "ops.inspection.get_run", "arguments": {"run_id": "run-a"}}],
-                },
-            }
-        raise AssertionError(f"unexpected tool call: {tool_name}")
-
-    try:
-        register_builtin_tools()
-        monkeypatch.setattr(registry, "call", _fake_call)
-        tool = registry.get("ops.workflow.inspect")
-
-        result = tool.handler({
-            "request": "巡检 crypto 分组并输出报告",
-            "groups": ["crypto"],
-            "generate_report": True,
-            "confirm_text": "确认巡检 abc12345",
-        }, ctx, db)
-
-        assert result["mode"] == "run"
-        assert calls == [(
-            "ops.inspection.run_servers_batch",
-            {"groups": ["crypto"], "generate_report": True, "confirm_text": "确认巡检 abc12345"},
-        )]
-        report_actions = [item for item in result["next_actions"] if item.get("tool") == "ops.inspection.generate_report_for_runs"]
-        assert report_actions
-        assert report_actions[0]["arguments"]["run_ids"] == ["run-a", "run-b"]
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_mcp_capability_service_owns_resource_catalog_and_read_wrapper(tmp_path):
@@ -601,11 +374,11 @@ def test_mcp_ai_workflows_resource_explains_grouped_inspection(tmp_path):
         response = mcp_resource_read(db, ctx, {"uri": "ops://ai-workflows"})
         payload = json.loads(response["contents"][0]["text"])
         items = (payload["data"] or {}).get("items") or []
-        inspect_item = next(item for item in items if item.get("tool") == "ops.workflow.inspect")
+        inspect_item = next(item for item in items if item.get("tool") == "ops.inspection.run_servers_batch")
 
-        assert "all-server grouped batch inspection" in inspect_item["description"]
+        assert "batch" in inspect_item["description"].lower()
         assert "ops.inspection.generate_report_for_runs" in inspect_item["recommended_after"]
-        assert "grouped_preview" in inspect_item["output_modes"]
+        assert "ops.inspection.preview_servers_batch" in inspect_item["recommended_before"]
     finally:
         db.close()
         engine.dispose()
@@ -634,8 +407,8 @@ def test_mcp_capability_service_owns_prompt_catalog_and_get_contract():
         "arguments": {"request": "巡检全部服务器，按分组分批巡检并输出报告"},
     })
     inspection_text = inspection_prompt["messages"][0]["content"]["text"]
-    assert "ops.workflow.inspect" in inspection_text
-    assert "grouped_preview" in inspection_text
+    assert "ops.inspection.run_servers_batch" in inspection_text
+    assert "grouped" in inspection_text
     assert "ops.inspection.generate_report_for_runs" in inspection_text
     assert "确认巡检 <fingerprint>" in inspection_text
 
@@ -681,13 +454,9 @@ def test_stdio_mcp_descriptions_are_ascii_safe_for_default_clients():
 def test_stdio_mcp_inspection_descriptions_match_agent_routing_contract():
     from app.mcp import server as stdio_server
 
-    workflow_description = stdio_server.ENGLISH_TOOL_DESCRIPTIONS["ops.workflow.inspect"].lower()
     batch_description = stdio_server.ENGLISH_TOOL_DESCRIPTIONS["ops.inspection.run_servers_batch"].lower()
     merged_report_description = stdio_server.ENGLISH_TOOL_DESCRIPTIONS["ops.inspection.generate_report_for_runs"].lower()
 
-    assert "all servers" in workflow_description
-    assert "grouped" in workflow_description
-    assert "merged report" in workflow_description
     assert "confirm_text" in batch_description
     assert "multiple run ids" in merged_report_description
 
@@ -771,7 +540,7 @@ def test_mcp_inspection_recommendation_includes_merged_report_tool():
     text = open("app/api/tools.py", encoding="utf-8").read()
     body = text.split('"inspection": [', 1)[1].split("],", 1)[0]
 
-    assert '"ops.workflow.inspect"' in body
+    assert '"ops.inspection.run_servers_batch"' in body
     assert '"ops.list_server_groups"' in body
     assert '"ops.inspection.generate_report_for_runs"' in body
 

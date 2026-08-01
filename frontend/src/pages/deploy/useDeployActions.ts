@@ -95,14 +95,29 @@ export function useDeployActions(args: UseDeployActionsArgs) {
   const buildRuntimeVariables = useCallback(() => {
     const selectedEnv = environments.find((e) => e.name === environment || e.id === environment)
     const serviceVars = selectedService?.template_variables || {}
-    const deployPath = serviceVars.deploy_path || serviceVars.base_path || serviceVars.service_dir || selectedEnv?.deploy_path || `/data/web/${system}`
+    const isDockerComposeService = (
+      selectedService?.template === 'docker_compose' ||
+      selectedService?.template === 'crypto_docker_compose' ||
+      Boolean(serviceVars.compose_dir) ||
+      (Array.isArray(pipelineSteps) && pipelineSteps.some((s: any) => {
+        const t = s?.step_type || s?.type
+        return t === 'docker_compose_update' || t === 'docker_compose'
+      }))
+    )
+    const deployPath = isDockerComposeService
+      ? (serviceVars.compose_dir || serviceVars.deploy_path || serviceVars.base_path || selectedEnv?.deploy_path || `/data/web/${system}`)
+      : (serviceVars.deploy_path || serviceVars.base_path || serviceVars.service_dir || selectedEnv?.deploy_path || `/data/web/${system}`)
     const healthUrl = serviceVars.health_url || selectedEnv?.health_url || selectedEnv?.variables?.health_url || 'http://localhost/health'
     const releaseService = selectedService?.name || service
     return {
       ...serviceVars,
+      compose_dir: serviceVars.compose_dir || deployPath,
+      compose_file: serviceVars.compose_file || 'docker-compose.yml',
       deploy_path: deployPath,
       health_url: healthUrl,
-      restart_command: serviceVars.restart_command || `pm2 restart ${releaseService || system || 'all'}`,
+      restart_command: isDockerComposeService
+        ? (serviceVars.restart_command || `docker compose -f ${serviceVars.compose_file || 'docker-compose.yml'} up -d --remove-orphans`)
+        : (serviceVars.restart_command || `pm2 restart ${releaseService || system || 'all'}`),
       build_command: serviceVars.build_command || '',
       repo: serviceVars.repo,
       release_service: releaseService,
@@ -111,8 +126,9 @@ export function useDeployActions(args: UseDeployActionsArgs) {
       environment,
       target_servers: parseServerList(servers),
       file_name: fileName,
+      deployment_kind: isDockerComposeService ? 'docker_compose' : 'traditional',
     }
-  }, [selectedService, environments, environment, system, service, serverGroup, servers, fileName, parseServerList])
+  }, [selectedService, environments, environment, system, service, serverGroup, servers, fileName, parseServerList, pipelineSteps])
 
   const buildDeployPayload = useCallback(() => ({
     system,
@@ -184,8 +200,21 @@ export function useDeployActions(args: UseDeployActionsArgs) {
   }, [buildDeployPayload, setTaskId, setDeploymentId, startPolling, notify])
 
   const handleDeploy = useCallback(async () => {
-    if (!system || !fileName) {
-      notify('请填写系统和文件名', 'error')
+    if (!system) {
+      notify('请填写系统', 'error')
+      return
+    }
+    const isDockerComposeService = (
+      selectedService?.template === 'docker_compose' ||
+      selectedService?.template === 'crypto_docker_compose' ||
+      Boolean(selectedService?.template_variables?.compose_dir) ||
+      (Array.isArray(pipelineSteps) && pipelineSteps.some((s: any) => {
+        const t = s?.step_type || s?.type
+        return t === 'docker_compose_update' || t === 'docker_compose'
+      }))
+    )
+    if (!isDockerComposeService && !fileName) {
+      notify('请填写文件名', 'error')
       return
     }
     if (!validateEnvironmentServerSelection('开始发布')) return
@@ -224,7 +253,7 @@ export function useDeployActions(args: UseDeployActionsArgs) {
     } finally {
       setConfirmingRelease(false)
     }
-  }, [system, fileName, validateEnvironmentServerSelection, setConfirmingRelease, loadReleaseConfirmation, buildDeployPayload, isProdRelease, service, environment, resetRunState, doDeploy, notify])
+  }, [system, fileName, selectedService, pipelineSteps, validateEnvironmentServerSelection, setConfirmingRelease, loadReleaseConfirmation, buildDeployPayload, isProdRelease, service, environment, resetRunState, doDeploy, notify])
 
   const cancelReleaseRiskDialog = useCallback(() => {
     if (loadingRef.current) return

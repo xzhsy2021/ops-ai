@@ -96,12 +96,12 @@ def test_executor_creates_operation_job(db):
     with patch.object(executor, "_execute_release", return_value={"action": "RELEASE", "ok": True}):
         result = executor.execute(approval.id)
 
-    # 查找关联的 Job
+    # 查找关联的 Job（source 已通用化为 "approval"，见 approval_executor.py）
     job = db.query(OperationJob).filter(
-        OperationJob.source == "qclaw_approval"
+        OperationJob.source == "approval"
     ).order_by(OperationJob.created_at.desc()).first()
     assert job is not None
-    assert job.source == "qclaw_approval"
+    assert job.source == "approval"
     assert "RELEASE" in job.title
 
 

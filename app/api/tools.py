@@ -14,6 +14,7 @@ from app.db import get_db
 from app.db.models import ToolToken, ToolCallLog, ToolPlan, ToolPlanEvent
 from app.services.tool_context import ToolContext
 from app.services.tool_token import (
+    _normalize_approver_ids,
     _normalize_bound_room_ids,
     create_tool_token,
     recommended_tool_token_templates,
@@ -85,6 +86,10 @@ class CreateToolTokenPayload(BaseModel):
     # token can be used from any room. Non-empty list = token is restricted
     # to the listed Matrix room IDs (e.g. ["!ops:matrix.org"]).
     bound_room_ids: List[str] = Field(default_factory=list)
+    # qclaw Element approver whitelist. Empty list (= default) = no
+    # token-level restriction. Non-empty list = only these Matrix user IDs
+    # may consume approval short codes created through this token.
+    approver_matrix_ids: List[str] = Field(default_factory=list)
 
 
 
@@ -100,6 +105,9 @@ class UpdateToolTokenPayload(BaseModel):
     # Pass an empty list to clear the room binding; pass None to leave it
     # unchanged. Frontend always sends the current list on edit.
     bound_room_ids: Optional[List[str]] = None
+    # Pass an empty list to clear the approver whitelist; pass None to leave
+    # it unchanged. Frontend always sends the current list on edit.
+    approver_matrix_ids: Optional[List[str]] = None
 
 
 class ToolPolicyPreviewPayload(BaseModel):
@@ -176,6 +184,7 @@ def _ctx_from_token(request: Request, db: Session, raw_token: str) -> ToolContex
         allow_write=bool(token.allow_write),
         allow_prod=bool(token.allow_prod),
         bound_room_ids=_normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
+        approver_matrix_ids=_normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
         client_name=token.name,
         ip_address=request.client.host if request.client else "",
         user_agent=request.headers.get("user-agent", ""),
@@ -199,6 +208,8 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             scopes=token.scopes or [],
             allow_write=bool(token.allow_write),
             allow_prod=bool(token.allow_prod),
+            bound_room_ids=_normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
+            approver_matrix_ids=_normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
             client_name=token.name,
             ip_address=request.client.host if request.client else "",
             user_agent=request.headers.get("user-agent", "") if request else "",
@@ -211,6 +222,8 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             "scopes": token.scopes or [],
             "allow_write": bool(token.allow_write),
             "allow_prod": bool(token.allow_prod),
+            "bound_room_ids": _normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
+            "approver_matrix_ids": _normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
         }
 
     templates = {item["key"]: item for item in recommended_tool_token_templates()}
@@ -579,8 +592,9 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
         allow_prod=allow_prod,
         expires_in_days=payload.expires_in_days,
         bound_room_ids=payload.bound_room_ids,
+        approver_matrix_ids=payload.approver_matrix_ids,
     )
-    audit("tool.token.create", "tool_token", payload.name, f"user={user.get('username')} scopes={','.join(scopes)} bound_rooms={','.join(_normalize_bound_room_ids(payload.bound_room_ids))}")
+    audit("tool.token.create", "tool_token", payload.name, f"user={user.get('username')} scopes={','.join(scopes)} bound_rooms={','.join(_normalize_bound_room_ids(payload.bound_room_ids))} approvers={','.join(_normalize_approver_ids(payload.approver_matrix_ids))}")
     _bump_capability_version(db)
     return api_response(data={"token": created["token"], "record": token_to_dict(created["record"])}, message="Token created; copy it now, it will be shown only once")
 
@@ -630,10 +644,12 @@ def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Reques
         token.revoked_at = _utcnow() if payload.revoke else None
     if payload.bound_room_ids is not None:
         token.bound_room_ids = _normalize_bound_room_ids(payload.bound_room_ids)
+    if payload.approver_matrix_ids is not None:
+        token.approver_matrix_ids = _normalize_approver_ids(payload.approver_matrix_ids)
 
     db.commit()
     db.refresh(token)
-    audit("tool.token.update", "tool_token", token.name, f"user={user.get('username')} scopes={','.join(token.scopes or [])} allow_write={token.allow_write} allow_prod={token.allow_prod} bound_rooms={','.join(_normalize_bound_room_ids(token.bound_room_ids))}")
+    audit("tool.token.update", "tool_token", token.name, f"user={user.get('username')} scopes={','.join(token.scopes or [])} allow_write={token.allow_write} allow_prod={token.allow_prod} bound_rooms={','.join(_normalize_bound_room_ids(token.bound_room_ids))} approvers={','.join(_normalize_approver_ids(token.approver_matrix_ids))}")
     _bump_capability_version(db)
     return api_response(data=token_to_dict(token), message="Token updated")
 

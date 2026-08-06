@@ -26,6 +26,7 @@ def test_recommended_tool_token_templates_are_backend_source_of_truth():
         "readonly-ai",
         "inspection-ai",
         "operator-human",
+        "claw-mcp",
         "qclaw-mcp",
         "admin-breakglass",
     ]

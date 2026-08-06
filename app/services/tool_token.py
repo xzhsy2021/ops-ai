@@ -125,6 +125,32 @@ def _resolve_expires_at(expires_in_days: Optional[int]) -> Optional[datetime]:
     return _utcnow() + timedelta(days=min(max(days, 1), 3650))
 
 
+def _normalize_approver_ids(value: Any) -> List[str]:
+    """Coerce arbitrary user input into a clean list[str] of Matrix user IDs.
+
+    Mirrors _normalize_bound_room_ids: empty/None -> [], strings are split
+    on newlines, list members must be strings, duplicates removed while
+    preserving order. Any other type -> [] (not crash).
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        candidates = [p for p in value.splitlines() if p.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        candidates = [p for p in value if isinstance(p, str)]
+    else:
+        return []
+    seen: set[str] = set()
+    result: List[str] = []
+    for raw in candidates:
+        user_id = raw.strip()
+        if not user_id or user_id in seen:
+            continue
+        seen.add(user_id)
+        result.append(user_id)
+    return result
+
+
 def _normalize_bound_room_ids(value: Any) -> List[str]:
     """Coerce arbitrary user input into a clean list[str] of Matrix room IDs.
 
@@ -176,11 +202,13 @@ def create_tool_token(
     allow_prod: bool = False,
     expires_in_days: Optional[int] = 90,
     bound_room_ids: Optional[List[str]] = None,
+    approver_matrix_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
     resolved_scopes = list(scopes) if scopes else list(DEFAULT_AI_TOKEN_SCOPES)
     resolved_allow_write = _resolve_write_flag(resolved_scopes, allow_write)
     resolved_bound_rooms = _normalize_bound_room_ids(bound_room_ids)
+    resolved_approvers = _normalize_approver_ids(approver_matrix_ids)
     token = ToolToken(
         name=name.strip() or "tool-token",
         token_hash=hash_token(raw),
@@ -192,6 +220,7 @@ def create_tool_token(
         allow_prod=bool(allow_prod),
         expires_at=_resolve_expires_at(expires_in_days),
         bound_room_ids=resolved_bound_rooms,
+        approver_matrix_ids=resolved_approvers,
     )
     db.add(token)
     db.commit()
@@ -270,6 +299,7 @@ def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any
         "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
         "revoked_at": token.revoked_at.isoformat() if token.revoked_at else None,
         "bound_room_ids": _normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
+        "approver_matrix_ids": _normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
     }
     if include_hash:
         data["token_hash"] = token.token_hash

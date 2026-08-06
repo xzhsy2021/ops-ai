@@ -648,6 +648,8 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               scopes: t.scopes,
               allow_write: t.allow_write,
               allow_prod: t.allow_prod,
+              bound_room_ids: Array.isArray(t.bound_room_ids) ? t.bound_room_ids : [],
+              approver_matrix_ids: Array.isArray(t.approver_matrix_ids) ? t.approver_matrix_ids : [],
               key_prefix: t.token_prefix,
               masked_value: t.token_prefix ? `${t.token_prefix}...` : undefined,
             }))}
@@ -664,6 +666,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                 allow_prod: data.allow_prod,
                 expires_in_days: data.expires_in_days,
                 bound_room_ids: data.bound_room_ids || [],
+                approver_matrix_ids: data.approver_matrix_ids || [],
               })
               const d = getData(res)
               setCreatedToken(d.token || '')

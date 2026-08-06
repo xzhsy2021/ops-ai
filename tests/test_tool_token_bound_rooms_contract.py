@@ -208,17 +208,13 @@ def test_enforce_room_binding_runs_at_top_of_qclaw_mcp_tools():
     # schema but enforce_room_binding still runs (no-op when unbound).
     expected_sites = [
         "def routing_resolve_message_target",
-        "def approval_prepare_release",
-        "def approval_prepare_rollback",
-        "def approval_prepare_dml",
-        "def approval_prepare_package_cleanup",
+        "def approval_prepare_service_control",
         "def approval_execute",
-        "def approval_reject",
     ]
     for fn in expected_sites:
         assert fn in src, f"missing qclaw tool: {fn}"
     # enforce_room_binding is imported and referenced.
-    assert "from app.services.tool_token import enforce_room_binding" in src
+    assert "enforce_room_binding" in src
     # At least one call site per tool (reject's call uses args.get, which
     # still counts as an enforce_room_binding( call).
     assert src.count("enforce_room_binding(") >= len(expected_sites)

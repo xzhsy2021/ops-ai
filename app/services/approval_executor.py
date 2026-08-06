@@ -6,7 +6,10 @@
 3. 更新审批工单状态为 SUCCEEDED / FAILED
 4. 记录执行结果和失败原因
 
-四个执行方法复用现有业务层函数，不重复实现部署/回滚/DML/清理逻辑：
+执行逻辑（发布/回滚/DML/包清理）抽为模块级共享函数 execute_*，供
+ApprovalExecutor 方法和 PlanExecutor 步骤处理器共同调用。PlanExecutor
+复用同一套业务实现，避免在计划链路内部再次调用旧 prepare_* 审批工具。
+
 - RELEASE  → DeploymentRepository + ensure_deploy_worker_running
 - ROLLBACK → 现有回滚 API 逻辑
 - DML      → DbQueryExportService.execute_sql
@@ -124,45 +127,12 @@ class ApprovalExecutor:
         复用现有 DeploymentRepository 创建部署记录，然后触发部署 worker。
         部署 worker 异步执行实际发布，此处返回部署 ID 供监控。
         """
-        from app.db.repository import DeploymentRepository
-        from app.api.deploy._shared import ensure_deploy_worker_running
-
-        system_name = payload.get("system_name", "")
-        service_name = payload.get("service_name", "") or None
-        environment = payload.get("environment", "") or None
-        targets = payload.get("targets", [])
-        action_parameters = payload.get("action_parameters", {})
-
-        repo = DeploymentRepository(self.db)
-        deployment = repo.create(
-            system=system_name,
-            service=service_name,
-            environment=environment,
-            strategy="DIRECT",
-            servers=",".join(targets) if targets else "",
-            created_by=approval.approved_by or "system",
-            version=approval.package_name or "",
-            status="pending",
+        return execute_release(
+            self.db,
+            payload,
+            operator=approval.approved_by or "system",
+            package_name=approval.package_name or "",
         )
-        self.db.commit()
-
-        # 触发后台部署 worker（异步执行实际发布步骤）
-        try:
-            ensure_deploy_worker_running()
-        except Exception:
-            # worker 启动失败不阻塞审批完成，部署记录已在 DB 中
-            pass
-
-        return {
-            "action": "RELEASE",
-            "deployment_id": str(deployment.id),
-            "system": system_name,
-            "service": service_name,
-            "environment": environment,
-            "servers": targets,
-            "package": approval.package_name,
-            "message": "部署记录已创建，部署 worker 将异步执行",
-        }
 
     # ── 回滚执行 ──
 
@@ -172,55 +142,11 @@ class ApprovalExecutor:
         复用现有部署回滚逻辑：通过 DeploymentRepository 查找原部署记录，
         创建一条新的回滚部署记录（status=pending），由部署 worker 执行。
         """
-        from app.db.repository import DeploymentRepository
-        from app.api.deploy._shared import ensure_deploy_worker_running
-
-        action_parameters = payload.get("action_parameters", {})
-        deployment_id = action_parameters.get("deployment_id", "")
-        targets = payload.get("targets", [])
-
-        if not deployment_id:
-            raise ValueError("回滚操作需要指定 deployment_id")
-
-        repo = DeploymentRepository(self.db)
-        original = repo.get_by_id(deployment_id) if hasattr(repo, "get_by_id") else None
-        if not original:
-            # 直接按原部署信息查找
-            from app.db.models import Deployment
-            original = self.db.query(Deployment).filter(
-                Deployment.id == deployment_id
-            ).first()
-
-        if not original:
-            raise ValueError(f"原部署记录不存在: {deployment_id}")
-
-        # 创建回滚部署记录
-        rollback = repo.create(
-            system=original.system,
-            service=original.service,
-            environment=original.environment,
-            strategy="DIRECT",
-            servers=original.servers or ",".join(targets),
-            created_by=approval.approved_by or "system",
-            version=original.version or "",
-            status="pending",
+        return execute_rollback(
+            self.db,
+            payload,
+            operator=approval.approved_by or "system",
         )
-        self.db.commit()
-
-        try:
-            ensure_deploy_worker_running()
-        except Exception:
-            pass
-
-        return {
-            "action": "ROLLBACK",
-            "rollback_deployment_id": str(rollback.id),
-            "original_deployment_id": deployment_id,
-            "system": original.system,
-            "environment": original.environment,
-            "targets": targets,
-            "message": "回滚部署记录已创建，部署 worker 将异步执行",
-        }
 
     # ── DML 执行 ──
 
@@ -230,33 +156,11 @@ class ApprovalExecutor:
         复用 DbQueryExportService.execute_sql，它内部包含预检、影响行数
         校验、审计日志记录。
         """
-        from app.services.db_query_export import DbQueryExportService
-
-        action_parameters = payload.get("action_parameters", {})
-        db_connection_id = action_parameters.get("database_connection_id", "")
-        sql_text = action_parameters.get("sql_text", "")
-        max_affected_rows = action_parameters.get("max_affected_rows", 100)
-        database_name = action_parameters.get("database_name", "")
-
-        service = DbQueryExportService(self.db)
-        result = service.execute_sql(
-            sql=sql_text,
+        return execute_dml(
+            self.db,
+            payload,
             operator=approval.approved_by or "system",
-            connection_id=db_connection_id,
-            database_name=database_name,
-            max_affected_rows=max_affected_rows,
-            # 审批已通过，跳过 confirm_text 二次确认
-            confirm_text="EXECUTE SQL",
-            reason=f"审批执行: {approval.id}",
         )
-
-        return {
-            "action": "DML",
-            "database_connection_id": db_connection_id,
-            "affected_rows": result.get("affected_rows", 0),
-            "sql_text": sql_text[:200],
-            "result": result,
-        }
 
     # ── 包清理执行 ──
 
@@ -265,31 +169,11 @@ class ApprovalExecutor:
 
         复用 package_retention.cleanup_packages，按保留策略清理过期包。
         """
-        from app.services.package_retention import cleanup_packages
-
-        action_parameters = payload.get("action_parameters", {})
-        package_ids = action_parameters.get("package_ids", [])
-
-        # cleanup_packages 按保留策略执行，不传 package_ids（它不接受此参数）
-        # 如果需要只清理指定包，应在 prepare 阶段将 package_ids 写入策略
-        result = cleanup_packages(
+        return execute_package_cleanup(
             self.db,
-            policy=None,  # 使用默认保留策略
-            dry_run=False,
-            actor=approval.approved_by or "system",
+            payload,
+            operator=approval.approved_by or "system",
         )
-
-        summary = result.get("summary", {})
-        removed = result.get("removed", [])
-
-        return {
-            "action": "PACKAGE_CLEANUP",
-            "requested_package_ids": package_ids,
-            "cleaned_count": summary.get("cleanup_count", 0),
-            "cleanup_size_mb": summary.get("cleanup_size_mb", 0),
-            "removed_packages": removed[:50],  # 限制返回数量
-            "message": f"已清理 {summary.get('cleanup_count', 0)} 个包",
-        }
 
     # ── 服务控制执行 ──
 
@@ -411,3 +295,168 @@ class ApprovalExecutor:
             }
         finally:
             ssh.close()
+
+
+# ── 共享执行函数 ──
+#
+# 这些函数以 (db, payload, operator, ...) 为签名，供旧 ApprovalExecutor 方法
+# 和新的 PlanExecutor 步骤处理器共同调用。PlanExecutor 复用同一套业务实现，
+# 避免在计划链路内部再次调用旧 prepare_* 审批工具（防止审批递归）。
+
+
+def execute_release(db: Session, payload: dict, *, operator: str = "system", package_name: str = "") -> dict[str, Any]:
+    """执行发布操作：创建部署记录并触发后台部署 worker。"""
+    from app.db.repository import DeploymentRepository
+    from app.api.deploy._shared import ensure_deploy_worker_running
+
+    system_name = payload.get("system_name", "")
+    service_name = payload.get("service_name", "") or None
+    environment = payload.get("environment", "") or None
+    targets = payload.get("targets", [])
+    action_parameters = payload.get("action_parameters", {})
+
+    repo = DeploymentRepository(db)
+    deployment = repo.create(
+        system=system_name,
+        service=service_name,
+        environment=environment,
+        strategy="DIRECT",
+        servers=",".join(targets) if targets else "",
+        created_by=operator or "system",
+        version=package_name or "",
+        status="pending",
+    )
+    db.commit()
+
+    # 触发后台部署 worker（异步执行实际发布步骤）
+    try:
+        ensure_deploy_worker_running()
+    except Exception:
+        # worker 启动失败不阻塞审批完成，部署记录已在 DB 中
+        pass
+
+    return {
+        "action": "RELEASE",
+        "deployment_id": str(deployment.id),
+        "system": system_name,
+        "service": service_name,
+        "environment": environment,
+        "servers": targets,
+        "package": package_name,
+        "message": "部署记录已创建，部署 worker 将异步执行",
+    }
+
+
+def execute_rollback(db: Session, payload: dict, *, operator: str = "system") -> dict[str, Any]:
+    """执行回滚操作：查找原部署记录并创建回滚部署记录。"""
+    from app.db.repository import DeploymentRepository
+    from app.api.deploy._shared import ensure_deploy_worker_running
+
+    action_parameters = payload.get("action_parameters", {})
+    deployment_id = action_parameters.get("deployment_id", "")
+    targets = payload.get("targets", [])
+
+    if not deployment_id:
+        raise ValueError("回滚操作需要指定 deployment_id")
+
+    repo = DeploymentRepository(db)
+    original = repo.get_by_id(deployment_id) if hasattr(repo, "get_by_id") else None
+    if not original:
+        # 直接按原部署信息查找
+        from app.db.models import Deployment
+        original = db.query(Deployment).filter(
+            Deployment.id == deployment_id
+        ).first()
+
+    if not original:
+        raise ValueError(f"原部署记录不存在: {deployment_id}")
+
+    # 创建回滚部署记录
+    rollback = repo.create(
+        system=original.system,
+        service=original.service,
+        environment=original.environment,
+        strategy="DIRECT",
+        servers=original.servers or ",".join(targets),
+        created_by=operator or "system",
+        version=original.version or "",
+        status="pending",
+    )
+    db.commit()
+
+    try:
+        ensure_deploy_worker_running()
+    except Exception:
+        pass
+
+    return {
+        "action": "ROLLBACK",
+        "rollback_deployment_id": str(rollback.id),
+        "original_deployment_id": deployment_id,
+        "system": original.system,
+        "environment": original.environment,
+        "targets": targets,
+        "message": "回滚部署记录已创建，部署 worker 将异步执行",
+    }
+
+
+def execute_dml(db: Session, payload: dict, *, operator: str = "system") -> dict[str, Any]:
+    """执行 DML 操作，复用 DbQueryExportService.execute_sql（含预检与审计）。"""
+    from app.services.db_query_export import DbQueryExportService
+
+    action_parameters = payload.get("action_parameters", {})
+    db_connection_id = action_parameters.get("database_connection_id", "")
+    sql_text = action_parameters.get("sql_text", "")
+    max_affected_rows = action_parameters.get("max_affected_rows", 100)
+    database_name = action_parameters.get("database_name", "")
+
+    if not sql_text:
+        raise ValueError("DML 操作需要指定 sql_text")
+
+    service = DbQueryExportService(db)
+    result = service.execute_sql(
+        sql=sql_text,
+        operator=operator or "system",
+        connection_id=db_connection_id,
+        database_name=database_name,
+        max_affected_rows=max_affected_rows,
+        # 审批已通过，跳过 confirm_text 二次确认
+        confirm_text="EXECUTE SQL",
+        reason=f"审批执行: {operator or 'system'}",
+    )
+
+    return {
+        "action": "DML",
+        "database_connection_id": db_connection_id,
+        "affected_rows": result.get("affected_rows", 0),
+        "sql_text": sql_text[:200],
+        "result": result,
+    }
+
+
+def execute_package_cleanup(db: Session, payload: dict, *, operator: str = "system") -> dict[str, Any]:
+    """执行包清理操作，复用 package_retention.cleanup_packages。"""
+    from app.services.package_retention import cleanup_packages
+
+    action_parameters = payload.get("action_parameters", {})
+    package_ids = action_parameters.get("package_ids", [])
+
+    # cleanup_packages 按保留策略执行，不传 package_ids（它不接受此参数）
+    result = cleanup_packages(
+        db,
+        policy=None,  # 使用默认保留策略
+        dry_run=False,
+        actor=operator or "system",
+    )
+
+    summary = result.get("summary", {})
+    removed = result.get("removed", [])
+
+    return {
+        "action": "PACKAGE_CLEANUP",
+        "requested_package_ids": package_ids,
+        "cleaned_count": summary.get("cleanup_count", 0),
+        "cleanup_size_mb": summary.get("cleanup_size_mb", 0),
+        "removed_packages": removed[:50],  # 限制返回数量
+        "message": f"已清理 {summary.get('cleanup_count', 0)} 个包",
+    }

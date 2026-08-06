@@ -111,9 +111,64 @@ def _health_check_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Sess
     return {"action": "HEALTH_CHECK", "results": results, "success_count": success_count}
 
 
+def _release_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """发布步骤。复用共享执行函数 execute_release，不触发旧审批工具。"""
+    from app.services.approval_executor import execute_release
+
+    params = step.parameters or {}
+    payload = {
+        "system_name": params.get("system_name") or plan.system_name,
+        "service_name": params.get("service_name") or plan.service_name,
+        "environment": params.get("environment") or plan.environment,
+        "targets": params.get("targets") or plan.targets or [],
+        "action_parameters": params.get("action_parameters", {}),
+    }
+    package_name = params.get("package_name") or plan.package_name or ""
+    return execute_release(db, payload, operator=plan.approved_by or "system", package_name=package_name)
+
+
+def _rollback_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """回滚步骤。复用共享执行函数 execute_rollback。"""
+    from app.services.approval_executor import execute_rollback
+
+    params = step.parameters or {}
+    payload = {
+        "targets": params.get("targets") or plan.targets or [],
+        "action_parameters": params.get("action_parameters", {}),
+    }
+    return execute_rollback(db, payload, operator=plan.approved_by or "system")
+
+
+def _dml_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """DML 步骤。复用共享执行函数 execute_dml。"""
+    from app.services.approval_executor import execute_dml
+
+    params = step.parameters or {}
+    payload = {
+        "targets": params.get("targets") or plan.targets or [],
+        "action_parameters": params.get("action_parameters", {}),
+    }
+    return execute_dml(db, payload, operator=plan.approved_by or "system")
+
+
+def _package_cleanup_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """包清理步骤。复用共享执行函数 execute_package_cleanup。"""
+    from app.services.approval_executor import execute_package_cleanup
+
+    params = step.parameters or {}
+    payload = {
+        "action_parameters": params.get("action_parameters", {}),
+    }
+    return execute_package_cleanup(db, payload, operator=plan.approved_by or "system")
+
+
 STEP_HANDLERS: dict[str, StepHandler] = {
     "SERVICE_CONTROL": _service_control_handler,
     "HEALTH_CHECK": _health_check_handler,
+    "RELEASE": _release_handler,
+    "ROLLBACK": _rollback_handler,
+    "DML": _dml_handler,
+    "PACKAGE_CLEANUP": _package_cleanup_handler,
 }
 
 

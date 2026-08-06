@@ -42,16 +42,17 @@ Remote HTTP MCP 不能读取用户电脑上的 `D:\...` 路径。如果使用 Re
 
 ## 3. 发布链路
 
+> 本节中的 `ops_upload_package`、`ops_create_deploy_plan` 等名称是旧流程/内部 next-action 别名，不是当前 MCP 注册名。远程 Agent 应使用已注册的 `ops.prepare_release_from_local_package`，或使用 `ops.approval.prepare_plan` 组装支持的消息级计划步骤。
+
 建议 Agent 执行顺序：
 
 ```text
-ops_upload_package
-→ ops_get_service_config
-→ ops_create_deploy_plan
-→ ops_run_precheck
+ops.prepare_release_from_local_package
+→ 查询服务配置（使用 ops.list_services）
+→ 预检/确认发布计划
 → 等待用户确认
-→ ops_execute_deploy_plan
-→ ops_get_deployment_status / ops_get_deployment_report
+→ 兼容发布路径：ops.approval.prepare_release → ops.approval.execute
+→ 查询发布状态/报告
 ```
 
 发布计划和执行会记录 `deploy_package_refs`，用于后续清理保护。

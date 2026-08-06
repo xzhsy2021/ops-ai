@@ -2,6 +2,8 @@
 
 > **For Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **文档状态（2026-08-06）**：本文档的单动作审批实现已完成并保留兼容。涉及“一条消息多个步骤、一次审批”的内容以 [2026-08-06-message-execution-plan.md](2026-08-06-message-execution-plan.md) 及其设计文档为准。
+
 **Goal:** Let qclaw turn encrypted Element room messages into deterministic, human-approved OPS actions without granting qclaw direct package, deployment, rollback, cleanup, or DML capabilities.
 
 **Architecture:** qclaw remains the Matrix E2EE boundary and identity attester. OPS owns deterministic message-to-system routing, approval policy, immutable action manifests, controlled package intake, one-time approval consumption, and fixed-domain execution. The MCP surface exposes only routing, approval preparation, approval decision, execution, and status operations; approved actions run through an internal executor rather than caller-selected raw tools.

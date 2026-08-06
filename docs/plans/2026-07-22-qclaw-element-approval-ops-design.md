@@ -1,5 +1,7 @@
 # qclaw Element Approval And OPS Execution Design
 
+> **文档状态（2026-08-06）**：本文档描述旧的单动作 `AiActionApproval` 流程，继续作为兼容路径设计参考。多步骤消息的当前主流程以 [2026-08-06-message-execution-plan-design.md](2026-08-06-message-execution-plan-design.md) 为准。
+
 Date: 2026-07-22
 Status: Approved
 

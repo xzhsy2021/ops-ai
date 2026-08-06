@@ -1,5 +1,7 @@
 # 消息级执行计划与一次审批设计
 
+> **实施状态（2026-08-06）**：方案 2 的后端主链路已落地并通过专项测试。执行器注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`；发布、回滚、DML、包清理的执行业务逻辑与旧单动作审批路径共享 `approval_executor.execute_*` 函数。
+
 ## 目标
 
 将一条 Element/qclaw 消息触发的完整工单流程收敛为一次人工审批。消息解析、路由、计划生成和风险评估完成后，系统创建一个独立的执行计划；授权人批准该计划后，计划内已声明的步骤按顺序执行，不再为每个步骤重复审批。
@@ -71,11 +73,17 @@ PENDING_APPROVAL -> REJECTED / EXPIRED
 
 - `ops.approval.prepare_plan`
 - `ops.approval.execute_plan`
-- `ops.approval.get_plan`
-- `ops.approval.list_plans`
-- `ops.approval.reject_plan`
 
-管理 API 提供计划列表、详情和拒绝操作，详情包含步骤状态和结果，但不暴露短码哈希或敏感命令参数。旧 `/api/v2/approvals` 接口继续工作。
+当前没有新增 `ops.approval.get_plan`、`ops.approval.list_plans` 或 `ops.approval.reject_plan` MCP 工具。
+
+管理 API 提供计划列表、详情、拒绝和过期清理：
+
+- `GET /api/v2/execution-plans`
+- `GET /api/v2/execution-plans/{plan_id}`
+- `POST /api/v2/execution-plans/{plan_id}/reject`
+- `POST /api/v2/execution-plans/expire-stale`
+
+详情包含步骤状态和结果，但不暴露短码哈希或授权人白名单。旧 `/api/v2/approvals` 接口继续工作。
 
 ## 数据迁移与兼容
 
@@ -83,10 +91,17 @@ PENDING_APPROVAL -> REJECTED / EXPIRED
 
 ## 验收标准
 
-- 一条完整消息只生成一个执行计划、一个审批记录和一个短码。
+- 一条完整消息只生成一个执行计划、一次计划级审批和一个短码；不额外创建旧 `AiActionApproval` 记录。
 - 审批通过后，计划内多个步骤自动顺序执行，不重复触发审批。
 - 重复消息或重复 prepare 请求不会生成重复待审批计划。
 - 任何实质计划变化都要求重新审批。
 - 错误房间、事件、摘要、授权人、短码和过期计划均不能执行。
 - 执行中断恢复时不会重复已成功步骤。
 - 旧单动作审批接口回归测试保持通过。
+
+## 当前限制
+
+- qclaw 消息路由目前由外部 Agent 通过 MCP 工具编排；仓库内没有独立的 qclaw 消息消费进程。仓库中的端到端契约测试覆盖“路由 → prepare_plan → execute_plan”边界。
+- `PlanExecutor` 当前注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 六类步骤。发布/回滚/DML/包清理的执行业务逻辑已从 `ApprovalExecutor` 抽为共享 `execute_*` 函数，旧单动作审批与新计划步骤共用同一实现（`bb4e5d8`）。
+- 高危动作作为计划步骤时**只**在执行器内部调用共享业务函数；`prepare_plan` 的调用方仍只接触 `ops.approval.prepare_plan` / `execute_plan`，不直接接触底层危险 scope。
+- 方案 2 的专项测试已通过；完整后端测试仍有与本方案无关的既有基线失败，主要来自未提交的前端重构和风险策略测试。

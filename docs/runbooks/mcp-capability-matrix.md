@@ -1,8 +1,10 @@
 # MCP Capability Matrix
 
-Updated: 2026-06-09
+Updated: 2026-08-06
 
 This matrix is the current OPS MCP/HTTP tool capability map for local small-team operations.
+
+> For risk disposition of high-risk / write tools, see [HIGH_RISK_CAPABILITY_ASSESSMENT.md](./HIGH_RISK_CAPABILITY_ASSESSMENT.md). For the message-level execution plan (`ops.approval.prepare_plan` / `ops.approval.execute_plan`) and its step types, see [2026-08-06-message-execution-plan-design.md](../plans/2026-08-06-message-execution-plan-design.md).
 
 Naming rule:
 
@@ -130,6 +132,22 @@ These tools manage DB-backed DAILY / WEEKLY / MONTHLY inspection schedules. The 
 | `ops.cascade.upsert` | `ops_cascade_upsert` | write | `ops:write`, `ops:admin` | high | Upsert one cascade policy by `name` |
 | `ops.tier.approve` | `ops_tier_approve` | write | `ops:write`, `ops:admin` | high | Approve/unlock a tier that requires approval, usually MONTHLY first run |
 | `ops.tier.history` | `ops_tier_history` | read | `ops:read` | low | Query historical inspection runs for one tier |
+
+## Approval And Execution Plan Tools
+
+Message-level execution plans consolidate many high-risk actions into one approval. See the [design doc](../plans/2026-08-06-message-execution-plan-design.md) for the manifest/digest and step model.
+
+Registered approval tools (all gated by the one-time short code, not by token scope):
+
+| HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
+|---|---:|---|---|---|---|
+| `ops.approval.prepare_plan` | `ops_approval_prepare_plan` | plan | `ops:read` | low | Create one immutable execution plan from steps (SERVICE_CONTROL, HEALTH_CHECK, RELEASE, ROLLBACK, DML, PACKAGE_CLEANUP) and emit a one-time approval code |
+| `ops.approval.execute_plan` | `ops_approval_execute_plan` | execute | `ops:read` | low | Consume the approved code and run the frozen steps in order |
+| `ops.approval.prepare_service_control` | `ops_approval_prepare_service_control` | plan | `ops:read` | low | Legacy single-action service-control approval (restart/stop/start/update) |
+| `ops.approval.execute` | `ops_approval_execute` | execute | `ops:read` | low | Legacy single-action approval consume (deploy/rollback/DML/package-cleanup) |
+| `ops.approval.list` | `ops_approval_list` | read | `ops:read` | low | List approvals with filters |
+
+Legacy single-action prepare paths for release / rollback / DML / package-cleanup are routed through `ops.approval.prepare_release` / `ops.approval.prepare_rollback` / `ops.approval.prepare_dml` / `ops.approval.prepare_package_cleanup` as approval-hint names in `app/services/tool_policy.py` (`APPROVAL_TOOL_MAP` / `APPROVAL_TOOL_NAME_MAP`); the actual registered entry point is `ops.approval.execute`, and the business logic is shared with the plan steps via `approval_executor.execute_*`.
 
 ## Streaming Tool Results
 

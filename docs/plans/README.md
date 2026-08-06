@@ -1,6 +1,6 @@
 # Plans README
 
-Updated: 2026-06-09
+Updated: 2026-08-06
 
 ## Current Sources Of Truth
 
@@ -8,10 +8,13 @@ Use these files for current development decisions:
 
 - [2026-05-01-runtime-source-of-truth.md](./2026-05-01-runtime-source-of-truth.md) - canonical runtime routes, API mounts, resource model, and verification gate.
 - [../runbooks/mcp-capability-matrix.md](../runbooks/mcp-capability-matrix.md) - current HTTP Tool / MCP tool names, aliases, risk gates, inspection workflow, and streaming-tool status.
+- [../runbooks/HIGH_RISK_CAPABILITY_ASSESSMENT.md](../runbooks/HIGH_RISK_CAPABILITY_ASSESSMENT.md) - high-risk / write tool assessment and recommended disposition (review document, no code).
 - [2026-06-08-mcp-efficiency-permission-ui-implementation.md](./2026-06-08-mcp-efficiency-permission-ui-implementation.md) - implemented MCP efficiency, permission preview, stdio fallback, Tool Access UI, pagination, and task/report/ledger layout changes.
 - [2026-06-01-concurrent-deploy-and-mcp-maturity-iteration-plan.md](./2026-06-01-concurrent-deploy-and-mcp-maturity-iteration-plan.md) - closed baseline summary for the 2026-06 concurrent deploy/MCP iteration.
-
-There is no broad active iteration plan in this directory as of 2026-06-09. New work should be handled as focused implementation tasks with local tests.
+- [2026-07-22-qclaw-element-approval-ops-design.md](./2026-07-22-qclaw-element-approval-ops-design.md) - qclaw Element approval integration design (single-action approval).
+- [2026-07-22-qclaw-element-approval-ops-implementation.md](./2026-07-22-qclaw-element-approval-ops-implementation.md) - implementation plan for the qclaw approval integration.
+- [2026-08-06-message-execution-plan-design.md](./2026-08-06-message-execution-plan-design.md) - design of the message-level execution plan (方案 2, one approval per message).
+- [2026-08-06-message-execution-plan.md](./2026-08-06-message-execution-plan.md) - implementation plan and task status for the message execution plan.
 
 ## Keep In Root
 

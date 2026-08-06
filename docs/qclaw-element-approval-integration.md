@@ -5,6 +5,8 @@
 > **设计参考:** [docs/plans/2026-07-22-qclaw-element-approval-ops-design.md](plans/2026-07-22-qclaw-element-approval-ops-design.md)
 > **实施计划:** [docs/plans/2026-07-22-qclaw-element-approval-ops-implementation.md](plans/2026-07-22-qclaw-element-approval-ops-implementation.md)
 
+> **方案 2 状态（2026-08-06）**：多步骤消息的主流程已迁移到独立 `ExecutionPlan`，使用一次 `prepare_plan` 和一次 `execute_plan`。执行器已注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 六类步骤，发布/回滚/DML/包清理可直接写入计划步骤。本文第 3 节的发布、回滚、DML、包清理示例仍是旧单动作审批兼容流程，与新计划步骤共用同一业务实现（`approval_executor.execute_*`）。
+
 ---
 
 ## 1. 概述
@@ -49,17 +51,34 @@ qclaw 作为 Matrix/Element E2EE 边界和身份证明方，OPS 作为审批策�
 |---|---|---|
 | 路由解析 | [app/services/qclaw_routing.py](../app/services/qclaw_routing.py) | 消息→系统/服务，签发 HMAC 路由票据 |
 | 审批生命周期 | [app/services/action_approval.py](../app/services/action_approval.py) | prepare / consume / reject / expire |
+| 执行计划 | [app/services/execution_plan.py](../app/services/execution_plan.py) + [app/services/plan_executor.py](../app/services/plan_executor.py) | 一次审批、冻结 manifest、顺序执行 |
 | 包接收 | [app/services/package_intake.py](../app/services/package_intake.py) | staging→upload，SHA-256 校验，元数据落库 |
-| 执行器 | [app/services/approval_executor.py](../app/services/approval_executor.py) | 分发 RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP |
-| MCP 工具 | [app/services/tool_adapters/approval_tools.py](../app/services/tool_adapters/approval_tools.py) | 10 个 MCP 工具入口 |
-| API 路由 | [app/api/approvals.py](../app/api/approvals.py) | Web UI 管理接口 |
-| 数据模型 | [app/db/models.py](../app/db/models.py) `AiActionApproval` | 持久化审批工单 |
+| 兼容执行器 | [app/services/approval_executor.py](../app/services/approval_executor.py) | 旧单动作 RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP |
+| MCP 工具 | [app/services/tool_adapters/approval_tools.py](../app/services/tool_adapters/approval_tools.py) | 旧审批工具及 `prepare_plan` / `execute_plan` |
+| 管理 API | [app/api/execution_plans.py](../app/api/execution_plans.py) + [app/api/approvals.py](../app/api/approvals.py) | 计划级和旧审批管理接口 |
+| 数据模型 | [app/db/models.py](../app/db/models.py) | `ExecutionPlan` / `ExecutionPlanStep` / `AiActionApproval` |
 
 ---
 
 ## 3. 端到端调用序列
 
-### 3.1 正常发布流程
+### 3.1 方案 2：多步骤消息流程
+
+```text
+Element 消息
+  → ops.routing.resolve_message_target
+  → 组装完整步骤清单
+  → ops.approval.prepare_plan
+  → 授权人批准一次性短码
+  → ops.approval.execute_plan
+  → 按顺序执行步骤并反馈结果
+```
+
+`prepare_plan` 的 manifest 冻结房间、原始事件、内容摘要、路由 revision、环境、目标、步骤、参数、依赖和策略。相同的待审批 `plan_digest` 幂等复用；实质计划变化必须重新审批。当前执行器支持 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。
+
+### 3.2 兼容流程：发布、回滚、DML、包清理
+
+以下流程保留用于旧客户端，仍使用 `ops.approval.prepare_*` → `ops.approval.execute`，不代表已经迁移为 `ExecutionPlan` 步骤。
 
 ```
 Element 用户 → qclaw → OPS → Element 审批 → qclaw → OPS 执行 → qclaw → Element 反馈
@@ -179,7 +198,7 @@ result = await mcp.call("ops.approval.execute", {
 状态: 部署 worker 已启动
 ```
 
-### 3.2 回滚 / DML / 包清理流程
+### 3.3 回滚 / DML / 包清理流程
 
 调用 `ops.approval.prepare_rollback` / `prepare_dml` / `prepare_package_cleanup`，参数不同但流程一致。
 
@@ -187,7 +206,7 @@ result = await mcp.call("ops.approval.execute", {
 **DML 参数:** `database_connection_id`, `sql_text`, `max_affected_rows`
 **PACKAGE_CLEANUP 参数:** `package_ids`
 
-### 3.3 拒绝流程
+### 3.4 拒绝流程
 
 授权用户回复「拒绝 A1B2C3D4」时，qclaw 调用:
 ```python
@@ -198,7 +217,7 @@ await mcp.call("ops.approval.reject", {
 ```
 工单进入终态 `REJECTED`，不能再消费。
 
-### 3.4 过期流程
+### 3.5 过期流程
 
 OPS 内部定时任务（每 5 分钟）调用 `ActionApprovalService.expire_stale()`，将过期的 `PENDING_APPROVAL` 工单标记为 `EXPIRED`。qclaw 轮询 `ops.approval.get` 发现状态变更后在房间反馈"审批已过期"。
 
@@ -213,6 +232,8 @@ OPS 内部定时任务（每 5 分钟）调用 `ActionApprovalService.expire_sta
 | `ops.approval.prepare_rollback` | `ops:read` | low | 准备回滚审批 |
 | `ops.approval.prepare_dml` | `ops:read` | low | 准备 DML 审批 |
 | `ops.approval.prepare_package_cleanup` | `ops:read` | low | 准备包清理审批 |
+| `ops.approval.prepare_plan` | `ops:read` | low | 准备消息级多步骤执行计划 |
+| `ops.approval.execute_plan` | `ops:read` | low | 消费计划短码并顺序执行 |
 | `ops.approval.execute` | `ops:read` | low | 消费短码并执行 |
 | `ops.approval.reject` | `ops:read` | low | 拒绝审批 |
 | `ops.approval.get` | `ops:read` | low | 查询审批详情 |

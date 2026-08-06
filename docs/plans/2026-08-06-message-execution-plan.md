@@ -2,6 +2,26 @@
 
 > **For Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+## Implementation Status
+
+**Status: Implemented on 2026-08-06.** Tasks 1-8 are complete. The focused execution-plan/qclaw suites pass. The full backend suite has unrelated baseline failures in existing frontend contract tests and one risk-policy test; no execution-plan test is implicated.
+
+**Extension on 2026-08-06 (post Tasks 1-8):** `PlanExecutor` now also registers `RELEASE`, `ROLLBACK`, `DML`, and `PACKAGE_CLEANUP` step handlers. Their business logic was extracted from `ApprovalExecutor` into shared `execute_*` functions in `app/services/approval_executor.py`, so the plan path and the legacy single-action approval path share one implementation. See `tests/test_plan_executor_legacy_steps.py` and commit `bb4e5d8`.
+
+| Task | Status | Evidence |
+|---|---|---|
+| 1. Persistence and migrations | Complete | `b11e68f`, `tests/test_execution_plan_migration.py` |
+| 2. Immutable plan service | Complete | `196190f`, `tests/test_execution_plan_service.py` |
+| 3. Approval consume/reject | Complete | `a1cd62c`, `tests/test_execution_plan_approval.py` |
+| 4. Sequential executor | Complete for registered step types | `3168579`, `tests/test_plan_executor.py` |
+| 5. MCP plan tools | Complete | `79ad166`, `tests/test_execution_plan_tools_contract.py` |
+| 6. qclaw message contract | Complete at MCP boundary; one plan-level approval | `95a5117`, `tests/test_qclaw_message_execution_plan.py` |
+| 7. Management API | Complete | `ece5d4b`, `tests/test_execution_plan_api.py` |
+| 8. Regression and migration verification | Complete with documented baseline failures | `ba6ea9b`, focused suites and migration check |
+| 9. Legacy step handlers (RELEASE/ROLLBACK/DML/PACKAGE_CLEANUP) | Complete | `bb4e5d8`, `tests/test_plan_executor_legacy_steps.py` |
+
+`PlanExecutor` supports `SERVICE_CONTROL`, `HEALTH_CHECK`, `RELEASE`, `ROLLBACK`, `DML`, and `PACKAGE_CLEANUP`. The legacy single-action approval path remains available and shares the same execution functions.
+
 **Goal:** 将一条 Element/qclaw 消息触发的完整执行流程建模为一个独立执行计划，只产生一次人工审批，审批通过后按冻结的步骤清单顺序执行。
 
 **Architecture:** 新增 `ExecutionPlan` 与 `ExecutionPlanStep` 两个持久化实体，使用不可变 manifest digest 做幂等和审批后完整性校验。新增 `PlanExecutor` 负责步骤状态、依赖、恢复和结果；保留现有单动作审批接口作为兼容路径，消息触发链路迁移到统一 `prepare_plan`/`execute_plan`。
@@ -211,7 +231,7 @@ Expected: FAIL before implementation.
 
 **Step 3: Implement the executor registry**
 
-Create a registry mapping stable step action types to callables. Adapt existing release, rollback, DML, package cleanup, and service-control implementations behind the registry instead of calling old approval preparation tools recursively.
+Create a registry mapping stable step action types to callables. Adapt existing business implementations behind the registry instead of calling old approval preparation tools recursively. In the current implementation only service-control and health-check handlers are registered; release, rollback, DML, and package-cleanup handlers remain future extensions.
 
 Each handler receives the frozen step parameters plus plan context and returns a serializable result. The executor must create/link one plan-level OperationJob and step-level audit records without issuing a second approval.
 
@@ -312,7 +332,7 @@ Expected: FAIL until the message trigger uses the plan path.
 
 **Step 3: Replace step-by-step approval calls**
 
-At the message-triggered orchestration boundary, build the complete plan before asking for approval. Do not call `prepare_service_control` or other old approval tools for each plan step. Keep the old tools available for external legacy callers.
+At the MCP boundary used by the external qclaw Agent, build the complete plan before asking for approval. Do not call `prepare_service_control` or other old approval tools for each plan step. Keep the old tools available for external legacy callers. There is no separate in-repository qclaw message-consumer process to modify.
 
 **Step 4: Run focused tests**
 
@@ -387,7 +407,7 @@ Expected: existing behavior remains green, except any explicitly documented base
 pytest -q
 ```
 
-Expected: no new failures attributable to execution plans.
+Observed: focused execution-plan suites pass. The full suite has six unrelated baseline failures: five frontend contract failures from the pre-existing unstaged UI redesign and one risk-policy contract failure.
 
 **Step 4: Build the frontend and typecheck**
 
@@ -396,7 +416,7 @@ npm run build
 npm run typecheck
 ```
 
-Expected: production build succeeds. Existing typecheck baseline errors must be recorded separately and no new errors may be introduced.
+Observed: production build succeeds. Typecheck reports the existing 14-error frontend baseline; no execution-plan-related frontend changes were introduced.
 
 **Step 5: Verify migration idempotency against the real local database**
 

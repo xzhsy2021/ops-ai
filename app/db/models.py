@@ -413,6 +413,15 @@ class ToolToken(Base):
     # Empty list (= []) means no room restriction; default is empty for
     # backward compatibility (existing tokens keep working unchanged).
     bound_room_ids = Column(JSON, default=list)
+    # qclaw Element approver whitelist: if non-empty, only these Matrix user
+    # IDs may consume approval short codes created through this token. The
+    # whitelist is stored on the token (not the system config) so binding
+    # approvers is a per-credential, admin-managed decision. Empty list
+    # (= []) means "no token-level restriction"; approval still requires the
+    # system/service-level approvers (message_routing.approvers) when
+    # configured, and falls back to any room member when neither is set
+    # (backward compatible with pre-binding tokens).
+    approver_matrix_ids = Column(JSON, default=list)
 
 
 class ToolCallLog(Base):
@@ -590,6 +599,96 @@ class AiActionApproval(Base):
     execution_result = Column(JSON, nullable=True)
     failure_reason = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class ExecutionPlan(Base):
+    """消息级执行计划：一条 Element/qclaw 消息对应一次人工审批。
+
+    与 AiActionApproval（单动作审批）不同，ExecutionPlan 冻结完整计划 manifest，
+    授权人批准一次后，计划内声明的步骤按顺序自动执行，不再逐步骤审批。
+
+    设计要点：
+    - plan_digest 是不可变 plan manifest 的 SHA-256，用于幂等去重和审批后完整性校验。
+    - 短码只在 prepare 时返回一次明文，数据库只存加盐哈希。
+    - consume() 使用条件更新保证原子性，多个并发调用只有一个成功。
+    """
+    __tablename__ = "execution_plans"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    status = Column(String(32), default="PENDING_APPROVAL", index=True)
+    plan_digest = Column(String(64), nullable=False, index=True)
+    risk_level = Column(String(32), default="high", index=True)
+
+    # ── 消息与路由绑定 ──
+    room_id = Column(String(255), nullable=False, index=True)
+    request_event_id = Column(String(255), nullable=False, index=True)
+    content_sha256 = Column(String(64), nullable=True)
+    system_name = Column(String(64), nullable=True, index=True)
+    service_name = Column(String(128), nullable=True)
+    environment = Column(String(64), nullable=True)
+    targets = Column(JSON, default=list)
+    routing_ticket_digest = Column(String(64), nullable=True)
+    routing_config_revision = Column(String(64), nullable=True)
+
+    # ── 发布包绑定 ──
+    package_name = Column(String(255), nullable=True)
+    package_sha256 = Column(String(64), nullable=True)
+    package_size_bytes = Column(Integer, nullable=True)
+
+    # ── 计划内容 ──
+    manifest = Column(JSON, nullable=False, default=dict)
+    policy = Column(JSON, nullable=False, default=dict)
+    ai_reason = Column(Text, nullable=True)
+    authorized_matrix_users = Column(JSON, default=list)
+
+    # ── 审批生命周期 ──
+    approval_code_hash = Column(String(128), nullable=True)
+    requested_by = Column(String(128), nullable=True)
+    approved_by = Column(String(255), nullable=True)
+    approval_event_id = Column(String(255), nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    consumed_at = Column(DateTime, nullable=True)
+    rejected_by = Column(String(255), nullable=True)
+    rejected_at = Column(DateTime, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
+    # ── 执行生命周期 ──
+    execution_job_id = Column(String(32), nullable=True, index=True)
+    execution_result = Column(JSON, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    steps = relationship(
+        "ExecutionPlanStep",
+        back_populates="plan",
+        cascade="all, delete-orphan",
+        order_by="ExecutionPlanStep.step_order",
+        lazy="selectin",
+    )
+
+
+class ExecutionPlanStep(Base):
+    """执行计划内的有序步骤。审批后按顺序执行，不再触发审批。"""
+    __tablename__ = "execution_plan_steps"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    plan_id = Column(String(32), ForeignKey("execution_plans.id"), nullable=False, index=True)
+    step_key = Column(String(128), nullable=False)
+    step_order = Column(Integer, nullable=False, default=0)
+    action_type = Column(String(64), nullable=False, index=True)
+    parameters = Column(JSON, nullable=False, default=dict)
+    dependencies = Column(JSON, nullable=False, default=list)
+    status = Column(String(24), default="PENDING", index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    result = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+    plan = relationship("ExecutionPlan", back_populates="steps")
 
 
 class DeployPackage(Base):

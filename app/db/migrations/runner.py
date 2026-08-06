@@ -1086,6 +1086,18 @@ MIGRATIONS: List[Dict[str, str]] = [
             "ALTER TABLE tool_tokens ADD COLUMN bound_room_ids TEXT DEFAULT '[]' NOT NULL"
         ),
     },
+    {
+        "version": "073_002_tool_token_approvers",
+        "name": "Add approver_matrix_ids column to tool_tokens for qclaw approver whitelist",
+        # Same idempotent ALTER pattern as 073_001. Existing tokens default
+        # to '[]' (no token-level approver restriction) so pre-existing
+        # credentials keep working unchanged.
+        "table": "tool_tokens",
+        "column": "approver_matrix_ids",
+        "sql": (
+            "ALTER TABLE tool_tokens ADD COLUMN approver_matrix_ids TEXT DEFAULT '[]' NOT NULL"
+        ),
+    },
     # NOTE: deliberately no separate index migration for bound_room_ids.
     # Indexing a JSON/TEXT column directly is not portable (MySQL requires
     # a generated column + index). Room-binding lookups are point reads on
@@ -1093,6 +1105,89 @@ MIGRATIONS: List[Dict[str, str]] = [
     # check against bound_room_ids, so a DB index on the column itself
     # would not help the hot path.
 
+    # ── Message Execution Plan: 一条消息 = 一个执行计划 = 一次审批 ──
+    {
+        "version": "074_001_execution_plans",
+        "name": "Create execution_plans table for message-level one-approval plans",
+        "table": "execution_plans",
+        "sql": """CREATE TABLE IF NOT EXISTS execution_plans (
+            id VARCHAR(32) PRIMARY KEY,
+            status VARCHAR(32) DEFAULT 'PENDING_APPROVAL',
+            plan_digest VARCHAR(64) NOT NULL,
+            risk_level VARCHAR(32) DEFAULT 'high',
+            room_id VARCHAR(255) NOT NULL,
+            request_event_id VARCHAR(255) NOT NULL,
+            content_sha256 VARCHAR(64),
+            system_name VARCHAR(64),
+            service_name VARCHAR(128),
+            environment VARCHAR(64),
+            targets JSON,
+            routing_ticket_digest VARCHAR(64),
+            routing_config_revision VARCHAR(64),
+            package_name VARCHAR(255),
+            package_sha256 VARCHAR(64),
+            package_size_bytes BIGINT,
+            manifest JSON NOT NULL,
+            policy JSON,
+            ai_reason TEXT,
+            authorized_matrix_users JSON,
+            approval_code_hash VARCHAR(128),
+            requested_by VARCHAR(128),
+            approved_by VARCHAR(255),
+            approval_event_id VARCHAR(255),
+            expires_at DATETIME,
+            consumed_at DATETIME,
+            rejected_by VARCHAR(255),
+            rejected_at DATETIME,
+            approved_at DATETIME,
+            execution_job_id VARCHAR(32),
+            execution_result JSON,
+            failure_reason TEXT,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "074_002_execution_plan_steps",
+        "name": "Create execution_plan_steps table for ordered plan steps",
+        "table": "execution_plan_steps",
+        "sql": """CREATE TABLE IF NOT EXISTS execution_plan_steps (
+            id VARCHAR(32) PRIMARY KEY,
+            plan_id VARCHAR(32) NOT NULL,
+            step_key VARCHAR(128) NOT NULL,
+            step_order INTEGER DEFAULT 0,
+            action_type VARCHAR(64) NOT NULL,
+            parameters JSON,
+            dependencies JSON,
+            status VARCHAR(24) DEFAULT 'PENDING',
+            attempt_count INTEGER DEFAULT 0,
+            result JSON,
+            error_message TEXT,
+            started_at DATETIME,
+            finished_at DATETIME,
+            created_at DATETIME
+        )""",
+    },
+    {
+        "version": "074_003_execution_plan_indexes",
+        "name": "Create indexes for execution plan lookups",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_execution_plan_digest ON execution_plans(plan_digest)",
+    },
+    {
+        "version": "074_004_execution_plan_status_index",
+        "name": "Create status index for execution plans",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_execution_plan_status ON execution_plans(status)",
+    },
+    {
+        "version": "074_005_execution_plan_room_event_index",
+        "name": "Create room+event index for execution plans",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_execution_plan_room_event ON execution_plans(room_id, request_event_id)",
+    },
+    {
+        "version": "074_006_execution_plan_step_plan_index",
+        "name": "Create plan_id index for execution plan steps",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_execution_plan_steps_plan_id ON execution_plan_steps(plan_id)",
+    },
 ]
 
 

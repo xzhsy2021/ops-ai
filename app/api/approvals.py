@@ -33,7 +33,7 @@ class ApprovalSummary(BaseModel):
     expires_at: str | None = None
     approved_at: str | None = None
     executed_at: str | None = None
-    execution_job_id: int | None = None
+    execution_job_id: int | str | None = None
     package_name: str | None = None
     failure_reason: str | None = None
 

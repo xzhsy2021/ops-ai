@@ -485,7 +485,20 @@ def get_server_tool(args, ctx, db):
 
 # ─── Service Control (restart / stop / start / update) ──────────────────────
 
-def _resolve_service_control_command(cfg: dict, action: str, compose_service: str = "") -> str:
+def _env_prefix(env: dict | None = None) -> str:
+    """将环境变量 dict 渲染为命令前缀，如 'SYSTEM_TRACE=true OTHER=1 '。"""
+    if not env:
+        return ""
+    return " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items()) + " "
+
+
+def _resolve_service_control_command(
+    cfg: dict,
+    action: str,
+    compose_service: str = "",
+    env: dict | None = None,
+    compose_args: list[str] | None = None,
+) -> str:
     """根据服务配置解析控制命令。
 
     优先级：
@@ -493,16 +506,21 @@ def _resolve_service_control_command(cfg: dict, action: str, compose_service: st
     2. Docker Compose 服务：
        - restart: docker compose -f <file> restart [service]
        - stop:    docker compose -f <file> stop [service]
-       - start:   docker compose -f <file> up -d [service]
-       - update:  docker compose -f <file> pull [service] && docker compose -f <file> up -d [service]
+       - start:   docker compose -f <file> up -d [service] [compose_args]
+       - update:  docker compose -f <file> pull [service] && docker compose -f <file> up -d --no-deps [service] [compose_args]
     3. PM2 服务：pm2 restart/stop/start/reload <pm2_name>
     4. process_keyword：pkill / 启动命令（不支持 update）
+
+    `env`（dict[str,str]）渲染为整条命令的环境变量前缀（如 SYSTEM_TRACE=true），
+    作用于该 shell 内所有的 docker compose 子命令；`compose_args`（list[str]）
+    透传到 `up` / `restart` 子命令（如 --force-recreate）。两者都只影响命令
+    生成，不允许直接注入任意命令行。
     """
     tv = cfg.get("template_variables") or {}
     cmd_key = f"{action}_command"
     explicit = tv.get(cmd_key)
     if explicit:
-        return str(explicit)
+        return _env_prefix(env) + str(explicit)
 
     template = cfg.get("template") or ""
     compose_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
@@ -511,21 +529,22 @@ def _resolve_service_control_command(cfg: dict, action: str, compose_service: st
     svc_target = compose_service or tv.get("compose_service") or ""
     svc_arg = shlex.quote(svc_target) if svc_target else ""
 
+    extra = (" " + " ".join(compose_args)) if compose_args else ""
+
     if template in ("docker_compose", "crypto_docker_compose") or compose_dir:
         compose_file = tv.get("compose_file", "docker-compose.yml")
+        prefix = _env_prefix(env)
         if action == "restart":
-            return f"docker compose -f {shlex.quote(compose_file)} restart {svc_arg}".strip()
+            return f"{prefix}docker compose -f {shlex.quote(compose_file)} restart {svc_arg}{extra}".strip()
         elif action == "stop":
-            return f"docker compose -f {shlex.quote(compose_file)} stop {svc_arg}".strip()
+            return f"{prefix}docker compose -f {shlex.quote(compose_file)} stop {svc_arg}".strip()
         elif action == "start":
-            return f"docker compose -f {shlex.quote(compose_file)} up -d {svc_arg}".strip()
+            return f"{prefix}docker compose -f {shlex.quote(compose_file)} up -d {svc_arg}{extra}".strip()
         elif action == "update":
             # 拉取最新镜像并重建容器（--no-deps 避免影响依赖服务）
-            return (
-                f"docker compose -f {shlex.quote(compose_file)} pull {svc_arg}".strip()
-                + " && "
-                + f"docker compose -f {shlex.quote(compose_file)} up -d --no-deps {svc_arg}".strip()
-            )
+            pull = f"{prefix}docker compose -f {shlex.quote(compose_file)} pull {svc_arg}".strip()
+            up = f"{prefix}docker compose -f {shlex.quote(compose_file)} up -d --no-deps {svc_arg}{extra}".strip()
+            return pull + " && " + up
 
     pm2_name = tv.get("pm2_name") or ""
     if pm2_name:
@@ -647,18 +666,19 @@ def _get_container_logs(ssh, base_dir: str, compose_file: str, compose_svc: str)
         return f"logs_error: {e}"
 
 
-def _execute_service_control(server_key: str, system: str, service: str, action: str, ctx, db, compose_service: str = "") -> dict:
+def _execute_service_control(server_key: str, system: str, service: str, action: str, ctx, db, compose_service: str = "", env: dict | None = None, compose_args: list[str] | None = None) -> dict:
     """在指定服务器上执行服务控制操作（restart/stop/start/update）。
 
     返回执行结果，包含前后健康检查对比。
     Docker Compose 部署会在操作后通过 docker compose ps 验证容器状态，
     检测重启循环、架构不匹配等异常，并自动获取容器日志。
+    env / compose_args 可选传递给命令生成器（trace 启动等）。
     """
     cfg = get_service_config({"system": system, "service": service}, ctx, db)
     if not cfg.get("found"):
         raise HTTPException(status_code=404, detail=f"服务配置未找到: {system}/{service}")
 
-    command = _resolve_service_control_command(cfg, action, compose_service=compose_service)
+    command = _resolve_service_control_command(cfg, action, compose_service=compose_service, env=env, compose_args=compose_args)
     tv = cfg.get("template_variables") or {}
     base_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
     template = cfg.get("template") or ""

@@ -182,10 +182,14 @@ class ApprovalExecutor:
 
         通过 SSH 连接到目标服务器，使用服务配置中的控制命令执行操作。
         支持 Docker Compose / PM2 / process_keyword 三种服务类型。
+        action_parameters 额外支持 env（dict[str,str] 命令前缀）与
+        compose_args（list[str] 追加到 up/restart 命令），用于 trace 启动等场景。
         """
         action_parameters = payload.get("action_parameters", {})
         control_action = action_parameters.get("control_action", "restart")
         compose_service = action_parameters.get("compose_service", "")
+        env = action_parameters.get("env")
+        compose_args = action_parameters.get("compose_args")
         system_name = payload.get("system_name", "")
         service_name = payload.get("service_name", "")
         targets = payload.get("targets", [])
@@ -208,6 +212,8 @@ class ApprovalExecutor:
                 result = self._control_single_server(
                     server_name, system_name, service_name, control_action, ctx,
                     compose_service=compose_service,
+                    env=env,
+                    compose_args=compose_args,
                 )
                 results.append(result)
             except Exception as e:
@@ -232,7 +238,7 @@ class ApprovalExecutor:
             "message": f"服务控制完成: {success_count}/{len(targets)} 成功, {fail_count} 失败",
         }
 
-    def _control_single_server(self, server_name: str, system: str, service: str, action: str, ctx, *, compose_service: str = "") -> dict:
+    def _control_single_server(self, server_name: str, system: str, service: str, action: str, ctx, *, compose_service: str = "", env: dict | None = None, compose_args: list[str] | None = None) -> dict:
         """在单台服务器上执行服务控制。"""
         from app.services.tool_adapters.server_tools import (
             _resolve_service_control_command,
@@ -246,7 +252,7 @@ class ApprovalExecutor:
         if not cfg.get("found"):
             return {"server": server_name, "ok": False, "error": f"服务配置未找到: {system}/{service}"}
 
-        command = _resolve_service_control_command(cfg, action, compose_service=compose_service)
+        command = _resolve_service_control_command(cfg, action, compose_service=compose_service, env=env, compose_args=compose_args)
         tv = cfg.get("template_variables") or {}
         base_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
 

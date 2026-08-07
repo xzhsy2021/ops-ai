@@ -41,6 +41,8 @@ def _service_control_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: S
     service_name = params.get("service_name") or plan.service_name
     targets = params.get("targets") or plan.targets or []
     compose_service = params.get("compose_service", "")
+    env = params.get("env")
+    compose_args = params.get("compose_args")
 
     if not targets:
         raise ValueError("服务控制步骤需要指定目标服务器列表")
@@ -54,6 +56,7 @@ def _service_control_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: S
             result = executor._control_single_server(
                 server_name, system_name, service_name, control_action,
                 _approver_ctx(plan), compose_service=compose_service,
+                env=env, compose_args=compose_args,
             )
             results.append(result)
         except Exception as e:

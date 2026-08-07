@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { CopyButton } from '../../components/ui'
 
 type TokenInfo = {
@@ -153,7 +153,7 @@ function formatTime(s?: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
-export function ToolTokenPanel({
+export const ToolTokenPanel = memo(function ToolTokenPanel({
   tokens,
   loading,
   canDelete = false,
@@ -694,4 +694,4 @@ export function ToolTokenPanel({
       )}
     </div>
   )
-}
+})

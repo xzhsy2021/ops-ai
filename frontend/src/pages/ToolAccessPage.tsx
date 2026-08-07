@@ -265,6 +265,24 @@ export default function ToolAccessPage() {
   const enabledToolCount = tools.filter((t) => t.available !== false && t.enabled !== false).length
   const blockedToolCount = tools.filter((t) => t.available === false || t.enabled === false || t.blocked_reason).length
   const capabilityVersion = capabilities?.server?.capability_version || manifest?.capability_version || '-'
+  const mappedTokens = useMemo(() => tokens.map((t: any) => ({
+    id: t.id,
+    name: t.name,
+    description: t.description || '',
+    status: t.status || (t.revoked_at ? 'revoked' : 'active'),
+    created_at: t.created_at,
+    last_used_at: t.last_used_at,
+    expires_at: t.expires_at,
+    revoked_at: t.revoked_at,
+    scopes: t.scopes,
+    allow_write: t.allow_write,
+    allow_prod: t.allow_prod,
+    bound_room_ids: Array.isArray(t.bound_room_ids) ? t.bound_room_ids : [],
+    approver_matrix_ids: Array.isArray(t.approver_matrix_ids) ? t.approver_matrix_ids : [],
+    key_prefix: t.token_prefix,
+    masked_value: t.token_prefix ? `${t.token_prefix}...` : undefined,
+  })), [tokens])
+
   const sampleToolInfo = useMemo(() => tools.find((t) => t.name === sampleTool) || null, [tools, sampleTool])
   const sampleMcpAlias = useMemo(() => toMcpAlias(sampleTool), [sampleTool])
 
@@ -636,23 +654,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
       {activeTab === 'tokens' && (
         <section className="tool-tab-panel">
           <ToolTokenPanel
-            tokens={tokens.map((t: any) => ({
-              id: t.id,
-              name: t.name,
-              description: t.description || '',
-              status: t.status || (t.revoked_at ? 'revoked' : 'active'),
-              created_at: t.created_at,
-              last_used_at: t.last_used_at,
-              expires_at: t.expires_at,
-              revoked_at: t.revoked_at,
-              scopes: t.scopes,
-              allow_write: t.allow_write,
-              allow_prod: t.allow_prod,
-              bound_room_ids: Array.isArray(t.bound_room_ids) ? t.bound_room_ids : [],
-              approver_matrix_ids: Array.isArray(t.approver_matrix_ids) ? t.approver_matrix_ids : [],
-              key_prefix: t.token_prefix,
-              masked_value: t.token_prefix ? `${t.token_prefix}...` : undefined,
-            }))}
+            tokens={mappedTokens}
             loading={loading}
             canDelete={isAdmin}
             tokenTemplates={tokenTemplates}

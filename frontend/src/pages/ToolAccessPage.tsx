@@ -490,7 +490,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
 
           {/* 能力开关弹窗 */}
           {showSwitchModal && (
-            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }} onClick={() => setShowSwitchModal(false)}>
+            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 24px', overflowY: 'auto' }} onClick={() => setShowSwitchModal(false)}>
               <div className="card" style={{ width: 'min(820px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }} onClick={(e) => e.stopPropagation()}>
                 <div className="card-header">
                   <div><h2>能力开关</h2><span>默认只读，写操作逐项开启</span></div>
@@ -579,7 +579,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
 
           {/* 风险策略弹窗 */}
           {showRiskPolicyModal && (
-            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }} onClick={() => setShowRiskPolicyModal(false)}>
+            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 24px', overflowY: 'auto' }} onClick={() => setShowRiskPolicyModal(false)}>
               <div className="card" style={{ width: 'min(820px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }} onClick={(e) => e.stopPropagation()}>
                 <div className="card-header">
                   <div><h2>风险策略</h2><span>工具风险分级与确认规则</span></div>
@@ -606,7 +606,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
 
           {/* Manifest 弹窗 */}
           {showManifestModal && (
-            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'grid', placeItems: 'center', padding: 24 }} onClick={() => setShowManifestModal(false)}>
+            <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 24px', overflowY: 'auto' }} onClick={() => setShowManifestModal(false)}>
               <div className="card" style={{ width: 'min(920px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }} onClick={(e) => e.stopPropagation()}>
                 <div className="card-header">
                   <div><h2>Manifest 摘要</h2><span>当前能力发现元数据</span></div>

@@ -15,6 +15,7 @@ import { ServerGroupChips } from './inspection/ServerGroupChips'
 import { ServerToolbar } from './inspection/ServerToolbar'
 import { ServerCategoryChips } from './inspection/ServerCategoryChips'
 import { ServerAdvancedSettings } from './inspection/ServerAdvancedSettings'
+import DiagnosisCard from '../components/v10/DiagnosisCard'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
 
@@ -796,7 +797,19 @@ export default function InspectionCenterPage() {
       </nav>
 
       {tab === 'overview' && (
+        <>
         <OverviewTab overview={overview} servers={servers} projects={projects} />
+        {(overview.open_issue_count > 0 || overview.high_risk_count > 0) && (
+          <DiagnosisCard
+            title="巡检风险诊断"
+            explain={`当前有 ${overview.open_issue_count || 0} 个待处理问题${overview.high_risk_count ? `，其中 ${overview.high_risk_count} 个高风险` : ''}。建议优先处理高风险项，避免影响系统稳定性。`}
+            recommend="点击下方按钮进入风险问题页，按优先级逐项处理。高风险项应在 24 小时内响应。"
+            actionLabel="查看风险问题"
+            actionTo={`${ROUTES.inspection}?tab=issues`}
+            level={overview.high_risk_count > 0 ? 'danger' : 'warn'}
+          />
+        )}
+        </>
       )}
 
       {tab === 'server' && (

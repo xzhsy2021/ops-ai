@@ -158,10 +158,10 @@ Agent:
 Agent:
   1. list_services → 找到服务配置
   2. 询问发布包路径
-  3. prepare_release → 创建发布计划
-  4. run_precheck → 预检
-  5. 回复用户确认
-  6. 用户确认 → prepare_release → 审批
-  7. 用户批准 → execute → 执行发布
-  8. 监控发布状态并报告
+  3. 查询包信息、校验包并执行非变更预检
+  4. 组装 RELEASE 及必要 HEALTH_CHECK 步骤
+  5. 回复完整执行计划并等待用户确认
+  6. 用户确认 → ops.approval.prepare_plan → 生成一个短码
+  7. 授权人批准 → ops.approval.execute_plan → 按冻结步骤执行发布
+  8. 查询部署状态、报告和日志并反馈结果
 ```

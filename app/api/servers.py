@@ -751,10 +751,15 @@ def _detect_server_deployment(db: Session, server_name: str) -> dict:
                 continue
             tv = svc.template_variables or {}
             template = svc.template or ""
-            compose_dir = tv.get("compose_dir") or tv.get("deploy_path") or tv.get("service_dir") or ""
+            # 只有显式配置了 compose_dir 或模板本身就是 compose 时才判定为
+            # Docker Compose 部署。deploy_path / service_dir 是普通部署路径
+            # （如静态前端目录），不能作为 compose 判定依据，否则会选中
+            # 没有 docker-compose.yml 的目录执行 compose ps，导致误报 0 服务。
+            compose_dir = tv.get("compose_dir") or ""
+            explicit_compose = template in ("docker_compose", "crypto_docker_compose") or bool(compose_dir)
             pm2_name = tv.get("pm2_name") or ""
             keyword = tv.get("process_keyword") or tv.get("service_name") or ""
-            if template in ("docker_compose", "crypto_docker_compose") or compose_dir:
+            if explicit_compose:
                 mode = "docker_compose"
             elif pm2_name:
                 mode = "pm2"
@@ -795,53 +800,69 @@ def server_processes(request: Request, name: str, db: Session = Depends(get_db))
 
     with _ssh_session(name) as (ssh, srv):
         if mode == "docker_compose":
-            # 取第一个 docker_compose 服务的目录与文件作为默认
-            svc = next((s for s in services if s["mode"] == "docker_compose"), None)
-            compose_dir = (svc or {}).get("compose_dir") or ""
-            compose_file = (svc or {}).get("compose_file") or "docker-compose.yml"
-            base_cmd = f"cd {shlex.quote(compose_dir or '.')} && " if compose_dir else ""
-            # docker compose ps --format json 输出每行一个 JSON 对象
-            exit_code, out, err = ssh.exec(
-                f"{base_cmd} docker compose -f {shlex.quote(compose_file)} ps --format json 2>/dev/null || "
-                f"{base_cmd} docker-compose -f {shlex.quote(compose_file)} ps 2>/dev/null",
-                timeout=20,
-            )
+            # 收集所有 docker_compose 服务，按 (compose_dir, compose_file) 去重，
+            # 逐个目录探测并合并结果 —— 服务器可能在不同目录部署多套 compose 项目。
+            compose_targets = []
+            seen = set()
+            for s in services:
+                if s["mode"] != "docker_compose":
+                    continue
+                cdir = (s.get("compose_dir") or "").strip() or "."
+                cfile = (s.get("compose_file") or "docker-compose.yml").strip() or "docker-compose.yml"
+                key = (cdir, cfile)
+                if key in seen:
+                    continue
+                seen.add(key)
+                compose_targets.append((cdir, cfile))
+            if not compose_targets:
+                compose_targets = [("", "docker-compose.yml")]
             result = []
-            # 尝试解析 JSON 行格式
-            for line in (out or "").splitlines():
-                line = line.strip()
-                if not line or not line.startswith("{"):
-                    continue
-                try:
-                    p = _json.loads(line)
-                except Exception:
-                    continue
-                state = (p.get("State") or p.get("status") or "unknown").lower()
-                result.append({
-                    "name": p.get("Service") or p.get("Name") or p.get("name") or "",
-                    "pid": p.get("PID") or p.get("PIDs") or 0,
-                    "status": state,
-                    "image": p.get("Image") or p.get("image") or "",
-                    "ports": p.get("Ports") or p.get("Publishers") or "",
-                    "uptime": p.get("RunningFor") or p.get("Status") or "",
-                    "restarts": 0,
-                })
-            # 如果 JSON 解析为空，尝试文本解析 docker-compose ps 的表格输出
-            if not result and out and not out.lstrip().startswith("{"):
-                lines = [l for l in (out or "").splitlines() if l.strip()]
-                if len(lines) > 1:
-                    for line in lines[1:]:
-                        parts = line.split()
-                        if len(parts) >= 3:
-                            result.append({
-                                "name": parts[0],
-                                "pid": 0,
-                                "status": parts[2].lower() if len(parts) > 2 else "unknown",
-                                "image": parts[1] if len(parts) > 1 else "",
-                                "ports": "",
-                                "uptime": " ".join(parts[3:]) if len(parts) > 3 else "",
-                                "restarts": 0,
-                            })
+            for cdir, cfile in compose_targets:
+                base_cmd = f"cd {shlex.quote(cdir)} && " if cdir not in ("", ".") else ""
+                # docker compose ps --format json 输出每行一个 JSON 对象
+                exit_code, out, err = ssh.exec(
+                    f"{base_cmd} docker compose -f {shlex.quote(cfile)} ps --format json 2>/dev/null || "
+                    f"{base_cmd} docker-compose -f {shlex.quote(cfile)} ps 2>/dev/null",
+                    timeout=20,
+                )
+                # 尝试解析 JSON 行格式
+                for line in (out or "").splitlines():
+                    line = line.strip()
+                    if not line or not line.startswith("{"):
+                        continue
+                    try:
+                        p = _json.loads(line)
+                    except Exception:
+                        continue
+                    state = (p.get("State") or p.get("status") or "unknown").lower()
+                    result.append({
+                        "name": p.get("Service") or p.get("Name") or p.get("name") or "",
+                        "pid": p.get("PID") or p.get("PIDs") or 0,
+                        "status": state,
+                        "image": p.get("Image") or p.get("image") or "",
+                        "ports": p.get("Ports") or p.get("Publishers") or "",
+                        "uptime": p.get("RunningFor") or p.get("Status") or "",
+                        "restarts": 0,
+                        "compose_dir": cdir,
+                    })
+                # 如果 JSON 解析为空，尝试文本解析 docker-compose ps 的表格输出
+                if not result or not any(r.get("name") for r in result):
+                    if out and not out.lstrip().startswith("{"):
+                        lines = [l for l in (out or "").splitlines() if l.strip()]
+                        if len(lines) > 1:
+                            for line in lines[1:]:
+                                parts = line.split()
+                                if len(parts) >= 3:
+                                    result.append({
+                                        "name": parts[0],
+                                        "pid": 0,
+                                        "status": parts[2].lower() if len(parts) > 2 else "unknown",
+                                        "image": parts[1] if len(parts) > 1 else "",
+                                        "ports": "",
+                                        "uptime": " ".join(parts[3:]) if len(parts) > 3 else "",
+                                        "restarts": 0,
+                                        "compose_dir": cdir,
+                                    })
             audit("server.processes", "server", name, request.state.username)
             return api_response(data={
                 "processes": result,

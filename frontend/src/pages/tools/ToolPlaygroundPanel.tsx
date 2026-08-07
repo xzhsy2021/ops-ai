@@ -13,18 +13,29 @@ export function ToolPlaygroundPanel({
   const [tool, setTool] = useState(defaultTool || '')
   const [args, setArgs] = useState(defaultArgs || '{}')
   const playground = useToolPlayground()
+  const [executing, setExecuting] = useState(false)
+  const [output, setOutput] = useState('')
+  const [error, setError] = useState('')
+  const [duration, setDuration] = useState<number | null>(null)
 
   const handleExecute = async () => {
-    const res = onExecute
-      ? await onExecute(tool.trim(), args)
-      : await playground.execute(tool.trim(), args)
-    return res
+    setExecuting(true)
+    setError('')
+    setOutput('')
+    setDuration(null)
+    try {
+      const res = onExecute
+        ? await onExecute(tool.trim(), args)
+        : await playground.execute(tool.trim(), args)
+      setOutput(res?.result || '')
+      setError(res?.error || '')
+      setDuration(res?.duration_ms ?? null)
+    } catch (err: any) {
+      setError(err?.message || '执行失败')
+    } finally {
+      setExecuting(false)
+    }
   }
-
-  const executing = playground.executing
-  const output = playground.result
-  const error = playground.error
-  const duration = playground.duration_ms
 
   return (
     <div className="card" style={{ display: 'grid', gap: 12 }}>

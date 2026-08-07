@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { deployment, taskCenter } from '../api'
 import { ROUTES } from '../routes'
 import { EmptyState, PageHeader, StatusBadge, FavoriteButton, RiskConfirmDialog } from '../components/ui'
+import { RiskBadge } from '../components/agent'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 
 type TaskItem = {
@@ -50,6 +51,17 @@ function isLiveStatus(value?: string) {
 
 function taskKey(item: Pick<TaskItem, 'kind' | 'id'>) {
   return `${item.kind}:${item.id}`
+}
+
+function getTaskRiskLevel(item: TaskItem): string {
+  const detail = item.detail || {}
+  return detail?.risk?.risk_level || detail?.risk_level || ''
+}
+
+function getTaskFailureReason(item: TaskItem): string {
+  if (!['failed', 'error'].includes(String(item.status || '').toLowerCase())) return ''
+  const detail = item.detail || {}
+  return detail?.error_message || detail?.failure_reason || ''
 }
 
 function timeSummary(item: TaskItem) {
@@ -105,6 +117,7 @@ export default function TaskCenterPage() {
   const [loading, setLoading] = useState(false)
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState('')
+  const [riskLevel, setRiskLevel] = useState('')
   const [selected, setSelected] = useState<any>(null)
   const [error, setError] = useState('')
   const [actionMsg, setActionMsg] = useState('')
@@ -123,6 +136,11 @@ export default function TaskCenterPage() {
     return result
   }, [items, total])
 
+  const filteredItems = useMemo(() => {
+    if (!riskLevel) return items
+    return items.filter((item) => getTaskRiskLevel(item) === riskLevel)
+  }, [items, riskLevel])
+
   const sortedItems = useMemo(() => {
     const priority = (item: TaskItem) => {
       const s = String(item.status || '').toLowerCase()
@@ -132,8 +150,8 @@ export default function TaskCenterPage() {
       return 3
     }
     const timestamp = (item: TaskItem) => new Date(item.started_at || item.finished_at || '').getTime() || 0
-    return [...items].sort((a, b) => priority(a) - priority(b) || timestamp(b) - timestamp(a))
-  }, [items])
+    return [...filteredItems].sort((a, b) => priority(a) - priority(b) || timestamp(b) - timestamp(a))
+  }, [filteredItems])
 
   const selectedTaskKeySet = useMemo(() => new Set(selectedTaskKeys), [selectedTaskKeys])
   const selectableItems = useMemo(() => sortedItems.filter((item) => !isLiveStatus(item.status)), [sortedItems])
@@ -289,6 +307,14 @@ export default function TaskCenterPage() {
               <option value="pending_approval">待审批</option>
             </select>
           </label>
+          <label>风险
+            <select value={riskLevel} onChange={(e) => { setRiskLevel(e.target.value); setOffset(0) }}>
+              <option value="">全部</option>
+              <option value="high">高风险</option>
+              <option value="medium">中风险</option>
+              <option value="low">低风险</option>
+            </select>
+          </label>
           <button className="btn" onClick={load}>筛选</button>
         </div>
       </div>
@@ -306,9 +332,24 @@ export default function TaskCenterPage() {
                 <tr key={`${item.kind}-${item.id}`} className={[isLiveStatus(item.status) ? 'task-row-live' : '', ['failed', 'error'].includes(String(item.status || '').toLowerCase()) ? 'task-row-failed' : ''].filter(Boolean).join(' ') || undefined}>
                   <td><input type="checkbox" aria-label={`选择任务 ${item.title}`} checked={selectedTaskKeySet.has(taskKey(item))} disabled={isLiveStatus(item.status)} onChange={(e) => toggleTaskSelection(item, e.target.checked)} /></td>
                   <td>{KIND_LABEL[item.kind] || item.kind}</td>
-                  <td>{item.title}</td>
+                  <td>
+                    <div>{item.title}</div>
+                    {getTaskFailureReason(item) && (
+                      <div className="task-failure-reason" title={getTaskFailureReason(item)}>
+                        {getTaskFailureReason(item).length > 60
+                          ? getTaskFailureReason(item).slice(0, 60) + '…'
+                          : getTaskFailureReason(item)}
+                      </div>
+                    )}
+                  </td>
                   <td><StatusBadge value={item.status} /></td>
-                  <td>{item.detail?.risk?.risk_level || item.detail?.risk_level || item.detail?.source_tool || '-'}</td>
+                  <td>{(() => {
+                    const rl = getTaskRiskLevel(item)
+                    if (rl === 'high') return <RiskBadge level="alert" label="高风险" size="sm" />
+                    if (rl === 'medium') return <RiskBadge level="warn" label="中风险" size="sm" />
+                    if (rl === 'low') return <RiskBadge level="info" label="低风险" size="sm" />
+                    return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>-</span>
+                  })()}</td>
                   <td>{item.target}</td>
                   <td>{item.operator}</td>
                   <td>

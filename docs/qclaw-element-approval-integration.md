@@ -1,11 +1,11 @@
 # qclaw Element Approval OPS 集成文档
 
-> **版本:** 1.0
-> **日期:** 2026-07-27
+> **版本:** 1.1
+> **日期:** 2026-08-07
 > **设计参考:** [docs/plans/2026-07-22-qclaw-element-approval-ops-design.md](plans/2026-07-22-qclaw-element-approval-ops-design.md)
 > **实施计划:** [docs/plans/2026-07-22-qclaw-element-approval-ops-implementation.md](plans/2026-07-22-qclaw-element-approval-ops-implementation.md)
 
-> **方案 2 状态（2026-08-06）**：多步骤消息的主流程已迁移到独立 `ExecutionPlan`，使用一次 `prepare_plan` 和一次 `execute_plan`。执行器已注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 六类步骤，发布/回滚/DML/包清理可直接写入计划步骤。本文第 3 节的发布、回滚、DML、包清理示例仍是旧单动作审批兼容流程，与新计划步骤共用同一业务实现（`approval_executor.execute_*`）。
+> **方案 2 状态（2026-08-06）**：多步骤消息的主流程已迁移到独立 `ExecutionPlan`，使用一次 `prepare_plan` 和一次 `execute_plan`。执行器已注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 六类步骤，发布/回滚/DML/包清理可直接写入计划步骤。本文第 3 节保留旧单动作审批作为兼容流程；新接入应优先使用计划级流程，旧流程只用于已存在的客户端兼容。
 
 ---
 
@@ -473,15 +473,14 @@ pytest tests/test_qclaw_end_to_end_contract.py -q
 - 内部执行器 + OperationJob 记录
 - Web UI 管理 API
 
-### 10.2 待实现
-- **前端 UI 控件:** 系统编辑页消息路由配置表单
-- **API 契约测试:** `test_qclaw_routing_api.py` / `test_qclaw_approval_api.py`
-- **多用户审批策略:** 按操作类型和环境区分授权用户
-- **审计联动:** 审批工单与 `audit_chain` 集成
-- **回滚自动化:** 部署失败后自动建议回滚审批（仍需人工批准）
-- **包保留策略联动:** qclaw 上传的包自动应用保留策略
+### 10.2 当前限制与后续演进
+- **外部 qclaw 消费进程:** 不在本仓库内，由 qclaw 负责 Element/Matrix 消息接收和回复。
+- **过期清理:** OPS 提供审批和执行计划过期清理 API；是否每 5 分钟自动调用取决于部署环境的调度配置，不能假设平台内置后台调度已启用。
+- **多用户审批策略:** 当前使用系统配置的授权审批人和环境策略，按操作类型和环境细分仍可继续增强。
+- **回滚自动化:** 部署失败后不会自动执行回滚；系统可生成回滚建议，仍需人工批准。
+- **包保留策略联动:** 包保留策略由 OPS 包管理流程负责，qclaw 上传包需经过 OPS 接收和校验后再按策略处理。
 
 ---
 
 **文档维护者:** OPS 团队
-**最后更新:** 2026-07-27
+**最后更新:** 2026-08-07

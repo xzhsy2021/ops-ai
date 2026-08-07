@@ -754,15 +754,18 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                   return { result: '', error: '等待风险确认中...' }
                 }
                 try {
-                  const parsed = JSON.parse(argsStr)
-                  const res = await capabilityTools.call(toolName, parsed)
-                  const data = getData(res)
-                  await loadTabData(activeTab)
-                  return {
-                    result: JSON.stringify(data?.result || data, null, 2),
-                    error: data?.error || '',
-                    duration_ms: data?.duration_ms || data?.elapsed_ms || null,
-                  }
+                   const parsed = JSON.parse(argsStr)
+                   const res = await capabilityTools.call(toolName, parsed)
+                   const data = getData(res)
+                   setSampleResult(data)
+                   const result = {
+                     result: JSON.stringify(data?.result || data, null, 2),
+                     error: data?.error || '',
+                     duration_ms: data?.duration_ms || data?.elapsed_ms || null,
+                   }
+                   // Show the tool response immediately; audit/catalog refresh must not block it.
+                   void loadTabData(activeTab)
+                   return result
                 } catch (err: any) {
                   return {
                     result: '',

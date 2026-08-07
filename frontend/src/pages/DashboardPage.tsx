@@ -318,6 +318,111 @@ function DeployWidget({ data }: { data: DashboardData | null }) {
   )
 }
 
+function SiteStatusPanel({
+  score,
+  metrics,
+  dashboard,
+  backendOnline,
+  loading,
+  recentDeployments,
+}: {
+  score: number
+  metrics: Record<string, number>
+  dashboard: DashboardData | null
+  backendOnline: boolean
+  loading: boolean
+  recentDeployments: any[]
+}) {
+  const failed = dashboard?.deployments?.tasks_by_status?.failed ?? 0
+  const running = metrics.running_work ?? 0
+  const blocked = dashboard?.deployments?.tasks_by_status?.blocked ?? 0
+  const riskCount = dashboard?.risks?.length ?? 0
+  const highRiskCount = (dashboard?.risks || []).filter((r) => r.level === 'high' || r.level === 'critical').length
+  const tone = scoreTone(score, backendOnline)
+
+  if (loading) {
+    return (
+      <div className="site-status-panel">
+        <div className="site-status-main"><Skeleton type="block" count={1} /></div>
+        <div className="site-status-metrics"><Skeleton type="block" count={4} /></div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="site-status-panel">
+      <div className="site-status-main">
+        <div className="site-status-orb">
+          <div className={`site-status-orb-ring site-status-orb-ring--${tone}`} />
+          <div className="site-status-orb-inner">
+            <strong>{score}<small>%</small></strong>
+            <span>{backendOnline ? 'ONLINE' : 'OFFLINE'}</span>
+          </div>
+        </div>
+        <div className="site-status-summary">
+          <div className="site-status-title">站点态势</div>
+          <div className="site-status-desc">
+            {dashboard?.generated_at
+              ? `更新于 ${new Date(dashboard.generated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+              : '暂无数据'}
+          </div>
+          <div className="site-status-tags">
+            {highRiskCount > 0 && <span className="site-status-tag site-status-tag--danger">{highRiskCount} 个高风险</span>}
+            {riskCount > 0 && <span className="site-status-tag site-status-tag--warn">{riskCount} 个待处理</span>}
+            {!backendOnline && <span className="site-status-tag site-status-tag--danger">后端离线</span>}
+            {backendOnline && riskCount === 0 && <span className="site-status-tag site-status-tag--ok">一切正常</span>}
+          </div>
+        </div>
+      </div>
+      <div className="site-status-metrics">
+        <Link to={ROUTES.tasks} className="site-status-metric">
+          <span className="site-status-metric-icon site-status-metric-icon--run">▶</span>
+          <div>
+            <strong>{running}</strong>
+            <span>运行中</span>
+          </div>
+        </Link>
+        <Link to={ROUTES.tasks} className="site-status-metric">
+          <span className="site-status-metric-icon site-status-metric-icon--fail">✕</span>
+          <div>
+            <strong>{failed}</strong>
+            <span>失败</span>
+          </div>
+        </Link>
+        <Link to={ROUTES.tasks} className="site-status-metric">
+          <span className="site-status-metric-icon site-status-metric-icon--block">⊘</span>
+          <div>
+            <strong>{blocked}</strong>
+            <span>阻塞</span>
+          </div>
+        </Link>
+        <Link to={ROUTES.tools} className="site-status-metric">
+          <span className="site-status-metric-icon site-status-metric-icon--risk">⚠</span>
+          <div>
+            <strong>{highRiskCount}</strong>
+            <span>高风险</span>
+          </div>
+        </Link>
+      </div>
+      {recentDeployments.length > 0 && (
+        <div className="site-status-events">
+          {recentDeployments.slice(0, 4).map((d: any) => {
+            const evtTone = d.status === 'success' ? 'ok' : d.status === 'failed' ? 'danger' : 'warn'
+            return (
+              <Link key={d.id} to={ROUTES.deploy} className="site-status-event">
+                <span className={`site-status-event-dot site-status-event-dot--${evtTone}`} />
+                <span className="site-status-event-label">{d.system || '—'} / {d.service || '—'}</span>
+                <span className="site-status-event-meta">{d.environment || '—'}</span>
+                <span className="site-status-event-time">{d.started_at ? fmtShortTime(d.started_at) : '—'}</span>
+              </Link>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StorageWidget({ data }: { data: DashboardData | null }) {
   const storage = data?.storage || {}
   const local = storage.local || storage.local_summary || {}
@@ -549,6 +654,24 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* 站点态势面板 */}
+      <SiteStatusPanel
+        score={score}
+        metrics={metrics}
+        dashboard={dashboard}
+        backendOnline={backendOnline}
+        loading={loading}
+        recentDeployments={recentDeployments}
+      />
+
+      {/* KPI 指标卡条 */}
+      <div className="wx-dash-kpi wx-kpi-row" aria-label="运行快照">
+        <div className="wx-kpi"><span className="label">健康评分</span><span className="value">{score}</span></div>
+        <div className="wx-kpi"><span className="label">服务器</span><span className="value">{metrics.servers ?? 0}</span></div>
+        <div className={`wx-kpi ${(metrics.running_work || 0) > 0 ? 'tone-run' : ''}`}><span className="label">运行中</span><span className="value">{metrics.running_work ?? 0}</span></div>
+        <div className={`wx-kpi ${(dashboard?.deployments?.tasks_by_status?.failed || 0) > 0 ? 'tone-fail' : ''}`}><span className="label">失败任务</span><span className="value">{dashboard?.deployments?.tasks_by_status?.failed ?? 0}</span></div>
       </div>
 
       {/* 4 宫格快捷卡 */}

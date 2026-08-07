@@ -24,6 +24,7 @@ import { useDeployOptionsLoader } from './deploy/useDeployOptionsLoader'
 import { useDeployServerSelection } from './deploy/useDeployServerSelection'
 import { useDeployActions } from './deploy/useDeployActions'
 import { useRetentionPolicy } from './deploy/useRetentionPolicy'
+import { PipelineStageRail } from '../components/v10/PipelineStage'
 
 const selectStyle: React.CSSProperties = {
   width: '100%',
@@ -333,7 +334,19 @@ export default function DeployPage() {
       {activeTab === 'deploy' && (
         <>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 260px', gap: '16px', alignItems: 'start' }}>
-          <StepWizard
+          <div>
+            <PipelineStageRail
+              steps={[
+                { key: 'target', title: '选择目标' },
+                { key: 'package', title: isSelectedDockerCompose ? '发布配置' : '发布包' },
+                { key: 'server', title: '服务器' },
+                { key: 'precheck', title: '预检' },
+                { key: 'confirm', title: '确认' },
+                { key: 'run', title: '执行发布' },
+              ]}
+              activeIndex={wizardStep}
+            />
+            <StepWizard
             steps={[
               {
                 key: 'target', title: '选择目标', description: '系统 / 服务 / 环境',
@@ -420,6 +433,7 @@ export default function DeployPage() {
             activeStep={wizardStep}
             onStepChange={setWizardStep}
           />
+          </div>
           <DeploySummaryCard
             title="已选配置"
             extra={<span className="cc-chip cc-chip--ghost">SUMMARY</span>}

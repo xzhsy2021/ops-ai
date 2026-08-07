@@ -16,6 +16,8 @@ import { ToastContainer } from './components/ToastContainer'
 import { KeyboardShortcutsPanel } from './components/KeyboardShortcutsPanel'
 import { usePreferenceStore } from './stores/preferenceStore'
 import { applyTheme, applyFxMode } from './theme/engine'
+import { ThemeToast } from './components/ui/ThemeToast'
+import { SettingsModal, type ThemeMode as SettingsTheme } from './components/ui/SettingsModal'
 
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
@@ -42,8 +44,6 @@ const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 const SystemListPage = lazy(() => import('./pages/SystemListPage'))
 const SystemEditPage = lazy(() => import('./pages/SystemEditPage'))
 const ServiceEditPage = lazy(() => import('./pages/ServiceEditPage'))
-const NeuralLabPage = lazy(() => import('./pages/NeuralLabPage'))
-
 function BrandMark({ size = 22 }: { size?: number }) {
   return (
     <span
@@ -248,6 +248,8 @@ function App() {
   const [commandOpen, setCommandOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [zenMode, setZenMode] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [themeToast, setThemeToast] = useState<{ open: boolean; label: string }>({ open: false, label: '' })
 
   const currentRole = useMemo(() => {
     if (user?.is_admin) return 'admin'
@@ -275,12 +277,14 @@ function App() {
   const isServerWorkbench = location.pathname.startsWith(`${ROUTES.servers}/`)
 
   const toggleTheme = useCallback(() => {
-    setTheme((prev) => {
-      const idx = THEME_CYCLE.indexOf(prev)
-      const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length]
-      applyTheme(next)
-      return next
-    })
+    setSettingsOpen(true)
+  }, [])
+
+  const handleThemeSelect = useCallback((t: ThemeMode) => {
+    setTheme(t)
+    applyTheme(t)
+    const names: Record<ThemeMode, string> = { crystal: '水晶', jade: '翡翠', light: '浅色' }
+    setThemeToast({ open: true, label: names[t] })
   }, [])
 
   const togglePerformance = useCallback(() => {
@@ -408,21 +412,6 @@ function App() {
       <div className="app-shell app-shell--login">
         <Suspense fallback={loadingFallback}><LoginPage /></Suspense>
       </div>
-    )
-  }
-
-  // 神经突触实验室：独立全屏渲染（参照参考的 rail+topbar+content 布局，不套用 App 外壳）
-  if (user && location.pathname === ROUTES.neuralLab) {
-    return (
-      <>
-        <DistStaleBanner />
-        <ErrorBoundary key={location.pathname} title="神经突触实验室加载失败">
-          <Suspense fallback={loadingFallback}>
-            <NeuralLabPage />
-          </Suspense>
-        </ErrorBoundary>
-        {createPortal(<ToastContainer />, document.body)}
-      </>
     )
   }
 
@@ -590,7 +579,6 @@ function App() {
                   <Route path={ROUTES.inspection} element={requireAuth(hasMinRole('readonly') ? <InspectionCenterPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.database} element={requireAuth(hasMinRole('readonly') ? <DatabaseToolsPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.tools} element={requireAuth(hasMinRole('readonly') ? <ToolAccessPage /> : <NotFoundPage />)} />
-                  <Route path={ROUTES.neuralLab} element={requireAuth(hasMinRole('readonly') ? <NeuralLabPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.mcpTools} element={requireAuth(hasMinRole('readonly') ? <McpToolsPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.mcpAudit} element={requireAuth(hasMinRole('admin') ? <McpAuditPage /> : <NotFoundPage />)} />
                   <Route path={ROUTES.aiWorkflows} element={requireAuth(hasMinRole('readonly') ? <AiWorkflowsPage /> : <NotFoundPage />)} />
@@ -608,6 +596,17 @@ function App() {
       <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} navItems={availableNavItems} onToggleTheme={toggleTheme} />
       {createPortal(<ToastContainer />, document.body)}
       <KeyboardShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <SettingsModal
+        open={settingsOpen}
+        theme={theme}
+        onTheme={handleThemeSelect}
+        onClose={() => setSettingsOpen(false)}
+      />
+      <ThemeToast
+        open={themeToast.open}
+        label={themeToast.label}
+        onDone={() => setThemeToast({ open: false, label: '' })}
+      />
     </div>
   )
 }

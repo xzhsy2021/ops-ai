@@ -291,6 +291,32 @@ export default function SystemDiagnosticsPage() {
 
       {error && <ErrorState title="诊断失败" description={error} />}
 
+      <SectionCard title="快速探针" subtitle="只读探针快捷入口，用于快速检查系统关键状态。写操作请通过任务中心或巡检中心执行。">
+        <div style={{ display: 'grid', gap: '12px' }}>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <Link className="btn" to={ROUTES.inspection} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>
+              ◉ 巡检报告
+            </Link>
+            <Link className="btn" to={ROUTES.system} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>
+              ◈ 系统状态
+            </Link>
+            <Link className="btn" to={ROUTES.tasks} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>
+              ⌘ 任务中心
+            </Link>
+            <Link className="btn" to={ROUTES.reports} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>
+              📊 报告中心
+            </Link>
+            <Link className="btn" to={ROUTES.audit} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)', textDecoration: 'none' }}>
+              📋 审计日志
+            </Link>
+          </div>
+          <div style={{ color: 'var(--text-muted)', fontSize: '12px', lineHeight: 1.5 }}>
+            诊断页提供后端运行自检（数据库、密钥、目录、备份、Worker、MCP 工具目录等），均为只读操作。
+            如需执行服务器巡检或项目巡检，请使用上方"巡检中心"入口。
+          </div>
+        </div>
+      </SectionCard>
+
       <SectionCard title="巡检入口" subtitle="安装诊断用于定位平台自身运行问题；巡检中心用于服务器安全、项目安全、风险闭环和巡检报告。">
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '12px', alignItems: 'center' }}>
           <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>如果需要执行服务器巡检、项目巡检或综合巡检，请进入巡检中心。巡检结果会沉淀到风险问题和报告中心。</div>

@@ -3,7 +3,7 @@ import { LogConsole } from '../../components/LogConsole'
 import { DeploymentRunHeader } from './DeploymentRunHeader'
 import { DeploymentServerGrid } from './DeploymentServerGrid'
 import type { DeploymentLogEntry as LogEntry, DeploymentReport } from '../../types/deploy'
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 
 function ConfigDiff({ captured, live }: { captured: Record<string, any> | null; live: Record<string, any> | null }) {
   const [open, setOpen] = useState(false)
@@ -83,6 +83,42 @@ export default function DeploymentRunPanel({
 }: DeploymentRunPanelProps) {
   const failedServers = report?.failed_servers || []
   const reportSuggestions = report?.suggestions || []
+
+  const isFailed = ['failed', 'partial_failed'].includes(status)
+  const failureReasons = useMemo(() => {
+    const reasons: Array<{ source: string; message: string }> = []
+    // 从 report 提取
+    if (report?.failure_analysis) {
+      reasons.push({ source: '分析', message: report.failure_analysis.message || report.summary_text || '' })
+    }
+    if (report?.summary_text && !reasons.length) {
+      reasons.push({ source: '摘要', message: report.summary_text })
+    }
+    // 从 serverExecutionRows 提取失败服务器
+    serverExecutionRows.filter((r) => r.status === 'failed').forEach((r) => {
+      reasons.push({ source: `服务器: ${r.name}`, message: r.last || '未知错误' })
+    })
+    // 从 taskDetails 提取失败步骤
+    if (taskDetails?.step_tasks) {
+      taskDetails.step_tasks
+        .filter((st: any) => st.status === 'failed' || st.status === 'error')
+        .forEach((st: any) => {
+          const key = st.server_name ? `${st.server_name}/${st.step_name}` : st.step_name
+          if (!reasons.some((r) => r.message === (st.message || ''))) {
+            reasons.push({ source: key, message: st.message || '执行失败' })
+          }
+        })
+    }
+    // 从 failedServers (report) 补充
+    failedServers.forEach((fs: any) => {
+      const key = fs.server_name || '未知'
+      const msg = fs.message || fs.status || ''
+      if (msg && !reasons.some((r) => r.source.includes(key) && r.message === msg)) {
+        reasons.push({ source: `服务器: ${key}`, message: msg })
+      }
+    })
+    return reasons
+  }, [report, serverExecutionRows, taskDetails, failedServers])
 
   const copyMarkdownReport = () => {
     const summary = report?.summary || {}
@@ -181,10 +217,29 @@ export default function DeploymentRunPanel({
         <DeploymentServerGrid servers={serverStatuses} />
       )}
 
+      {/* 失败归因 — 始终显示 */}
+      {isFailed && failureReasons.length > 0 && (
+        <div style={{ border: '1px solid var(--danger)', borderRadius: '10px', padding: '12px', background: 'color-mix(in srgb, var(--danger) 8%, transparent)', display: 'grid', gap: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <h4 style={{ margin: 0, color: 'var(--danger)' }}>失败归因摘要</h4>
+            <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{failureReasons.length} 条失败记录</span>
+          </div>
+          {failureReasons.slice(0, 8).map((r, idx) => (
+            <div key={idx} style={{ fontSize: 12, display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8, alignItems: 'start' }}>
+              <span style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>{r.source}</span>
+              <span style={{ color: 'var(--danger)', wordBreak: 'break-word' }}>{r.message}</span>
+            </div>
+          ))}
+          {failureReasons.length > 8 && (
+            <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>… 还有 {failureReasons.length - 8} 条</div>
+          )}
+        </div>
+      )}
+
       {report && (
         <div style={{ border: '1px solid var(--border-strong)', borderRadius: '10px', padding: '10px', background: 'var(--bg-page)', display: 'grid', gap: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-            <h4 style={{ margin: 0 }}>发布摘要与失败归因</h4>
+            <h4 style={{ margin: 0 }}>发布摘要</h4>
             <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>耗时 {report.duration_seconds ?? '-'} 秒 · 可回滚 {report.rollback_available ? '是' : '否'}</span>
           </div>
           <div style={{ color: report.failure_analysis?.status === 'failed' ? 'var(--danger)' : 'var(--text-secondary)' }}>{report.summary_text || '-'}</div>

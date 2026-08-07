@@ -450,26 +450,26 @@ export default function ServerListPage() {
       } else if (form.auth_type === 'key_content') {
         payload.key_content = form.key_content || null
       }
-      if (form.jump_host) {
-        const selectedSrv = servers.find((s) => s.name === form.jump_host)
-        if (selectedSrv) {
-          const jumpHostConfig: Record<string, any> = {
-            name: selectedSrv.name,
-            host: selectedSrv.host,
-            port: selectedSrv.port,
-            username: selectedSrv.username || selectedSrv.user,
-          }
-          if (selectedSrv.key || selectedSrv.key_file) {
-            jumpHostConfig.key = selectedSrv.key || selectedSrv.key_file
-          }
-          if (selectedSrv.password) {
-            jumpHostConfig.password = selectedSrv.password
-          }
-          if (selectedSrv.key_content) {
-            jumpHostConfig.key_content = selectedSrv.key_content
-          }
-          payload.jump_host = jumpHostConfig
+      const selectedSrv = form.jump_host ? servers.find((s) => s.name === form.jump_host) : undefined
+      if (selectedSrv) {
+        const jumpHostConfig: Record<string, any> = {
+          name: selectedSrv.name,
+          host: selectedSrv.host,
+          port: selectedSrv.port,
+          username: selectedSrv.username || selectedSrv.user,
         }
+        if (selectedSrv.key || selectedSrv.key_file) {
+          jumpHostConfig.key = selectedSrv.key || selectedSrv.key_file
+        }
+        if (selectedSrv.password) {
+          jumpHostConfig.password = selectedSrv.password
+        }
+        if (selectedSrv.key_content) {
+          jumpHostConfig.key_content = selectedSrv.key_content
+        }
+        payload.jump_host = jumpHostConfig
+      } else {
+        payload.jump_host = ''
       }
       if (editing) {
         await serverManagement.update(editing, payload)
@@ -506,7 +506,9 @@ export default function ServerListPage() {
     const updates: Record<string, any> = {}
     if (batchForm.description.trim()) updates.description = batchForm.description.trim()
     if (batchForm.tags.trim()) updates.tags = batchForm.tags.split(',').map((t) => t.trim()).filter(Boolean)
-    if (batchForm.jump_host) {
+    if (batchForm.jump_host === '__clear__') {
+      updates.jump_host = '__clear__'
+    } else if (batchForm.jump_host) {
       const jumpSrv = servers.find((s) => s.name === batchForm.jump_host)
       if (jumpSrv) {
         const jumpCfg: Record<string, any> = { name: jumpSrv.name, host: jumpSrv.host, port: jumpSrv.port, username: jumpSrv.username || jumpSrv.user }

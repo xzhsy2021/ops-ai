@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import './index.css'
 import './theme/tokens.css'
+import './styles/wenxi-workspace.css'
 import { initThemeEngine } from './theme/engine'
 
 

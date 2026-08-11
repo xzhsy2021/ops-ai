@@ -19,6 +19,8 @@ _GENERIC_IDENTITY_FIELDS = frozenset(_MESSAGE_FIELDS[:-1])
 _LEGACY_IDENTITY_FIELDS = frozenset(
     {"room_id", "request_event_id", "event_id", "sender_matrix_id"}
 )
+_CHANNEL_ACCOUNT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"
+_CHANNEL_ACCOUNT_ID_RE = re.compile(_CHANNEL_ACCOUNT_ID_PATTERN)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -33,6 +35,16 @@ def _channel(value: Any) -> str:
     if channel not in SUPPORTED_CHANNELS:
         raise ValueError(f"unsupported channel: {channel}")
     return channel
+
+
+def _channel_account_id(value: Any) -> str:
+    account_id = _required_text(value, "channel_account_id")
+    if not _CHANNEL_ACCOUNT_ID_RE.fullmatch(account_id):
+        raise ValueError(
+            "channel_account_id must be a 1-128 character ASCII slug containing "
+            "only letters, digits, dots, underscores, or hyphens"
+        )
+    return account_id
 
 
 def _closed_mapping(
@@ -65,8 +77,12 @@ class MessageContext:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "channel", _channel(self.channel))
-        for field_name in (
+        object.__setattr__(
+            self,
             "channel_account_id",
+            _channel_account_id(self.channel_account_id),
+        )
+        for field_name in (
             "conversation_id",
             "message_id",
             "sender_id",
@@ -104,7 +120,12 @@ def message_context_schema() -> Dict[str, Any]:
         "type": "object",
         "properties": {
             "channel": {"type": "string", "enum": sorted(SUPPORTED_CHANNELS)},
-            "channel_account_id": {"type": "string", "minLength": 1},
+            "channel_account_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": _CHANNEL_ACCOUNT_ID_PATTERN,
+            },
             "conversation_id": {"type": "string", "minLength": 1},
             "message_id": {"type": "string", "minLength": 1},
             "sender_id": {"type": "string", "minLength": 1},
@@ -175,9 +196,7 @@ def normalize_identity(value: Any) -> Dict[str, str]:
         )
     return {
         "channel": _channel(data["channel"]),
-        "channel_account_id": _required_text(
-            data["channel_account_id"], "channel_account_id"
-        ),
+        "channel_account_id": _channel_account_id(data["channel_account_id"]),
         "sender_id": _required_text(data["sender_id"], "sender_id"),
     }
 
@@ -197,8 +216,6 @@ def normalize_conversation_binding(value: Any) -> Dict[str, str]:
         )
     return {
         "channel": _channel(data["channel"]),
-        "channel_account_id": _required_text(
-            data["channel_account_id"], "channel_account_id"
-        ),
+        "channel_account_id": _channel_account_id(data["channel_account_id"]),
         "conversation_id": _required_text(data["conversation_id"], "conversation_id"),
     }

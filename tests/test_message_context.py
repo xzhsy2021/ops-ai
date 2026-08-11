@@ -115,6 +115,37 @@ def test_message_context_rejects_unknown_fields():
         MessageContext.from_dict(raw)
 
 
+def test_message_context_rejects_colon_in_channel_account_id():
+    raw = _message_context()
+    raw["channel_account_id"] = "primary:west"
+
+    with pytest.raises(ValueError, match="channel_account_id"):
+        MessageContext.from_dict(raw)
+
+
+def test_valid_message_context_tuples_cannot_collide():
+    tuples = [
+        ("tenant", "ops:alice", "ops:room"),
+        ("tenant.ops", "alice", "room"),
+        ("tenant-ops", "ops:alice", "ops:room"),
+        ("tenant_ops", "alice", "room"),
+    ]
+    contexts = []
+    for account_id, sender_id, conversation_id in tuples:
+        raw = _message_context()
+        raw.update(
+            {
+                "channel_account_id": account_id,
+                "sender_id": sender_id,
+                "conversation_id": conversation_id,
+            }
+        )
+        contexts.append(MessageContext.from_dict(raw))
+
+    assert len({context.actor_key for context in contexts}) == len(tuples)
+    assert len({context.conversation_key for context in contexts}) == len(tuples)
+
+
 def test_message_context_rejects_non_string_unknown_field_keys_cleanly():
     raw = _message_context()
     raw[1] = "unexpected"
@@ -189,6 +220,9 @@ def test_message_context_schema_is_closed_and_reusable():
         "content_sha256",
     ]
     assert set(schema["properties"]["channel"]["enum"]) == SUPPORTED_CHANNELS
+    account_schema = schema["properties"]["channel_account_id"]
+    assert account_schema["pattern"] == "^[A-Za-z0-9._-]{1,128}$"
+    assert account_schema["maxLength"] == 128
     assert schema["properties"]["content_sha256"]["pattern"] == "^[0-9a-fA-F]{64}$"
 
     schema["required"].clear()
@@ -232,6 +266,32 @@ def test_legacy_matrix_identity_and_binding_strings_normalize():
         "channel_account_id": "default",
         "conversation_id": "!ops:example.org",
     }
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "raw"),
+    [
+        (
+            normalize_identity,
+            {
+                "channel": "matrix",
+                "channel_account_id": "primary:west",
+                "sender_id": "@alice:example.org",
+            },
+        ),
+        (
+            normalize_conversation_binding,
+            {
+                "channel": "matrix",
+                "channel_account_id": "primary:west",
+                "conversation_id": "!ops:example.org",
+            },
+        ),
+    ],
+)
+def test_identity_and_binding_reject_colon_in_channel_account_id(normalizer, raw):
+    with pytest.raises(ValueError, match="channel_account_id"):
+        normalizer(raw)
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ from app.db.migrations.runner import run_schema_migrations
 from app.db.models import AiActionApproval, OperationJob
 from app.services.action_approval import ActionApprovalService, _utcnow
 from app.services.approval_executor import ApprovalExecutor
+from app.services.message_context import MessageContext
 from app.services.qclaw_routing import (
     RoutingOutcome,
     resolve_message_target,
@@ -44,6 +45,17 @@ def _event(suffix: str) -> str:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _matrix_context(room_id: str, event_id: str, content_sha256: str) -> MessageContext:
+    return MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id=room_id,
+        message_id=event_id,
+        sender_id="@requester:matrix.org",
+        content_sha256=content_sha256,
+    )
 
 
 # 路由配置示例（与设计文档一致）
@@ -135,10 +147,9 @@ class TestEndToEndReleaseFlow:
         assert decision.routing_config_revision is not None
 
         # Step 2: 签发并验证路由票据
+        message_context = _matrix_context(room_id, request_event, content_sha)
         ticket = issue_ticket(
-            room_id=room_id,
-            event_id=request_event,
-            content_sha256=content_sha,
+            message_context=message_context,
             system_name=decision.system_name,
             service_name=decision.service_name,
             routing_config_revision=decision.routing_config_revision,
@@ -146,9 +157,7 @@ class TestEndToEndReleaseFlow:
         assert ticket.ticket and ticket.digest
         assert verify_ticket(
             ticket_str=ticket.ticket,
-            expected_room_id=room_id,
-            expected_event_id=request_event,
-            expected_content_sha256=content_sha,
+            expected_message_context=message_context,
             expected_system_name=decision.system_name,
             expected_service_name=decision.service_name,
             expected_revision=decision.routing_config_revision,
@@ -505,10 +514,9 @@ class TestRoutingTicketIntegrity:
         tampered_hash = _content_hash(f"tampered-{suffix}")
 
         decision = resolve_message_target("部署 量化", ROUTING_SYSTEMS)
+        message_context = _matrix_context(room_id, event_id, original_hash)
         ticket = issue_ticket(
-            room_id=room_id,
-            event_id=event_id,
-            content_sha256=original_hash,
+            message_context=message_context,
             system_name=decision.system_name,
             service_name=decision.service_name,
             routing_config_revision=decision.routing_config_revision,
@@ -517,9 +525,7 @@ class TestRoutingTicketIntegrity:
         # 原始 hash 验证通过
         assert verify_ticket(
             ticket_str=ticket.ticket,
-            expected_room_id=room_id,
-            expected_event_id=event_id,
-            expected_content_sha256=original_hash,
+            expected_message_context=message_context,
             expected_system_name=decision.system_name,
             expected_service_name=decision.service_name,
             expected_revision=decision.routing_config_revision,
@@ -528,9 +534,7 @@ class TestRoutingTicketIntegrity:
         # 篡改 hash 验证失败
         assert not verify_ticket(
             ticket_str=ticket.ticket,
-            expected_room_id=room_id,
-            expected_event_id=event_id,
-            expected_content_sha256=tampered_hash,
+            expected_message_context=_matrix_context(room_id, event_id, tampered_hash),
             expected_system_name=decision.system_name,
             expected_service_name=decision.service_name,
             expected_revision=decision.routing_config_revision,
@@ -540,10 +544,13 @@ class TestRoutingTicketIntegrity:
         """票据绑定 room_id，跨房间验证失败"""
         suffix = "ticket-room"
         decision = resolve_message_target("部署 量化", ROUTING_SYSTEMS)
+        message_context = _matrix_context(
+            _room(suffix),
+            _event(suffix),
+            _content_hash(f"msg-{suffix}"),
+        )
         ticket = issue_ticket(
-            room_id=_room(suffix),
-            event_id=_event(suffix),
-            content_sha256=_content_hash(f"msg-{suffix}"),
+            message_context=message_context,
             system_name=decision.system_name,
             service_name=decision.service_name,
             routing_config_revision=decision.routing_config_revision,
@@ -552,9 +559,11 @@ class TestRoutingTicketIntegrity:
         # 不同房间验证失败
         assert not verify_ticket(
             ticket_str=ticket.ticket,
-            expected_room_id="!wrong-room:matrix.org",
-            expected_event_id=_event(suffix),
-            expected_content_sha256=_content_hash(f"msg-{suffix}"),
+            expected_message_context=_matrix_context(
+                "!wrong-room:matrix.org",
+                _event(suffix),
+                _content_hash(f"msg-{suffix}"),
+            ),
             expected_system_name=decision.system_name,
             expected_service_name=decision.service_name,
             expected_revision=decision.routing_config_revision,

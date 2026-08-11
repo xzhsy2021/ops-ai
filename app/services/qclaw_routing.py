@@ -1,6 +1,6 @@
-"""确定性消息路由和签名票据签发，用于 qclaw Element 集成。
+"""确定性消息路由和签名票据签发，用于 QClaw 渠道集成。
 
-qclaw 从 Element 房间读取消息后，调用此模块将消息确定性路由到
+QClaw 从消息渠道读取消息后，调用此模块将消息确定性路由到
 对应的 OPS 系统/服务，并签发一个 15 分钟有效的路由票据。
 """
 import base64
@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 from app.core.config import QCLAW_APPROVAL_SIGNING_KEY, QCLAW_APPROVAL_TTL_SECONDS
+from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
 class RoutingOutcome(str, Enum):
@@ -35,7 +36,7 @@ class RoutingDecision:
     matched_by: str | None = None
     routing_config_revision: str | None = None
     candidates: tuple[str, ...] = ()
-    approvers: tuple[str, ...] = ()  # 授权审批人 Matrix user ID 列表
+    approvers: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,50 @@ def _extract_routing(system_or_service: dict) -> dict:
     return {}
 
 
+def normalize_routing_approvers(value: Any) -> list[dict[str, str]]:
+    """Normalize structured approvers and legacy Matrix sender IDs."""
+    if value is None:
+        raise ValueError("approvers must be a list")
+    if not isinstance(value, list):
+        raise ValueError("approvers must be a list")
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, item in enumerate(value):
+        try:
+            identity = normalize_identity(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"approvers[{index}]: {exc}") from exc
+        key = (
+            identity["channel"],
+            identity["channel_account_id"],
+            identity["sender_id"],
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(identity)
+    return result
+
+
+def normalize_message_routing_config(value: Any) -> dict[str, Any]:
+    """Normalize one persisted message-routing object without adding defaults."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("message_routing must be an object")
+    normalized = dict(value)
+    if "approvers" in normalized:
+        normalized["approvers"] = normalize_routing_approvers(normalized["approvers"])
+    return normalized
+
+
+def _approver_sort_key(identity: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        identity["channel"],
+        identity["channel_account_id"],
+        identity["sender_id"],
+    )
+
+
 def normalize_routing_config(systems: list[dict]) -> str:
     """规范化路由配置 JSON，用于计算 config revision。"""
     normalized = []
@@ -90,7 +135,10 @@ def normalize_routing_config(systems: list[dict]) -> str:
             "aliases": sorted(routing.get("aliases", [])),
             "keywords": sorted(routing.get("keywords", [])),
             "priority": routing.get("priority", 0),
-            "approvers": sorted(routing.get("approvers", [])),
+            "approvers": sorted(
+                normalize_routing_approvers(routing.get("approvers", [])),
+                key=_approver_sort_key,
+            ),
         }
         # 服务级路由
         for svc in sys_cfg.get("services", []):
@@ -101,7 +149,10 @@ def normalize_routing_config(systems: list[dict]) -> str:
                     "aliases": sorted(svc_routing.get("aliases", [])),
                     "keywords": sorted(svc_routing.get("keywords", [])),
                     "priority": svc_routing.get("priority", 0),
-                    "approvers": sorted(svc_routing.get("approvers", [])),
+                    "approvers": sorted(
+                        normalize_routing_approvers(svc_routing.get("approvers", [])),
+                        key=_approver_sort_key,
+                    ),
                 })
         normalized.append(entry)
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -117,26 +168,27 @@ def compute_routing_revision(systems: list[dict]) -> str:
 # 路由解析
 # ──────────────────────────────────────────────────────────────
 
-def _extract_approvers(routing: dict, svc_routing: dict | None = None) -> tuple[str, ...]:
+def _extract_approvers(
+    routing: dict,
+    svc_routing: dict | None = None,
+) -> tuple[dict[str, str], ...]:
     """从路由配置提取授权审批人。
 
     优先使用服务级 approvers（如果非空），否则回退到系统级 approvers。
-    去重并保留顺序。
+    配置在边界统一规范化；无效身份会抛错并由调用方 fail closed。
     """
-    candidates: list[str] = []
-    seen: set[str] = set()
-    sources = [svc_routing, routing] if svc_routing else [routing]
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        for user in src.get("approvers", []) or []:
-            if not isinstance(user, str):
-                continue
-            u = user.strip()
-            if u and u not in seen:
-                seen.add(u)
-                candidates.append(u)
-    return tuple(candidates)
+    if not isinstance(routing, dict):
+        raise ValueError("system message_routing must be an object")
+    system_approvers = normalize_routing_approvers(routing.get("approvers", []))
+    if svc_routing is not None:
+        if not isinstance(svc_routing, dict):
+            raise ValueError("service message_routing must be an object")
+        service_approvers = normalize_routing_approvers(
+            svc_routing.get("approvers", [])
+        )
+        if service_approvers:
+            return tuple(service_approvers)
+    return tuple(system_approvers)
 
 
 def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDecision:
@@ -284,27 +336,24 @@ def _get_signing_key() -> str:
 
 
 def issue_ticket(
-    room_id: str,
-    event_id: str,
-    content_sha256: str,
+    message_context: MessageContext | dict[str, Any],
     system_name: str,
     service_name: str | None,
     routing_config_revision: str,
 ) -> RoutingTicket:
     """签发 HMAC-SHA256 签名的路由票据，15 分钟有效。"""
+    context = normalize_message_context(message_context)
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(seconds=QCLAW_APPROVAL_TTL_SECONDS)
     nonce = secrets.token_hex(16)
 
     payload = {
-        "room_id": room_id,
-        "event_id": event_id,
-        "content_sha256": content_sha256,
+        "message_context": context.to_dict(),
         "system_name": system_name,
         "service_name": service_name,
         "routing_config_revision": routing_config_revision,
-        "issued_at": issued_at.replace(tzinfo=None).isoformat(),
-        "expires_at": expires_at.replace(tzinfo=None).isoformat(),
+        "issued_at": issued_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "nonce": nonce,
     }
 
@@ -317,19 +366,21 @@ def issue_ticket(
     ticket = f"{payload_b64}.{sig}"
     digest = hashlib.sha256(ticket.encode("ascii")).hexdigest()
 
-    return RoutingTicket(ticket=ticket, digest=digest, expires_at=expires_at.replace(tzinfo=None))
+    return RoutingTicket(ticket=ticket, digest=digest, expires_at=expires_at)
 
 
 def verify_ticket(
     ticket_str: str,
-    expected_room_id: str,
-    expected_event_id: str,
-    expected_content_sha256: str,
+    expected_message_context: MessageContext | dict[str, Any],
     expected_system_name: str,
     expected_service_name: str | None,
     expected_revision: str,
 ) -> bool:
     """验证路由票据：签名、过期时间、所有绑定字段。"""
+    try:
+        context = normalize_message_context(expected_message_context)
+    except (TypeError, ValueError):
+        return False
     if not ticket_str or "." not in ticket_str:
         return False
 
@@ -357,14 +408,14 @@ def verify_ticket(
         expires_at = datetime.fromisoformat(expires_str)
     except Exception:
         return False
-    if datetime.now(timezone.utc).replace(tzinfo=None) > expires_at:
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
         return False
 
     # 验证绑定字段
     checks = [
-        ("room_id", payload.get("room_id") == expected_room_id),
-        ("event_id", payload.get("event_id") == expected_event_id),
-        ("content_sha256", payload.get("content_sha256") == expected_content_sha256),
+        ("message_context", payload.get("message_context") == context.to_dict()),
         ("system_name", payload.get("system_name") == expected_system_name),
         ("service_name", payload.get("service_name") == expected_service_name),
         ("revision", payload.get("routing_config_revision") == expected_revision),

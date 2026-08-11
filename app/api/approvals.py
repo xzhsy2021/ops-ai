@@ -2,7 +2,7 @@
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.auth_v2 import get_current_user
@@ -11,6 +11,10 @@ from app.db.models import AiActionApproval
 from app.services.action_approval import ActionApprovalService
 from app.services.approval_executor import ApprovalExecutor
 from app.config.systems import get_all_systems, get_system_by_name, save_system
+from app.services.qclaw_routing import (
+    normalize_message_routing_config,
+    normalize_routing_approvers,
+)
 
 router = APIRouter(prefix="/api/v2/approvals", tags=["qclaw审批管理"])
 
@@ -167,10 +171,26 @@ def manual_execute(
 class MessageRoutingConfig(BaseModel):
     """消息路由配置"""
     enabled: bool = False
-    aliases: list[str] = []
-    keywords: list[str] = []
+    aliases: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
     priority: int = 0
-    approvers: list[str] = []
+    approvers: list[dict[str, str]] = Field(default_factory=list)
+
+    @field_validator("approvers", mode="before")
+    @classmethod
+    def normalize_approvers(cls, value):
+        return normalize_routing_approvers(value)
+
+
+def _routing_summary(value: Any) -> dict[str, Any]:
+    routing = normalize_message_routing_config(value or {})
+    return {
+        "enabled": routing.get("enabled", False),
+        "aliases": routing.get("aliases", []),
+        "keywords": routing.get("keywords", []),
+        "priority": routing.get("priority", 0),
+        "approvers": routing.get("approvers", []),
+    }
 
 
 @router.get("/routing/systems", summary="查询所有系统的路由配置")
@@ -180,7 +200,7 @@ def list_routing_configs(
     systems = get_all_systems()
     result = []
     for name, cfg in systems.items():
-        routing = cfg.get("message_routing", {})
+        routing = _routing_summary(cfg.get("message_routing", {}))
         result.append({
             "system_name": name,
             "enabled": routing.get("enabled", False),
@@ -191,11 +211,9 @@ def list_routing_configs(
             "services": [
                 {
                     "service_name": svc.get("name", ""),
-                    "enabled": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("enabled", False),
-                    "aliases": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("aliases", []),
-                    "keywords": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("keywords", []),
-                    "priority": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("priority", 0),
-                    "approvers": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("approvers", []),
+                    **_routing_summary(
+                        svc.get("template_variables", {}).get("message_routing", {})
+                    ),
                 }
                 for svc in cfg.get("services", [])
             ],

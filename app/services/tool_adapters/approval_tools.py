@@ -1,4 +1,4 @@
-"""qclaw Element 审批 MCP 工具。
+"""QClaw 多渠道审批 MCP 工具。
 
 注册 ops.routing.* 和 ops.approval.* MCP 工具，供 qclaw 通过 MCP 调用。
 这些工具是 qclaw 集成的唯一 OPS 接口，不暴露 deploy:execute / package:write
@@ -13,8 +13,7 @@ from app.services.tool_registry import registry
 from app.services.message_context import message_context_schema, normalize_message_context
 from app.services.tool_token import (
     enforce_room_binding,
-    matching_approver_sender_ids,
-    resolve_approver_identities,
+    normalize_approver_identities,
 )
 from app.services.qclaw_routing import (
     resolve_message_target,
@@ -23,6 +22,7 @@ from app.services.qclaw_routing import (
     compute_routing_revision,
     _extract_routing,
     _extract_approvers,
+    normalize_routing_approvers,
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
@@ -36,6 +36,73 @@ from app.services.tool_adapters.file_transfer_tools import (
 from app.services.package_retention import get_package_retention_policy, inspect_package_file
 
 
+def _current_channel_identities(
+    identities,
+    *,
+    channel: str,
+    channel_account_id: str,
+) -> list[dict[str, str]]:
+    normalized = normalize_approver_identities(identities)
+    return [
+        identity
+        for identity in normalized
+        if identity["channel"] == channel
+        and identity["channel_account_id"] == channel_account_id
+    ]
+
+
+def _effective_approver_identities(
+    ctx,
+    configured,
+    *,
+    channel: str,
+    channel_account_id: str,
+) -> list[dict[str, str]]:
+    """Apply token-first approver policy and reject cross-channel fallthrough."""
+    try:
+        token_identities = normalize_approver_identities(
+            getattr(ctx, "approver_identities", None)
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid token approver policy: {exc}",
+        ) from exc
+    if token_identities:
+        matched = _current_channel_identities(
+            token_identities,
+            channel=channel,
+            channel_account_id=channel_account_id,
+        )
+        if not matched:
+            raise HTTPException(
+                status_code=403,
+                detail="No authorized approver is configured for this channel account",
+            )
+        return matched
+
+    try:
+        configured_identities = normalize_routing_approvers(configured)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid routing approver configuration: {exc}",
+        ) from exc
+    if not configured_identities:
+        return []
+    matched = _current_channel_identities(
+        configured_identities,
+        channel=channel,
+        channel_account_id=channel_account_id,
+    )
+    if not matched:
+        raise HTTPException(
+            status_code=403,
+            detail="No authorized approver is configured for this channel account",
+        )
+    return matched
+
+
 def _lookup_approvers(
     ctx,
     system_name: str,
@@ -45,48 +112,36 @@ def _lookup_approvers(
     channel_account_id: str,
 ) -> list[str]:
     """Resolve approvers for one channel account without cross-channel fallback."""
-    try:
-        token_approvers = matching_approver_sender_ids(
-            getattr(ctx, "approver_identities", None),
-            channel=channel,
-            channel_account_id=channel_account_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Invalid token approver policy: {exc}",
-        ) from exc
-    if token_approvers is not None:
-        if not token_approvers:
-            raise HTTPException(
-                status_code=403,
-                detail="No authorized approver is configured for this channel account",
-            )
-        return token_approvers
     if not system_name:
-        return []
-    systems = get_all_systems()
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
-        return []
-    sys_routing = _extract_routing(sys_cfg)
-    configured: list[str] = []
-    if service_name:
-        for svc in sys_cfg.get("services", []) or []:
-            if svc.get("name") == service_name:
-                svc_routing = _extract_routing(svc)
-                configured = list(_extract_approvers(sys_routing, svc_routing))
-                break
-    if not configured:
-        configured = list(_extract_approvers(sys_routing))
-    if not configured:
-        return []
-    identities = resolve_approver_identities(legacy=configured)
-    return matching_approver_sender_ids(
-        identities,
+        configured = []
+    else:
+        systems = get_all_systems()
+        sys_cfg = systems.get(system_name)
+        configured = []
+        if sys_cfg:
+            try:
+                sys_routing = _extract_routing(sys_cfg)
+                if service_name:
+                    for svc in sys_cfg.get("services", []) or []:
+                        if svc.get("name") == service_name:
+                            configured = list(
+                                _extract_approvers(sys_routing, _extract_routing(svc))
+                            )
+                            break
+                if not configured:
+                    configured = list(_extract_approvers(sys_routing))
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Invalid routing approver configuration: {exc}",
+                ) from exc
+    identities = _effective_approver_identities(
+        ctx,
+        configured,
         channel=channel,
         channel_account_id=channel_account_id,
-    ) or []
+    )
+    return [identity["sender_id"] for identity in identities]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -95,8 +150,8 @@ def _lookup_approvers(
 
 @registry.register(
     name="ops.routing.resolve_message_target",
-    title="解析 Element 消息路由目标",
-    description="将 Element 房间消息文本确定性路由到 OPS 系统/服务，并签发路由票据。qclaw 调用此工具确定消息对应的操作目标。",
+    title="解析 QClaw 消息路由目标",
+    description="将 QClaw 渠道消息确定性路由到 OPS 系统/服务，并签发绑定完整消息上下文的路由票据。",
     scopes=["ops:read"],
     risk="low",
     category="routing",
@@ -105,42 +160,90 @@ def _lookup_approvers(
         "properties": {
             "message_text": {
                 "type": "string",
-                "description": "Element 房间消息原文",
+                "description": "QClaw 渠道消息原文",
             },
+            "message_context": message_context_schema(),
             "room_id": {
                 "type": "string",
-                "description": "Matrix 房间 ID",
+                "description": "兼容字段：Matrix 房间 ID",
             },
             "event_id": {
                 "type": "string",
-                "description": "Matrix 事件 ID",
+                "description": "兼容字段：Matrix 事件 ID",
+            },
+            "request_event_id": {
+                "type": "string",
+                "description": "兼容字段：Matrix 请求事件 ID",
+            },
+            "sender_matrix_id": {
+                "type": "string",
+                "description": "兼容字段：Matrix 发起人 ID",
             },
             "content_sha256": {
                 "type": "string",
                 "description": "消息内容的 SHA-256，用于绑定票据",
             },
         },
-        "required": ["message_text", "room_id", "event_id", "content_sha256"],
+        "required": ["message_text"],
         "additionalProperties": False,
     },
 )
 def routing_resolve_message_target(args, ctx, db):
     message_text = args["message_text"]
-    room_id = args["room_id"]
-    event_id = args["event_id"]
-    content_sha256 = args["content_sha256"]
-
-    # Enforce Element room binding at the MCP layer: if the caller's token
-    # was issued with a non-empty bound_room_ids list, only rooms on the
-    # list are allowed. Empty / missing binding = no restriction.
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), room_id)
+    legacy_fields = {
+        "room_id",
+        "event_id",
+        "request_event_id",
+        "sender_matrix_id",
+        "content_sha256",
+    }
+    try:
+        if "message_context" in args:
+            if legacy_fields & set(args):
+                raise ValueError(
+                    "message_context cannot be combined with legacy Matrix fields"
+                )
+            message_context = normalize_message_context(args["message_context"])
+        else:
+            legacy_context = {
+                key: args[key]
+                for key in legacy_fields
+                if key in args
+            }
+            message_context = normalize_message_context(legacy_context)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # 获取所有系统配置
     systems_dict = get_all_systems()
-    systems = list(systems_dict.values())
+    systems = [
+        {**system, "name": system.get("name") or name}
+        for name, system in systems_dict.items()
+    ]
 
     # 解析路由
-    decision = resolve_message_target(message_text, systems)
+    try:
+        decision = resolve_message_target(message_text, systems)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid routing approver configuration: {exc}",
+        ) from exc
+
+    configured_identities = [dict(item) for item in decision.approvers]
+    effective_identities: list[dict[str, str]] = []
+    if decision.outcome == RoutingOutcome.RESOLVED:
+        effective_identities = _effective_approver_identities(
+            ctx,
+            configured_identities,
+            channel=message_context.channel,
+            channel_account_id=message_context.channel_account_id,
+        )
+    approver_sender_ids = [item["sender_id"] for item in effective_identities]
+    approver_actor_keys = [
+        f'{item["channel"]}:{item["channel_account_id"]}:{item["sender_id"]}'
+        for item in effective_identities
+    ]
 
     if decision.outcome != RoutingOutcome.RESOLVED:
         return {
@@ -149,7 +252,11 @@ def routing_resolve_message_target(args, ctx, db):
             "service_name": None,
             "matched_by": None,
             "candidates": list(decision.candidates),
-            "approvers": list(decision.approvers),
+            "message_context": message_context.to_dict(),
+            "configured_approver_identities": configured_identities,
+            "approver_identities": [],
+            "approver_actor_keys": [],
+            "approvers": [],
             "ticket": None,
             "ticket_digest": None,
             "routing_config_revision": decision.routing_config_revision,
@@ -157,9 +264,7 @@ def routing_resolve_message_target(args, ctx, db):
 
     # 签发路由票据
     ticket = issue_ticket(
-        room_id=room_id,
-        event_id=event_id,
-        content_sha256=content_sha256,
+        message_context=message_context,
         system_name=decision.system_name,
         service_name=decision.service_name,
         routing_config_revision=decision.routing_config_revision,
@@ -171,7 +276,11 @@ def routing_resolve_message_target(args, ctx, db):
         "service_name": decision.service_name,
         "matched_by": decision.matched_by,
         "candidates": list(decision.candidates),
-        "approvers": list(decision.approvers),
+        "message_context": message_context.to_dict(),
+        "configured_approver_identities": configured_identities,
+        "approver_identities": effective_identities,
+        "approver_actor_keys": approver_actor_keys,
+        "approvers": approver_sender_ids,
         "ticket": ticket.ticket,
         "ticket_digest": ticket.digest,
         "routing_config_revision": decision.routing_config_revision,

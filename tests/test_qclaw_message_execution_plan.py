@@ -12,6 +12,7 @@ import pytest
 from app.db.base import SessionLocal, Base, engine
 from app.db.migrations.runner import run_schema_migrations
 from app.db.models import AiActionApproval, ExecutionPlan
+from app.services.message_context import MessageContext
 from app.services.qclaw_routing import (
     RoutingOutcome,
     resolve_message_target,
@@ -128,19 +129,23 @@ class TestMessageExecutionPlanFlow:
         assert decision.outcome == RoutingOutcome.RESOLVED
         assert decision.system_name == "crypto-trader"
 
-        ticket = issue_ticket(
-            room_id=room_id,
-            event_id=request_event,
+        message_context = MessageContext(
+            channel="matrix",
+            channel_account_id="default",
+            conversation_id=room_id,
+            message_id=request_event,
+            sender_id="@requester:matrix.org",
             content_sha256=content_sha,
+        )
+        ticket = issue_ticket(
+            message_context=message_context,
             system_name=decision.system_name,
             service_name=decision.service_name,
             routing_config_revision=decision.routing_config_revision,
         )
         assert verify_ticket(
             ticket_str=ticket.ticket,
-            expected_room_id=room_id,
-            expected_event_id=request_event,
-            expected_content_sha256=content_sha,
+            expected_message_context=message_context,
             expected_system_name=decision.system_name,
             expected_service_name=decision.service_name,
             expected_revision=decision.routing_config_revision,

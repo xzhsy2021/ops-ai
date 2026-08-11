@@ -826,7 +826,6 @@ class TestMCPExecuteChain:
             token_name="test-token",
             token_owner="test",
             allow_write=True,
-            bound_room_ids=[],
         )
 
         # mock 四个执行方法避免真实部署
@@ -897,7 +896,6 @@ class TestMCPExecuteChain:
             token_name="test-token",
             token_owner="test",
             allow_write=True,
-            bound_room_ids=[],
         )
 
         with patch.object(
@@ -953,7 +951,6 @@ class TestMCPExecuteChain:
             token_name="test-token",
             token_owner="test",
             allow_write=True,
-            bound_room_ids=[],
         )
 
         result = approval_execute(

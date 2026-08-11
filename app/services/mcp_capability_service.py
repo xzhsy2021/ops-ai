@@ -154,7 +154,7 @@ def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_ov
 
 def mcp_call_tool(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     from app.services.tool_registry import register_builtin_tools, registry
-    from app.services.tool_token import enforce_room_binding
+    from app.services.tool_token import enforce_conversation_binding
 
     register_builtin_tools()
     params = params or {}
@@ -162,7 +162,9 @@ def mcp_call_tool(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, An
     args = params.get("arguments") or {}
     if not tool_name:
         raise ValueError("tools/call requires params.name")
-    _enforce_qclaw_room_binding(registry, tool_name, args, ctx, enforce_room_binding)
+    _enforce_qclaw_conversation_binding(
+        registry, tool_name, args, ctx, enforce_conversation_binding
+    )
     result = registry.call(db, tool_name, args, ctx)
     is_error = not bool(result.get("ok", True)) if isinstance(result, dict) else False
     return {
@@ -176,28 +178,39 @@ def mcp_call_tool(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, An
     }
 
 
-def _enforce_qclaw_room_binding(registry, tool_name: str, args: Dict[str, Any], ctx, enforce_room_binding_fn) -> None:
-    """MCP 层统一门禁：qclaw 系列工具（routing / approval_*）若携带 room_id
-    且调用 token 配置了房间绑定，则在进入 handler 前统一执行房间校验。
-
-    这是 `enforce_room_binding` 散落在各个 approval adapter 之外的第二道防线，
-    保证任何 qclaw 类别工具的调用都经过房间门禁，而不依赖各工具内部是否记得调用。
-    """
+def _enforce_qclaw_conversation_binding(
+    registry,
+    tool_name: str,
+    args: Dict[str, Any],
+    ctx,
+    enforce_conversation_binding_fn,
+) -> None:
+    """Enforce generic token conversation policy before qclaw handlers."""
     tool = registry.get(tool_name)
     if not tool:
         return
     category = str(getattr(tool, "category", "") or "")
     if not (category == "routing" or category.startswith("approval") or category.startswith("qclaw")):
         return
-    room_id = (args or {}).get("room_id")
-    if not room_id:
+    arguments = args or {}
+    bindings = getattr(ctx, "channel_bindings", None)
+    if "message_context" in arguments:
+        enforce_conversation_binding_fn(
+            bindings,
+            message_context=arguments.get("message_context"),
+        )
         return
-    enforce_room_binding_fn(getattr(ctx, "bound_room_ids", None), room_id)
+    enforce_conversation_binding_fn(
+        bindings,
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id=arguments.get("room_id"),
+    )
 
 
 def mcp_call_tool_stream(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     from app.services.tool_registry import register_builtin_tools, registry
-    from app.services.tool_token import enforce_room_binding
+    from app.services.tool_token import enforce_conversation_binding
 
     register_builtin_tools()
     params = params or {}
@@ -206,7 +219,9 @@ def mcp_call_tool_stream(db, ctx, params: Dict[str, Any] | None = None) -> Dict[
     if not tool_name:
         raise ValueError("tools/call.stream requires params.name")
 
-    _enforce_qclaw_room_binding(registry, tool_name, args, ctx, enforce_room_binding)
+    _enforce_qclaw_conversation_binding(
+        registry, tool_name, args, ctx, enforce_conversation_binding
+    )
 
     events: List[Dict[str, Any]] = []
 

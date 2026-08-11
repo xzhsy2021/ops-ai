@@ -240,19 +240,71 @@ def test_approver_matching_distinguishes_unrestricted_from_no_channel_match():
     ) == ["@alice:example.org"]
 
 
-def test_tool_context_normalizes_legacy_inputs_then_derives_aliases():
+def test_tool_context_ignores_legacy_policy_inputs_and_derives_aliases():
     from app.services.tool_context import ToolContext
 
     legacy = ToolContext(
         bound_room_ids=["!ops:example.org"],
         approver_matrix_ids=["@alice:example.org"],
     )
-    assert legacy.channel_bindings == [MATRIX_ROOM]
-    assert legacy.approver_identities == [MATRIX_APPROVER]
-    assert legacy.bound_room_ids == ["!ops:example.org"]
-    assert legacy.approver_matrix_ids == ["@alice:example.org"]
+    assert legacy.channel_bindings == []
+    assert legacy.approver_identities == []
+    assert legacy.bound_room_ids == []
+    assert legacy.approver_matrix_ids == []
 
     generic = ToolContext(
+        channel_bindings=[MATRIX_ROOM],
+        approver_identities=[MATRIX_APPROVER],
+        bound_room_ids=["!stale:example.org"],
+        approver_matrix_ids=["@stale:example.org"],
+    )
+    assert generic.bound_room_ids == ["!ops:example.org"]
+    assert generic.approver_matrix_ids == ["@alice:example.org"]
+
+
+def _message_context(*, conversation_id="group-7"):
+    return {
+        "channel": "wechat",
+        "channel_account_id": "corp-a",
+        "conversation_id": conversation_id,
+        "message_id": "msg-1",
+        "sender_id": "owner-1",
+        "content_sha256": "a" * 64,
+    }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_mcp_call_paths_enforce_generic_message_context(tmp_path, stream):
+    from app.services.mcp_capability_service import mcp_call_tool, mcp_call_tool_stream
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import registry
+
+    engine = _engine(tmp_path, f"mcp-generic-guard-{stream}.db")
+    db = _session(engine)
+    tool_name = f"ops.contract.generic_guard_{stream}"
+
+    @registry.register(
+        name=tool_name,
+        description="generic channel guard integration",
+        input_schema={
+            "type": "object",
+            "properties": {"message_context": {"type": "object"}},
+            "additionalProperties": False,
+        },
+        scopes=["ops:read"],
+        category="routing",
+        streamable=True,
+    )
+    def _guarded(args, ctx, db, stream_callback=None):
+        if stream_callback:
+            stream_callback({"event": "guarded"})
+        return {"accepted": True}
+
+    ctx = ToolContext(
+        username="tester",
+        auth_type="session",
+        is_admin=True,
+        scopes=["*"],
         channel_bindings=[
             {
                 "channel": "wechat",
@@ -260,18 +312,151 @@ def test_tool_context_normalizes_legacy_inputs_then_derives_aliases():
                 "conversation_id": "group-7",
             }
         ],
+    )
+    invoke = mcp_call_tool_stream if stream else mcp_call_tool
+    try:
+        result = invoke(
+            db,
+            ctx,
+            {
+                "name": tool_name.replace(".", "_"),
+                "arguments": {"message_context": _message_context()},
+            },
+        )
+        assert result["isError"] is False
+
+        for arguments in (
+            {},
+            {"message_context": {"channel": "wechat"}},
+            {"message_context": _message_context(conversation_id="group-8")},
+        ):
+            with pytest.raises(HTTPException) as exc:
+                invoke(
+                    db,
+                    ctx,
+                    {"name": tool_name.replace(".", "_"), "arguments": arguments},
+                )
+            assert exc.value.status_code == 403
+    finally:
+        registry._tools.pop(tool_name, None)
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_mcp_call_paths_normalize_legacy_matrix_room_context(tmp_path, stream):
+    from app.services.mcp_capability_service import mcp_call_tool, mcp_call_tool_stream
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import registry
+
+    engine = _engine(tmp_path, f"mcp-matrix-guard-{stream}.db")
+    db = _session(engine)
+    tool_name = f"ops.contract.matrix_guard_{stream}"
+
+    @registry.register(
+        name=tool_name,
+        description="legacy Matrix channel guard integration",
+        input_schema={
+            "type": "object",
+            "properties": {"room_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        scopes=["ops:read"],
+        category="approval_prepare",
+        streamable=True,
+    )
+    def _guarded(args, ctx, db, stream_callback=None):
+        return {"accepted": True}
+
+    ctx = ToolContext(
+        username="tester",
+        auth_type="session",
+        is_admin=True,
+        scopes=["*"],
+        channel_bindings=[MATRIX_ROOM],
+    )
+    invoke = mcp_call_tool_stream if stream else mcp_call_tool
+    try:
+        result = invoke(
+            db,
+            ctx,
+            {
+                "name": tool_name.replace(".", "_"),
+                "arguments": {"room_id": "!ops:example.org"},
+            },
+        )
+        assert result["isError"] is False
+        with pytest.raises(HTTPException) as exc:
+            invoke(
+                db,
+                ctx,
+                {
+                    "name": tool_name.replace(".", "_"),
+                    "arguments": {"room_id": "!other:example.org"},
+                },
+            )
+        assert exc.value.status_code == 403
+    finally:
+        registry._tools.pop(tool_name, None)
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("channel", ["wechat", "telegram"])
+def test_legacy_matrix_approval_rejects_cross_channel_token_approvers(
+    tmp_path, monkeypatch, channel
+):
+    from app.services.tool_adapters import approval_tools
+    from app.services.tool_context import ToolContext
+
+    engine = _engine(tmp_path, f"approval-channel-deny-{channel}.db")
+    db = _session(engine)
+    ctx = ToolContext(
+        auth_type="tool_token",
+        token_name="cross-channel",
+        scopes=["ops:read"],
         approver_identities=[
             {
-                "channel": "wechat",
-                "channel_account_id": "corp-a",
+                "channel": channel,
+                "channel_account_id": "primary",
                 "sender_id": "owner-1",
             }
         ],
-        bound_room_ids=["!stale:example.org"],
-        approver_matrix_ids=["@stale:example.org"],
     )
-    assert generic.bound_room_ids == []
-    assert generic.approver_matrix_ids == []
+    monkeypatch.setattr(
+        approval_tools,
+        "get_all_systems",
+        lambda: {
+            "crypto-trader": {
+                "name": "crypto-trader",
+                "message_routing": {"approvers": ["@fallback:example.org"]},
+                "services": [],
+            }
+        },
+    )
+    try:
+        with pytest.raises(HTTPException) as exc:
+            approval_tools.approval_prepare_service_control(
+                {
+                    "room_id": "!ops:example.org",
+                    "request_event_id": "$event",
+                    "content_sha256": "b" * 64,
+                    "system_name": "crypto-trader",
+                    "service_name": "strategy",
+                    "environment": "test",
+                    "control_action": "restart",
+                    "targets": ["server-1"],
+                    "routing_config_revision": "rev-1",
+                    "routing_ticket_digest": "ticket-1",
+                },
+                ctx,
+                db,
+            )
+        assert exc.value.status_code == 403
+        assert "authorized approver" in str(exc.value.detail).lower()
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_token_and_preview_contexts_read_only_generic_columns(tmp_path, monkeypatch):

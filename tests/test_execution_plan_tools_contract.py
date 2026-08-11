@@ -41,13 +41,20 @@ def _steps() -> list[dict]:
 
 
 def _ctx(bound_room_ids=None, approver_matrix_ids=None):
+    from app.services.tool_token import (
+        resolve_approver_identities,
+        resolve_channel_bindings,
+    )
+
     return ToolContext(
         auth_type="tool_token",
         token_name="test-token",
         token_owner="test",
         allow_write=True,
-        bound_room_ids=bound_room_ids or [],
-        approver_matrix_ids=approver_matrix_ids or [],
+        channel_bindings=resolve_channel_bindings(legacy=bound_room_ids or []),
+        approver_identities=resolve_approver_identities(
+            legacy=approver_matrix_ids or []
+        ),
     )
 
 

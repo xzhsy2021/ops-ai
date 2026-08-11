@@ -144,16 +144,33 @@ def test_create_token_payload_declares_approver_matrix_ids_field():
 
 
 class _Ctx:
-    def __init__(self, approver_matrix_ids=None):
-        self.approver_matrix_ids = approver_matrix_ids or []
+    def __init__(self, approver_identities=None):
+        self.approver_identities = approver_identities or []
 
 
 def test_lookup_approvers_prefers_token_whitelist():
     from app.services.tool_adapters.approval_tools import _lookup_approvers
 
-    ctx = _Ctx(approver_matrix_ids=["@jack.han:matrix.org", "@alice:matrix.org"])
+    ctx = _Ctx(approver_identities=[
+        {
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "sender_id": "@jack.han:matrix.org",
+        },
+        {
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "sender_id": "@alice:matrix.org",
+        },
+    ])
     # Even though no system config exists, the token whitelist wins.
-    result = _lookup_approvers(ctx, "crypto-trader", "crypto-exchange")
+    result = _lookup_approvers(
+        ctx,
+        "crypto-trader",
+        "crypto-exchange",
+        channel="matrix",
+        channel_account_id="default",
+    )
     assert result == ["@jack.han:matrix.org", "@alice:matrix.org"]
 
 
@@ -163,8 +180,20 @@ def test_lookup_approvers_falls_back_when_no_token_whitelist():
     ctx = _Ctx()  # no token-level whitelist
     # No system/service message_routing configured -> empty list (backward
     # compatible: no approver restriction).
-    assert _lookup_approvers(ctx, "crypto-trader", "crypto-exchange") == []
-    assert _lookup_approvers(ctx, "", "") == []
+    assert _lookup_approvers(
+        ctx,
+        "crypto-trader",
+        "crypto-exchange",
+        channel="matrix",
+        channel_account_id="default",
+    ) == []
+    assert _lookup_approvers(
+        ctx,
+        "",
+        "",
+        channel="matrix",
+        channel_account_id="default",
+    ) == []
 
 
 def test_lookup_approvers_empty_ctx():
@@ -174,7 +203,12 @@ def test_lookup_approvers_empty_ctx():
     class _BareCtx:
         pass
 
-    assert _lookup_approvers(_BareCtx(), "crypto-trader") == []
+    assert _lookup_approvers(
+        _BareCtx(),
+        "crypto-trader",
+        channel="matrix",
+        channel_account_id="default",
+    ) == []
 
 
 def test_frontend_renders_approver_editor_and_table_badge():

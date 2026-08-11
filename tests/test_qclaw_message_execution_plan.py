@@ -77,12 +77,14 @@ def db():
 
 
 def _ctx(bound_room_ids=None):
+    from app.services.tool_token import resolve_channel_bindings
+
     return ToolContext(
         auth_type="tool_token",
         token_name="test-token",
         token_owner="test",
         allow_write=True,
-        bound_room_ids=bound_room_ids or [],
+        channel_bindings=resolve_channel_bindings(legacy=bound_room_ids or []),
     )
 
 

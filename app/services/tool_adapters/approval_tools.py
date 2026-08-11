@@ -10,7 +10,11 @@ from typing import Any, Dict
 from fastapi import HTTPException
 
 from app.services.tool_registry import registry
-from app.services.tool_token import enforce_room_binding, _normalize_approver_ids
+from app.services.tool_token import (
+    enforce_room_binding,
+    matching_approver_sender_ids,
+    resolve_approver_identities,
+)
 from app.services.qclaw_routing import (
     resolve_message_target,
     issue_ticket,
@@ -31,16 +35,32 @@ from app.services.tool_adapters.file_transfer_tools import (
 from app.services.package_retention import get_package_retention_policy, inspect_package_file
 
 
-def _lookup_approvers(ctx, system_name: str, service_name: str | None = None) -> list[str]:
-    """查找授权审批人：优先使用调用 token 的 approver_matrix_ids 白名单。
-
-    若 token 级白名单非空，则它是最强约束（审批人白名单是 per-credential、
-    admin 可管理的数据，见 ToolToken.approver_matrix_ids），直接返回。
-    否则回退到系统/服务级 message_routing.approvers 配置；两者都未配置时
-    返回空列表（此时 consume 对授权人不做限制，向后兼容）。
-    """
-    token_approvers = _normalize_approver_ids(getattr(ctx, "approver_matrix_ids", None))
-    if token_approvers:
+def _lookup_approvers(
+    ctx,
+    system_name: str,
+    service_name: str | None = None,
+    *,
+    channel: str,
+    channel_account_id: str,
+) -> list[str]:
+    """Resolve approvers for one channel account without cross-channel fallback."""
+    try:
+        token_approvers = matching_approver_sender_ids(
+            getattr(ctx, "approver_identities", None),
+            channel=channel,
+            channel_account_id=channel_account_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid token approver policy: {exc}",
+        ) from exc
+    if token_approvers is not None:
+        if not token_approvers:
+            raise HTTPException(
+                status_code=403,
+                detail="No authorized approver is configured for this channel account",
+            )
         return token_approvers
     if not system_name:
         return []
@@ -49,12 +69,23 @@ def _lookup_approvers(ctx, system_name: str, service_name: str | None = None) ->
     if not sys_cfg:
         return []
     sys_routing = _extract_routing(sys_cfg)
+    configured: list[str] = []
     if service_name:
         for svc in sys_cfg.get("services", []) or []:
             if svc.get("name") == service_name:
                 svc_routing = _extract_routing(svc)
-                return list(_extract_approvers(sys_routing, svc_routing))
-    return list(_extract_approvers(sys_routing))
+                configured = list(_extract_approvers(sys_routing, svc_routing))
+                break
+    if not configured:
+        configured = list(_extract_approvers(sys_routing))
+    if not configured:
+        return []
+    identities = resolve_approver_identities(legacy=configured)
+    return matching_approver_sender_ids(
+        identities,
+        channel=channel,
+        channel_account_id=channel_account_id,
+    ) or []
 
 
 # ──────────────────────────────────────────────────────────────
@@ -283,7 +314,13 @@ def approval_prepare_service_control(args, ctx, db):
     service = ActionApprovalService(db)
     control_action = args["control_action"]
     action_label = {"restart": "重启", "stop": "停止", "start": "启动", "update": "更新"}.get(control_action, control_action)
-    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel="matrix",
+        channel_account_id="default",
+    )
     approval, short_code = service.prepare(
         action_type="SERVICE_CONTROL",
         tool_name="ops.approval.prepare_service_control",
@@ -371,7 +408,13 @@ def approval_prepare_file_upload(args, ctx, db):
         db,
     )
 
-    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel="matrix",
+        channel_account_id="default",
+    )
     service = ActionApprovalService(db)
     approval, short_code = service.prepare(
         action_type="FILE_UPLOAD",
@@ -625,7 +668,13 @@ def approval_prepare_plan(args, ctx, db):
     """创建消息级执行计划并返回一次性审批短码。"""
     enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
     service = ExecutionPlanService(db)
-    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel="matrix",
+        channel_account_id="default",
+    )
     steps = _freeze_file_upload_plan_steps(args["steps"], db)
 
     plan, short_code = service.prepare(

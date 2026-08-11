@@ -292,12 +292,15 @@ def test_routing_update_returns_500_when_save_fails(monkeypatch, endpoint):
     }
     monkeypatch.setattr(approvals_api, "get_system_by_name", lambda name: deepcopy(system))
     monkeypatch.setattr(approvals_api, "save_system", lambda *args: False)
+    monkeypatch.setattr(approvals_api, "require_admin", lambda request, db: {"is_admin": True})
     config = approvals_api.MessageRoutingConfig(enabled=True, approvers=[_identity()])
     with pytest.raises(HTTPException) as exc:
         if endpoint == "system":
-            approvals_api.update_system_routing("crypto-trader", config, user={})
+            approvals_api.update_system_routing("crypto-trader", config, request=object(), db=None)
         else:
-            approvals_api.update_service_routing("crypto-trader", "strategy", config, user={})
+            approvals_api.update_service_routing(
+                "crypto-trader", "strategy", config, request=object(), db=None
+            )
     assert exc.value.status_code == 500
 
 

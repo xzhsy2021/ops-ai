@@ -1,11 +1,11 @@
 """qclaw 审批管理 API 路由。"""
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
-from app.core.auth_v2 import get_current_user
+from app.core.auth_v2 import get_current_user, require_admin, require_auth
 from app.db.base import get_db
 from app.db.models import AiActionApproval
 from app.services.action_approval import ActionApprovalService
@@ -180,11 +180,13 @@ class MessageRoutingConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_config(cls, value):
+        if value is None:
+            raise ValueError("message_routing must be an object")
         return normalize_message_routing_config(value)
 
 
 def _routing_summary(value: Any) -> dict[str, Any]:
-    routing = normalize_message_routing_config(value or {})
+    routing = normalize_message_routing_config(value if value is not None else {})
     return {
         "enabled": routing.get("enabled", False),
         "aliases": routing.get("aliases", []),
@@ -196,8 +198,10 @@ def _routing_summary(value: Any) -> dict[str, Any]:
 
 @router.get("/routing/systems", summary="查询所有系统的路由配置")
 def list_routing_configs(
-    user: Dict[str, Any] = Depends(get_current_user),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
+    require_auth(request, db)
     systems = get_all_systems()
     result = []
     for name, cfg in systems.items():
@@ -226,8 +230,10 @@ def list_routing_configs(
 def update_system_routing(
     system_name: str,
     config: MessageRoutingConfig,
-    user: Dict[str, Any] = Depends(get_current_user),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
+    require_admin(request, db)
     sys_cfg = get_system_by_name(system_name)
     if not sys_cfg:
         raise HTTPException(status_code=404, detail=f"系统不存在: {system_name}")
@@ -242,8 +248,10 @@ def update_service_routing(
     system_name: str,
     service_name: str,
     config: MessageRoutingConfig,
-    user: Dict[str, Any] = Depends(get_current_user),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
+    require_admin(request, db)
     sys_cfg = get_system_by_name(system_name)
     if not sys_cfg:
         raise HTTPException(status_code=404, detail=f"系统不存在: {system_name}")

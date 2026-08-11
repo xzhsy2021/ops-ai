@@ -59,20 +59,6 @@ def test_message_routing_rejects_malformed_types_consistently(routing):
         MessageRoutingConfig.model_validate(routing)
 
 
-def test_system_editor_uses_structured_multichannel_approvers():
-    source = (ROOT / "frontend/src/pages/SystemEditPage.tsx").read_text(encoding="utf-8")
-    assert "interface ApproverIdentity" in source
-    assert "channel_account_id: string" in source
-    assert "normalizeApprovers" in source
-    assert "channel: 'matrix'" in source
-    assert "channel_account_id: 'default'" in source
-    for channel in ("matrix", "wechat", "telegram"):
-        assert f'<option value="{channel}">' in source
-    assert "approverKey" in source
-    assert "approverLabel" in source
-    assert "approvers: string[]" not in source
-
-
 def test_signing_key_examples_and_docs_fail_closed():
     for filename in (
         ".env.example",

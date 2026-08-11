@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+python3 "$ROOT_DIR/scripts/load_dotenv.py" --format json "$ROOT_DIR/.env" >/dev/null
+while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+  printf -v "$key" '%s' "$value"
+  export "$key"
+done < <(python3 "$ROOT_DIR/scripts/load_dotenv.py" --format nul "$ROOT_DIR/.env")
+
 APP_DATA_DIR="${APP_DATA_DIR:-$ROOT_DIR/data}"
 export APP_DATA_DIR
 export UPLOAD_DIR="${UPLOAD_DIR:-$APP_DATA_DIR/uploads}"

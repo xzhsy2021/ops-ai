@@ -66,7 +66,9 @@ def _system_row_to_dict(row, services=None, environments=None) -> Dict[str, Any]
             for item in (environments or [])
         },
         "variables": dict(row.variables or {}),
-        "message_routing": normalize_message_routing_config(row.message_routing or {}),
+        "message_routing": normalize_message_routing_config(
+            row.message_routing if row.message_routing is not None else {}
+        ),
         # groups 已迁移到 ServerGroup 表（Phase 3b），这里不返回
         "source": "db",
     }
@@ -119,14 +121,16 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
     if "groups" in system:
         logger.debug("groups field ignored (migrated to ServerGroup table, Phase 3b)")
     try:
+        message_routing = normalize_message_routing_config(
+            system.get("message_routing")
+            if system.get("message_routing") is not None
+            else {}
+        )
         from app.db.base import SessionLocal
         from app.db.models import Service, System, SystemEnvironment
         from app.db.repository import SystemRepository
         with SessionLocal() as db:
             repo = SystemRepository(db)
-            message_routing = normalize_message_routing_config(
-                system.get("message_routing", {}) or {}
-            )
             existing = repo.get_by_name(name)
             if existing:
                 existing.display_name = system.get("display_name") or name

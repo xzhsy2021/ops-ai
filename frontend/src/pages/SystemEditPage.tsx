@@ -3,6 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { resource } from '../api'
 import { useNotificationStore } from '../store'
 import KeyValueEditor from '../components/KeyValueEditor'
+import {
+  approverKey,
+  approverLabel,
+  normalizeApprovers,
+  withStructuredApprovers,
+} from '../utils/approverIdentities.js'
+import type { ApproverChannel, ApproverIdentity } from '../utils/approverIdentities.js'
 
 const STRATEGY_LABELS: Record<string, string> = {
   DIRECT: 'Direct 直推',
@@ -18,62 +25,12 @@ interface MessageRouting {
   approvers: ApproverIdentity[]
 }
 
-type ApproverChannel = 'matrix' | 'wechat' | 'telegram'
-
-interface ApproverIdentity {
-  channel: ApproverChannel
-  channel_account_id: string
-  sender_id: string
-}
-
 const DEFAULT_ROUTING: MessageRouting = {
   enabled: false,
   aliases: [],
   keywords: [],
   priority: 0,
   approvers: [],
-}
-
-const APPROVER_CHANNELS: ApproverChannel[] = ['matrix', 'wechat', 'telegram']
-
-const approverKey = (identity: ApproverIdentity) =>
-  `${identity.channel}\u0000${identity.channel_account_id}\u0000${identity.sender_id}`
-
-const approverLabel = (identity: ApproverIdentity) =>
-  `${identity.channel}/${identity.channel_account_id}: ${identity.sender_id}`
-
-const normalizeApprovers = (value: unknown): ApproverIdentity[] => {
-  if (!Array.isArray(value)) return []
-  const result: ApproverIdentity[] = []
-  const seen = new Set<string>()
-  value.forEach((item) => {
-    let identity: ApproverIdentity | null = null
-    if (typeof item === 'string' && item.trim()) {
-      identity = {
-        channel: 'matrix',
-        channel_account_id: 'default',
-        sender_id: item.trim(),
-      }
-    } else if (item && typeof item === 'object') {
-      const candidate = item as Partial<ApproverIdentity>
-      const account = typeof candidate.channel_account_id === 'string'
-        ? candidate.channel_account_id.trim()
-        : ''
-      const sender = typeof candidate.sender_id === 'string' ? candidate.sender_id.trim() : ''
-      if (APPROVER_CHANNELS.includes(candidate.channel as ApproverChannel) && account && sender) {
-        identity = {
-          channel: candidate.channel as ApproverChannel,
-          channel_account_id: account,
-          sender_id: sender,
-        }
-      }
-    }
-    if (identity && !seen.has(approverKey(identity))) {
-      seen.add(approverKey(identity))
-      result.push(identity)
-    }
-  })
-  return result
 }
 
 export default function SystemEditPage() {
@@ -208,7 +165,7 @@ export default function SystemEditPage() {
       description: form.description.trim(),
       variables: form.variables,
       servers,
-      message_routing: routing,
+      message_routing: withStructuredApprovers(routing),
     }
     setSaving(true)
     try {

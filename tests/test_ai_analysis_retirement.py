@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
@@ -23,6 +24,8 @@ RETIRED_ANALYSIS_PROMPTS = {
     "ops_risk_triage",
     "ops_monthly_ops_report",
 }
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sqlite_session(tmp_path):
@@ -180,3 +183,36 @@ def test_sensitive_masking_remains_available_outside_analysis_subsystem():
     assert "abc123" not in masked
     assert "safe=value" in masked
     assert mask_sensitive("abcdef", limit=3) == "abc"
+
+
+def test_frontend_release_check_does_not_read_or_require_retired_backend_ai():
+    source = (REPO_ROOT / "scripts" / "frontend_route_check.js").read_text(encoding="utf-8")
+
+    retired_backend_markers = {
+        "aiDiagnosticsService",
+        "build_ai_diagnostic_analysis",
+        "app', 'services', 'ai_diagnostics.py",
+        "app', 'services', 'tool_adapters', 'ai_tools.py",
+        "ops.analyze_diagnostics",
+        "ops_diagnostic_triage",
+        "system AI diagnostics API missing",
+        "tool registry ai_tools import missing",
+    }
+    for marker in retired_backend_markers:
+        assert marker not in source, marker
+
+
+def test_smoke_check_does_not_probe_retired_ai_diagnostics_route():
+    source = (REPO_ROOT / "scripts" / "smoke_check.py").read_text(encoding="utf-8")
+
+    assert "/api/v2/system/ai-diagnostics" not in source
+
+
+def test_generate_report_stdio_description_lists_only_supported_report_types():
+    from app.mcp.server import ENGLISH_TOOL_DESCRIPTIONS
+
+    description = ENGLISH_TOOL_DESCRIPTIONS["ops.generate_report"].lower()
+
+    assert "ai analysis" not in description
+    for report_type in {"diagnostics", "operation chain", "deployment", "inspection"}:
+        assert report_type in description

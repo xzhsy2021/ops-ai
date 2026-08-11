@@ -159,7 +159,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.get_report": "Get report metadata and download URL by report_id. 中文: 查看报告详情/下载报告.",
     "ops.get_report_summary": "View report center summary including counts by type and total size. 中文: 查看报告概览/报告统计.",
     "ops.list_report_types": "List available report types that can be generated. 中文: 查看可生成报告类型.",
-    "ops.generate_report": "Generate a report artifact (diagnostics, AI analysis, operation chain, or deployment). Low risk. 中文: 生成报告/创建报告.",
+    "ops.generate_report": "Generate a report artifact (diagnostics, operation chain, operation-chain index, deployment, or inspection). Low risk. 中文: 生成报告/创建报告.",
 
     # ── Runtime & Storage (removed - use ops.exec_remote for remote operations) ──
 

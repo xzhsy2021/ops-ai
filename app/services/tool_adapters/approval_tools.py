@@ -6,12 +6,14 @@
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict
 from fastapi import HTTPException
 
 from app.services.tool_registry import registry
-from app.services.message_context import message_context_schema, normalize_message_context
+from app.services.message_context import MessageContext, message_context_schema, normalize_message_context
 from app.services.tool_token import (
+    enforce_conversation_binding,
     enforce_room_binding,
     normalize_approver_identities,
 )
@@ -296,27 +298,95 @@ def _common_prepare_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "room_id": {"type": "string", "description": "Matrix 房间 ID"},
-            "request_event_id": {"type": "string", "description": "请求消息的 Matrix 事件 ID"},
-            "content_sha256": {"type": "string", "description": "消息内容 SHA-256"},
+            "message_context": message_context_schema(),
+            "routing_ticket": {"type": "string", "description": "完整签名路由票据"},
+            "room_id": {"type": "string", "description": "兼容字段：Matrix 房间 ID"},
+            "request_event_id": {"type": "string", "description": "兼容字段：Matrix 请求事件 ID"},
+            "event_id": {"type": "string", "description": "兼容字段：Matrix 事件 ID"},
+            "sender_matrix_id": {"type": "string", "description": "兼容字段：Matrix 发起人 ID"},
+            "content_sha256": {"type": "string", "description": "兼容字段：消息内容 SHA-256"},
             "system_name": {"type": "string", "description": "目标系统名"},
             "service_name": {"type": "string", "description": "目标服务名（可选）"},
             "environment": {"type": "string", "description": "环境（test/staging/prod）"},
-            "routing_config_revision": {"type": "string", "description": "路由配置 revision"},
-            "routing_ticket_digest": {"type": "string", "description": "路由票据摘要"},
             "ai_reason": {"type": "string", "description": "AI 建议此操作的理由"},
         },
         "required": [
-            "room_id",
-            "request_event_id",
-            "content_sha256",
+            "routing_ticket",
             "system_name",
             "environment",
-            "routing_config_revision",
-            "routing_ticket_digest",
         ],
         "additionalProperties": False,
     }
+
+
+def _routing_systems() -> list[dict]:
+    return [
+        {**system, "name": system.get("name") or name}
+        for name, system in get_all_systems().items()
+    ]
+
+
+def _validated_prepare_ticket(args, ctx):
+    """Validate a prepare request before any approval or plan is created."""
+    if "routing_config_revision" in args or "routing_ticket_digest" in args:
+        raise HTTPException(
+            status_code=400,
+            detail="routing revision and ticket digest are computed by OPS",
+        )
+
+    legacy_fields = {
+        "room_id",
+        "request_event_id",
+        "event_id",
+        "sender_matrix_id",
+        "content_sha256",
+    }
+    try:
+        if "message_context" in args:
+            if legacy_fields & set(args):
+                raise ValueError(
+                    "message_context cannot be combined with legacy Matrix fields"
+                )
+            context = MessageContext.from_dict(args["message_context"])
+        else:
+            context = normalize_message_context(
+                {key: args[key] for key in legacy_fields if key in args}
+            )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    routing_ticket = str(args.get("routing_ticket") or "").strip()
+    if not routing_ticket:
+        raise HTTPException(status_code=400, detail="routing_ticket is required")
+
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None),
+        message_context=context,
+    )
+    try:
+        revision = compute_routing_revision(_routing_systems())
+        valid = verify_ticket(
+            routing_ticket,
+            expected_message_context=context,
+            expected_system_name=args["system_name"],
+            expected_service_name=args.get("service_name"),
+            expected_revision=revision,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Current routing configuration is invalid: {exc}",
+        ) from exc
+    if not valid:
+        raise HTTPException(
+            status_code=403,
+            detail="Routing ticket is invalid, expired, stale, or bound to another message target",
+        )
+
+    ticket_digest = hashlib.sha256(routing_ticket.encode("utf-8")).hexdigest()
+    return context, revision, ticket_digest
 
 
 def _freeze_file_upload_parameters(raw_parameters: dict, db, *, require_package_name: bool = False):
@@ -420,23 +490,25 @@ def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
     },
 )
 def approval_prepare_service_control(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ActionApprovalService(db)
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
+        args, ctx
+    )
     control_action = args["control_action"]
     action_label = {"restart": "重启", "stop": "停止", "start": "启动", "update": "更新"}.get(control_action, control_action)
     approvers = _lookup_approvers(
         ctx,
         args["system_name"],
         args.get("service_name"),
-        channel="matrix",
-        channel_account_id="default",
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
     )
+    service = ActionApprovalService(db)
     approval, short_code = service.prepare(
         action_type="SERVICE_CONTROL",
         tool_name="ops.approval.prepare_service_control",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
+        room_id=message_context.conversation_id,
+        request_event_id=message_context.message_id,
+        content_sha256=message_context.content_sha256,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
@@ -445,8 +517,8 @@ def approval_prepare_service_control(args, ctx, db):
             "control_action": control_action,
             **args.get("action_parameters", {}),
         },
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
         risk_level="high",
         ai_reason=args.get("ai_reason", ""),
         authorized_matrix_users=approvers,
@@ -505,7 +577,9 @@ def approval_prepare_service_control(args, ctx, db):
     },
 )
 def approval_prepare_file_upload(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
+        args, ctx
+    )
 
     targets = [str(item or "").strip() for item in (args.get("targets") or [])]
     if not targets or any(not item for item in targets):
@@ -522,23 +596,23 @@ def approval_prepare_file_upload(args, ctx, db):
         ctx,
         args["system_name"],
         args.get("service_name"),
-        channel="matrix",
-        channel_account_id="default",
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
     )
     service = ActionApprovalService(db)
     approval, short_code = service.prepare(
         action_type="FILE_UPLOAD",
         tool_name="ops.approval.prepare_file_upload",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
+        room_id=message_context.conversation_id,
+        request_event_id=message_context.message_id,
+        content_sha256=message_context.content_sha256,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
         targets=targets,
         action_parameters=action_parameters,
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
         risk_level="high",
         ai_reason=args.get("ai_reason", ""),
         package_name=filename,
@@ -759,12 +833,7 @@ def _plan_steps_schema() -> dict:
     input_schema={
         "type": "object",
         "properties": {
-            "room_id": {"type": "string", "description": "Matrix 房间 ID"},
-            "request_event_id": {"type": "string", "description": "请求消息的 Matrix 事件 ID"},
-            "content_sha256": {"type": "string", "description": "消息内容 SHA-256"},
-            "system_name": {"type": "string", "description": "目标系统名"},
-            "service_name": {"type": "string", "description": "目标服务名（可选）"},
-            "environment": {"type": "string", "description": "环境（test/staging/prod）"},
+            **_common_prepare_schema()["properties"],
             "targets": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -775,49 +844,39 @@ def _plan_steps_schema() -> dict:
                 "type": "object",
                 "description": "执行策略（如 continue_on_error / max_retries）",
             },
-            "routing_config_revision": {"type": "string", "description": "路由配置 revision"},
-            "routing_ticket_digest": {"type": "string", "description": "路由票据摘要"},
-            "ai_reason": {"type": "string", "description": "AI 建议此计划执行的理由"},
             "risk_level": {"type": "string", "description": "风险等级（low/medium/high）"},
         },
-        "required": [
-            "room_id",
-            "request_event_id",
-            "content_sha256",
-            "system_name",
-            "environment",
-            "steps",
-            "routing_config_revision",
-            "routing_ticket_digest",
-        ],
+        "required": _common_prepare_schema()["required"] + ["steps"],
         "additionalProperties": False,
     },
 )
 def approval_prepare_plan(args, ctx, db):
     """创建消息级执行计划并返回一次性审批短码。"""
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ExecutionPlanService(db)
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
+        args, ctx
+    )
     approvers = _lookup_approvers(
         ctx,
         args["system_name"],
         args.get("service_name"),
-        channel="matrix",
-        channel_account_id="default",
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
     )
     steps = _freeze_file_upload_plan_steps(args["steps"], db)
+    service = ExecutionPlanService(db)
 
     plan, short_code = service.prepare(
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
+        room_id=message_context.conversation_id,
+        request_event_id=message_context.message_id,
+        content_sha256=message_context.content_sha256,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
         targets=args.get("targets", []),
         steps=steps,
         policy=args.get("policy", {}),
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
         risk_level=args.get("risk_level", "high"),
         ai_reason=args.get("ai_reason", ""),
         authorized_matrix_users=approvers,

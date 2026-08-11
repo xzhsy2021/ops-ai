@@ -219,30 +219,54 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
         routing = _extract_routing(sys_cfg)
         if routing.get("enabled", False):
             active_systems.append((sys_cfg, routing))
+    active_systems.sort(key=lambda item: str(item[0].get("name", "")))
 
     # 1. 精确匹配系统规范名
-    for sys_cfg, routing in active_systems:
-        sys_name = sys_cfg.get("name", "")
-        if sys_name and normalize_text(sys_name) == normalized_msg:
-            return RoutingDecision(
-                outcome=RoutingOutcome.RESOLVED,
-                system_name=sys_name,
-                matched_by="system_name",
-                routing_config_revision=revision,
-                approvers=_extract_approvers(routing),
-            )
+    system_name_matches = [
+        (sys_cfg.get("name", ""), routing)
+        for sys_cfg, routing in active_systems
+        if sys_cfg.get("name", "")
+        and normalize_text(sys_cfg.get("name", "")) == normalized_msg
+    ]
+    if len(system_name_matches) == 1:
+        sys_name, routing = system_name_matches[0]
+        return RoutingDecision(
+            outcome=RoutingOutcome.RESOLVED,
+            system_name=sys_name,
+            matched_by="system_name",
+            routing_config_revision=revision,
+            approvers=_extract_approvers(routing),
+        )
+    if len(system_name_matches) > 1:
+        return RoutingDecision(
+            outcome=RoutingOutcome.AMBIGUOUS,
+            candidates=tuple(sorted(item[0] for item in system_name_matches)),
+            routing_config_revision=revision,
+        )
 
     # 2. 精确匹配系统别名
+    system_alias_matches = []
     for sys_cfg, routing in active_systems:
-        for alias in routing.get("aliases", []):
-            if alias and normalize_text(alias) == normalized_msg:
-                return RoutingDecision(
-                    outcome=RoutingOutcome.RESOLVED,
-                    system_name=sys_cfg.get("name", ""),
-                    matched_by="system_alias",
-                    routing_config_revision=revision,
-                    approvers=_extract_approvers(routing),
-                )
+        if any(
+            alias and normalize_text(alias) == normalized_msg
+            for alias in routing.get("aliases", [])
+        ):
+            system_alias_matches.append((sys_cfg.get("name", ""), routing))
+    if len(system_alias_matches) == 1:
+        sys_name, routing = system_alias_matches[0]
+        return RoutingDecision(
+            outcome=RoutingOutcome.RESOLVED,
+            system_name=sys_name,
+            matched_by="system_alias",
+            routing_config_revision=revision,
+            approvers=_extract_approvers(routing),
+        )
+    if len(system_alias_matches) > 1:
+        return RoutingDecision(
+            outcome=RoutingOutcome.AMBIGUOUS,
+            candidates=tuple(sorted(item[0] for item in system_alias_matches)),
+            routing_config_revision=revision,
+        )
 
     # 3. 唯一服务名或服务别名，返回其父系统
     service_matches = []  # (system_name, service_name, matched_by, sys_routing, svc_routing)
@@ -260,6 +284,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
                     service_matches.append((sys_cfg.get("name", ""), svc_name, "service_alias", routing, svc_routing))
                     break
 
+    service_matches.sort(key=lambda item: (item[0], item[1], item[2]))
     if len(service_matches) == 1:
         sys_name, svc_name, matched_by, sys_routing, svc_routing = service_matches[0]
         return RoutingDecision(
@@ -271,7 +296,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
             approvers=_extract_approvers(sys_routing, svc_routing),
         )
     if len(service_matches) > 1:
-        candidates = tuple(f"{s}/{sv}" for s, sv, *_ in service_matches)
+        candidates = tuple(sorted(f"{s}/{sv}" for s, sv, *_ in service_matches))
         return RoutingDecision(
             outcome=RoutingOutcome.AMBIGUOUS,
             candidates=candidates,
@@ -303,7 +328,10 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
 
     # 找最高优先级
     max_priority = max(m[2] for m in keyword_matches)
-    top_matches = [m for m in keyword_matches if m[2] == max_priority]
+    top_matches = sorted(
+        (m for m in keyword_matches if m[2] == max_priority),
+        key=lambda item: (item[0], item[1] or "", item[3]),
+    )
 
     if len(top_matches) == 1:
         sys_name, svc_name, _, matched_by, sys_routing, svc_routing = top_matches[0]
@@ -317,7 +345,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
         )
 
     # 同优先级多匹配 → AMBIGUOUS
-    candidates = tuple(f"{s}/{sv}" if sv else s for s, sv, *_ in top_matches)
+    candidates = tuple(sorted(f"{s}/{sv}" if sv else s for s, sv, *_ in top_matches))
     return RoutingDecision(
         outcome=RoutingOutcome.AMBIGUOUS,
         candidates=candidates,
@@ -330,11 +358,21 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
 # ──────────────────────────────────────────────────────────────
 
 def _get_signing_key() -> str:
-    """获取签名密钥，为空时生成临时密钥（测试场景）。"""
-    key = QCLAW_APPROVAL_SIGNING_KEY
-    if not key:
-        # 临时密钥：进程内一致即可
-        key = "dev-fallback-key-do-not-use-in-production"
+    """Return a configured high-entropy signing key or fail closed."""
+    key = str(QCLAW_APPROVAL_SIGNING_KEY or "").strip()
+    insecure_values = {
+        "changeme",
+        "change-me",
+        "default",
+        "dev-fallback-key-do-not-use-in-production",
+        "password",
+        "secret",
+        "test",
+    }
+    if len(key) < 32 or key.lower() in insecure_values or len(set(key)) < 8:
+        raise RuntimeError(
+            "APPROVAL_SIGNING_KEY must be configured with at least 32 non-trivial characters"
+        )
     return key
 
 
@@ -413,6 +451,8 @@ def verify_ticket(
         payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
         payload = json.loads(payload_json)
     except Exception:
+        return False
+    if not isinstance(payload, dict):
         return False
 
     # 验证过期

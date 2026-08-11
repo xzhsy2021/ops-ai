@@ -15,6 +15,14 @@ from app.services.qclaw_routing import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _strong_signing_key(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+        "qclaw-routing-test-key-0123456789abcdef",
+    )
+
+
 # ── 测试用的系统配置 ──
 
 SYSTEMS = [

@@ -35,6 +35,14 @@ from app.services.qclaw_routing import (
 _RUN_ID = uuid.uuid4().hex[:8]
 
 
+@pytest.fixture(autouse=True)
+def _strong_signing_key(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+        "qclaw-end-to-end-test-key-0123456789abcdef",
+    )
+
+
 def _room(suffix: str) -> str:
     return f"!e2e-{_RUN_ID}-{suffix}:matrix.org"
 

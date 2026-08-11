@@ -8,9 +8,19 @@ import pytest
 from fastapi import HTTPException
 
 from app.services.approval_executor import ApprovalExecutor
+from app.services.message_context import MessageContext
+from app.services.qclaw_routing import compute_routing_revision, issue_ticket
 from app.services.tool_adapters import file_transfer_tools
 from app.services.tool_registry import ensure_builtin_registered, registry
 from app.services.tool_policy import ai_tool_policy_metadata
+
+
+@pytest.fixture(autouse=True)
+def _strong_signing_key(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+        "file-upload-test-key-0123456789abcdef",
+    )
 
 
 class _Upload:
@@ -304,17 +314,29 @@ def test_prepare_file_upload_freezes_package_manifest(monkeypatch, tmp_path):
             return _Approval(), "ABCD1234"
 
     monkeypatch.setattr(approval_tools, "ActionApprovalService", _ApprovalService)
+    monkeypatch.setattr(approval_tools, "_lookup_approvers", lambda *args, **kwargs: [])
+    context = MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id="!room:example.org",
+        message_id="$event",
+        sender_id="@requester:example.org",
+        content_sha256="b" * 64,
+    )
+    ticket = issue_ticket(
+        context,
+        "crypto-trader",
+        "crypto-frontend",
+        compute_routing_revision(approval_tools._routing_systems()),
+    )
 
     result = approval_tools.approval_prepare_file_upload(
         {
-            "room_id": "!room:example.org",
-            "request_event_id": "$event",
-            "content_sha256": "b" * 64,
+            "message_context": context.to_dict(),
+            "routing_ticket": ticket.ticket,
             "system_name": "crypto-trader",
             "service_name": "crypto-frontend",
             "environment": "test",
-            "routing_config_revision": "rev-1",
-            "routing_ticket_digest": "ticket-1",
             "targets": ["server-a"],
             "action_parameters": {
                 "package_name": "frontend.tar.gz",

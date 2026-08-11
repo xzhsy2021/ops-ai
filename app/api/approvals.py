@@ -231,7 +231,8 @@ def update_system_routing(
     if not sys_cfg:
         raise HTTPException(status_code=404, detail=f"系统不存在: {system_name}")
     sys_cfg["message_routing"] = config.model_dump()
-    save_system(system_name, sys_cfg)
+    if not save_system(system_name, sys_cfg):
+        raise HTTPException(status_code=500, detail="保存系统消息路由配置失败")
     return {"ok": True, "system_name": system_name, "message_routing": config.model_dump()}
 
 
@@ -255,5 +256,6 @@ def update_service_routing(
             break
     if not found:
         raise HTTPException(status_code=404, detail=f"服务不存在: {service_name}")
-    save_system(system_name, sys_cfg)
+    if not save_system(system_name, sys_cfg):
+        raise HTTPException(status_code=500, detail="保存服务消息路由配置失败")
     return {"ok": True, "system_name": system_name, "service_name": service_name, "message_routing": config.model_dump()}

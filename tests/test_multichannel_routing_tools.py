@@ -21,6 +21,14 @@ from app.services.tool_context import ToolContext
 from app.services.tool_registry import registry
 
 
+@pytest.fixture(autouse=True)
+def _strong_signing_key(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+        "multichannel-routing-test-key-0123456789abcdef",
+    )
+
+
 def _context(channel="matrix", **overrides):
     values = {
         "channel": channel,

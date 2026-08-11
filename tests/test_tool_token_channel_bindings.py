@@ -593,6 +593,167 @@ def test_central_registry_guard_covers_direct_rest_stream_and_stdio_dispatch(
         engine.dispose()
 
 
+def test_bound_approval_list_filters_matrix_room_and_hides_non_matrix_rows(tmp_path):
+    from app.services.action_approval import ActionApprovalService
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    engine = _engine(tmp_path, "bound-approval-list.db")
+    db = _session(engine)
+    try:
+        service = ActionApprovalService(db)
+        for index, room_id in enumerate(("!ops:example.org", "!other:example.org")):
+            service.prepare(
+                action_type="SERVICE_CONTROL",
+                tool_name="ops.approval.prepare_service_control",
+                room_id=room_id,
+                request_event_id=f"$event-{index}",
+                content_sha256=str(index + 1) * 64,
+                system_name="crypto-trader",
+                service_name="strategy",
+                environment="test",
+                targets=["server-1"],
+                action_parameters={"control_action": "restart"},
+                routing_config_revision="rev-1",
+                routing_ticket_digest=f"ticket-{index}",
+            )
+
+        register_builtin_tools()
+        tool = registry.get("ops.approval.list")
+        assert "message_context" in tool.input_schema["properties"]
+        assert "room_id" in tool.input_schema["properties"]
+
+        matrix_ctx = ToolContext(
+            username="tester",
+            auth_type="session",
+            is_admin=True,
+            scopes=["*"],
+            channel_bindings=[MATRIX_ROOM],
+        )
+        matrix_result = registry.call(
+            db,
+            "ops.approval.list",
+            {"room_id": "!ops:example.org"},
+            matrix_ctx,
+        )["result"]
+        assert matrix_result["total"] == 1
+        assert len(matrix_result["items"]) == 1
+
+        wechat_ctx = ToolContext(
+            username="tester",
+            auth_type="session",
+            is_admin=True,
+            scopes=["*"],
+            channel_bindings=[
+                {
+                    "channel": "wechat",
+                    "channel_account_id": "corp-a",
+                    "conversation_id": "group-7",
+                }
+            ],
+        )
+        wechat_result = registry.call(
+            db,
+            "ops.approval.list",
+            {"message_context": _message_context()},
+            wechat_ctx,
+        )["result"]
+        assert wechat_result == {"ok": True, "total": 0, "items": []}
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_tool_token_create_and_update_audit_generic_binding_policy(
+    tmp_path, monkeypatch
+):
+    from app.api import tools as tools_api
+
+    engine = _engine(tmp_path, "tool-token-generic-audit.db")
+    db = _session(engine)
+    audit_calls = []
+    monkeypatch.setattr(
+        tools_api,
+        "require_auth",
+        lambda request, session: {"username": "admin", "is_admin": True},
+    )
+    monkeypatch.setattr(tools_api, "audit", lambda *args: audit_calls.append(args))
+    monkeypatch.setattr(tools_api, "_bump_capability_version", lambda session: None)
+
+    create_bindings = [
+        {
+            "channel": "wechat",
+            "channel_account_id": "corp-a",
+            "conversation_id": "group-7",
+        }
+    ]
+    create_approvers = [
+        {
+            "channel": "telegram",
+            "channel_account_id": "bot-a",
+            "sender_id": "42",
+        }
+    ]
+    update_bindings = [
+        {
+            "channel": "telegram",
+            "channel_account_id": "bot-a",
+            "conversation_id": "chat-9",
+        }
+    ]
+    update_approvers = [
+        {
+            "channel": "wechat",
+            "channel_account_id": "corp-a",
+            "sender_id": "owner-1",
+        }
+    ]
+    try:
+        response = tools_api.create_token(
+            tools_api.CreateToolTokenPayload(
+                name="multichannel-audit",
+                scopes=["ops:read"],
+                channel_bindings=create_bindings,
+                approver_identities=create_approvers,
+            ),
+            SimpleNamespace(),
+            db,
+        )
+        token_id = response["data"]["record"]["id"]
+        tools_api.update_token(
+            token_id,
+            tools_api.UpdateToolTokenPayload(
+                channel_bindings=update_bindings,
+                approver_identities=update_approvers,
+            ),
+            SimpleNamespace(),
+            db,
+        )
+
+        details = {call[0]: call[3] for call in audit_calls}
+        create_detail = details["tool.token.create"]
+        update_detail = details["tool.token.update"]
+        assert (
+            "channel_bindings="
+            + json.dumps(create_bindings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ) in create_detail
+        assert (
+            "approver_identities="
+            + json.dumps(create_approvers, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ) in create_detail
+        assert (
+            "channel_bindings="
+            + json.dumps(update_bindings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ) in update_detail
+        assert (
+            "approver_identities="
+            + json.dumps(update_approvers, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ) in update_detail
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_token_and_preview_contexts_read_only_generic_columns(tmp_path, monkeypatch):
     from app.api.tools import ToolPolicyPreviewPayload, _ctx_from_token, _preview_context_from_payload
     from app.db.models import ToolToken

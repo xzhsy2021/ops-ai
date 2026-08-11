@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
@@ -732,7 +733,20 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     serialized = token_to_dict(created["record"])
-    audit("tool.token.create", "tool_token", payload.name, f"user={user.get('username')} scopes={','.join(scopes)} bound_rooms={','.join(serialized['bound_room_ids'])} approvers={','.join(serialized['approver_matrix_ids'])}")
+    audit(
+        "tool.token.create",
+        "tool_token",
+        payload.name,
+        (
+            f"user={user.get('username')} scopes={','.join(scopes)} "
+            f"bound_rooms={','.join(serialized['bound_room_ids'])} "
+            f"approvers={','.join(serialized['approver_matrix_ids'])} "
+            "channel_bindings="
+            f"{json.dumps(serialized['channel_bindings'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))} "
+            "approver_identities="
+            f"{json.dumps(serialized['approver_identities'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        ),
+    )
     _bump_capability_version(db)
     return api_response(data={"token": created["token"], "record": token_to_dict(created["record"])}, message="Token created; copy it now, it will be shown only once")
 
@@ -809,7 +823,21 @@ def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Reques
     db.commit()
     db.refresh(token)
     serialized = token_to_dict(token)
-    audit("tool.token.update", "tool_token", token.name, f"user={user.get('username')} scopes={','.join(token.scopes or [])} allow_write={token.allow_write} allow_prod={token.allow_prod} bound_rooms={','.join(serialized['bound_room_ids'])} approvers={','.join(serialized['approver_matrix_ids'])}")
+    audit(
+        "tool.token.update",
+        "tool_token",
+        token.name,
+        (
+            f"user={user.get('username')} scopes={','.join(token.scopes or [])} "
+            f"allow_write={token.allow_write} allow_prod={token.allow_prod} "
+            f"bound_rooms={','.join(serialized['bound_room_ids'])} "
+            f"approvers={','.join(serialized['approver_matrix_ids'])} "
+            "channel_bindings="
+            f"{json.dumps(serialized['channel_bindings'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))} "
+            "approver_identities="
+            f"{json.dumps(serialized['approver_identities'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        ),
+    )
     _bump_capability_version(db)
     return api_response(data=token_to_dict(token), message="Token updated")
 

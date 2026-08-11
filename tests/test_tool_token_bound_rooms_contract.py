@@ -104,8 +104,20 @@ def test_create_and_round_trip_bound_room_ids(tmp_path):
         )
 
         record = created["record"]
-        # Persisted to the row.
-        assert record.bound_room_ids == ["!ops:matrix.org", "!ops-backup:matrix.org"]
+        # Runtime policy is persisted only in the generic column.
+        assert record.channel_bindings == [
+            {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "conversation_id": "!ops:matrix.org",
+            },
+            {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "conversation_id": "!ops-backup:matrix.org",
+            },
+        ]
+        assert record.bound_room_ids == []
         # Returned via token_to_dict for the API.
         as_dict = token_to_dict(record)
         assert as_dict["bound_room_ids"] == ["!ops:matrix.org", "!ops-backup:matrix.org"]

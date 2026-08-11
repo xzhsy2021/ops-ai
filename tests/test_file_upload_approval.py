@@ -51,7 +51,11 @@ def test_approval_intake_accepts_room_bound_read_token_without_package_write(mon
     ctx = SimpleNamespace(
         auth_type="tool_token",
         scopes=["ops:read"],
-        bound_room_ids=["!ops:example.org"],
+        channel_bindings=[{
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "conversation_id": "!ops:example.org",
+        }],
         username="qclaw",
         token_owner="qclaw",
         client_name="qclaw",
@@ -102,7 +106,11 @@ def test_approval_intake_reuses_same_message_and_package_content(monkeypatch, tm
     existing.write_bytes(content)
     ctx = SimpleNamespace(
         auth_type="tool_token",
-        bound_room_ids=["!ops:example.org"],
+        channel_bindings=[{
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "conversation_id": "!ops:example.org",
+        }],
         username="qclaw",
         token_owner="qclaw",
         client_name="qclaw",
@@ -155,7 +163,7 @@ def test_approval_intake_rejects_unbound_read_token(monkeypatch):
 
     ctx = SimpleNamespace(
         auth_type="tool_token",
-        bound_room_ids=[],
+        channel_bindings=[],
         has_scope=lambda scope: scope == "ops:read",
     )
     monkeypatch.setattr(tools_api, "get_tool_context", lambda request, db: ctx)

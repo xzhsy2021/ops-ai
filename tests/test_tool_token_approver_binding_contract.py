@@ -61,8 +61,20 @@ def test_create_and_round_trip_approver_matrix_ids(tmp_path):
         )
 
         record = created["record"]
-        # Persisted to the row.
-        assert record.approver_matrix_ids == ["@jack.han:matrix.org", "@ops-bot:matrix.org"]
+        # Runtime policy is persisted only in the generic column.
+        assert record.approver_identities == [
+            {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "sender_id": "@jack.han:matrix.org",
+            },
+            {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "sender_id": "@ops-bot:matrix.org",
+            },
+        ]
+        assert record.approver_matrix_ids == []
         # Returned via token_to_dict for the API.
         as_dict = token_to_dict(record)
         assert as_dict["approver_matrix_ids"] == ["@jack.han:matrix.org", "@ops-bot:matrix.org"]

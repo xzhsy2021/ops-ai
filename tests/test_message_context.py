@@ -344,8 +344,8 @@ def test_tool_context_audit_serializes_generic_and_legacy_bindings():
 
     assert audit["channel_bindings"] == ctx.channel_bindings
     assert audit["approver_identities"] == ctx.approver_identities
-    assert audit["bound_room_ids"] == ["!legacy:example.org"]
-    assert audit["approver_matrix_ids"] == ["@legacy:example.org"]
+    assert audit["bound_room_ids"] == []
+    assert audit["approver_matrix_ids"] == []
 
 
 def test_queued_job_context_round_trips_generic_bindings(tmp_path):

@@ -34,6 +34,37 @@ class ToolContext:
     ip_address: str = ""
     user_agent: str = ""
 
+    def __post_init__(self) -> None:
+        from app.services.tool_token import (
+            matrix_approver_ids_from_identities,
+            matrix_room_ids_from_bindings,
+            normalize_approver_identities,
+            normalize_channel_bindings,
+            resolve_approver_identities,
+            resolve_channel_bindings,
+        )
+
+        if self.channel_bindings:
+            self.channel_bindings = normalize_channel_bindings(self.channel_bindings)
+        elif self.bound_room_ids:
+            self.channel_bindings = resolve_channel_bindings(legacy=self.bound_room_ids)
+        else:
+            self.channel_bindings = []
+        if self.approver_identities:
+            self.approver_identities = normalize_approver_identities(
+                self.approver_identities
+            )
+        elif self.approver_matrix_ids:
+            self.approver_identities = resolve_approver_identities(
+                legacy=self.approver_matrix_ids
+            )
+        else:
+            self.approver_identities = []
+        self.bound_room_ids = matrix_room_ids_from_bindings(self.channel_bindings)
+        self.approver_matrix_ids = matrix_approver_ids_from_identities(
+            self.approver_identities
+        )
+
     def has_scope(self, scope: str) -> bool:
         if self.is_admin and self.auth_type == "session":
             return True

@@ -491,6 +491,8 @@ class ToolToken(Base):
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
+    channel_bindings = Column(JSON, default=list)
+    approver_identities = Column(JSON, default=list)
     # qclaw Element room binding: if non-empty, this token is only allowed to
     # call qclaw routing/approval tools from the listed Matrix room IDs.
     # Empty list (= []) means no room restriction; default is empty for

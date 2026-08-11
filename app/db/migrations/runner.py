@@ -1295,6 +1295,26 @@ MIGRATIONS: List[Dict[str, str]] = [
             updated_at DATETIME
         )""",
     },
+    {
+        "version": "084_002_tool_token_channel_bindings",
+        "name": "Add generic channel bindings to tool tokens",
+        "table": "tool_tokens",
+        "column": "channel_bindings",
+        "sql": (
+            "ALTER TABLE tool_tokens ADD COLUMN channel_bindings "
+            "TEXT DEFAULT '[]' NOT NULL"
+        ),
+    },
+    {
+        "version": "084_003_tool_token_approver_identities",
+        "name": "Add generic approver identities to tool tokens",
+        "table": "tool_tokens",
+        "column": "approver_identities",
+        "sql": (
+            "ALTER TABLE tool_tokens ADD COLUMN approver_identities "
+            "TEXT DEFAULT '[]' NOT NULL"
+        ),
+    },
 ]
 
 
@@ -1320,6 +1340,12 @@ AI_ANALYSIS_TABLE_DROPS = (
     ("ai_analysis_findings", "DROP TABLE IF EXISTS ai_analysis_findings"),
     ("ai_analysis_runs", "DROP TABLE IF EXISTS ai_analysis_runs"),
 )
+
+TOOL_TOKEN_BINDING_BACKFILL_MIGRATION: Dict[str, str] = {
+    "version": "084_004_tool_token_binding_backfill",
+    "name": "Backfill generic tool token bindings from Matrix aliases",
+    "sql": "python:backfill_tool_token_bindings",
+}
 
 
 def _now_iso() -> str:
@@ -1371,6 +1397,128 @@ def retire_ai_analysis_tables(engine) -> List[str]:
     if dropped:
         logger.info("Retired built-in AI analysis tables: %s", ", ".join(dropped))
     return dropped
+
+
+def _migration_json_list(value: Any, *, token_id: str, column: str) -> List[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+            ) from exc
+    else:
+        raise RuntimeError(
+            f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+        )
+    if not isinstance(parsed, list):
+        raise RuntimeError(
+            f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+        )
+    return parsed
+
+
+def _migration_legacy_strings(value: Any, *, token_id: str, column: str) -> List[str]:
+    parsed = _migration_json_list(value, token_id=token_id, column=column)
+    result: List[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, str) or not item.strip():
+            raise RuntimeError(
+                f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+            )
+        normalized = item.strip()
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def backfill_tool_token_bindings(engine) -> bool:
+    """Convert legacy Matrix token policy fields exactly once and atomically."""
+    migration = TOOL_TOKEN_BINDING_BACKFILL_MIGRATION
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, migration["version"]):
+            return False
+        inspector = inspect(conn)
+        if not inspector.has_table("tool_tokens"):
+            return False
+        columns = {item["name"] for item in inspector.get_columns("tool_tokens")}
+        required = {
+            "channel_bindings",
+            "approver_identities",
+            "bound_room_ids",
+            "approver_matrix_ids",
+        }
+        if not required.issubset(columns):
+            return False
+
+        rows = conn.execute(text(
+            "SELECT id, channel_bindings, approver_identities, "
+            "bound_room_ids, approver_matrix_ids FROM tool_tokens"
+        )).fetchall()
+        for row in rows:
+            token_id = str(row[0])
+            channel_bindings = _migration_json_list(
+                row[1], token_id=token_id, column="channel_bindings"
+            )
+            approver_identities = _migration_json_list(
+                row[2], token_id=token_id, column="approver_identities"
+            )
+            updates: Dict[str, str] = {}
+            if not channel_bindings:
+                room_ids = _migration_legacy_strings(
+                    row[3], token_id=token_id, column="bound_room_ids"
+                )
+                if room_ids:
+                    updates["channel_bindings"] = json.dumps(
+                        [
+                            {
+                                "channel": "matrix",
+                                "channel_account_id": "default",
+                                "conversation_id": room_id,
+                            }
+                            for room_id in room_ids
+                        ],
+                        ensure_ascii=False,
+                    )
+            if not approver_identities:
+                approver_ids = _migration_legacy_strings(
+                    row[4], token_id=token_id, column="approver_matrix_ids"
+                )
+                if approver_ids:
+                    updates["approver_identities"] = json.dumps(
+                        [
+                            {
+                                "channel": "matrix",
+                                "channel_account_id": "default",
+                                "sender_id": sender_id,
+                            }
+                            for sender_id in approver_ids
+                        ],
+                        ensure_ascii=False,
+                    )
+            if "channel_bindings" in updates:
+                conn.execute(
+                    text(
+                        "UPDATE tool_tokens SET channel_bindings=:value WHERE id=:id"
+                    ),
+                    {"value": updates["channel_bindings"], "id": token_id},
+                )
+            if "approver_identities" in updates:
+                conn.execute(
+                    text(
+                        "UPDATE tool_tokens SET approver_identities=:value WHERE id=:id"
+                    ),
+                    {"value": updates["approver_identities"], "id": token_id},
+                )
+        _mark_applied(conn, migration)
+    return True
 
 
 def _json_object(value: Any, *, key: str) -> Dict[str, Any]:
@@ -2014,4 +2162,6 @@ def run_schema_migrations(engine) -> List[str]:
         applied.append(SERVICE_IDENTITY_MIGRATION["version"])
     if retire_ai_analysis_tables(engine):
         applied.append(AI_ANALYSIS_RETIREMENT_MIGRATION["version"])
+    if backfill_tool_token_bindings(engine):
+        applied.append(TOOL_TOKEN_BINDING_BACKFILL_MIGRATION["version"])
     return applied

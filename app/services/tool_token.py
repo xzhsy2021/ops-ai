@@ -9,6 +9,11 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.models import ToolToken
+from app.services.message_context import (
+    normalize_conversation_binding,
+    normalize_identity,
+    normalize_message_context,
+)
 
 TOKEN_PREFIX = "ops_tool_"
 
@@ -26,6 +31,7 @@ DEFAULT_AI_TOKEN_SCOPES: List[str] = ["ops:read", "ops:write"]
 # the AI/MCP rollout).
 WRITE_SCOPE_TOKENS = {"ops:write", "deploy:execute", "config:write", "server:write",
                       "package:write", "package:cleanup", "db:write", "*"}
+_UNSET = object()
 
 
 def recommended_tool_token_templates() -> List[Dict[str, Any]]:
@@ -191,6 +197,120 @@ def _normalize_bound_room_ids(value: Any) -> List[str]:
     return result
 
 
+def _normalize_generic_list(value: Any, *, name: str, item_normalizer) -> List[Dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list")
+    result: List[Dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for index, item in enumerate(value):
+        try:
+            normalized = item_normalizer(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}[{index}]: {exc}") from exc
+        canonical = tuple(f"{key}={normalized[key]}" for key in sorted(normalized))
+        if canonical not in seen:
+            seen.add(canonical)
+            result.append(normalized)
+    return result
+
+
+def normalize_channel_bindings(value: Any) -> List[Dict[str, str]]:
+    return _normalize_generic_list(
+        value,
+        name="channel_bindings",
+        item_normalizer=normalize_conversation_binding,
+    )
+
+
+def normalize_approver_identities(value: Any) -> List[Dict[str, str]]:
+    return _normalize_generic_list(
+        value,
+        name="approver_identities",
+        item_normalizer=normalize_identity,
+    )
+
+
+def _strict_legacy_strings(value: Any, *, name: str) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates = value.splitlines()
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        raise ValueError(f"{name} must be a list of strings")
+    result: List[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(candidates):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{name}[{index}] must be a non-blank string")
+        normalized = item.strip()
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _legacy_channel_bindings(value: Any) -> List[Dict[str, str]]:
+    return [
+        normalize_conversation_binding(room_id)
+        for room_id in _strict_legacy_strings(value, name="bound_room_ids")
+    ]
+
+
+def _legacy_approver_identities(value: Any) -> List[Dict[str, str]]:
+    return [
+        normalize_identity(sender_id)
+        for sender_id in _strict_legacy_strings(value, name="approver_matrix_ids")
+    ]
+
+
+def resolve_channel_bindings(
+    *, generic: Any = _UNSET, legacy: Any = _UNSET
+) -> List[Dict[str, str]]:
+    generic_value = (
+        normalize_channel_bindings(generic) if generic is not _UNSET else None
+    )
+    legacy_value = (
+        _legacy_channel_bindings(legacy) if legacy is not _UNSET else None
+    )
+    if generic_value is not None and legacy_value is not None and generic_value != legacy_value:
+        raise ValueError("channel_bindings conflicts with bound_room_ids")
+    return generic_value if generic_value is not None else (legacy_value or [])
+
+
+def resolve_approver_identities(
+    *, generic: Any = _UNSET, legacy: Any = _UNSET
+) -> List[Dict[str, str]]:
+    generic_value = (
+        normalize_approver_identities(generic) if generic is not _UNSET else None
+    )
+    legacy_value = (
+        _legacy_approver_identities(legacy) if legacy is not _UNSET else None
+    )
+    if generic_value is not None and legacy_value is not None and generic_value != legacy_value:
+        raise ValueError("approver_identities conflicts with approver_matrix_ids")
+    return generic_value if generic_value is not None else (legacy_value or [])
+
+
+def matrix_room_ids_from_bindings(value: Any) -> List[str]:
+    return [
+        item["conversation_id"]
+        for item in normalize_channel_bindings(value)
+        if item["channel"] == "matrix" and item["channel_account_id"] == "default"
+    ]
+
+
+def matrix_approver_ids_from_identities(value: Any) -> List[str]:
+    return [
+        item["sender_id"]
+        for item in normalize_approver_identities(value)
+        if item["channel"] == "matrix" and item["channel_account_id"] == "default"
+    ]
+
+
 def create_tool_token(
     db: Session,
     *,
@@ -201,14 +321,22 @@ def create_tool_token(
     allow_write: Optional[bool] = None,
     allow_prod: bool = False,
     expires_in_days: Optional[int] = 90,
-    bound_room_ids: Optional[List[str]] = None,
-    approver_matrix_ids: Optional[List[str]] = None,
+    channel_bindings: Any = _UNSET,
+    approver_identities: Any = _UNSET,
+    bound_room_ids: Any = _UNSET,
+    approver_matrix_ids: Any = _UNSET,
 ) -> Dict[str, Any]:
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
     resolved_scopes = list(scopes) if scopes else list(DEFAULT_AI_TOKEN_SCOPES)
     resolved_allow_write = _resolve_write_flag(resolved_scopes, allow_write)
-    resolved_bound_rooms = _normalize_bound_room_ids(bound_room_ids)
-    resolved_approvers = _normalize_approver_ids(approver_matrix_ids)
+    resolved_bindings = resolve_channel_bindings(
+        generic=channel_bindings,
+        legacy=bound_room_ids,
+    )
+    resolved_approvers = resolve_approver_identities(
+        generic=approver_identities,
+        legacy=approver_matrix_ids,
+    )
     token = ToolToken(
         name=name.strip() or "tool-token",
         token_hash=hash_token(raw),
@@ -219,8 +347,10 @@ def create_tool_token(
         allow_write=resolved_allow_write,
         allow_prod=bool(allow_prod),
         expires_at=_resolve_expires_at(expires_in_days),
-        bound_room_ids=resolved_bound_rooms,
-        approver_matrix_ids=resolved_approvers,
+        channel_bindings=resolved_bindings,
+        approver_identities=resolved_approvers,
+        bound_room_ids=[],
+        approver_matrix_ids=[],
     )
     db.add(token)
     db.commit()
@@ -247,33 +377,105 @@ def validate_tool_token(db: Session, raw_token: str) -> ToolToken:
     return record
 
 
+def enforce_conversation_binding(
+    channel_bindings: Any,
+    message_context: Any = None,
+    *,
+    channel: Any = None,
+    channel_account_id: Any = None,
+    conversation_id: Any = None,
+) -> None:
+    try:
+        bindings = normalize_channel_bindings(channel_bindings)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=f"Invalid token channel bindings: {exc}") from exc
+    if not bindings:
+        return
+    try:
+        if message_context is not None:
+            if any(value is not None for value in (channel, channel_account_id, conversation_id)):
+                raise ValueError("message_context cannot be combined with conversation fields")
+            context = normalize_message_context(message_context)
+            candidate = normalize_conversation_binding(
+                {
+                    "channel": context.channel,
+                    "channel_account_id": context.channel_account_id,
+                    "conversation_id": context.conversation_id,
+                }
+            )
+        else:
+            candidate = normalize_conversation_binding(
+                {
+                    "channel": channel,
+                    "channel_account_id": channel_account_id,
+                    "conversation_id": conversation_id,
+                }
+            )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tool token has conversation binding configured but request context is invalid: {exc}",
+        ) from exc
+    if candidate not in bindings:
+        raise HTTPException(
+            status_code=403,
+            detail="Tool token is not allowed in this channel conversation",
+        )
+
+
 def enforce_room_binding(bound_room_ids: Any, room_id: str | None) -> None:
-    """Reject the request if the caller's room is not on the allow list.
-
-    Used by qclaw routing/approval tools to enforce Element room binding at
-    the MCP layer. Only applies when the token was issued with a non-empty
-    list of room IDs; an empty list (or None) means "no binding, allow any
-    room" for backward compatibility with pre-binding tokens.
-
-    Raises HTTPException(403) when the binding is configured and the call's
-    room_id is missing or not on the list.
-    """
-    rooms = _normalize_bound_room_ids(bound_room_ids)
-    if not rooms:
-        return  # No binding configured -> pass through.
-    if not room_id:
+    """Matrix/default compatibility wrapper for existing qclaw callers."""
+    try:
+        bindings = resolve_channel_bindings(legacy=bound_room_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=f"Invalid token room bindings: {exc}") from exc
+    if bindings and not room_id:
         raise HTTPException(
             status_code=403,
             detail="Tool token has room binding configured but request has no room_id",
         )
-    if str(room_id).strip() not in rooms:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Tool token not allowed in room {room_id!r}; "
-                f"allowed rooms: {','.join(rooms)}"
-            ),
+    try:
+        enforce_conversation_binding(
+            bindings,
+            channel="matrix",
+            channel_account_id="default",
+            conversation_id=room_id,
         )
+    except HTTPException as exc:
+        if exc.status_code == 403 and room_id:
+            rooms = matrix_room_ids_from_bindings(bindings)
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Tool token not allowed in room {room_id!r}; "
+                    f"allowed rooms: {','.join(rooms)}"
+                ),
+            ) from exc
+        raise
+
+
+def matching_approver_sender_ids(
+    approver_identities: Any,
+    *,
+    channel: Any,
+    channel_account_id: Any,
+) -> Optional[List[str]]:
+    identities = normalize_approver_identities(approver_identities)
+    if not identities:
+        return None
+    probe = normalize_identity(
+        {
+            "channel": channel,
+            "channel_account_id": channel_account_id,
+            "sender_id": "probe",
+        }
+    )
+    return [
+        identity["sender_id"]
+        for identity in identities
+        if identity["channel"] == probe["channel"]
+        and identity["channel_account_id"] == probe["channel_account_id"]
+    ]
 
 
 def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any]:
@@ -284,6 +486,12 @@ def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any
         status = "expired"
     else:
         status = "active"
+    channel_bindings = normalize_channel_bindings(
+        getattr(token, "channel_bindings", None)
+    )
+    approver_identities = normalize_approver_identities(
+        getattr(token, "approver_identities", None)
+    )
     data = {
         "id": token.id,
         "name": token.name,
@@ -298,8 +506,10 @@ def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any
         "expires_at": token.expires_at.isoformat() if token.expires_at else None,
         "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
         "revoked_at": token.revoked_at.isoformat() if token.revoked_at else None,
-        "bound_room_ids": _normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
-        "approver_matrix_ids": _normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
+        "channel_bindings": channel_bindings,
+        "approver_identities": approver_identities,
+        "bound_room_ids": matrix_room_ids_from_bindings(channel_bindings),
+        "approver_matrix_ids": matrix_approver_ids_from_identities(approver_identities),
     }
     if include_hash:
         data["token_hash"] = token.token_hash

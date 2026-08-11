@@ -12,10 +12,10 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 from app.core.config import QCLAW_APPROVAL_SIGNING_KEY, QCLAW_APPROVAL_TTL_SECONDS
-from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
+from app.services.message_context import MessageContext, normalize_identity
 
 
 class RoutingOutcome(str, Enum):
@@ -140,21 +140,24 @@ def normalize_routing_config(systems: list[dict]) -> str:
                 key=_approver_sort_key,
             ),
         }
-        # 服务级路由
-        for svc in sys_cfg.get("services", []):
+        services = []
+        # Resolver considers every service under an active system, even when
+        # the service-level message_routing.enabled flag is false or absent.
+        for svc in sys_cfg.get("services", []) or []:
             svc_routing = _extract_routing(svc)
-            if svc_routing.get("enabled", False):
-                entry.setdefault("services", []).append({
-                    "name": svc.get("name", ""),
-                    "aliases": sorted(svc_routing.get("aliases", [])),
-                    "keywords": sorted(svc_routing.get("keywords", [])),
-                    "priority": svc_routing.get("priority", 0),
-                    "approvers": sorted(
-                        normalize_routing_approvers(svc_routing.get("approvers", [])),
-                        key=_approver_sort_key,
-                    ),
-                })
+            services.append({
+                "name": svc.get("name", ""),
+                "aliases": sorted(svc_routing.get("aliases", [])),
+                "keywords": sorted(svc_routing.get("keywords", [])),
+                "priority": svc_routing.get("priority", 0),
+                "approvers": sorted(
+                    _extract_approvers(routing, svc_routing),
+                    key=_approver_sort_key,
+                ),
+            })
+        entry["services"] = sorted(services, key=lambda item: item["name"])
         normalized.append(entry)
+    normalized.sort(key=lambda item: item["name"])
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return canonical
 
@@ -335,14 +338,24 @@ def _get_signing_key() -> str:
     return key
 
 
+def _strict_message_context(
+    value: MessageContext | Mapping[str, Any],
+) -> MessageContext:
+    if isinstance(value, MessageContext):
+        return value
+    if isinstance(value, Mapping):
+        return MessageContext.from_dict(value)
+    raise ValueError("message_context must be a MessageContext or generic object")
+
+
 def issue_ticket(
-    message_context: MessageContext | dict[str, Any],
+    message_context: MessageContext | Mapping[str, Any],
     system_name: str,
     service_name: str | None,
     routing_config_revision: str,
 ) -> RoutingTicket:
     """签发 HMAC-SHA256 签名的路由票据，15 分钟有效。"""
-    context = normalize_message_context(message_context)
+    context = _strict_message_context(message_context)
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(seconds=QCLAW_APPROVAL_TTL_SECONDS)
     nonce = secrets.token_hex(16)
@@ -371,14 +384,14 @@ def issue_ticket(
 
 def verify_ticket(
     ticket_str: str,
-    expected_message_context: MessageContext | dict[str, Any],
+    expected_message_context: MessageContext | Mapping[str, Any],
     expected_system_name: str,
     expected_service_name: str | None,
     expected_revision: str,
 ) -> bool:
     """验证路由票据：签名、过期时间、所有绑定字段。"""
     try:
-        context = normalize_message_context(expected_message_context)
+        context = _strict_message_context(expected_message_context)
     except (TypeError, ValueError):
         return False
     if not ticket_str or "." not in ticket_str:

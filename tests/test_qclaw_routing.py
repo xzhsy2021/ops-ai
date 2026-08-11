@@ -1,4 +1,6 @@
 """测试 qclaw 路由解析和签名票据。"""
+from copy import deepcopy
+
 import pytest
 from datetime import datetime, timezone
 
@@ -243,3 +245,119 @@ def test_ticket_rejects_tampered_signature():
         expected_revision=revision,
     )
     assert ok is False
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("aliases", ["新策略服务"]),
+        (
+            "approvers",
+            [{
+                "channel": "wechat",
+                "channel_account_id": "primary",
+                "sender_id": "owner-2",
+            }],
+        ),
+    ],
+)
+def test_disabled_service_routing_changes_revision_and_invalidates_ticket(
+    field, replacement
+):
+    systems = [{
+        "name": "crypto-trader",
+        "message_routing": {"enabled": True},
+        "services": [{
+            "name": "strategy",
+            "template_variables": {
+                "message_routing": {
+                    "enabled": False,
+                    "aliases": ["策略服务"],
+                    "keywords": ["strategy deploy"],
+                    "priority": 50,
+                    "approvers": [{
+                        "channel": "wechat",
+                        "channel_account_id": "primary",
+                        "sender_id": "owner-1",
+                    }],
+                }
+            },
+        }],
+    }]
+    decision = resolve_message_target("策略服务", systems)
+    assert decision.outcome == RoutingOutcome.RESOLVED
+    assert decision.service_name == "strategy"
+
+    revision = compute_routing_revision(systems)
+    context = _message_context("wechat")
+    ticket = issue_ticket(
+        message_context=context,
+        system_name=decision.system_name,
+        service_name=decision.service_name,
+        routing_config_revision=revision,
+    )
+    changed = deepcopy(systems)
+    changed[0]["services"][0]["template_variables"]["message_routing"][field] = replacement
+    changed_revision = compute_routing_revision(changed)
+
+    assert changed_revision != revision
+    assert not verify_ticket(
+        ticket.ticket,
+        expected_message_context=context,
+        expected_system_name=decision.system_name,
+        expected_service_name=decision.service_name,
+        expected_revision=changed_revision,
+    )
+
+
+def test_routing_revision_is_independent_of_system_and_service_order():
+    systems = [
+        {
+            "name": "system-b",
+            "message_routing": {"enabled": True, "aliases": ["b"]},
+            "services": [
+                {"name": "service-z", "template_variables": {"message_routing": {}}},
+                {"name": "service-a", "template_variables": {"message_routing": {}}},
+            ],
+        },
+        {
+            "name": "system-a",
+            "message_routing": {"enabled": True, "aliases": ["a"]},
+            "services": [],
+        },
+    ]
+    reordered = list(reversed(deepcopy(systems)))
+    reordered[1]["services"].reverse()
+
+    assert compute_routing_revision(systems) == compute_routing_revision(reordered)
+
+
+def test_core_ticket_api_rejects_legacy_matrix_context_mapping():
+    revision = compute_routing_revision(SYSTEMS)
+    legacy_context = {
+        "room_id": "!room:example.org",
+        "event_id": "$event",
+        "sender_matrix_id": "@requester:example.org",
+        "content_sha256": "a" * 64,
+    }
+    with pytest.raises(ValueError):
+        issue_ticket(
+            message_context=legacy_context,
+            system_name="crypto-trader",
+            service_name=None,
+            routing_config_revision=revision,
+        )
+
+    ticket = issue_ticket(
+        message_context=_message_context(),
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+    assert not verify_ticket(
+        ticket.ticket,
+        expected_message_context=legacy_context,
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+        expected_revision=revision,
+    )

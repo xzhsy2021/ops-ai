@@ -659,6 +659,37 @@ def test_bound_approval_list_filters_matrix_room_and_hides_non_matrix_rows(tmp_p
             wechat_ctx,
         )["result"]
         assert wechat_result == {"ok": True, "total": 0, "items": []}
+
+        unbound_ctx = ToolContext(
+            username="tester",
+            auth_type="tool_token",
+            scopes=["*"],
+        )
+        unbound_wechat_result = registry.call(
+            db,
+            "ops.approval.list",
+            {"message_context": _message_context()},
+            unbound_ctx,
+        )["result"]
+        assert unbound_wechat_result == {"ok": True, "total": 0, "items": []}
+
+        unbound_matrix_result = registry.call(
+            db,
+            "ops.approval.list",
+            {
+                "message_context": {
+                    "channel": "matrix",
+                    "channel_account_id": "default",
+                    "conversation_id": "!ops:example.org",
+                    "message_id": "$list-event",
+                    "sender_id": "@caller:example.org",
+                    "content_sha256": "d" * 64,
+                }
+            },
+            unbound_ctx,
+        )["result"]
+        assert unbound_matrix_result["total"] == 1
+        assert len(unbound_matrix_result["items"]) == 1
     finally:
         db.close()
         engine.dispose()

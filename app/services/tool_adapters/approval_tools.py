@@ -561,19 +561,20 @@ def approval_list(args, ctx, db):
     from app.db.models import AiActionApproval
 
     query = db.query(AiActionApproval)
-    if getattr(ctx, "channel_bindings", None):
-        if "message_context" in args:
-            message_context = normalize_message_context(args["message_context"])
-            if not (
-                message_context.channel == "matrix"
-                and message_context.channel_account_id == "default"
-            ):
-                return {"ok": True, "total": 0, "items": []}
-            room_id = message_context.conversation_id
-        else:
-            room_id = str(args.get("room_id") or "").strip()
-        if not room_id:
+    room_id = None
+    if "message_context" in args:
+        message_context = normalize_message_context(args["message_context"])
+        if not (
+            message_context.channel == "matrix"
+            and message_context.channel_account_id == "default"
+        ):
             return {"ok": True, "total": 0, "items": []}
+        room_id = message_context.conversation_id
+    elif "room_id" in args:
+        room_id = str(args.get("room_id") or "").strip()
+    elif getattr(ctx, "channel_bindings", None):
+        return {"ok": True, "total": 0, "items": []}
+    if room_id is not None:
         query = query.filter(AiActionApproval.room_id == room_id)
     if args.get("status"):
         query = query.filter(AiActionApproval.status == args["status"])

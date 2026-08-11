@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 
@@ -43,12 +44,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", choices=("json", "nul"), default="json")
     parser.add_argument("path", type=Path)
+    parser.add_argument("--run", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
         values = missing_dotenv_values(args.path, os.environ)
     except (OSError, UnicodeError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 2
+    if args.run is not None:
+        if not args.run:
+            print("--run requires a command", file=sys.stderr)
+            return 2
+        child_env = os.environ.copy()
+        child_env.update(values)
+        return subprocess.run(args.run, env=child_env, check=False).returncode
     if args.format == "json":
         print(json.dumps(values, ensure_ascii=False))
     else:

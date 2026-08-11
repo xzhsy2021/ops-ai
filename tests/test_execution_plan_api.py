@@ -249,7 +249,7 @@ class TestExpireStale:
 
 
 class TestLegacyApprovalsUnchanged:
-    def test_old_approvals_router_still_serves(self, db):
+    def test_old_approvals_router_still_serves(self, db, monkeypatch):
         """旧 /api/v2/approvals 列表端点仍可用，不受执行计划 API 影响。"""
         from app.api import approvals as approvals_api
 
@@ -260,9 +260,13 @@ class TestLegacyApprovalsUnchanged:
             yield db
 
         app.dependency_overrides[get_db] = _get_db
-        app.dependency_overrides[approvals_api.get_current_user] = lambda: {
-            "id": 1, "username": "tester", "role": "admin", "is_admin": True,
-        }
+        monkeypatch.setattr(
+            approvals_api,
+            "require_auth",
+            lambda request, db: {
+                "id": 1, "username": "tester", "role": "admin", "is_admin": True,
+            },
+        )
         app.include_router(approvals_api.router)
 
         resp = TestClient(app).get("/api/v2/approvals")

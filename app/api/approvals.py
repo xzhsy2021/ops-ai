@@ -1,11 +1,11 @@
 """qclaw 审批管理 API 路由。"""
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
-from app.core.auth_v2 import get_current_user, require_admin, require_auth
+from app.core.auth_v2 import require_admin, require_auth
 from app.db.base import get_db
 from app.db.models import AiActionApproval
 from app.services.action_approval import ActionApprovalService
@@ -99,12 +99,13 @@ def _to_detail(a: AiActionApproval) -> ApprovalDetail:
 
 @router.get("", summary="查询审批列表")
 def list_approvals(
+    request: Request,
     status: Optional[str] = Query(None, description="状态过滤"),
     action_type: Optional[str] = Query(None, description="操作类型过滤"),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    require_auth(request, db)
     query = db.query(AiActionApproval)
     if status:
         query = query.filter(AiActionApproval.status == status)
@@ -117,9 +118,10 @@ def list_approvals(
 @router.get("/{approval_id}", summary="查询审批详情")
 def get_approval(
     approval_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    require_auth(request, db)
     service = ActionApprovalService(db)
     approval = service.get(approval_id)
     if not approval:
@@ -130,9 +132,10 @@ def get_approval(
 @router.post("/{approval_id}/reject", summary="拒绝审批")
 def reject_approval(
     approval_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    user = require_auth(request, db)
     service = ActionApprovalService(db)
     approval = service.reject(
         approval_id=approval_id,
@@ -145,9 +148,10 @@ def reject_approval(
 
 @router.post("/expire-stale", summary="清理过期审批")
 def expire_stale_approvals(
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    require_admin(request, db)
     service = ActionApprovalService(db)
     count = service.expire_stale()
     return {"expired_count": count}
@@ -156,10 +160,11 @@ def expire_stale_approvals(
 @router.post("/{approval_id}/execute", summary="手动触发执行（调试用）")
 def manual_execute(
     approval_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
     """手动触发已审批操作的执行。正常流程由 qclaw 审批后自动触发。"""
+    require_admin(request, db)
     executor = ApprovalExecutor(db)
     approval = executor.execute(approval_id)
     if not approval:

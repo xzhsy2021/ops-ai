@@ -1,4 +1,16 @@
 @echo off
+setlocal
+if not "%OPS_DOTENV_LOADED%"=="1" (
+    set "OPS_DOTENV_LOADED=1"
+    py -3 "%~dp0scripts\load_dotenv.py" "%~dp0.env" --run "%ComSpec%" /d /c call "%~f0" %*
+    if errorlevel 1 (
+        endlocal
+        exit /b 1
+    )
+    endlocal
+    exit /b 0
+)
+endlocal
 setlocal EnableDelayedExpansion
 chcp 65001 >nul 2>&1
 title Ops Platform v2.1.6

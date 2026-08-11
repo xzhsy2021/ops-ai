@@ -35,12 +35,15 @@ if (-not (Test-Path $VenvPython)) {
     Invoke-Expression "$PythonCmd -m venv `"$Venv`""
 }
 
-$DotEnvPath = Join-Path $Root ".env"
-$DotEnvJson = & $VenvPython (Join-Path $Root "scripts\load_dotenv.py") --format json $DotEnvPath
-if ($LASTEXITCODE -ne 0) { throw "Failed to load $DotEnvPath" }
-$DotEnvValues = $DotEnvJson | ConvertFrom-Json
-foreach ($property in $DotEnvValues.PSObject.Properties) {
-    [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
+if ($env:OPS_DOTENV_LOADED -ne "1") {
+    $DotEnvPath = Join-Path $Root ".env"
+    $DotEnvJson = & $VenvPython (Join-Path $Root "scripts\load_dotenv.py") --format json $DotEnvPath
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load $DotEnvPath" }
+    $DotEnvValues = $DotEnvJson | ConvertFrom-Json
+    foreach ($property in $DotEnvValues.PSObject.Properties) {
+        [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
+    }
+    $env:OPS_DOTENV_LOADED = "1"
 }
 
 if (-not $HostName) { $HostName = if ($env:HOST) { $env:HOST } else { "0.0.0.0" } }

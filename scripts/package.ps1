@@ -34,6 +34,9 @@ $copyItems = @(
     "requirements.txt",
     "pytest.ini",
     "start.sh",
+    "start_prod.sh",
+    "start_dev.sh",
+    "start_diag.sh",
     "start.bat",
     "start_single_process.bat",
     "start_single_process.ps1",
@@ -67,6 +70,17 @@ foreach ($pattern in $excludeFiles) {
 
 $zipPath = Join-Path $DIST "$PKG_NAME.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Compress-Archive -Path $PKG_DIR -DestinationPath $zipPath -Force
+$venvPython = Join-Path $ROOT "venv\Scripts\python.exe"
+$zipHelper = Join-Path $ROOT "scripts\create_package_zip.py"
+if (Test-Path $venvPython) {
+    & $venvPython $zipHelper --root $ROOT --package-dir $PKG_DIR --output $zipPath
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+    & py -3 $zipHelper --root $ROOT --package-dir $PKG_DIR --output $zipPath
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    & python $zipHelper --root $ROOT --package-dir $PKG_DIR --output $zipPath
+} else {
+    throw "Python not found"
+}
+if ($LASTEXITCODE -ne 0) { throw "Failed to create package ZIP" }
 
 Write-Host "Package created: $zipPath"

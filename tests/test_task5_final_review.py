@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import shutil
 import subprocess
 import sys
+import zipfile
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +18,15 @@ from app.core import auth_v2
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_POSIX_LAUNCHERS = (
+    "start.sh",
+    "start_prod.sh",
+    "start_dev.sh",
+    "start_diag.sh",
+    "scripts/dev.sh",
+    "scripts/preflight_start_check.sh",
+    "scripts/start_single_process.sh",
+)
 
 
 class _EmptyQuery:
@@ -272,6 +282,91 @@ def test_posix_launchers_reenter_through_bash_with_dotenv_precedence(tmp_path, l
     output = result.stdout + result.stderr
     assert "PRECHECK:from-root:from-process" in output
     assert "PermissionError" not in output
+
+
+def test_public_posix_launchers_are_executable_and_wrappers_use_bash():
+    stage = subprocess.run(
+        ["git", "ls-files", "--stage", *PUBLIC_POSIX_LAUNCHERS],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    modes = {line.split(maxsplit=3)[3]: line.split(maxsplit=1)[0] for line in stage.splitlines()}
+    assert modes == {path: "100755" for path in PUBLIC_POSIX_LAUNCHERS}
+
+    delegates = {
+        "start_prod.sh": 'exec bash "$DIR/scripts/start_single_process.sh" "$@"',
+        "start_dev.sh": 'exec bash "$DIR/start.sh" "$@"',
+        "start_diag.sh": 'exec bash "$DIR/scripts/preflight_start_check.sh" "$@"',
+    }
+    for filename, command in delegates.items():
+        assert command in (ROOT / filename).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "wrapper,target",
+    [
+        ("start_prod.sh", "scripts/start_single_process.sh"),
+        ("start_dev.sh", "start.sh"),
+        ("start_diag.sh", "scripts/preflight_start_check.sh"),
+    ],
+)
+def test_posix_wrappers_delegate_to_non_executable_target_via_bash(tmp_path, wrapper, target):
+    bash = shutil.which("bash")
+    if not bash and os.name == "nt":
+        candidate = Path(r"C:\Program Files\Git\bin\bash.exe")
+        bash = str(candidate) if candidate.exists() else None
+    if not bash:
+        pytest.skip("bash is unavailable")
+
+    wrapper_path = tmp_path / wrapper
+    shutil.copyfile(ROOT / wrapper, wrapper_path)
+    target_path = tmp_path / target
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        "#!/usr/bin/env bash\nprintf 'DELEGATED:%s\\n' \"${1:-}\"\n",
+        encoding="utf-8",
+    )
+    target_path.chmod(0o644)
+
+    result = subprocess.run(
+        [bash, str(wrapper_path), "probe"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.stdout.strip() == "DELEGATED:probe"
+
+
+def test_package_zip_preserves_posix_launcher_modes(tmp_path):
+    package_dir = tmp_path / "ops-package"
+    for relative in PUBLIC_POSIX_LAUNCHERS:
+        destination = package_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, destination)
+    archive = tmp_path / "ops-package.zip"
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/create_package_zip.py"),
+            "--root",
+            str(ROOT),
+            "--package-dir",
+            str(package_dir),
+            "--output",
+            str(archive),
+        ],
+        check=True,
+    )
+    with zipfile.ZipFile(archive) as bundle:
+        for relative in PUBLIC_POSIX_LAUNCHERS:
+            mode = bundle.getinfo(f"{package_dir.name}/{relative}").external_attr >> 16
+            assert mode & 0o111
+
+    for package_script in ("scripts/package.sh", "scripts/package.ps1"):
+        assert "create_package_zip.py" in (ROOT / package_script).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("value", [[], "", 0, False])

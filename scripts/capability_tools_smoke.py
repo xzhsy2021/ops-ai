@@ -12,11 +12,9 @@ REQUIRED_FILES = [
     "app/services/tool_registry.py",
     "app/services/tool_policy.py",
     "app/services/tool_token.py",
-    "app/services/tool_adapters/app_tools.py",
     "app/services/tool_adapters/deploy_tools.py",
     "app/services/tool_adapters/file_tools.py",
     "app/services/tool_adapters/server_tools.py",
-    "app/services/tool_adapters/config_tools.py",
     "app/services/tool_adapters/capability_tools.py",
     "app/services/package_retention.py",
     "app/mcp/server.py",
@@ -60,12 +58,10 @@ def main() -> int:
     not_found = [name for name in REQUIRED_TOOL_NAMES if name not in combined]
     if not_found:
         raise SystemExit(f"Missing tool names: {not_found}")
-    defaults_text = (ROOT / "app/config/default_seed.py").read_text(encoding='utf-8')
-    if "capability_server" not in defaults_text:
-        raise SystemExit("Missing capability_server bootstrap seed")
-    defaults_loader = (ROOT / "app/config/defaults.py").read_text(encoding='utf-8')
-    if "default_config.json" in defaults_loader and "no longer read" not in defaults_loader:
-        raise SystemExit("defaults.py must not load config/default_config.json")
+    policy_text = (ROOT / "app/services/tool_policy.py").read_text(encoding='utf-8')
+    bootstrap_text = (ROOT / "app/db/bootstrap.py").read_text(encoding='utf-8')
+    if "DEFAULT_CAPABILITY_SETTINGS" not in policy_text or "ensure_domain_defaults" not in bootstrap_text:
+        raise SystemExit("Missing capability settings database bootstrap")
     api_text = (ROOT / "app/api/tools.py").read_text(encoding='utf-8')
     for token in ["/capabilities", "capability_version", "include_disabled", "format"]:
         if token not in api_text:

@@ -14,18 +14,6 @@ HEALTH_CHECK_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 5
 HEALTH_CHECK_RETRIES = 6
 
-from app.config.repository import (
-    get_db_file, get_db_connection, reset_db_connection,
-    _init_db, load_config, save_config, CONFIG_FILE,
-    _get_db,
-)
-from app.config.defaults import DEFAULT_CONFIG
-from app.config.cache import (
-    invalidate_config_cache, load_config_cached,
-)
-from app.config.migration import (
-    _ensure_defaults, _apply_migrations_and_save, _migrate_json_to_db,
-)
 from app.config.servers import (
     get_all_servers, get_server_by_name, get_server_by_id, resolve_server,
     save_server, delete_server,
@@ -339,8 +327,11 @@ def resolve_template_variables(template: dict, variables: dict, shell_safe: bool
 
 
 def get_all_workflow_templates() -> Dict[str, Any]:
-    config = load_config()
-    user_templates = config.get("workflow_templates", {})
+    from app.db.base import SessionLocal
+    from app.db.repository import WorkflowTemplateRepository
+
+    with SessionLocal() as db:
+        user_templates = WorkflowTemplateRepository(db).get_all()
     all_templates = {}
     for key, tmpl in PRESET_WORKFLOW_TEMPLATES.items():
         all_templates[key] = {**tmpl, "is_preset": True}
@@ -357,21 +348,29 @@ def get_workflow_template_by_name(name: str) -> Optional[Dict[str, Any]]:
 
 
 def save_workflow_template(name: str, template: Dict[str, Any]) -> bool:
-    config = load_config()
-    templates = config.get("workflow_templates", {})
-    template["updated_at"] = datetime.now().isoformat()
-    if name not in templates:
-        template["created_at"] = datetime.now().isoformat()
-    templates[name] = template
-    config["workflow_templates"] = templates
-    return save_config(config)
+    from app.db.base import SessionLocal
+    from app.db.repository import WorkflowTemplateRepository
+
+    payload = dict(template or {})
+    now = datetime.now().isoformat()
+    with SessionLocal() as db:
+        repo = WorkflowTemplateRepository(db)
+        existing = repo.get(name)
+        payload["updated_at"] = now
+        if not existing:
+            payload["created_at"] = now
+        elif "created_at" not in payload and existing.get("created_at"):
+            payload["created_at"] = existing["created_at"]
+        repo.set(name, payload)
+        db.commit()
+    return True
 
 
 def delete_workflow_template(name: str) -> bool:
-    config = load_config()
-    templates = config.get("workflow_templates", {})
-    if name in templates:
-        del templates[name]
-        config["workflow_templates"] = templates
-        return save_config(config)
-    return False
+    from app.db.base import SessionLocal
+    from app.db.repository import WorkflowTemplateRepository
+
+    with SessionLocal() as db:
+        deleted = WorkflowTemplateRepository(db).delete(name)
+        db.commit()
+        return deleted

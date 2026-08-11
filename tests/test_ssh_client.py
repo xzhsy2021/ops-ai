@@ -101,14 +101,10 @@ def test_ssh_pool_uses_stable_pool_key(monkeypatch):
 
 
 def test_ssh_pool_resolves_jump_host_from_db_ssot(monkeypatch):
-    """字符串型 jump_host 在旧 config_kv 查不到时，应回退到 jump_hosts DB 表。"""
+    """字符串型 jump_host 应从 jump_hosts 数据库表解析。"""
     ssh_client = _patch_connect(monkeypatch)
     from app.config import servers as app_servers
 
-    monkeypatch.setattr(
-        "config_manager.load_config_cached",
-        lambda: {"jump_hosts": [], "servers": []},
-    )
     monkeypatch.setattr(
         app_servers,
         "get_jump_host_by_name",
@@ -148,10 +144,6 @@ def test_ssh_pool_falls_back_to_direct_when_db_jump_lacks_creds(monkeypatch):
     ssh_client = _patch_connect(monkeypatch)
     from app.config import servers as app_servers
 
-    monkeypatch.setattr(
-        "config_manager.load_config_cached",
-        lambda: {"jump_hosts": [], "servers": []},
-    )
     monkeypatch.setattr(
         app_servers,
         "get_jump_host_by_name",

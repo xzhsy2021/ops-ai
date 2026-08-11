@@ -120,3 +120,28 @@ def test_executor_marks_succeeded_or_failed(db):
         assert result.execution_result is not None
     else:
         assert result.failure_reason is not None
+
+
+def test_executor_marks_file_upload_failed_and_preserves_target_results(db, monkeypatch):
+    from app.services.tool_adapters import file_transfer_tools
+
+    monkeypatch.setattr(
+        file_transfer_tools,
+        "upload_file",
+        lambda args, ctx, db: (_ for _ in ()).throw(RuntimeError("simulated sftp failure")),
+    )
+    approval = _prepare_approval(
+        db,
+        action_type="FILE_UPLOAD",
+        action_parameters={
+            "package_name": "frontend.tar.gz",
+            "remote_path": "/srv/releases/frontend.tar.gz",
+        },
+    )
+
+    result = ApprovalExecutor(db).execute(approval.id)
+
+    assert result.status == "FAILED"
+    assert result.execution_result["action"] == "FILE_UPLOAD"
+    assert result.execution_result["fail_count"] == 1
+    assert result.failure_reason

@@ -40,6 +40,8 @@ MCP stdio bridge 读取 local_path
 
 Remote HTTP MCP 不能读取用户电脑上的 `D:\...` 路径。如果使用 Remote HTTP MCP，请先通过 OPS 页面上传，或使用 HTTP/base64 工具上传小文件。
 
+对于房间消息触发的批量计划，不要单独调用通用 `ops.upload_package` 或创建独立上传审批。将本机路径放入 `ops.approval.prepare_plan` 的 `FILE_UPLOAD` 步骤；stdio 桥接层会通过房间绑定的审批接收入口暂存文件，并将包清单冻结到同一个计划。qclaw Token 仍只需要 `ops:read`，不需要 `package:write`。
+
 ## 3. 发布链路
 
 > 本节中的 `ops_upload_package`、`ops_create_deploy_plan` 等名称是旧流程/内部 next-action 别名，不是当前 MCP 注册名。远程 Agent 应使用已注册的 `ops.prepare_release_from_local_package`，或使用 `ops.approval.prepare_plan` 组装支持的消息级计划步骤。

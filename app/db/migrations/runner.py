@@ -1,8 +1,10 @@
 """Lightweight schema migration runner for the embedded SQLite-first deployment."""
 import hashlib
+import json
 import logging
+import uuid
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Any, Dict, List
 from sqlalchemy import inspect, text
 
 logger = logging.getLogger(__name__)
@@ -866,9 +868,9 @@ MIGRATIONS: List[Dict[str, str]] = [
     },
     {
         "version": "081_001_cleanup_legacy_kv",
-        "name": "Cleanup legacy KV keys (servers/jump_hosts/settings) migrated to DB tables (Phase 3a/3.g)",
+        "name": "Preserve legacy KV assets for terminal domain migration",
         "table": "config_kv",
-        "sql": "DELETE FROM config_kv WHERE key IN ('servers', 'jump_hosts', 'settings')",
+        "sql": "SELECT 1",
     },
     {
         "version": "081_002_migrate_audit_logs_to_records",
@@ -1188,7 +1190,125 @@ MIGRATIONS: List[Dict[str, str]] = [
         "name": "Create plan_id index for execution plan steps",
         "sql": "CREATE INDEX IF NOT EXISTS ix_execution_plan_steps_plan_id ON execution_plan_steps(plan_id)",
     },
+    {
+        "version": "083_001_system_environments",
+        "name": "Create system environments table",
+        "table": "system_environments",
+        "sql": """CREATE TABLE IF NOT EXISTS system_environments (
+            id VARCHAR(32) PRIMARY KEY,
+            system_name VARCHAR(64) NOT NULL,
+            name VARCHAR(64) NOT NULL,
+            display_name VARCHAR(128),
+            category VARCHAR(32) DEFAULT 'custom',
+            description TEXT,
+            base_path VARCHAR(255),
+            servers JSON,
+            variables JSON,
+            service_overrides JSON,
+            group_overrides JSON,
+            created_at DATETIME,
+            updated_at DATETIME,
+            CONSTRAINT uq_system_environment_name UNIQUE(system_name, name),
+            FOREIGN KEY(system_name) REFERENCES systems(name) ON DELETE CASCADE
+        )""",
+    },
+    {
+        "version": "083_002_system_message_routing",
+        "name": "Add system message routing",
+        "table": "systems",
+        "column": "message_routing",
+        "sql": "ALTER TABLE systems ADD COLUMN message_routing JSON",
+    },
+    {
+        "version": "083_003_capability_settings",
+        "name": "Create capability settings table",
+        "table": "capability_settings",
+        "sql": """CREATE TABLE IF NOT EXISTS capability_settings (
+            id VARCHAR(32) PRIMARY KEY,
+            settings JSON NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "083_004_retention_policies",
+        "name": "Create retention policies table",
+        "table": "retention_policies",
+        "sql": """CREATE TABLE IF NOT EXISTS retention_policies (
+            policy_type VARCHAR(32) PRIMARY KEY,
+            settings JSON NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "083_005_notification_settings",
+        "name": "Create notification settings table",
+        "table": "notification_settings",
+        "sql": """CREATE TABLE IF NOT EXISTS notification_settings (
+            id VARCHAR(32) PRIMARY KEY,
+            settings JSON NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "083_006_named_domain_settings",
+        "name": "Create named domain settings tables",
+        "sql": """CREATE TABLE IF NOT EXISTS inspection_profiles (
+            name VARCHAR(128) PRIMARY KEY,
+            settings JSON NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "083_007_workflow_templates",
+        "name": "Create workflow templates table",
+        "table": "workflow_templates",
+        "sql": """CREATE TABLE IF NOT EXISTS workflow_templates (
+            name VARCHAR(128) PRIMARY KEY,
+            template JSON NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "083_008_deployment_defaults",
+        "name": "Create deployment defaults table",
+        "table": "deployment_defaults",
+        "sql": """CREATE TABLE IF NOT EXISTS deployment_defaults (
+            id VARCHAR(32) PRIMARY KEY,
+            settings JSON NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
+    {
+        "version": "083_009_global_variables",
+        "name": "Create global variables table",
+        "table": "global_variables",
+        "sql": """CREATE TABLE IF NOT EXISTS global_variables (
+            name VARCHAR(128) PRIMARY KEY,
+            value JSON,
+            created_at DATETIME,
+            updated_at DATETIME
+        )""",
+    },
 ]
+
+
+CONFIG_KV_RETIREMENT_MIGRATION: Dict[str, str] = {
+    "version": "083_010_retire_config_kv",
+    "name": "Migrate domain settings and retire config_kv",
+    "sql": "python:retire_config_kv",
+}
+
+SERVICE_IDENTITY_MIGRATION: Dict[str, str] = {
+    "version": "083_011_service_identity",
+    "name": "Enforce unique service identity per system",
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_services_system_name ON services(system_name, name)",
+}
 
 
 def _now_iso() -> str:
@@ -1220,6 +1340,609 @@ def _mark_applied(conn, mig: Dict[str, str]):
         text("INSERT OR REPLACE INTO schema_migrations(version, name, applied_at, checksum) VALUES(:v, :n, :a, :c)"),
         {"v": mig["version"], "n": mig.get("name", mig["version"]), "a": _now_iso(), "c": _checksum(mig)},
     )
+
+
+def _json_object(value: Any, *, key: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Legacy config key '{key}' must contain a JSON object")
+    return value
+
+
+def _upsert_singleton(conn, table: str, payload: Dict[str, Any], now: str) -> None:
+    conn.execute(text(
+        f"INSERT INTO {table}(id, settings, created_at, updated_at) "
+        "VALUES('default', :settings, :now, :now) "
+        "ON CONFLICT(id) DO UPDATE SET settings=excluded.settings, updated_at=excluded.updated_at"
+    ), {"settings": json.dumps(payload, ensure_ascii=False), "now": now})
+
+
+def _legacy_records(value: Any, *, key: str) -> List[Dict[str, Any]]:
+    """Normalize legacy list/dict asset buckets without discarding their keys."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        records = value
+    elif isinstance(value, dict):
+        records = []
+        for record_key, raw_record in value.items():
+            if not isinstance(raw_record, dict):
+                raise RuntimeError(
+                    f"Legacy config key '{key}' item '{record_key}' must contain a JSON object"
+                )
+            record = dict(raw_record)
+            record.setdefault("name", str(record_key))
+            record.setdefault("_legacy_key", str(record_key))
+            records.append(record)
+    else:
+        raise RuntimeError(f"Legacy config key '{key}' must contain a list or JSON object")
+    if any(not isinstance(record, dict) for record in records):
+        raise RuntimeError(f"Legacy config key '{key}' must contain JSON objects")
+    return [dict(record) for record in records]
+
+
+def _migrate_legacy_systems(conn, value: Any, now: str) -> None:
+    if value is None:
+        return
+    systems = _json_object(value, key="systems")
+    for system_name, raw_system in systems.items():
+        if not isinstance(raw_system, dict):
+            raise RuntimeError(f"Legacy system '{system_name}' must contain a JSON object")
+        system_name = str(system_name).strip()
+        if not system_name:
+            raise RuntimeError("Legacy systems contains an empty system name")
+        environments = raw_system.get("environments") or {}
+        services = raw_system.get("services") or []
+        if not isinstance(environments, dict):
+            raise RuntimeError(f"System '{system_name}' environments must be a JSON object")
+        if not isinstance(services, list):
+            raise RuntimeError(f"System '{system_name}' services must be a JSON list")
+
+        existing = conn.execute(text(
+            "SELECT environments, services, message_routing FROM systems WHERE name=:name"
+        ), {"name": system_name}).fetchone()
+        if existing is None:
+            conn.execute(text(
+                "INSERT INTO systems("
+                "id, name, display_name, strategy, base_path, description, variables, servers, "
+                "message_routing, environments, services, created_at, updated_at"
+                ") VALUES("
+                ":id, :name, :display_name, :strategy, :base_path, :description, :variables, "
+                ":servers, :message_routing, :environments, :services, :now, :now)"
+            ), {
+                "id": uuid.uuid4().hex,
+                "name": system_name,
+                "display_name": raw_system.get("display_name") or system_name,
+                "strategy": raw_system.get("strategy") or "WORKFLOW",
+                "base_path": raw_system.get("base_path") or "/data/web/app",
+                "description": raw_system.get("description"),
+                "variables": json.dumps(raw_system.get("variables") or {}, ensure_ascii=False),
+                "servers": json.dumps(raw_system.get("servers") or [], ensure_ascii=False),
+                "message_routing": json.dumps(raw_system.get("message_routing") or {}, ensure_ascii=False),
+                "environments": json.dumps(environments, ensure_ascii=False),
+                "services": json.dumps(services, ensure_ascii=False),
+                "now": now,
+            })
+        else:
+            stored_environments = json.loads(existing[0] or "{}")
+            stored_services = json.loads(existing[1] or "[]")
+            stored_routing = json.loads(existing[2] or "{}")
+            if not isinstance(stored_environments, dict) or not isinstance(stored_services, list):
+                raise RuntimeError(f"System '{system_name}' contains invalid legacy inventory")
+            merged_environments = dict(environments)
+            merged_environments.update(stored_environments)
+            stored_names = {
+                str(item.get("name") or "").strip()
+                for item in stored_services
+                if isinstance(item, dict)
+            }
+            merged_services = list(stored_services)
+            merged_services.extend(
+                item for item in services
+                if isinstance(item, dict)
+                and str(item.get("name") or "").strip() not in stored_names
+            )
+            conn.execute(text(
+                "UPDATE systems SET environments=:environments, services=:services, "
+                "message_routing=:message_routing, updated_at=:now WHERE name=:name"
+            ), {
+                "name": system_name,
+                "environments": json.dumps(merged_environments, ensure_ascii=False),
+                "services": json.dumps(merged_services, ensure_ascii=False),
+                "message_routing": json.dumps(
+                    stored_routing or raw_system.get("message_routing") or {},
+                    ensure_ascii=False,
+                ),
+                "now": now,
+            })
+
+        groups = raw_system.get("groups") or raw_system.get("regions") or {}
+        if groups and not isinstance(groups, dict):
+            raise RuntimeError(f"System '{system_name}' groups must be a JSON object")
+        for group_code, raw_group in groups.items():
+            if not isinstance(raw_group, dict):
+                raise RuntimeError(
+                    f"System '{system_name}' group '{group_code}' must contain a JSON object"
+                )
+            group_name = f"{system_name}-{group_code}"
+            server_names = raw_group.get("servers") or []
+            if not server_names and raw_group.get("server"):
+                server_names = [raw_group["server"]]
+            metadata = {
+                key: value for key, value in raw_group.items()
+                if key not in {"name", "display_name", "description", "servers", "tags"}
+            }
+            conn.execute(text(
+                "INSERT INTO server_groups("
+                "id, name, display_name, description, server_names, tags, metadata_json, created_at, updated_at"
+                ") VALUES("
+                ":id, :name, :display_name, :description, :server_names, :tags, :metadata, :now, :now"
+                ") ON CONFLICT(name) DO NOTHING"
+            ), {
+                "id": uuid.uuid4().hex,
+                "name": group_name,
+                "display_name": raw_group.get("display_name") or str(group_code),
+                "description": raw_group.get("description"),
+                "server_names": json.dumps(server_names, ensure_ascii=False),
+                "tags": json.dumps(raw_group.get("tags") or [], ensure_ascii=False),
+                "metadata": json.dumps(metadata, ensure_ascii=False),
+                "now": now,
+            })
+
+
+def _migrate_legacy_servers(conn, value: Any, now: str) -> None:
+    from app.core.secret_store import encrypt_secret
+
+    core_fields = {
+        "id", "name", "host", "port", "user", "username", "key", "key_file",
+        "key_content", "password", "jump_host", "status", "created_at", "updated_at",
+    }
+    for server in _legacy_records(value, key="servers"):
+        name = str(server.get("name") or "").strip()
+        host = str(server.get("host") or "").strip()
+        if not name or not host:
+            raise RuntimeError("Legacy server requires non-empty name and host")
+        jump_host = server.get("jump_host")
+        if isinstance(jump_host, dict):
+            jump_host_name = jump_host.get("name") or jump_host.get("host")
+        else:
+            jump_host_name = jump_host
+        metadata = {key: value for key, value in server.items() if key not in core_fields}
+        if isinstance(jump_host, dict):
+            metadata["inline_jump_host"] = jump_host
+        conn.execute(text(
+            "INSERT INTO servers("
+            "id, name, host, port, user, key, key_content, password, jump_host, status, "
+            "metadata_json, created_at, updated_at"
+            ") VALUES("
+            ":id, :name, :host, :port, :user, :key, :key_content, :password, :jump_host, "
+            ":status, :metadata, :now, :now) ON CONFLICT(name) DO NOTHING"
+        ), {
+            "id": str(server.get("id") or uuid.uuid4().hex),
+            "name": name,
+            "host": host,
+            "port": int(server.get("port") or 22),
+            "user": server.get("user") or server.get("username") or "root",
+            "key": server.get("key") or server.get("key_file") or "~/.ssh/id_rsa",
+            "key_content": encrypt_secret(server.get("key_content")),
+            "password": encrypt_secret(server.get("password")),
+            "jump_host": jump_host_name,
+            "status": server.get("status") or "online",
+            "metadata": json.dumps(metadata, ensure_ascii=False),
+            "now": now,
+        })
+
+
+def _migrate_legacy_jump_hosts(conn, value: Any, now: str) -> None:
+    from app.core.secret_store import encrypt_secret
+
+    for jump_host in _legacy_records(value, key="jump_hosts"):
+        name = str(jump_host.get("name") or "").strip()
+        host = str(jump_host.get("host") or "").strip()
+        if not name or not host:
+            raise RuntimeError("Legacy jump host requires non-empty name and host")
+        conn.execute(text(
+            "INSERT INTO jump_hosts("
+            "id, name, host, port, user, key, key_content, password, status, description, tags, "
+            "created_at, updated_at"
+            ") VALUES("
+            ":id, :name, :host, :port, :user, :key, :key_content, :password, :status, "
+            ":description, :tags, :now, :now) ON CONFLICT(name) DO NOTHING"
+        ), {
+            "id": str(jump_host.get("id") or uuid.uuid4().hex),
+            "name": name,
+            "host": host,
+            "port": int(jump_host.get("port") or 22),
+            "user": jump_host.get("user") or jump_host.get("username") or "root",
+            "key": jump_host.get("key") or jump_host.get("key_file") or "~/.ssh/id_rsa",
+            "key_content": encrypt_secret(jump_host.get("key_content")),
+            "password": encrypt_secret(jump_host.get("password")),
+            "status": jump_host.get("status") or "online",
+            "description": jump_host.get("description"),
+            "tags": json.dumps(jump_host.get("tags") or [], ensure_ascii=False),
+            "now": now,
+        })
+
+
+def _migrate_legacy_server_groups(conn, value: Any, now: str) -> None:
+    for group in _legacy_records(value, key="server_groups"):
+        name = str(group.get("name") or "").strip()
+        if not name:
+            raise RuntimeError("Legacy server group requires a non-empty name")
+        server_names = group.get("server_names") or group.get("servers") or []
+        if not server_names and group.get("server"):
+            server_names = [group["server"]]
+        metadata = {
+            key: value for key, value in group.items()
+            if key not in {
+                "id", "name", "display_name", "description", "server_names", "servers",
+                "tags", "created_at", "updated_at", "_legacy_key",
+            }
+        }
+        conn.execute(text(
+            "INSERT INTO server_groups("
+            "id, name, display_name, description, server_names, tags, metadata_json, created_at, updated_at"
+            ") VALUES("
+            ":id, :name, :display_name, :description, :server_names, :tags, :metadata, :now, :now"
+            ") ON CONFLICT(name) DO NOTHING"
+        ), {
+            "id": str(group.get("id") or uuid.uuid4().hex),
+            "name": name,
+            "display_name": group.get("display_name") or name,
+            "description": group.get("description"),
+            "server_names": json.dumps(server_names, ensure_ascii=False),
+            "tags": json.dumps(group.get("tags") or [], ensure_ascii=False),
+            "metadata": json.dumps(metadata, ensure_ascii=False),
+            "now": now,
+        })
+
+
+def _migrate_legacy_pipelines(conn, value: Any, now: str) -> None:
+    for pipeline in _legacy_records(value, key="pipelines"):
+        pipeline_id = str(pipeline.get("id") or pipeline.get("_legacy_key") or "").strip()
+        pipeline_name = str(pipeline.get("name") or pipeline_id).strip()
+        system_name = str(pipeline.get("system_name") or pipeline.get("system") or "").strip()
+        if not pipeline_id or not pipeline_name or not system_name:
+            raise RuntimeError("Legacy pipeline requires id, name, and system_name")
+        if conn.execute(text(
+            "SELECT 1 FROM systems WHERE name=:name"
+        ), {"name": system_name}).fetchone() is None:
+            raise RuntimeError(
+                f"Legacy pipeline '{pipeline_id}' references unknown system '{system_name}'"
+            )
+        conn.execute(text(
+            "INSERT INTO pipelines("
+            "id, name, system_name, description, strategy, created_at, updated_at"
+            ") VALUES("
+            ":id, :name, :system_name, :description, :strategy, :now, :now"
+            ") ON CONFLICT(id) DO NOTHING"
+        ), {
+            "id": pipeline_id,
+            "name": pipeline_name,
+            "system_name": system_name,
+            "description": pipeline.get("description"),
+            "strategy": pipeline.get("strategy") or "DIRECT",
+            "now": now,
+        })
+        steps = pipeline.get("steps") or []
+        if not isinstance(steps, list):
+            raise RuntimeError(f"Legacy pipeline '{pipeline_id}' steps must be a JSON list")
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise RuntimeError(f"Legacy pipeline '{pipeline_id}' steps must contain JSON objects")
+            step_name = str(step.get("name") or f"step-{index + 1}").strip()
+            sort_order = int(step.get("sort_order", index))
+            exists = conn.execute(text(
+                "SELECT 1 FROM pipeline_steps WHERE pipeline_id=:pipeline_id "
+                "AND sort_order=:sort_order AND name=:name"
+            ), {
+                "pipeline_id": pipeline_id,
+                "sort_order": sort_order,
+                "name": step_name,
+            }).fetchone()
+            if exists:
+                continue
+            conn.execute(text(
+                "INSERT INTO pipeline_steps(id, pipeline_id, name, step_type, config, sort_order) "
+                "VALUES(:id, :pipeline_id, :name, :step_type, :config, :sort_order)"
+            ), {
+                "id": str(step.get("id") or uuid.uuid4().hex),
+                "pipeline_id": pipeline_id,
+                "name": step_name,
+                "step_type": step.get("step_type") or step.get("type") or "command",
+                "config": json.dumps(step.get("config") or {}, ensure_ascii=False),
+                "sort_order": sort_order,
+            })
+
+
+def _migrate_legacy_assets(conn, config: Dict[str, Any], now: str) -> None:
+    _migrate_legacy_systems(conn, config.get("systems"), now)
+    _migrate_legacy_servers(conn, config.get("servers"), now)
+    _migrate_legacy_jump_hosts(conn, config.get("jump_hosts"), now)
+    _migrate_legacy_server_groups(conn, config.get("server_groups"), now)
+    _migrate_legacy_pipelines(conn, config.get("pipelines"), now)
+
+
+def _expand_legacy_settings(config: Dict[str, Any]) -> None:
+    """Promote the pre-SSOT settings bucket while preserving newer top-level values."""
+    if "settings" not in config:
+        return
+    settings = _json_object(config.pop("settings"), key="settings")
+    supported = {
+        "capability_server",
+        "release_retention",
+        "package_retention",
+        "runtime_retention",
+        "notification_settings",
+        "inspection_profiles",
+        "workflow_templates",
+        "deploy_defaults",
+        "global_variables",
+    }
+    unknown = sorted(set(settings) - supported)
+    if unknown:
+        raise RuntimeError("Unmapped legacy settings keys: " + ", ".join(unknown))
+    for key, value in settings.items():
+        config.setdefault(key, value)
+
+
+def _migrate_system_inventory(conn, now: str) -> None:
+    system_names = {row[0] for row in conn.execute(text("SELECT name FROM systems")).fetchall()}
+    aliases = {"crypto": "crypto-trader"}
+    for alias, canonical in aliases.items():
+        if alias not in system_names and canonical in system_names:
+            conn.execute(text(
+                "UPDATE services SET system_name=:canonical WHERE system_name=:alias"
+            ), {"canonical": canonical, "alias": alias})
+
+    # Prefer the canonical short service names, which contain the newer
+    # environment mappings and explicit update commands in existing installs.
+    if "crypto-trader" in system_names:
+        conn.execute(text(
+            "DELETE FROM services AS prefixed "
+            "WHERE prefixed.system_name='crypto-trader' "
+            "AND prefixed.name LIKE 'crypto-%' "
+            "AND EXISTS ("
+            "  SELECT 1 FROM services AS canonical "
+            "  WHERE canonical.system_name='crypto-trader' "
+            "  AND canonical.name=substr(prefixed.name, 8)"
+            ")"
+        ))
+
+    orphan_names = sorted({
+        row[0]
+        for row in conn.execute(text(
+            "SELECT DISTINCT service.system_name "
+            "FROM services AS service "
+            "LEFT JOIN systems AS system ON system.name=service.system_name "
+            "WHERE system.name IS NULL"
+        )).fetchall()
+    })
+    if orphan_names:
+        raise RuntimeError(
+            "Services reference unknown systems: " + ", ".join(orphan_names)
+        )
+
+    system_rows = conn.execute(text(
+        "SELECT name, environments, services FROM systems ORDER BY name"
+    )).fetchall()
+    for system_name, raw_environments, raw_services in system_rows:
+        environments = json.loads(raw_environments or "{}")
+        if not isinstance(environments, dict):
+            raise RuntimeError(f"System '{system_name}' environments must be a JSON object")
+        for environment_name, raw_environment in environments.items():
+            environment = raw_environment if isinstance(raw_environment, dict) else {}
+            conn.execute(text(
+                "INSERT INTO system_environments("
+                "id, system_name, name, display_name, category, description, base_path, "
+                "servers, variables, service_overrides, group_overrides, created_at, updated_at"
+                ") VALUES("
+                ":id, :system_name, :name, :display_name, :category, :description, :base_path, "
+                ":servers, :variables, :service_overrides, :group_overrides, :now, :now"
+                ") ON CONFLICT(system_name, name) DO NOTHING"
+            ), {
+                "id": uuid.uuid4().hex,
+                "system_name": system_name,
+                "name": str(environment_name),
+                "display_name": environment.get("display_name") or str(environment_name),
+                "category": environment.get("category") or "custom",
+                "description": environment.get("description"),
+                "base_path": environment.get("base_path") or environment.get("deploy_path"),
+                "servers": json.dumps(environment.get("servers") or [], ensure_ascii=False),
+                "variables": json.dumps(environment.get("variables") or {}, ensure_ascii=False),
+                "service_overrides": json.dumps(environment.get("service_overrides") or {}, ensure_ascii=False),
+                "group_overrides": json.dumps(environment.get("group_overrides") or {}, ensure_ascii=False),
+                "now": now,
+            })
+
+        services = json.loads(raw_services or "[]")
+        if not isinstance(services, list):
+            raise RuntimeError(f"System '{system_name}' services must be a JSON list")
+        for raw_service in services:
+            if not isinstance(raw_service, dict):
+                continue
+            service_name = str(raw_service.get("name") or "").strip()
+            if not service_name:
+                continue
+            semantic_name = (
+                service_name[7:]
+                if system_name == "crypto-trader" and service_name.startswith("crypto-")
+                else service_name
+            )
+            exists = conn.execute(text(
+                "SELECT 1 FROM services "
+                "WHERE system_name=:system_name AND name IN (:name, :semantic_name) LIMIT 1"
+            ), {
+                "system_name": system_name,
+                "name": service_name,
+                "semantic_name": semantic_name,
+            }).fetchone()
+            if exists:
+                continue
+            conn.execute(text(
+                "INSERT INTO services("
+                "id, name, display_name, system_name, repo, build_cmd, start_cmd, template, "
+                "pipeline_id, template_variables, servers, created_at, updated_at"
+                ") VALUES("
+                ":id, :name, :display_name, :system_name, :repo, :build_cmd, :start_cmd, "
+                ":template, :pipeline_id, :template_variables, :servers, :now, :now)"
+            ), {
+                "id": uuid.uuid4().hex,
+                "name": service_name,
+                "display_name": raw_service.get("display_name") or service_name,
+                "system_name": system_name,
+                "repo": raw_service.get("repo"),
+                "build_cmd": raw_service.get("build_cmd"),
+                "start_cmd": raw_service.get("start_cmd"),
+                "template": raw_service.get("template"),
+                "pipeline_id": raw_service.get("pipeline_id"),
+                "template_variables": json.dumps(raw_service.get("template_variables") or {}, ensure_ascii=False),
+                "servers": json.dumps(raw_service.get("servers") or [], ensure_ascii=False),
+                "now": now,
+            })
+
+    conn.execute(text("UPDATE systems SET environments='{}', services='[]'"))
+
+
+def _migrate_domain_settings(conn, config: Dict[str, Any], now: str) -> None:
+    singleton_keys = {
+        "capability_server": "capability_settings",
+        "notification_settings": "notification_settings",
+        "deploy_defaults": "deployment_defaults",
+    }
+    for key, table in singleton_keys.items():
+        if key in config:
+            _upsert_singleton(conn, table, _json_object(config[key], key=key), now)
+
+    retention_keys = {
+        "release_retention": "release",
+        "package_retention": "package",
+        "runtime_retention": "runtime",
+    }
+    for key, policy_type in retention_keys.items():
+        if key not in config:
+            continue
+        payload = _json_object(config[key], key=key)
+        conn.execute(text(
+            "INSERT INTO retention_policies(policy_type, settings, created_at, updated_at) "
+            "VALUES(:policy_type, :settings, :now, :now) "
+            "ON CONFLICT(policy_type) DO UPDATE SET settings=excluded.settings, updated_at=excluded.updated_at"
+        ), {
+            "policy_type": policy_type,
+            "settings": json.dumps(payload, ensure_ascii=False),
+            "now": now,
+        })
+
+    profiles = config.get("inspection_profiles", {})
+    if isinstance(profiles, dict):
+        profiles = profiles.get("items", [])
+    if profiles and not isinstance(profiles, list):
+        raise RuntimeError("Legacy config key 'inspection_profiles' must contain a list")
+    for profile in profiles or []:
+        if not isinstance(profile, dict):
+            continue
+        name = str(profile.get("id") or profile.get("name") or "").strip()
+        if not name:
+            continue
+        conn.execute(text(
+            "INSERT INTO inspection_profiles(name, settings, created_at, updated_at) "
+            "VALUES(:name, :settings, :now, :now) "
+            "ON CONFLICT(name) DO UPDATE SET settings=excluded.settings, updated_at=excluded.updated_at"
+        ), {"name": name, "settings": json.dumps(profile, ensure_ascii=False), "now": now})
+
+    templates = _json_object(config.get("workflow_templates"), key="workflow_templates")
+    for name, template in templates.items():
+        if not isinstance(template, dict):
+            raise RuntimeError(f"Workflow template '{name}' must contain a JSON object")
+        conn.execute(text(
+            "INSERT INTO workflow_templates(name, template, created_at, updated_at) "
+            "VALUES(:name, :template, :now, :now) "
+            "ON CONFLICT(name) DO UPDATE SET template=excluded.template, updated_at=excluded.updated_at"
+        ), {"name": str(name), "template": json.dumps(template, ensure_ascii=False), "now": now})
+
+    variables = _json_object(config.get("global_variables"), key="global_variables")
+    for name, value in variables.items():
+        conn.execute(text(
+            "INSERT INTO global_variables(name, value, created_at, updated_at) "
+            "VALUES(:name, :value, :now, :now) "
+            "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"
+        ), {"name": str(name), "value": json.dumps(value, ensure_ascii=False), "now": now})
+
+
+def _create_service_identity_index(conn) -> None:
+    duplicates = conn.execute(text(
+        "SELECT system_name, name, COUNT(*) AS total FROM services "
+        "GROUP BY system_name, name HAVING COUNT(*) > 1"
+    )).fetchall()
+    if duplicates:
+        labels = [f"{row[0]}/{row[1]} ({row[2]})" for row in duplicates]
+        raise RuntimeError("Duplicate service identities remain: " + ", ".join(labels))
+    conn.execute(text(SERVICE_IDENTITY_MIGRATION["sql"]))
+
+
+def ensure_service_identity_index(engine) -> bool:
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, SERVICE_IDENTITY_MIGRATION["version"]):
+            return False
+        if "services" not in inspect(conn).get_table_names():
+            return False
+        _create_service_identity_index(conn)
+        _mark_applied(conn, SERVICE_IDENTITY_MIGRATION)
+        return True
+
+
+def retire_config_kv(engine) -> bool:
+    """Copy recognized legacy data to domain tables and drop config_kv atomically."""
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, CONFIG_KV_RETIREMENT_MIGRATION["version"]):
+            return False
+        if "config_kv" not in inspect(conn).get_table_names():
+            _mark_applied(conn, CONFIG_KV_RETIREMENT_MIGRATION)
+            return False
+
+        config: Dict[str, Any] = {}
+        for key, raw_value in conn.execute(text("SELECT key, value FROM config_kv")).fetchall():
+            try:
+                config[key] = json.loads(raw_value)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"Invalid JSON in legacy config key '{key}'") from exc
+
+        _expand_legacy_settings(config)
+
+        recognized = {
+            "__seeded",
+            "systems",
+            "servers",
+            "jump_hosts",
+            "server_groups",
+            "pipelines",
+            "capability_server",
+            "release_retention",
+            "package_retention",
+            "runtime_retention",
+            "notification_settings",
+            "inspection_profiles",
+            "workflow_templates",
+            "deploy_defaults",
+            "global_variables",
+        }
+        unknown = sorted(set(config) - recognized)
+        if unknown:
+            raise RuntimeError("Unmapped legacy config keys: " + ", ".join(unknown))
+
+        now = _now_iso()
+        _migrate_legacy_assets(conn, config, now)
+        _migrate_system_inventory(conn, now)
+        _migrate_domain_settings(conn, config, now)
+        conn.execute(text("DROP TABLE config_kv"))
+        _create_service_identity_index(conn)
+        _mark_applied(conn, CONFIG_KV_RETIREMENT_MIGRATION)
+        _mark_applied(conn, SERVICE_IDENTITY_MIGRATION)
+        logger.info("Migrated domain settings and retired config_kv")
+        return True
 
 
 def run_schema_migrations(engine) -> List[str]:
@@ -1254,36 +1977,8 @@ def run_schema_migrations(engine) -> List[str]:
                 conn.execute(text(mig["sql"]))
                 _mark_applied(conn, mig)
                 applied.append(version)
+    if retire_config_kv(engine):
+        applied.append(CONFIG_KV_RETIREMENT_MIGRATION["version"])
+    if ensure_service_identity_index(engine):
+        applied.append(SERVICE_IDENTITY_MIGRATION["version"])
     return applied
-
-
-def migrate_read_only_default():
-    """Backfill missing capability_server switches for existing deployments.
-
-    Only keys that are absent in the stored config are filled in with the
-    current DEFAULT_CAPABILITY_SETTINGS. Existing user values are preserved
-    so an admin who intentionally enabled a stricter mode is not overridden.
-    This is the same belt-and-suspenders migration we use elsewhere: the
-    goal is "no 403 just because a new key was added in code", not "rewrite
-    admin choices".
-    """
-    try:
-        from config_manager import load_config, save_config
-        from app.services.tool_policy import DEFAULT_CAPABILITY_SETTINGS
-        config = load_config()
-        if "capability_server" not in config:
-            return
-        caps = config["capability_server"]
-        if not isinstance(caps, dict):
-            return
-        changed = False
-        for key, default in DEFAULT_CAPABILITY_SETTINGS.items():
-            if key not in caps:
-                caps[key] = default
-                changed = True
-        if changed:
-            save_config(config)
-            logger.info("Backfilled capability_server defaults for keys: %s",
-                        [k for k in DEFAULT_CAPABILITY_SETTINGS if k in caps and caps[k] == DEFAULT_CAPABILITY_SETTINGS[k]])
-    except Exception:
-        logger.exception("Failed to apply capability_server default backfill")

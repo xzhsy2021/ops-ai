@@ -91,6 +91,22 @@ def _normalize_steps(steps: list[dict]) -> list[dict]:
     return normalized
 
 
+def step_approval_details(action_type: str, parameters: dict | None, default_targets: list[str] | None = None) -> dict:
+    """Return the non-secret fields an approver must see for a plan step."""
+    if str(action_type or "").strip() != "FILE_UPLOAD":
+        return {}
+    params = dict(parameters or {})
+    action_parameters = dict(params.get("action_parameters") or {})
+    return {
+        "package_name": action_parameters.get("package_name") or "",
+        "remote_path": action_parameters.get("remote_path") or "",
+        "overwrite": bool(action_parameters.get("overwrite", False)),
+        "expected_sha256": action_parameters.get("expected_sha256") or "",
+        "expected_size_bytes": action_parameters.get("expected_size_bytes"),
+        "targets": list(params.get("targets") or default_targets or []),
+    }
+
+
 def compute_plan_digest(
     room_id: str,
     request_event_id: str,

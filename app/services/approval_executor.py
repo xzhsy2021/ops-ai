@@ -30,6 +30,14 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+class FileUploadExecutionError(RuntimeError):
+    """Raised when one or more targets in a file upload batch fail."""
+
+    def __init__(self, execution_result: dict[str, Any]):
+        self.execution_result = execution_result
+        super().__init__(execution_result.get("message") or "File upload batch failed")
+
+
 class ApprovalExecutor:
     """审批后操作执行器"""
 
@@ -91,7 +99,10 @@ class ApprovalExecutor:
             error_traceback = traceback.format_exc()
             approval.status = "FAILED"
             approval.failure_reason = error_msg
-            approval.execution_result = {"error": error_msg, "traceback": error_traceback}
+            approval.execution_result = getattr(e, "execution_result", None) or {
+                "error": error_msg,
+                "traceback": error_traceback,
+            }
             approval.executed_at = _utcnow()
             job.status = "failed"
             job.error_message = error_msg
@@ -116,6 +127,8 @@ class ApprovalExecutor:
             return self._execute_package_cleanup(approval, payload)
         elif action_type == "SERVICE_CONTROL":
             return self._execute_service_control(approval, payload)
+        elif action_type == "FILE_UPLOAD":
+            return self._execute_file_upload(approval, payload)
         else:
             raise ValueError(f"未知的操作类型: {action_type}")
 
@@ -237,6 +250,52 @@ class ApprovalExecutor:
             "fail_count": fail_count,
             "message": f"服务控制完成: {success_count}/{len(targets)} 成功, {fail_count} 失败",
         }
+
+    def _execute_file_upload(self, approval: AiActionApproval, payload: dict) -> dict[str, Any]:
+        """Execute the frozen package upload request with OPS internal permissions."""
+        from app.services.tool_adapters import file_transfer_tools
+
+        action_parameters = dict(payload.get("action_parameters") or {})
+        targets = [str(item or "").strip() for item in (payload.get("targets") or [])]
+        if not targets:
+            raise ValueError("文件上传操作需要至少一个目标服务器")
+        if not action_parameters.get("remote_path"):
+            raise ValueError("文件上传操作需要远端文件路径")
+
+        class _Ctx:
+            username = approval.approved_by or "system"
+            token_owner = approval.approved_by or "system"
+
+        ctx = _Ctx()
+        results = []
+        for server_name in targets:
+            upload_args = {
+                **action_parameters,
+                "server": server_name,
+                "confirm_text": "CONFIRM ops.upload_file",
+            }
+            try:
+                results.append(file_transfer_tools.upload_file(upload_args, ctx, self.db))
+            except Exception as exc:
+                results.append({"server": server_name, "ok": False, "error": str(exc)})
+
+        success_count = sum(1 for item in results if item.get("ok"))
+        execution_result = {
+            "action": "FILE_UPLOAD",
+            "system": payload.get("system_name", ""),
+            "service": payload.get("service_name", ""),
+            "targets": targets,
+            "remote_path": action_parameters["remote_path"],
+            "package_sha256": action_parameters.get("expected_sha256", ""),
+            "package_size_bytes": action_parameters.get("expected_size_bytes"),
+            "results": results,
+            "success_count": success_count,
+            "fail_count": len(results) - success_count,
+            "message": f"文件上传完成: {success_count}/{len(targets)} 成功, {len(results) - success_count} 失败",
+        }
+        if execution_result["fail_count"]:
+            raise FileUploadExecutionError(execution_result)
+        return execution_result
 
     def _control_single_server(self, server_name: str, system: str, service: str, action: str, ctx, *, compose_service: str = "", env: dict | None = None, compose_args: list[str] | None = None) -> dict:
         """在单台服务器上执行服务控制。"""

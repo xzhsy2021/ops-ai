@@ -47,21 +47,20 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from config_manager import _init_db, _ensure_defaults, load_config
     from app.db import init_db
+    from app.db.bootstrap import ensure_domain_defaults
     from app.core.auth_v2 import init_default_user
     from app.db.base import SessionLocal
 
-    _init_db()
-    _ensure_defaults()
+    init_db()
+    with SessionLocal() as bootstrap_db:
+        ensure_domain_defaults(bootstrap_db)
     try:
         from app.config.servers import migrate_server_secrets_at_rest
         migrate_server_secrets_at_rest()
     except Exception:
         logger.exception("Failed to migrate server secrets at rest")
         raise
-
-    init_db()
 
     db = SessionLocal()
     try:
@@ -101,8 +100,7 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    config = load_config()
-    # 系统数和服务器数从 DB 表查询（Phase 3a/3e SSOT）
+    # 系统数和服务器数从 DB 表查询。
     try:
         from app.db import ServerRepository, SystemRepository, SessionLocal
         with SessionLocal() as _db:

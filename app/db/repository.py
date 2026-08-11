@@ -6,10 +6,13 @@ from typing import List, Optional, Dict, Any
 from app.deploy.state import TERMINAL_STATUSES, normalize_status
 from sqlalchemy.orm import Session
 from .models import (
-    User, Server, Service, Environment, System,
+    User, Server, Service, Environment, System, SystemEnvironment,
+    CapabilitySetting, RetentionPolicy, NotificationSetting,
+    InspectionProfileSetting, WorkflowTemplateSetting,
+    DeploymentDefault, GlobalVariable,
     Deployment, Pipeline, PipelineStep,
     DeployTask, DeployLog, ServerGroup,
-    ConfigKV, DeploymentRecord, AuditRecord,
+    DeploymentRecord, AuditRecord,
     DeploymentServerTask, DeploymentStepTask, DeploymentPackageDistribution,
     DeploymentLockRecord, NotificationEvent,
     JumpHost, SshKey,
@@ -156,7 +159,8 @@ class SystemRepository:
     def create(self, name: str, display_name: str = None, strategy: str = "WORKFLOW",
                base_path: str = "/data/web/app", description: str = None,
                variables: dict = None, servers: list = None,
-               environments: dict = None, services: list = None) -> System:
+               environments: dict = None, services: list = None,
+               message_routing: dict = None) -> System:
         system = System(
             name=name,
             display_name=display_name or name,
@@ -167,6 +171,7 @@ class SystemRepository:
             servers=servers or [],
             environments=environments or {},
             services=services or [],
+            message_routing=message_routing or {},
         )
         self.db.add(system)
         self.db.commit()
@@ -238,11 +243,16 @@ class ServiceRepository:
         return self.db.query(Service).filter(Service.system_name == system_name).all()
 
     def create(self, name: str, system_name: str, display_name: str = None,
-               template: str = None, pipeline_id: str = None, template_variables: dict = None, servers: list = None) -> Service:
+               repo: str = None, build_cmd: str = None, start_cmd: str = None,
+               template: str = None, pipeline_id: str = None,
+               template_variables: dict = None, servers: list = None) -> Service:
         service = Service(
             name=name,
             system_name=system_name,
             display_name=display_name,
+            repo=repo,
+            build_cmd=build_cmd,
+            start_cmd=start_cmd,
             template=template,
             pipeline_id=pipeline_id,
             template_variables=template_variables or {},
@@ -299,6 +309,236 @@ class EnvironmentRepository:
             self.db.commit()
             return True
         return False
+
+
+class SystemEnvironmentRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_by_id(self, environment_id: str) -> Optional[SystemEnvironment]:
+        return self.db.query(SystemEnvironment).filter(SystemEnvironment.id == environment_id).first()
+
+    def get_by_name(self, system_name: str, name: str) -> Optional[SystemEnvironment]:
+        return self.db.query(SystemEnvironment).filter(
+            SystemEnvironment.system_name == system_name,
+            SystemEnvironment.name == name,
+        ).first()
+
+    def list_all(self) -> List[SystemEnvironment]:
+        return self.db.query(SystemEnvironment).order_by(
+            SystemEnvironment.system_name,
+            SystemEnvironment.name,
+        ).all()
+
+    def list_by_system(self, system_name: str) -> List[SystemEnvironment]:
+        return self.db.query(SystemEnvironment).filter(
+            SystemEnvironment.system_name == system_name,
+        ).order_by(SystemEnvironment.name).all()
+
+    def create(
+        self,
+        *,
+        system_name: str,
+        name: str,
+        display_name: str = None,
+        category: str = "custom",
+        description: str = None,
+        base_path: str = None,
+        servers: list = None,
+        variables: dict = None,
+        service_overrides: dict = None,
+        group_overrides: dict = None,
+    ) -> SystemEnvironment:
+        row = SystemEnvironment(
+            system_name=system_name,
+            name=name,
+            display_name=display_name or name,
+            category=category or "custom",
+            description=description,
+            base_path=base_path,
+            servers=servers or [],
+            variables=variables or {},
+            service_overrides=service_overrides or {},
+            group_overrides=group_overrides or {},
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def upsert(
+        self,
+        *,
+        system_name: str,
+        name: str,
+        display_name: str = None,
+        category: str = "custom",
+        description: str = None,
+        base_path: str = None,
+        servers: list = None,
+        variables: dict = None,
+        service_overrides: dict = None,
+        group_overrides: dict = None,
+    ) -> SystemEnvironment:
+        row = self.get_by_name(system_name, name)
+        if row is None:
+            return self.create(
+                system_name=system_name,
+                name=name,
+                display_name=display_name,
+                category=category,
+                description=description,
+                base_path=base_path,
+                servers=servers,
+                variables=variables,
+                service_overrides=service_overrides,
+                group_overrides=group_overrides,
+            )
+        row.display_name = display_name or name
+        row.category = category or "custom"
+        row.description = description
+        row.base_path = base_path
+        row.servers = servers or []
+        row.variables = variables or {}
+        row.service_overrides = service_overrides or {}
+        row.group_overrides = group_overrides or {}
+        self.db.flush()
+        return row
+
+    def delete(self, environment_id: str) -> bool:
+        row = self.get_by_id(environment_id)
+        if row is None:
+            return False
+        self.db.delete(row)
+        self.db.flush()
+        return True
+
+
+class _SingletonSettingsRepository:
+    model = None
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get(self) -> Optional[Dict[str, Any]]:
+        row = self.db.query(self.model).filter(self.model.id == "default").first()
+        return dict(row.settings or {}) if row else None
+
+    def set(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        row = self.db.query(self.model).filter(self.model.id == "default").first()
+        payload = dict(settings or {})
+        if row is None:
+            self.db.add(self.model(id="default", settings=payload))
+        else:
+            row.settings = payload
+        self.db.flush()
+        return payload
+
+
+class CapabilitySettingsRepository(_SingletonSettingsRepository):
+    model = CapabilitySetting
+
+
+class NotificationSettingsRepository(_SingletonSettingsRepository):
+    model = NotificationSetting
+
+
+class DeploymentDefaultsRepository(_SingletonSettingsRepository):
+    model = DeploymentDefault
+
+
+class RetentionPolicyRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get(self, policy_type: str) -> Optional[Dict[str, Any]]:
+        row = self.db.query(RetentionPolicy).filter(RetentionPolicy.policy_type == policy_type).first()
+        return dict(row.settings or {}) if row else None
+
+    def set(self, policy_type: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        row = self.db.query(RetentionPolicy).filter(RetentionPolicy.policy_type == policy_type).first()
+        payload = dict(settings or {})
+        if row is None:
+            self.db.add(RetentionPolicy(policy_type=policy_type, settings=payload))
+        else:
+            row.settings = payload
+        self.db.flush()
+        return payload
+
+
+class _NamedSettingsRepository:
+    model = None
+    payload_field = "settings"
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get(self, name: str) -> Optional[Dict[str, Any]]:
+        row = self.db.query(self.model).filter(self.model.name == name).first()
+        if row is None:
+            return None
+        return dict(getattr(row, self.payload_field) or {})
+
+    def get_all(self) -> Dict[str, Dict[str, Any]]:
+        rows = self.db.query(self.model).order_by(self.model.name).all()
+        return {row.name: dict(getattr(row, self.payload_field) or {}) for row in rows}
+
+    def set(self, name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        row = self.db.query(self.model).filter(self.model.name == name).first()
+        value = dict(payload or {})
+        if row is None:
+            self.db.add(self.model(name=name, **{self.payload_field: value}))
+        else:
+            setattr(row, self.payload_field, value)
+        self.db.flush()
+        return value
+
+    def delete(self, name: str) -> bool:
+        row = self.db.query(self.model).filter(self.model.name == name).first()
+        if row is None:
+            return False
+        self.db.delete(row)
+        self.db.flush()
+        return True
+
+
+class InspectionProfileRepository(_NamedSettingsRepository):
+    model = InspectionProfileSetting
+
+
+class WorkflowTemplateRepository(_NamedSettingsRepository):
+    model = WorkflowTemplateSetting
+    payload_field = "template"
+
+
+class GlobalVariableRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_all(self) -> Dict[str, Any]:
+        return {
+            row.name: row.value
+            for row in self.db.query(GlobalVariable).order_by(GlobalVariable.name).all()
+        }
+
+    def set(self, name: str, value: Any) -> Any:
+        row = self.db.query(GlobalVariable).filter(GlobalVariable.name == name).first()
+        if row is None:
+            self.db.add(GlobalVariable(name=name, value=value))
+        else:
+            row.value = value
+        self.db.flush()
+        return value
+
+    def replace_all(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        wanted = dict(values or {})
+        existing = {row.name: row for row in self.db.query(GlobalVariable).all()}
+        for name, row in existing.items():
+            if name not in wanted:
+                self.db.delete(row)
+        for name, value in wanted.items():
+            self.set(name, value)
+        self.db.flush()
+        return wanted
 
 
 class DeploymentRepository:
@@ -807,43 +1047,6 @@ class SshKeyRepository:
             "description": row.description,
         }
 
-
-class ConfigRepository:
-    def __init__(self, session: Session):
-        self.session = session
-
-    def get_all(self) -> Dict[str, Any]:
-        rows = self.session.query(ConfigKV).all()
-        result = {}
-        for row in rows:
-            try:
-                result[row.key] = json.loads(row.value)
-            except json.JSONDecodeError:
-                result[row.key] = row.value
-        return result
-
-    def get(self, key: str) -> Any:
-        row = self.session.query(ConfigKV).filter(ConfigKV.key == key).first()
-        if not row:
-            return None
-        try:
-            return json.loads(row.value)
-        except json.JSONDecodeError:
-            return row.value
-
-    def set(self, key: str, value: Any):
-        existing = self.session.query(ConfigKV).filter_by(key=key).first()
-        json_value = json.dumps(value, ensure_ascii=False)
-        if existing:
-            existing.value = json_value
-        else:
-            self.session.add(ConfigKV(key=key, value=json_value))
-        self.session.flush()
-
-    def save_all(self, config: Dict[str, Any]):
-        for key, value in config.items():
-            self.set(key, value)
-        self.session.commit()
 
     def save_deploy_log(self, log_dict: Dict[str, Any]) -> bool:
         try:

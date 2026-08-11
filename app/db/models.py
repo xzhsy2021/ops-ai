@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, String, Integer, DateTime, Text, Boolean, ForeignKey, JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from .base import Base
@@ -41,8 +42,7 @@ class Server(Base):
     jump_host = Column(String(64), nullable=True)
     status = Column(String(24), default="online", index=True)
     # Extra dict (description, tags, group, sftp_allowed_roots, auth_type, enabled,
-    # inline_jump_host, etc.). Phase 3a SSOT migration: writers populate this column
-    # instead of config_kv["servers"]; readers should fall back to {} if NULL.
+    # inline_jump_host, etc.). Readers fall back to {} if this column is NULL.
     metadata_json = Column(JSON, nullable=True, default=dict)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -57,12 +57,29 @@ class Environment(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
-class System(Base):
-    """Phase 3e SSOT: 系统配置主表，替代 config_kv['systems'] blob。
+class SystemEnvironment(Base):
+    __tablename__ = "system_environments"
+    __table_args__ = (
+        UniqueConstraint("system_name", "name", name="uq_system_environment_name"),
+    )
 
-    每个 system 独立行，消除 blob 整体改写的并发问题。
-    environments/services 作为 JSON 字段存储，保留 deep-merge 逻辑。
-    """
+    id = Column(String(32), primary_key=True, default=_uuid)
+    system_name = Column(String(64), ForeignKey("systems.name", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(64), nullable=False, index=True)
+    display_name = Column(String(128), nullable=True)
+    category = Column(String(32), default="custom")
+    description = Column(Text, nullable=True)
+    base_path = Column(String(255), nullable=True)
+    servers = Column(JSON, default=list)
+    variables = Column(JSON, default=dict)
+    service_overrides = Column(JSON, default=dict)
+    group_overrides = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class System(Base):
+    """System metadata; services and environments use dedicated tables."""
     __tablename__ = "systems"
 
     id = Column(String(32), primary_key=True, default=_uuid)
@@ -73,14 +90,81 @@ class System(Base):
     description = Column(Text, nullable=True)
     variables = Column(JSON, default=dict)
     servers = Column(JSON, default=list)
+    message_routing = Column(JSON, default=dict)
     environments = Column(JSON, default=dict)  # per-system 环境配置（含 service_overrides/group_overrides）
     services = Column(JSON, default=list)  # 服务列表（legacy 形态，Service 表是独立 SSOT）
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class CapabilitySetting(Base):
+    __tablename__ = "capability_settings"
+
+    id = Column(String(32), primary_key=True, default="default")
+    settings = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class RetentionPolicy(Base):
+    __tablename__ = "retention_policies"
+
+    policy_type = Column(String(32), primary_key=True)
+    settings = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class NotificationSetting(Base):
+    __tablename__ = "notification_settings"
+
+    id = Column(String(32), primary_key=True, default="default")
+    settings = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InspectionProfileSetting(Base):
+    __tablename__ = "inspection_profiles"
+
+    name = Column(String(128), primary_key=True)
+    settings = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class WorkflowTemplateSetting(Base):
+    __tablename__ = "workflow_templates"
+
+    name = Column(String(128), primary_key=True)
+    template = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class DeploymentDefault(Base):
+    __tablename__ = "deployment_defaults"
+
+    id = Column(String(32), primary_key=True, default="default")
+    settings = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class GlobalVariable(Base):
+    __tablename__ = "global_variables"
+
+    name = Column(String(128), primary_key=True)
+    value = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class Service(Base):
     __tablename__ = "services"
+    __table_args__ = (
+        UniqueConstraint("system_name", "name", name="uq_services_system_name"),
+    )
 
     id = Column(String(32), primary_key=True, default=_uuid)
     name = Column(String(64), nullable=False, index=True)
@@ -183,10 +267,9 @@ class ServerGroup(Base):
 
 
 class JumpHost(Base):
-    """跳板机 (bastion) — Phase 3.g SSOT migration.
+    """跳板机 (bastion) inventory.
 
-    Replaces config_kv["jump_hosts"] list-of-dicts. The `servers.jump_host`
-    column continues to hold the *name* of a JumpHost (string reference);
+    The `servers.jump_host` column holds the JumpHost name;
     full connection metadata (host/port/user/key/key_content/password) lives
     here and is resolved on demand by get_jump_host_by_name().
 
@@ -739,12 +822,6 @@ class SshKey(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
-
-
-class ConfigKV(Base):
-    __tablename__ = "config_kv"
-    key = Column(String, primary_key=True)
-    value = Column(Text, nullable=False)
 
 
 class DeploymentRecord(Base):

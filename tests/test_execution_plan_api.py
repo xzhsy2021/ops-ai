@@ -169,6 +169,41 @@ class TestGetPlanDetail:
         assert "approval_code_hash" not in body
         assert "authorized_matrix_users" not in body
 
+    def test_file_upload_detail_exposes_approval_fields(self, db, client):
+        svc = ExecutionPlanService(db)
+        plan, _ = svc.prepare(
+            room_id=_room("upload-detail"),
+            request_event_id=_event("upload-detail"),
+            content_sha256="e" * 64,
+            system_name="crypto-trader",
+            service_name="crypto-frontend",
+            environment="test",
+            targets=["cc-test2"],
+            steps=[{
+                "step_key": "upload",
+                "action_type": "FILE_UPLOAD",
+                "parameters": {
+                    "action_parameters": {
+                        "package_name": "frontend.tar.gz",
+                        "remote_path": "/srv/releases/frontend.tar.gz",
+                        "overwrite": False,
+                        "expected_sha256": "f" * 64,
+                        "expected_size_bytes": 12,
+                    },
+                },
+                "dependencies": [],
+            }],
+            policy={"continue_on_error": False},
+            routing_config_revision="rev-upload-detail",
+            routing_ticket_digest="ticket-upload-detail",
+            authorized_matrix_users=["@admin:matrix.org"],
+        )
+
+        resp = client.get(f"/api/v2/execution-plans/{plan.id}")
+
+        assert resp.status_code == 200
+        assert resp.json()["steps"][0]["approval_details"]["remote_path"] == "/srv/releases/frontend.tar.gz"
+
     def test_detail_404_for_unknown(self, db, client):
         resp = client.get("/api/v2/execution-plans/does-not-exist")
         assert resp.status_code == 404

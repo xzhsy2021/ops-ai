@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form, D
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from config_manager import load_config, save_config, get_all_servers, get_server_by_name
+from app.config.servers import get_all_servers, get_server_by_name, save_server
+from app.config.systems import get_all_systems, save_system
 from app.api.helpers import api_response, audit
 from app.core.config import get_runtime_path
 from app.db import get_db
@@ -31,6 +32,41 @@ from app.services.backup_service import (
 
 admin_ops_router = APIRouter(prefix="/api/v2/admin", tags=["后台维护"])
 logger = logging.getLogger(__name__)
+
+
+def _database_config_snapshot(db: Session) -> dict:
+    from app.db.repository import (
+        CapabilitySettingsRepository,
+        DeploymentDefaultsRepository,
+        GlobalVariableRepository,
+        InspectionProfileRepository,
+        NotificationSettingsRepository,
+        RetentionPolicyRepository,
+        WorkflowTemplateRepository,
+    )
+
+    retention_repo = RetentionPolicyRepository(db)
+    return {
+        "systems": get_all_systems(),
+        "capability_settings": CapabilitySettingsRepository(db).get() or {},
+        "retention_policies": {
+            name: retention_repo.get(name) or {}
+            for name in ("release", "package", "runtime")
+        },
+        "notification_settings": NotificationSettingsRepository(db).get() or {},
+        "inspection_profiles": InspectionProfileRepository(db).get_all(),
+        "workflow_templates": WorkflowTemplateRepository(db).get_all(),
+        "global_variables": GlobalVariableRepository(db).get_all(),
+        "deploy_defaults": DeploymentDefaultsRepository(db).get() or {},
+    }
+
+
+def _replace_named_settings(repo, values: dict) -> None:
+    wanted = dict(values or {})
+    for name in set(repo.get_all()) - set(wanted):
+        repo.delete(name)
+    for name, payload in wanted.items():
+        repo.set(str(name), payload if isinstance(payload, dict) else {})
 
 
 def _as_http_error(exc: BackupServiceError) -> HTTPException:
@@ -66,10 +102,14 @@ def _create_config_import_backup() -> str:
 
 
 def _config_import_diff(data: dict, db: Session) -> dict:
-    current_config = load_config()
+    current_config = _database_config_snapshot(db)
     imported_config = data.get("config", {}) or {}
     diff = {"config_keys": {}, "pipelines": {}, "server_groups": {}, "servers": {}}
-    for key in ("systems", "settings", "global_variables", "deploy_defaults"):
+    for key in (
+        "systems", "capability_settings", "retention_policies",
+        "notification_settings", "inspection_profiles", "workflow_templates",
+        "global_variables", "deploy_defaults",
+    ):
         if key in imported_config:
             before = current_config.get(key, {}) or {}
             after = imported_config.get(key, {}) or {}
@@ -116,12 +156,7 @@ def schema_version(request: Request, db: Session = Depends(get_db)):
 @admin_ops_router.get("/export-config")
 def export_config(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
-    config = load_config()
-    safe_config = {}
-
-    for key in ("systems", "settings", "global_variables", "deploy_defaults"):
-        if key in config:
-            safe_config[key] = config[key]
+    safe_config = _database_config_snapshot(db)
 
     servers_list = get_all_servers()
     safe_servers = []
@@ -165,7 +200,7 @@ def export_config(request: Request, db: Session = Depends(get_db)):
 
     return api_response(data={
         "app": "ops",
-        "version": "2.0",
+        "version": "3.0",
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "config": safe_config,
         "pipelines": pipelines_data,
@@ -194,18 +229,40 @@ async def import_config(request: Request, db: Session = Depends(get_db)):
 
     import_backup = _create_config_import_backup()
     diff = _config_import_diff(data, db)
-    current_config = load_config()
+    from app.db.repository import (
+        CapabilitySettingsRepository,
+        DeploymentDefaultsRepository,
+        GlobalVariableRepository,
+        InspectionProfileRepository,
+        NotificationSettingsRepository,
+        RetentionPolicyRepository,
+        WorkflowTemplateRepository,
+    )
 
-    for key in ("systems", "global_variables", "deploy_defaults"):
-        if key in imported_config:
-            current_config[key] = imported_config[key]
-
-    save_config(current_config)
+    for system_name, system_payload in (imported_config.get("systems") or {}).items():
+        if not save_system(str(system_name), system_payload if isinstance(system_payload, dict) else {}):
+            raise HTTPException(status_code=500, detail=f"Failed to import system: {system_name}")
+    if "global_variables" in imported_config:
+        GlobalVariableRepository(db).replace_all(imported_config.get("global_variables") or {})
+    if "deploy_defaults" in imported_config:
+        DeploymentDefaultsRepository(db).set(imported_config.get("deploy_defaults") or {})
+    if "capability_settings" in imported_config:
+        CapabilitySettingsRepository(db).set(imported_config.get("capability_settings") or {})
+    if "notification_settings" in imported_config:
+        NotificationSettingsRepository(db).set(imported_config.get("notification_settings") or {})
+    if "retention_policies" in imported_config:
+        retention_repo = RetentionPolicyRepository(db)
+        for policy_type, policy in (imported_config.get("retention_policies") or {}).items():
+            retention_repo.set(str(policy_type), policy if isinstance(policy, dict) else {})
+    if "inspection_profiles" in imported_config:
+        _replace_named_settings(InspectionProfileRepository(db), imported_config.get("inspection_profiles") or {})
+    if "workflow_templates" in imported_config:
+        _replace_named_settings(WorkflowTemplateRepository(db), imported_config.get("workflow_templates") or {})
+    db.commit()
 
     imported_servers = imported_config.get("servers", [])
     if imported_servers:
         for srv in imported_servers:
-            from config_manager import save_server
             save_server(srv)
 
     imported_pipelines = data.get("pipelines", [])

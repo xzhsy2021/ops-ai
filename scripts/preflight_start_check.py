@@ -15,6 +15,7 @@ import platform
 import socket
 import sqlite3
 import sys
+import tempfile
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,14 +139,26 @@ def _package_files_check() -> Check:
 
 
 def _writable_dir(path: Path) -> tuple[bool, str]:
+    probe = None
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".ops_preflight_write_test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        # Use a unique temporary file. A fixed probe can be left behind by a
+        # different process/identity and make a writable directory look broken.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".ops_preflight_", suffix=".tmp",
+            dir=path, delete=False,
+        ) as handle:
+            probe = Path(handle.name)
+            handle.write("ok")
         return True, ""
     except Exception as exc:
         return False, str(exc)
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _runtime_dirs_check() -> Check:

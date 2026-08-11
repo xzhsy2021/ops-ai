@@ -178,6 +178,124 @@ def test_mcp_aliases_round_trip_without_prior_tools_list_cache():
     assert _from_mcp_tool_name("ops_db_export_query_result") == "ops.db.export_query_result"
 
 
+def test_stdio_file_upload_approval_stages_local_package_before_prepare(monkeypatch):
+    from app.mcp import server
+
+    captured = {}
+    manifest = {
+        "ok": True,
+        "local_path": "C:/room/package.tar.gz",
+        "package_name": "package.tar.gz",
+        "sha256": "a" * 64,
+        "size_bytes": 12,
+        "blockers": [],
+    }
+
+    monkeypatch.setattr(server, "_local_package_manifest_for_mcp", lambda args: manifest)
+    uploads = {}
+
+    def fake_upload(args, approval_intake=False):
+        uploads.update({"args": args, "approval_intake": approval_intake})
+        return {
+            "data": {"result": {"package_name": "package.tar.gz", "sha256": "a" * 64}}
+        }
+
+    monkeypatch.setattr(server, "_multipart_upload_package", fake_upload)
+
+    def fake_request(method, path, payload):
+        captured.update({"method": method, "path": path, "payload": payload})
+        return {"data": {"result": {"approval_id": "approval-1"}}}
+
+    monkeypatch.setattr(server, "_request", fake_request)
+
+    result = server._prepare_file_upload_for_mcp({
+        "room_id": "!room:example.org",
+        "request_event_id": "$event",
+        "content_sha256": "b" * 64,
+        "system_name": "crypto-trader",
+        "service_name": "crypto-frontend",
+        "environment": "test",
+        "targets": ["server-a"],
+        "routing_config_revision": "rev-1",
+        "routing_ticket_digest": "ticket-1",
+        "action_parameters": {
+            "local_path": "C:/room/package.tar.gz",
+            "filename": "package.tar.gz",
+            "remote_path": "/srv/releases/package.tar.gz",
+        },
+    })
+
+    assert result["data"]["result"]["approval_id"] == "approval-1"
+    forwarded = captured["payload"]["arguments"]
+    assert forwarded["action_parameters"]["package_name"] == "package.tar.gz"
+    assert "local_path" not in forwarded["action_parameters"]
+    assert forwarded["action_parameters"]["expected_sha256"] == "a" * 64
+    assert forwarded["action_parameters"]["expected_size_bytes"] == 12
+    assert uploads["approval_intake"] is True
+
+
+def test_stdio_batch_file_upload_stages_local_package_before_single_plan_approval(monkeypatch):
+    from app.mcp import server
+
+    captured = {}
+    manifest = {
+        "ok": True,
+        "local_path": "C:/room/package.tar.gz",
+        "package_name": "package.tar.gz",
+        "sha256": "d" * 64,
+        "size_bytes": 24,
+        "blockers": [],
+    }
+    monkeypatch.setattr(server, "_local_package_manifest_for_mcp", lambda args: manifest)
+    uploads = {}
+
+    def fake_upload(args, approval_intake=False):
+        uploads.update({"args": args, "approval_intake": approval_intake})
+        return {
+            "data": {"result": {"package_name": "approval-package.tar.gz", "sha256": "d" * 64}}
+        }
+
+    monkeypatch.setattr(server, "_multipart_upload_package", fake_upload)
+
+    def fake_request(method, path, payload):
+        captured.update({"method": method, "path": path, "payload": payload})
+        return {"data": {"result": {"plan_id": "plan-1", "short_code": "ABCD1234"}}}
+
+    monkeypatch.setattr(server, "_request", fake_request)
+
+    result = server._prepare_plan_for_mcp({
+        "room_id": "!room:example.org",
+        "request_event_id": "$event",
+        "content_sha256": "b" * 64,
+        "system_name": "crypto-trader",
+        "service_name": "crypto-frontend",
+        "environment": "test",
+        "targets": ["server-a"],
+        "routing_config_revision": "rev-1",
+        "routing_ticket_digest": "ticket-1",
+        "steps": [{
+            "step_key": "upload",
+            "action_type": "FILE_UPLOAD",
+            "parameters": {
+                "action_parameters": {
+                    "local_path": "C:/room/package.tar.gz",
+                    "filename": "package.tar.gz",
+                    "remote_path": "/srv/releases/package.tar.gz",
+                },
+            },
+        }],
+    })
+
+    assert result["data"]["result"]["plan_id"] == "plan-1"
+    forwarded = captured["payload"]["arguments"]
+    action_parameters = forwarded["steps"][0]["parameters"]["action_parameters"]
+    assert action_parameters["package_name"] == "approval-package.tar.gz"
+    assert "local_path" not in action_parameters
+    assert action_parameters["expected_sha256"] == "d" * 64
+    assert action_parameters["expected_size_bytes"] == 24
+    assert uploads["approval_intake"] is True
+
+
 def test_mcp_capability_service_owns_alias_payload_and_call_contract(tmp_path):
     from app.services.mcp_capability_service import (
         from_mcp_tool_name,

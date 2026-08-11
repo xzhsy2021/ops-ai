@@ -6,14 +6,7 @@ from app.core.secret_store import decrypt_secret, encrypt_secret, is_encrypted
 
 logger = logging.getLogger(__name__)
 
-# Phase 3a SSOT migration:
-# - server 写路径:save_server / delete_server → ServerRepository (DB 表)
-# - server 读路径:get_all_servers / get_server_by_name → ServerRepository
-# - config_kv["servers"] 不再被这些函数写入;保留其历史数据作为只读回退已不再需要。
-#
-# Phase 3.g SSOT migration:
-# - jump host 读路径:get_jump_host_by_name → JumpHostRepository (DB 表)
-# - config_kv["jump_hosts"] 仍可存在为只读 legacy 桶,save_config 写入时会打 deprecation 警告
+# Server and jump-host inventory is stored in dedicated database tables.
 
 _SECRET_FIELDS = ("password", "key_content")
 _REDACTED = "********"
@@ -114,7 +107,7 @@ def _server_dict_to_metadata(server: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _server_row_to_dict(row) -> Optional[Dict[str, Any]]:
-    """ORM Server row → legacy config_kv-style dict (decrypted, metadata merged)."""
+    """Convert a Server row to the API-compatible decrypted dictionary."""
     if row is None:
         return None
     meta = row.metadata_json or {}
@@ -219,7 +212,7 @@ def resolve_server(key: Optional[str], db=None) -> Optional[Dict[str, Any]]:
     This helper closes the gap so Path B remains a usable fallback. It tries
     multiple lookup strategies in order:
 
-    1. Exact ``name`` match (config_kv legacy + DB name column).
+    1. Exact ``name`` match.
     2. Exact ``id`` (UUID) match.
     3. Short-prefix UUID match — if the caller passed a hex string of 4-32
        characters that uniquely matches the start of a row's ``id``.
@@ -284,10 +277,9 @@ def resolve_server(key: Optional[str], db=None) -> Optional[Dict[str, Any]]:
 def save_server(server: Dict[str, Any], db=None) -> bool:
     """Persist a server row to the Server table (DB is SSOT).
 
-    The input dict shape matches what the v2 API and the legacy config_kv
-    layer used to accept (name/host/port/user/password/key/key_content/
+    The input dict accepts name/host/port/user/password/key/key_content/
     jump_host/status, plus extras like description/tags/group/sftp_allowed_roots/
-    auth_type/enabled/username). This function does not touch config_kv.
+    auth_type/enabled/username).
     """
     from app.db.models import Server
     from app.db.repository import ServerRepository, _encrypt_server_fields
@@ -318,11 +310,6 @@ def save_server(server: Dict[str, Any], db=None) -> bool:
             db.refresh(existing)
             logger.info("Updated server (DB SSOT): %s", name)
 
-        try:
-            from app.config.cache import invalidate_config_cache
-            invalidate_config_cache()
-        except Exception:
-            logger.debug("Failed to invalidate config cache after save_server", exc_info=True)
         return True
     except Exception:
         logger.exception("save_server failed for %s", name)
@@ -358,10 +345,21 @@ def delete_server(name: str, db=None) -> bool:
 
     db, owns = _open_session(db)
     try:
-        refs = _get_database_connection_references(db, name)
+        refs = get_server_references(name, db=db)
         if refs:
-            ref_names = ", ".join({r["connection_name"] for r in refs})
-            raise ValueError(f"服务器 '{name}' 正被以下数据库连接引用: {ref_names}。请先修改或删除相关数据库连接。")
+            ref_labels = sorted({
+                "/".join(str(part) for part in (
+                    ref.get("type"),
+                    ref.get("system"),
+                    ref.get("environment") or ref.get("service") or ref.get("group"),
+                    ref.get("connection_name") or ref.get("deployment_id"),
+                ) if part)
+                for ref in refs
+            })
+            raise ValueError(
+                f"Server '{name}' is referenced by: {', '.join(ref_labels)}. "
+                "Remove those references before deleting the server."
+            )
 
         repo = ServerRepository(db)
         row = repo._get_server_row_by_name(name)
@@ -370,11 +368,6 @@ def delete_server(name: str, db=None) -> bool:
             return False
         db.delete(row)
         db.commit()
-        try:
-            from app.config.cache import invalidate_config_cache
-            invalidate_config_cache()
-        except Exception:
-            logger.debug("Failed to invalidate config cache after delete_server", exc_info=True)
         logger.info("Deleted server (DB SSOT): %s", name)
         return True
     except ValueError:
@@ -391,7 +384,7 @@ def delete_server(name: str, db=None) -> bool:
             db.close()
 
 
-# ─── Jump hosts (still read from config_kv; pending dedicated JumpHost model) ──
+# ─── Jump hosts ─────────────────────────────────────────────────────────────
 
 
 def get_jump_host_by_name(name: str) -> Optional[Dict[str, Any]]:
@@ -514,11 +507,6 @@ def migrate_server_secrets_at_rest() -> int:
                 changed += 1
         if changed:
             db.commit()
-            try:
-                from app.config.cache import invalidate_config_cache
-                invalidate_config_cache()
-            except Exception:
-                logger.debug("Failed to invalidate cache after server secret migration", exc_info=True)
             logger.info("Encrypted %s server rows' plaintext secrets (at rest)", changed)
         return changed
     finally:
@@ -529,18 +517,37 @@ def migrate_server_secrets_at_rest() -> int:
 # ─── Reference lookup (Phase 3a: query DB tables) ────────────────────────────
 
 
-def get_server_references(server_name: str) -> List[Dict[str, Any]]:
+def get_server_references(server_name: str, db=None) -> List[Dict[str, Any]]:
     """Find DB rows that reference a server by name.
 
-    Replaces the old config_kv-based lookup, which read systems[].servers /
-    systems[].environments[].servers / systems[].groups[].server. Now we query
-    ServerGroup.server_names, Service.servers, and Deployment.servers.
+    Covers every domain table that stores a server name.
     """
-    from app.db.models import Deployment, ServerGroup, Service
+    from app.db.models import (
+        Deployment,
+        ServerGroup,
+        Service,
+        System,
+        SystemEnvironment,
+    )
 
-    db, owns = _open_session(None)
+    db, owns = _open_session(db)
     try:
         refs: List[Dict[str, Any]] = []
+
+        for system in db.query(System).all():
+            if server_name in (system.servers or []):
+                refs.append({
+                    "type": "system",
+                    "system": system.name,
+                })
+
+        for environment in db.query(SystemEnvironment).all():
+            if server_name in (environment.servers or []):
+                refs.append({
+                    "type": "system_environment",
+                    "system": environment.system_name,
+                    "environment": environment.name,
+                })
 
         for g in db.query(ServerGroup).all():
             if server_name in (g.server_names or []):
@@ -569,6 +576,8 @@ def get_server_references(server_name: str) -> List[Dict[str, Any]]:
                     "system": dep.system,
                     "status": dep.status,
                 })
+
+        refs.extend(_get_database_connection_references(db, server_name))
 
         return refs
     finally:

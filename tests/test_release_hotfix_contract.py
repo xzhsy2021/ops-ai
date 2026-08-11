@@ -6,15 +6,14 @@ import pytest
 
 
 def test_notification_settings_default_and_normalization(monkeypatch):
-    import app.db
+    import app.db.repository
     from app.api import deploy_v2
 
-    class FakeConfigRepository:
+    class FakeNotificationSettingsRepository:
         def __init__(self, db):
             pass
 
-        def get(self, key):
-            assert key == "notification_settings"
+        def get(self):
             return {
                 "enabled": 1,
                 "webhook_urls": " https://a.example/hook ， https://a.example/hook\nhttps://b.example/hook ",
@@ -22,7 +21,11 @@ def test_notification_settings_default_and_normalization(monkeypatch):
                 "timeout": "999",
             }
 
-    monkeypatch.setattr(app.db, "ConfigRepository", FakeConfigRepository)
+    monkeypatch.setattr(
+        app.db.repository,
+        "NotificationSettingsRepository",
+        FakeNotificationSettingsRepository,
+    )
 
     settings = deploy_v2._notification_settings(object())
 

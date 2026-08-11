@@ -20,7 +20,7 @@ from app.db.models import (
     ToolPlan,
     ToolPlanEvent,
 )
-from app.db import ConfigRepository
+from app.db.repository import RetentionPolicyRepository
 
 
 DEFAULT_RETENTION: Dict[str, Any] = {
@@ -115,7 +115,7 @@ def _normalize_policy(policy: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_retention_policy(db: Session) -> Dict[str, Any]:
-    cfg = ConfigRepository(db).get("release_retention") or {}
+    cfg = RetentionPolicyRepository(db).get("release") or {}
     if not isinstance(cfg, dict):
         cfg = {}
     return _normalize_policy(cfg)
@@ -123,7 +123,7 @@ def get_retention_policy(db: Session) -> Dict[str, Any]:
 
 def save_retention_policy(db: Session, policy: Dict[str, Any]) -> Dict[str, Any]:
     merged = _normalize_policy({**get_retention_policy(db), **(policy or {})})
-    ConfigRepository(db).set("release_retention", merged)
+    RetentionPolicyRepository(db).set("release", merged)
     db.commit()
     return merged
 

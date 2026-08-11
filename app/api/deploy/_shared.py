@@ -224,7 +224,7 @@ def _find_service_index(services: List[Dict[str, Any]], service_name: str) -> in
 
 def _load_system_cfg(system_name: str) -> Dict[str, Any]:
     from app.domain.inventory import inventory
-    return inventory._load_system_raw(system_name)
+    return inventory.get_system(system_name) or {}
 
 
 def _norm_name(value: Any) -> str:
@@ -1266,10 +1266,10 @@ def _notification_settings(db: Session) -> Dict[str, Any]:
     normalized default keeps GET /notifications safe and lets the UI render
     before the first explicit save.
     """
-    from app.db import ConfigRepository
+    from app.db.repository import NotificationSettingsRepository
 
     defaults = _notification_defaults()
-    raw = ConfigRepository(db).get("notification_settings") or {}
+    raw = NotificationSettingsRepository(db).get() or {}
     if not isinstance(raw, dict):
         raw = {}
     timeout = raw.get("timeout", defaults["timeout"])

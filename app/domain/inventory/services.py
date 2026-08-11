@@ -38,42 +38,36 @@ class InventoryReadService:
     def get_service(self, system_name: str, service_name: str, environment: str = "") -> Optional[Dict[str, Any]]:
         if not service_name:
             return None
-        # Phase 3c SSOT: 优先查 DB;KV 仅作为过渡期回退(DB 与 KV 字段不同时以 DB 为准)。
-        try:
-            from app.db.base import SessionLocal
-            from app.db import ServiceRepository
-            db = SessionLocal()
-            try:
-                repo = ServiceRepository(db)
-                row = repo.get_by_name(service_name, system_name)
-                if row is not None:
-                    return {
-                        "id": row.id,
-                        "name": row.name,
-                        "display_name": row.display_name or row.name,
-                        "system_name": row.system_name,
-                        "repo": row.repo or "",
-                        "template": row.template or "",
-                        "pipeline_id": row.pipeline_id or "",
-                        "servers": row.servers or [],
-                        "template_variables": row.template_variables or {},
-                        "source": "db",
-                    }
-            finally:
-                db.close()
-        except Exception:
-            logger.exception("DB service lookup failed for %s/%s; falling back to KV",
-                             system_name, service_name)
-        try:
-            from app.config.systems import resolve_system_config
-            sys_cfg = resolve_system_config(system_name, environment=environment)
-        except Exception:
-            logger.exception("Failed to resolve service config for %s/%s/%s", system_name, service_name, environment)
-            sys_cfg = self._load_system_raw(system_name)
-        for svc in sys_cfg.get("services", []) or []:
-            if isinstance(svc, dict) and self._service_matches(svc, service_name):
-                return svc
-        return None
+        from app.db.base import SessionLocal
+        from app.db.repository import ServiceRepository, SystemEnvironmentRepository
+
+        with SessionLocal() as db:
+            row = ServiceRepository(db).get_by_name(service_name, system_name)
+            if row is None:
+                return None
+            payload = {
+                "id": row.id,
+                "name": row.name,
+                "display_name": row.display_name or row.name,
+                "system_name": row.system_name,
+                "repo": row.repo or "",
+                "build_cmd": row.build_cmd or "",
+                "start_cmd": row.start_cmd or "",
+                "template": row.template or "",
+                "pipeline_id": row.pipeline_id or "",
+                "servers": list(row.servers or []),
+                "template_variables": dict(row.template_variables or {}),
+                "source": "db",
+            }
+            if environment:
+                env = SystemEnvironmentRepository(db).get_by_name(system_name, environment)
+                override = (env.service_overrides or {}).get(row.name, {}) if env else {}
+                if isinstance(override, dict):
+                    for key in ("display_name", "repo", "build_cmd", "start_cmd", "template", "pipeline_id", "servers"):
+                        if key in override:
+                            payload[key] = override[key]
+                    payload["template_variables"].update(override.get("template_variables") or {})
+            return payload
 
     def list_groups(self, system_name: str, environment: str = None) -> Dict[str, Any]:
         from app.config.systems import get_all_groups
@@ -92,27 +86,46 @@ class InventoryReadService:
         return get_servers_for_system(system_name, environment)
 
     def list_pipelines(self, db, keyword: str = "", limit: int = 100):
-        from config_manager import load_config
-        config = load_config()
-        pipelines = config.get("pipelines", {})
-        items = list(pipelines.values())
+        from app.db.repository import PipelineRepository
+
+        items = [
+            {
+                "id": row.id,
+                "name": row.name,
+                "system_name": row.system_name,
+                "description": row.description or "",
+                "strategy": row.strategy or "DIRECT",
+            }
+            for row in PipelineRepository(db).list_all()
+        ]
         if keyword:
             kw = keyword.lower()
             items = [x for x in items if kw in str(x.get("name", "")).lower() or kw in str(x.get("system", "")).lower()]
         return items[:limit]
 
     def get_pipeline(self, db, pipeline_id: str):
-        from config_manager import load_config
-        config = load_config()
-        return config.get("pipelines", {}).get(pipeline_id)
+        from app.db.repository import PipelineRepository, PipelineStepRepository
 
-    def _load_system_raw(self, system_name: str) -> Dict[str, Any]:
-        try:
-            from app.config.cache import load_config_cached
-            return (load_config_cached().get("systems", {}) or {}).get(system_name, {}) or {}
-        except Exception:
-            logger.exception("Failed to load system config for %s", system_name)
-            return {}
+        row = PipelineRepository(db).get_by_id(pipeline_id)
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "name": row.name,
+            "system_name": row.system_name,
+            "description": row.description or "",
+            "strategy": row.strategy or "DIRECT",
+            "steps": [
+                {
+                    "id": step.id,
+                    "name": step.name,
+                    "type": step.step_type,
+                    "config": step.config or {},
+                    "sort_order": step.sort_order,
+                }
+                for step in PipelineStepRepository(db).list_by_pipeline(row.id)
+            ],
+        }
 
     @staticmethod
     def _norm_name(value: Any) -> str:

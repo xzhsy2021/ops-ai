@@ -7,7 +7,8 @@
 - 本文档对应方案 2：一条消息先生成一个完整 `ExecutionPlan`，授权人只审批一次，之后按冻结步骤顺序执行。
 - 多步骤消息的主流程使用 `ops.approval.prepare_plan` 和 `ops.approval.execute_plan`。
 - `ops.approval.prepare_*` 和 `ops.approval.execute` 仍保留给旧客户端和单动作兼容场景，不是多步骤消息的首选流程。
-- 当前 `ExecutionPlan` 执行器已注册六类步骤：`SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。发布/回滚/DML/包清理可写入计划步骤（`prepare_plan` 的 `steps`），执行时由执行器内部调用共享业务函数完成，不再逐动作审批。
+- 当前 `ExecutionPlan` 执行器已注册七类步骤：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。上传/发布/回滚/DML/包清理可写入计划步骤（`prepare_plan` 的 `steps`），执行时由执行器内部调用共享业务函数完成，不再逐动作审批。
+- stdio MCP 的 `FILE_UPLOAD` 步骤可在 `action_parameters.local_path` 中引用本机受控包。桥接层会先通过房间绑定的审批接收入口暂存到 OPS File Center，再把包名、SHA-256 和大小冻结进同一个计划；不为文件上传创建第二个审批。
 
 ## 身份
 
@@ -102,7 +103,7 @@
 ### 操作类工具（需审批）
 | 场景 | 推荐工具 |
 |------|---------|
-| 多步骤运维请求（发布/回滚/DML/包清理/服务控制） | `ops.approval.prepare_plan`（steps 可含 SERVICE_CONTROL/HEALTH_CHECK/RELEASE/ROLLBACK/DML/PACKAGE_CLEANUP）→ `ops.approval.execute_plan` |
+| 多步骤运维请求（上传/发布/回滚/DML/包清理/服务控制） | `ops.approval.prepare_plan`（steps 可含 SERVICE_CONTROL/HEALTH_CHECK/FILE_UPLOAD/RELEASE/ROLLBACK/DML/PACKAGE_CLEANUP）→ `ops.approval.execute_plan` |
 | 单动作重启/停止/启动（兼容） | `ops.restart_service` / `ops.stop_service` / `ops.start_service` → 对应旧 `ops.approval.prepare_service_control` |
 | 发布（单动作兼容） | `ops.prepare_release_from_local_package` → `ops.approval.prepare_release` → `ops.approval.execute` |
 | 回滚（单动作兼容） | `ops.create_rollback_plan` → `ops.approval.prepare_rollback` → `ops.approval.execute` |

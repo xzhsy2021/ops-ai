@@ -97,6 +97,22 @@ def test_explicit_command_gets_env_prefix():
     assert cmd.startswith("SYSTEM_TRACE=true docker compose up -d --force-recreate system")
 
 
+def test_generic_frontend_update_runs_configured_script_from_deploy_path():
+    cfg = {
+        "template": "generic_frontend",
+        "template_variables": {
+            "deploy_path": "/data/www",
+            "update_script": "./www.sh",
+        },
+    }
+    cmd = _resolve_service_control_command(
+        cfg,
+        "update",
+        env={"DEPLOY_MODE": "test"},
+    )
+    assert cmd == "cd /data/www && DEPLOY_MODE=test ./www.sh"
+
+
 # ── _service_control_handler passthrough ──
 
 def test_service_control_handler_forwards_env_and_compose_args():

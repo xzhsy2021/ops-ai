@@ -3390,9 +3390,8 @@ def assert_server_inspectable(server_id: str) -> Dict[str, Any]:
 
 
 def list_projects() -> List[Dict[str, Any]]:
-    from config_manager import load_config_cached
-    cfg = load_config_cached()
-    systems = cfg.get("systems", {}) or {}
+    from app.config.systems import get_all_systems
+    systems = get_all_systems()
     result: List[Dict[str, Any]] = []
     for sys_name, sys_cfg in systems.items():
         services = sys_cfg.get("services") or []

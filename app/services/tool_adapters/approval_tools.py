@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+from fastapi import HTTPException
 
 from app.services.tool_registry import registry
 from app.services.tool_token import enforce_room_binding, _normalize_approver_ids
@@ -20,9 +21,14 @@ from app.services.qclaw_routing import (
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
-from app.services.execution_plan import ExecutionPlanService
+from app.services.execution_plan import ExecutionPlanService, step_approval_details
 from app.services.package_intake import intake_package, list_staging_packages
 from app.config.systems import get_all_systems
+from app.services.tool_adapters.file_transfer_tools import (
+    _remote_file_path,
+    _resolve_source,
+)
+from app.services.package_retention import get_package_retention_policy, inspect_package_file
 
 
 def _lookup_approvers(ctx, system_name: str, service_name: str | None = None) -> list[str]:
@@ -172,6 +178,72 @@ def _common_prepare_schema() -> dict:
     }
 
 
+def _freeze_file_upload_parameters(raw_parameters: dict, db, *, require_package_name: bool = False):
+    raw_parameters = dict(raw_parameters or {})
+    if require_package_name and not raw_parameters.get("package_name"):
+        raise HTTPException(
+            status_code=400,
+            detail="FILE_UPLOAD steps in a batch plan must reference an OPS File Center package_name",
+        )
+
+    source, filename = _resolve_source(raw_parameters)
+    remote_path = _remote_file_path(raw_parameters.get("remote_path"))
+    overwrite = bool(raw_parameters.get("overwrite", False))
+    confirm_path = str(raw_parameters.get("confirm_path") or "")
+    if overwrite and confirm_path != remote_path:
+        raise HTTPException(status_code=400, detail="Overwriting requires confirm_path equal to remote_path")
+
+    policy = get_package_retention_policy(db) if db is not None else None
+    inspection = inspect_package_file(source, filename=filename, policy=policy, calculate_sha256=True)
+    if inspection.get("blockers"):
+        raise HTTPException(status_code=400, detail="; ".join(inspection["blockers"]))
+    package_sha256 = str(inspection.get("sha256") or "").lower()
+    package_size_bytes = int(inspection.get("size_bytes") or source.stat().st_size)
+    supplied_sha256 = str(raw_parameters.get("expected_sha256") or "").strip().lower()
+    if supplied_sha256 and supplied_sha256 != package_sha256:
+        raise HTTPException(status_code=409, detail="expected_sha256 does not match the local package")
+    if raw_parameters.get("expected_size_bytes") is not None:
+        try:
+            supplied_size = int(raw_parameters["expected_size_bytes"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="expected_size_bytes must be an integer")
+        if supplied_size != package_size_bytes:
+            raise HTTPException(status_code=409, detail="expected_size_bytes does not match the local package")
+
+    action_parameters = {
+        "remote_path": remote_path,
+        "overwrite": overwrite,
+        "expected_sha256": package_sha256,
+        "expected_size_bytes": package_size_bytes,
+    }
+    if raw_parameters.get("package_name"):
+        action_parameters["package_name"] = filename
+    else:
+        action_parameters["local_path"] = str(source)
+    if raw_parameters.get("filename") or not raw_parameters.get("package_name"):
+        action_parameters["filename"] = filename
+    if confirm_path:
+        action_parameters["confirm_path"] = confirm_path
+    return action_parameters, filename, package_sha256, package_size_bytes, remote_path
+
+
+def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
+    frozen_steps = []
+    for raw_step in steps:
+        step = dict(raw_step)
+        if str(step.get("action_type") or "").strip() == "FILE_UPLOAD":
+            parameters = dict(step.get("parameters") or {})
+            action_parameters, _, _, _, _ = _freeze_file_upload_parameters(
+                parameters.get("action_parameters") or {},
+                db,
+                require_package_name=True,
+            )
+            parameters["action_parameters"] = action_parameters
+            step["parameters"] = parameters
+        frozen_steps.append(step)
+    return frozen_steps
+
+
 # ──────────────────────────────────────────────────────────────
 # ops.approval.prepare_service_control — 服务控制审批
 # ──────────────────────────────────────────────────────────────
@@ -241,6 +313,101 @@ def approval_prepare_service_control(args, ctx, db):
         "control_action": control_action,
         "action_label": action_label,
         "targets": args["targets"],
+        "authorized_approvers": approvers,
+    }
+
+
+@registry.register(
+    name="ops.approval.prepare_file_upload",
+    title="Prepare file upload approval",
+    description=(
+        "Create a one-time Element approval for uploading a validated package to one or more "
+        "configured servers. The package checksum, size, targets, and remote path are frozen "
+        "in the approval; approval execution performs the SFTP upload only."
+    ),
+    scopes=["ops:read"],
+    risk="low",
+    category="approval_prepare",
+    input_schema={
+        "type": "object",
+        "properties": {
+            **_common_prepare_schema()["properties"],
+            "targets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Configured target server names",
+            },
+            "action_parameters": {
+                "type": "object",
+                "properties": {
+                    "package_name": {"type": "string"},
+                    "local_path": {"type": "string"},
+                    "filename": {"type": "string"},
+                    "remote_path": {"type": "string"},
+                    "overwrite": {"type": "boolean", "default": False},
+                    "confirm_path": {"type": "string"},
+                    "expected_sha256": {"type": "string"},
+                    "expected_size_bytes": {"type": "integer"},
+                },
+                "required": ["remote_path"],
+                "additionalProperties": False,
+            },
+        },
+        "required": _common_prepare_schema()["required"] + ["targets", "action_parameters"],
+        "additionalProperties": False,
+    },
+)
+def approval_prepare_file_upload(args, ctx, db):
+    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+
+    targets = [str(item or "").strip() for item in (args.get("targets") or [])]
+    if not targets or any(not item for item in targets):
+        raise HTTPException(status_code=400, detail="File upload approval requires at least one target server")
+    if len(set(targets)) != len(targets):
+        raise HTTPException(status_code=400, detail="Duplicate target servers are not allowed")
+
+    action_parameters, filename, package_sha256, package_size_bytes, remote_path = _freeze_file_upload_parameters(
+        args.get("action_parameters") or {},
+        db,
+    )
+
+    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    service = ActionApprovalService(db)
+    approval, short_code = service.prepare(
+        action_type="FILE_UPLOAD",
+        tool_name="ops.approval.prepare_file_upload",
+        room_id=args["room_id"],
+        request_event_id=args["request_event_id"],
+        content_sha256=args["content_sha256"],
+        system_name=args["system_name"],
+        service_name=args.get("service_name"),
+        environment=args["environment"],
+        targets=targets,
+        action_parameters=action_parameters,
+        routing_config_revision=args["routing_config_revision"],
+        routing_ticket_digest=args["routing_ticket_digest"],
+        risk_level="high",
+        ai_reason=args.get("ai_reason", ""),
+        package_name=filename,
+        package_sha256=package_sha256,
+        package_size_bytes=package_size_bytes,
+        authorized_matrix_users=approvers,
+    )
+    return {
+        "approval_id": approval.id,
+        "short_code": short_code,
+        "action_type": approval.action_type,
+        "action_digest": approval.action_digest,
+        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+        "status": approval.status,
+        "system_name": args["system_name"],
+        "service_name": args.get("service_name"),
+        "targets": targets,
+        "package_name": filename,
+        "package_size_bytes": package_size_bytes,
+        "package_sha256": package_sha256,
+        "remote_path": remote_path,
+        "overwrite": action_parameters.get("overwrite", False),
         "authorized_approvers": approvers,
     }
 
@@ -396,7 +563,7 @@ def _plan_steps_schema() -> dict:
             "type": "object",
             "properties": {
                 "step_key": {"type": "string", "description": "计划内唯一步骤键"},
-                "action_type": {"type": "string", "description": "步骤类型（如 SERVICE_CONTROL / HEALTH_CHECK）"},
+                "action_type": {"type": "string", "description": "Step type, for example SERVICE_CONTROL / FILE_UPLOAD / HEALTH_CHECK"},
                 "parameters": {"type": "object", "description": "冻结的步骤参数"},
                 "dependencies": {
                     "type": "array",
@@ -459,7 +626,7 @@ def approval_prepare_plan(args, ctx, db):
     enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
     service = ExecutionPlanService(db)
     approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
-    steps = args["steps"]
+    steps = _freeze_file_upload_plan_steps(args["steps"], db)
 
     plan, short_code = service.prepare(
         room_id=args["room_id"],
@@ -495,6 +662,7 @@ def approval_prepare_plan(args, ctx, db):
                 "step_order": s.step_order,
                 "action_type": s.action_type,
                 "status": s.status,
+                "approval_details": step_approval_details(s.action_type, s.parameters, plan.targets),
             }
             for s in plan.steps
         ],
@@ -578,5 +746,3 @@ def approval_execute_plan(args, ctx, db):
             else f"执行计划状态: {plan.status}"
         ),
     }
-
-

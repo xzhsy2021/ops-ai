@@ -63,6 +63,11 @@ def _service_control_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: S
             results.append({"server": server_name, "ok": False, "error": str(e)})
 
     success_count = sum(1 for r in results if r.get("ok"))
+    if success_count != len(results):
+        raise RuntimeError(
+            f"服务控制未全部成功: {success_count}/{len(results)} 成功 "
+            f"({[r.get('error') or 'unknown error' for r in results if not r.get('ok')]})"
+        )
     return {
         "action": "SERVICE_CONTROL",
         "control_action": control_action,
@@ -165,6 +170,22 @@ def _package_cleanup_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: S
     return execute_package_cleanup(db, payload, operator=plan.approved_by or "system")
 
 
+def _file_upload_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """Upload a package step using the same internal executor as direct approvals."""
+    from types import SimpleNamespace
+    from app.services.approval_executor import ApprovalExecutor
+
+    params = step.parameters or {}
+    payload = {
+        "system_name": params.get("system_name") or plan.system_name,
+        "service_name": params.get("service_name") or plan.service_name,
+        "targets": params.get("targets") or plan.targets or [],
+        "action_parameters": dict(params.get("action_parameters") or {}),
+    }
+    approval = SimpleNamespace(approved_by=plan.approved_by or "system")
+    return ApprovalExecutor(db)._execute_file_upload(approval, payload)
+
+
 STEP_HANDLERS: dict[str, StepHandler] = {
     "SERVICE_CONTROL": _service_control_handler,
     "HEALTH_CHECK": _health_check_handler,
@@ -172,6 +193,7 @@ STEP_HANDLERS: dict[str, StepHandler] = {
     "ROLLBACK": _rollback_handler,
     "DML": _dml_handler,
     "PACKAGE_CLEANUP": _package_cleanup_handler,
+    "FILE_UPLOAD": _file_upload_handler,
 }
 
 
@@ -323,6 +345,9 @@ class PlanExecutor:
             except Exception as e:
                 step.status = "FAILED"
                 step.error_message = str(e)
+                execution_result = getattr(e, "execution_result", None)
+                if isinstance(execution_result, dict):
+                    step.result = execution_result
                 step.finished_at = _utcnow()
                 self.db.commit()
                 if not continue_on_error:
@@ -339,7 +364,13 @@ class PlanExecutor:
         if any(s == "FAILED" for s in statuses):
             # 有失败步骤：若还有独立步骤成功过，则 PARTIAL_FAILED，否则 FAILED
             succeeded = any(s == "SUCCEEDED" for s in statuses)
-            return "PARTIAL_FAILED" if succeeded else "FAILED"
+            partial_step = any(
+                s.status == "FAILED"
+                and isinstance(s.result, dict)
+                and int(s.result.get("success_count") or 0) > 0
+                for s in plan.steps
+            )
+            return "PARTIAL_FAILED" if succeeded or partial_step else "FAILED"
         if any(s == "SKIPPED" for s in statuses):
             return "FAILED" if not any(s == "SUCCEEDED" for s in statuses) else "PARTIAL_FAILED"
         # 无失败/跳过，但非全部成功（理论上不该发生）

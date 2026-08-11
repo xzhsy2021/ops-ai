@@ -5,7 +5,7 @@
 > **设计参考:** [docs/plans/2026-07-22-qclaw-element-approval-ops-design.md](plans/2026-07-22-qclaw-element-approval-ops-design.md)
 > **实施计划:** [docs/plans/2026-07-22-qclaw-element-approval-ops-implementation.md](plans/2026-07-22-qclaw-element-approval-ops-implementation.md)
 
-> **方案 2 状态（2026-08-06）**：多步骤消息的主流程已迁移到独立 `ExecutionPlan`，使用一次 `prepare_plan` 和一次 `execute_plan`。执行器已注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 六类步骤，发布/回滚/DML/包清理可直接写入计划步骤。本文第 3 节保留旧单动作审批作为兼容流程；新接入应优先使用计划级流程，旧流程只用于已存在的客户端兼容。
+> **方案 2 状态（2026-08-10）**：多步骤消息的主流程已迁移到独立 `ExecutionPlan`，使用一次 `prepare_plan` 和一次 `execute_plan`。执行器已注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 七类步骤，上传/发布/回滚/DML/包清理可直接写入计划步骤。本文第 3 节保留旧单动作审批作为兼容流程；新接入应优先使用计划级流程，旧流程只用于已存在的客户端兼容。
 
 ---
 
@@ -74,7 +74,9 @@ Element 消息
   → 按顺序执行步骤并反馈结果
 ```
 
-`prepare_plan` 的 manifest 冻结房间、原始事件、内容摘要、路由 revision、环境、目标、步骤、参数、依赖和策略。相同的待审批 `plan_digest` 幂等复用；实质计划变化必须重新审批。当前执行器支持 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。
+`prepare_plan` 的 manifest 冻结房间、原始事件、内容摘要、路由 revision、环境、目标、步骤、参数、依赖和策略。相同的待审批 `plan_digest` 幂等复用；实质计划变化必须重新审批。当前执行器支持 `SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。
+
+当 stdio MCP 的 `FILE_UPLOAD` 步骤提供 `action_parameters.local_path` 时，桥接层会在调用 `prepare_plan` 前通过仅限房间绑定 Tool Token 的审批接收入口上传到 OPS File Center。该入口不授予 qclaw 通用 `package:write`；上传后的 `package_name`、SHA-256、大小、远端路径和覆盖策略会被冻结到同一个执行计划，授权人只审批一次。
 
 ### 3.2 兼容流程：发布、回滚、DML、包清理
 

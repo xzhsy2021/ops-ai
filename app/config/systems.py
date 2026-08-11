@@ -1,7 +1,4 @@
-"""系统配置 SSOT — Phase 3e: 优先读 systems DB 表，config_kv blob 作为过渡期回退。
-
-迁移完成后 config_kv['systems'] 可清理（由 _ensure_defaults 保护防止 re-seed）。
-"""
+"""Database-only system inventory composition and compatibility helpers."""
 import copy
 import logging
 from typing import Any, Dict, List, Optional
@@ -11,7 +8,37 @@ logger = logging.getLogger(__name__)
 
 # ── DB SSOT 读写 ──
 
-def _system_row_to_dict(row) -> Dict[str, Any]:
+def _service_row_to_dict(row) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "display_name": row.display_name or row.name,
+        "system_name": row.system_name,
+        "repo": row.repo or "",
+        "build_cmd": row.build_cmd or "",
+        "start_cmd": row.start_cmd or "",
+        "template": row.template or "",
+        "pipeline_id": row.pipeline_id or "",
+        "template_variables": dict(row.template_variables or {}),
+        "servers": list(row.servers or []),
+        "source": "db",
+    }
+
+
+def _environment_row_to_dict(row) -> Dict[str, Any]:
+    return {
+        "display_name": row.display_name or row.name,
+        "category": row.category or "custom",
+        "description": row.description or "",
+        "base_path": row.base_path or "",
+        "servers": list(row.servers or []),
+        "variables": dict(row.variables or {}),
+        "service_overrides": dict(row.service_overrides or {}),
+        "group_overrides": dict(row.group_overrides or {}),
+    }
+
+
+def _system_row_to_dict(row, services=None, environments=None) -> Dict[str, Any]:
     """ORM System row → legacy system cfg dict（保持向后兼容）。"""
     return {
         "display_name": row.display_name or row.name,
@@ -19,38 +46,39 @@ def _system_row_to_dict(row) -> Dict[str, Any]:
         "base_path": row.base_path or "/data/web/app",
         "description": row.description or "",
         "servers": list(row.servers or []),
-        "services": list(row.services or []),
-        "environments": dict(row.environments or {}),
+        "services": [_service_row_to_dict(item) for item in (services or [])],
+        "environments": {
+            item.name: _environment_row_to_dict(item)
+            for item in (environments or [])
+        },
         "variables": dict(row.variables or {}),
+        "message_routing": dict(row.message_routing or {}),
         # groups 已迁移到 ServerGroup 表（Phase 3b），这里不返回
         "source": "db",
     }
 
 
 def get_all_systems() -> Dict[str, Any]:
-    """优先从 DB 读取所有 system，回退到 config_kv blob。"""
-    # 先查 DB
-    try:
-        from app.db.base import SessionLocal
-        from app.db.repository import SystemRepository
-        with SessionLocal() as db:
-            rows = SystemRepository(db).list_all()
-            if rows:
-                result = {}
-                for row in rows:
-                    sys_cfg = _system_row_to_dict(row)
-                    result[row.name] = sys_cfg
-                return result
-    except Exception as e:
-        logger.debug(f"Failed to load systems from DB, falling back to blob: {e}")
+    """Read systems and their child resources from database SSOT tables."""
+    from app.db.base import SessionLocal
+    from app.db.repository import (
+        ServiceRepository,
+        SystemEnvironmentRepository,
+        SystemRepository,
+    )
 
-    # 回退到 blob
-    from app.config.cache import load_config_cached
-    systems = load_config_cached().get("systems", {})
-    for sys_cfg in systems.values():
-        if "variables" not in sys_cfg:
-            sys_cfg["variables"] = {}
-    return systems
+    with SessionLocal() as db:
+        systems = SystemRepository(db).list_all()
+        service_repo = ServiceRepository(db)
+        environment_repo = SystemEnvironmentRepository(db)
+        return {
+            row.name: _system_row_to_dict(
+                row,
+                service_repo.list_by_system(row.name),
+                environment_repo.list_by_system(row.name),
+            )
+            for row in systems
+        }
 
 
 def get_system_by_name(name: str) -> Optional[Dict[str, Any]]:
@@ -73,11 +101,12 @@ def get_servers_for_system(system_name: str, environment: str = None) -> List[Di
 
 
 def save_system(name: str, system: Dict[str, Any]) -> bool:
-    """写 DB systems 表。"""
+    """Persist a system and its child resources to their domain tables."""
     if "groups" in system:
         logger.debug("groups field ignored (migrated to ServerGroup table, Phase 3b)")
     try:
         from app.db.base import SessionLocal
+        from app.db.models import Service, System, SystemEnvironment
         from app.db.repository import SystemRepository
         with SessionLocal() as db:
             repo = SystemRepository(db)
@@ -89,12 +118,12 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
                 existing.description = system.get("description")
                 existing.variables = system.get("variables", {}) or {}
                 existing.servers = system.get("servers", []) or []
-                existing.environments = system.get("environments", {}) or {}
-                existing.services = system.get("services", []) or []
-                repo.update(existing)
+                existing.message_routing = system.get("message_routing", {}) or {}
+                existing.environments = {}
+                existing.services = []
                 logger.info(f"Updated system: {name}")
             else:
-                repo.create(
+                existing = System(
                     name=name,
                     display_name=system.get("display_name") or name,
                     strategy=system.get("strategy", "WORKFLOW"),
@@ -102,15 +131,68 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
                     description=system.get("description"),
                     variables=system.get("variables", {}) or {},
                     servers=system.get("servers", []) or [],
-                    environments=system.get("environments", {}) or {},
-                    services=system.get("services", []) or [],
+                    environments={},
+                    services=[],
+                    message_routing=system.get("message_routing", {}) or {},
                 )
+                db.add(existing)
+                db.flush()
                 logger.info(f"Added system: {name}")
-        try:
-            from app.config.cache import invalidate_config_cache
-            invalidate_config_cache()
-        except Exception:
-            pass
+
+            if "services" in system:
+                incoming_services = {
+                    str(item.get("name") or "").strip(): item
+                    for item in (system.get("services") or [])
+                    if isinstance(item, dict) and str(item.get("name") or "").strip()
+                }
+                stored_services = {
+                    row.name: row
+                    for row in db.query(Service).filter(Service.system_name == name).all()
+                }
+                for service_name, row in stored_services.items():
+                    if service_name not in incoming_services:
+                        db.delete(row)
+                for service_name, payload in incoming_services.items():
+                    row = stored_services.get(service_name)
+                    if row is None:
+                        row = Service(name=service_name, system_name=name)
+                        db.add(row)
+                    row.display_name = payload.get("display_name") or service_name
+                    row.repo = payload.get("repo") or None
+                    row.build_cmd = payload.get("build_cmd") or None
+                    row.start_cmd = payload.get("start_cmd") or None
+                    row.template = payload.get("template") or None
+                    row.pipeline_id = payload.get("pipeline_id") or None
+                    row.template_variables = payload.get("template_variables") or {}
+                    row.servers = payload.get("servers") or []
+
+            if "environments" in system:
+                incoming_environments = system.get("environments") or {}
+                stored_environments = {
+                    row.name: row
+                    for row in db.query(SystemEnvironment).filter(
+                        SystemEnvironment.system_name == name,
+                    ).all()
+                }
+                for environment_name, row in stored_environments.items():
+                    if environment_name not in incoming_environments:
+                        db.delete(row)
+                for environment_name, payload in incoming_environments.items():
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    row = stored_environments.get(environment_name)
+                    if row is None:
+                        row = SystemEnvironment(system_name=name, name=environment_name)
+                        db.add(row)
+                    row.display_name = payload.get("display_name") or environment_name
+                    row.category = payload.get("category") or "custom"
+                    row.description = payload.get("description") or ""
+                    row.base_path = payload.get("base_path") or payload.get("deploy_path") or ""
+                    row.servers = payload.get("servers") or []
+                    row.variables = payload.get("variables") or {}
+                    row.service_overrides = payload.get("service_overrides") or {}
+                    row.group_overrides = payload.get("group_overrides") or {}
+            db.commit()
         return True
     except Exception as e:
         logger.exception(f"Failed to save system '{name}' to DB")
@@ -118,21 +200,24 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
 
 
 def delete_system(name: str) -> bool:
-    """从 DB systems 表删除。"""
+    """Delete a system and its database-owned child resources."""
     try:
         from app.db.base import SessionLocal
+        from app.db.models import Service, SystemEnvironment
         from app.db.repository import SystemRepository
         with SessionLocal() as db:
             repo = SystemRepository(db)
-            if repo.delete_by_name(name):
-                logger.info(f"Deleted system: {name}")
-                try:
-                    from app.config.cache import invalidate_config_cache
-                    invalidate_config_cache()
-                except Exception:
-                    pass
-                return True
-            return False
+            row = repo.get_by_name(name)
+            if row is None:
+                return False
+            db.query(Service).filter(Service.system_name == name).delete(synchronize_session=False)
+            db.query(SystemEnvironment).filter(
+                SystemEnvironment.system_name == name,
+            ).delete(synchronize_session=False)
+            db.delete(row)
+            db.commit()
+            logger.info(f"Deleted system: {name}")
+            return True
     except Exception:
         logger.exception(f"Failed to delete system '{name}' from DB")
         return False
@@ -349,11 +434,6 @@ def save_group(system_name: str, group_code: str, group_cfg: Dict[str, Any], env
             existing.metadata_json = meta or None
             repo.update(existing)
         logger.info("Saved group (DB SSOT): %s", name)
-        try:
-            from app.config.cache import invalidate_config_cache
-            invalidate_config_cache()
-        except Exception:
-            logger.debug("Failed to invalidate config cache after save_group", exc_info=True)
         return True
     except Exception:
         logger.exception("save_group failed for %s", name)
@@ -382,11 +462,6 @@ def delete_group(system_name: str, group_code: str, environment: str = None) -> 
             return False
         db.delete(existing)
         db.commit()
-        try:
-            from app.config.cache import invalidate_config_cache
-            invalidate_config_cache()
-        except Exception:
-            logger.debug("Failed to invalidate config cache after delete_group", exc_info=True)
         logger.info("Deleted group (DB SSOT): %s", name)
         return True
     except Exception:

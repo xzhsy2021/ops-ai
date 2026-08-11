@@ -64,3 +64,15 @@ def test_tool_token_panel_uses_chinese_permission_labels():
     for label in ["运维读取", "运维写入", "服务器读取", "审计读取", "发布预检", "数据库写入", "全部权限"]:
         assert label in panel
     assert "formatScopeLabel" in panel
+
+
+def test_tool_token_modals_escape_backdrop_filter_compositing_context():
+    panel = open("frontend/src/pages/tools/ToolTokenPanel.tsx", encoding="utf-8").read()
+    css = open("frontend/src/index.css", encoding="utf-8").read()
+
+    assert "createPortal" in panel
+    assert "document.body" in panel
+    assert panel.count("<ToolTokenModal") == 2
+    assert "tool-token-modal-dialog" in panel
+    modal_css = css.split(".tool-token-modal-dialog", 1)[1].split("}", 1)[0]
+    assert "backdrop-filter: none" in modal_css

@@ -171,14 +171,14 @@ async def get_notification_settings(request: Request, db: Session = Depends(get_
 async def update_notification_settings(request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
     data = await request.json()
-    from app.db import ConfigRepository
+    from app.db.repository import NotificationSettingsRepository
     settings = {
         "enabled": bool(data.get("enabled", False)),
         "webhook_urls": _clean_str_list(data.get("webhook_urls", [])),
         "events": _clean_str_list(data.get("events", ["deploy.success", "deploy.failed", "deploy.canceled", "rollback.success", "rollback.failed"])),
         "timeout": int(data.get("timeout", 5) or 5),
     }
-    ConfigRepository(db).set("notification_settings", settings)
+    NotificationSettingsRepository(db).set(settings)
     db.commit()
     audit("notification.settings.update", "system", "release_notification", f"user={user.get('username')}")
     return api_response(data=settings, message="Notification settings updated")

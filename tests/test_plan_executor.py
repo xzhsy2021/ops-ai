@@ -155,6 +155,38 @@ def test_partial_failed_when_independent_step_completed(db):
     assert by_key["health"].status == "SUCCEEDED"
 
 
+def test_partial_file_upload_preserves_target_results_and_marks_plan_partial(db):
+    from app.services.approval_executor import FileUploadExecutionError
+
+    execution_result = {
+        "action": "FILE_UPLOAD",
+        "success_count": 1,
+        "fail_count": 1,
+        "results": [
+            {"server": "s1", "ok": True},
+            {"server": "s2", "ok": False, "error": "sftp failed"},
+        ],
+        "message": "File upload batch failed",
+    }
+
+    def partially_failed(plan, step, db):
+        raise FileUploadExecutionError(execution_result)
+
+    steps = [{
+        "step_key": "upload",
+        "action_type": "FILE_UPLOAD",
+        "parameters": {},
+        "dependencies": [],
+    }]
+    plan = _prepare(db, "partial-upload", steps=steps)
+
+    result = PlanExecutor(db, handlers={"FILE_UPLOAD": partially_failed}).execute(plan.id)
+
+    assert result.status == "PARTIAL_FAILED"
+    assert result.steps[0].status == "FAILED"
+    assert result.steps[0].result == execution_result
+
+
 def test_failed_prerequisite_without_continue_marks_plan_failed(db):
     """continue_on_error=False 时，失败即停止，计划 FAILED。"""
     def fail(plan, step, db):

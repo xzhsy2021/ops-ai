@@ -91,14 +91,24 @@ def _asset_mime_check() -> Dict[str, Any]:
 
 
 def _dir_writable(path: Path) -> Dict[str, Any]:
+    probe = None
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".ops_diagnostics_write_test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".ops_diagnostics_", suffix=".tmp",
+            dir=path, delete=False,
+        ) as handle:
+            probe = Path(handle.name)
+            handle.write("ok")
         return _ok("目录可写", path=str(path))
     except Exception as exc:
         return _error(f"目录不可写: {exc}", path=str(path))
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _runtime_dirs_check() -> Dict[str, Any]:

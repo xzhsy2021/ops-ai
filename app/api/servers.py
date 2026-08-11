@@ -336,7 +336,7 @@ async def delete_server_group(request: Request, db: Session = Depends(get_db)):
     if not group_name:
         raise HTTPException(status_code=400, detail="name is required")
 
-    # 1) Clear group field on every server that has it (legacy KV mirror)
+    # 1) Clear group metadata on every server that has it.
     servers = inventory.list_servers()
     updated = 0
     for srv in servers:
@@ -345,8 +345,7 @@ async def delete_server_group(request: Request, db: Session = Depends(get_db)):
             if save_server(srv):
                 updated += 1
 
-    # 2) Also clear metadata_json.group for the same servers (DB SSOT
-    #    mirror, in case the save_server pass above missed any rows).
+    # 2) Ensure metadata_json.group is cleared for the same servers.
     from app.db.models import Server
     from sqlalchemy import or_, func
     g_expr = func.json_extract(Server.metadata_json, "$.group")
@@ -366,31 +365,13 @@ async def delete_server_group(request: Request, db: Session = Depends(get_db)):
     if g is not None:
         deleted = repo.delete(g.id)
 
-    # 4) Clean the legacy KV `systems` entry so inventory_reconcile
-    #    doesn't see a stale only_in_kv drift for this group.
-    try:
-        from app.config.repository import _load_config_unsafe, save_config
-        cfg = _load_config_unsafe()
-        systems = cfg.get("systems") or {}
-        if group_name in systems:
-            systems.pop(group_name, None)
-            cfg["systems"] = systems
-            save_config(cfg)
-            kv_cleaned = True
-        else:
-            kv_cleaned = False
-    except Exception as exc:  # pragma: no cover - best-effort
-        kv_cleaned = False
-        logger.warning("delete_server_group: KV cleanup failed for %r: %s", group_name, exc)
-
     audit("server.delete_group", "server", group_name,
           f"user={request.state.username} cleared={updated} "
-          f"meta_rewrite={len(rows)} row_deleted={deleted} kv_cleaned={kv_cleaned}")
+          f"meta_rewrite={len(rows)} row_deleted={deleted}")
     return api_response(data={
         "updated": updated,
         "meta_rewrite": len(rows),
         "row_deleted": deleted,
-        "kv_cleaned": kv_cleaned,
     })
 
 

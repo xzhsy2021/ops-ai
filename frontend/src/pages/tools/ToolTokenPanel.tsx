@@ -1,4 +1,5 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, type ReactNode, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { CopyButton } from '../../components/ui'
 
 type TokenInfo = {
@@ -151,6 +152,31 @@ function formatTime(s?: string): string {
   const d = new Date(s)
   if (isNaN(d.getTime())) return s
   return d.toLocaleString('zh-CN', { hour12: false })
+}
+
+function ToolTokenModal({
+  label,
+  onClose,
+  children,
+}: {
+  label: string
+  onClose: () => void
+  children: ReactNode
+}) {
+  return createPortal(
+    <div
+      className="modal-backdrop tool-token-modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="card tool-token-modal-dialog" role="dialog" aria-modal="true" aria-label={label}>
+        {children}
+      </div>
+    </div>,
+    document.body,
+  )
 }
 
 export const ToolTokenPanel = memo(function ToolTokenPanel({
@@ -508,8 +534,7 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
 
       {/* 新建 Token 弹窗 */}
       {showCreateModal && (
-        <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 24px', overflowY: 'auto' }}>
-          <div className="card" style={{ width: 'min(920px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }}>
+        <ToolTokenModal label="新建 Tool Token" onClose={() => setShowCreateModal(false)}>
             <div className="card-header">
               <div>
                 <h2>新建 Tool Token</h2>
@@ -610,14 +635,12 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
                 {generating ? '生成中...' : '生成 Token'}
               </button>
             </div>
-          </div>
-        </div>
+        </ToolTokenModal>
       )}
 
       {/* 编辑 Token 弹窗 */}
       {editing && (
-        <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 24px', overflowY: 'auto' }}>
-          <div className="card" style={{ width: 'min(920px, 96vw)', maxHeight: '88vh', overflow: 'auto', display: 'grid', gap: 14 }}>
+        <ToolTokenModal label="编辑 Tool Token" onClose={() => setEditing(null)}>
             <div className="card-header">
               <div>
                 <h2>编辑 Tool Token</h2>
@@ -689,8 +712,7 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
               <button className="btn btn-subtle" onClick={() => setEditing(null)}>取消</button>
               <button className="btn btn-primary" disabled={!editName.trim() || saving} onClick={handleUpdate}>{saving ? '保存中...' : '保存变更'}</button>
             </div>
-          </div>
-        </div>
+        </ToolTokenModal>
       )}
     </div>
   )

@@ -141,7 +141,7 @@ Registered approval tools (all gated by the one-time short code, not by token sc
 
 | HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
 |---|---:|---|---|---|---|
-| `ops.approval.prepare_plan` | `ops_approval_prepare_plan` | plan | `ops:read` | low | Create one immutable execution plan from steps (SERVICE_CONTROL, HEALTH_CHECK, RELEASE, ROLLBACK, DML, PACKAGE_CLEANUP) and emit a one-time approval code |
+| `ops.approval.prepare_plan` | `ops_approval_prepare_plan` | plan | `ops:read` | low | Create one immutable execution plan from steps (SERVICE_CONTROL, HEALTH_CHECK, FILE_UPLOAD, RELEASE, ROLLBACK, DML, PACKAGE_CLEANUP) and emit a one-time approval code; stdio local FILE_UPLOAD inputs are staged through a room-bound intake and remain covered by this single approval |
 | `ops.approval.execute_plan` | `ops_approval_execute_plan` | execute | `ops:read` | low | Consume the approved code and run the frozen steps in order |
 | `ops.approval.prepare_service_control` | `ops_approval_prepare_service_control` | plan | `ops:read` | low | Legacy single-action service-control approval (restart/stop/start/update) |
 | `ops.approval.execute` | `ops_approval_execute` | execute | `ops:read` | low | Legacy single-action approval consume (deploy/rollback/DML/package-cleanup) |

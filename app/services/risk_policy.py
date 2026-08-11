@@ -204,7 +204,11 @@ def _is_non_destructive_plan_creation(tool_def) -> bool:
     category = getattr(tool_def, "category", "") or ""
     if category == "deploy_plan":
         return True
-    return name in {"ops.create_rollback_plan", "ops.create_deploy_plan"}
+    return name in {
+        "ops.create_config_change_plan",
+        "ops.create_rollback_plan",
+        "ops.create_deploy_plan",
+    }
 
 
 def _is_dry_run(args: Dict[str, Any]) -> bool:

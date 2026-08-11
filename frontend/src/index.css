@@ -1003,6 +1003,32 @@ input:focus, select:focus, textarea:focus {
   transform: none;
 }
 
+.tool-token-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 5vh 24px;
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.55);
+  overscroll-behavior: contain;
+}
+
+.tool-token-modal-dialog {
+  width: min(920px, 96vw);
+  max-height: 88vh;
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+  background: var(--bg-surface) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transform: none !important;
+  transition: none !important;
+}
+
 .stat-card {
   background:
     linear-gradient(135deg, var(--accent-soft), transparent 55%),

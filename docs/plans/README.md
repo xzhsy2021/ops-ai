@@ -1,6 +1,6 @@
-# Plans README
+﻿# Plans README
 
-Updated: 2026-08-06
+Updated: 2026-08-10
 
 ## Current Sources Of Truth
 
@@ -13,8 +13,9 @@ Use these files for current development decisions:
 - [2026-06-01-concurrent-deploy-and-mcp-maturity-iteration-plan.md](./2026-06-01-concurrent-deploy-and-mcp-maturity-iteration-plan.md) - closed baseline summary for the 2026-06 concurrent deploy/MCP iteration.
 - [2026-07-22-qclaw-element-approval-ops-design.md](./2026-07-22-qclaw-element-approval-ops-design.md) - qclaw Element approval integration design (single-action approval).
 - [2026-07-22-qclaw-element-approval-ops-implementation.md](./2026-07-22-qclaw-element-approval-ops-implementation.md) - implementation plan for the qclaw approval integration.
-- [2026-08-06-message-execution-plan-design.md](./2026-08-06-message-execution-plan-design.md) - design of the message-level execution plan (方案 2, one approval per message).
+- [2026-08-06-message-execution-plan-design.md](./2026-08-06-message-execution-plan-design.md) - design of the message-level execution plan (鏂规 2, one approval per message).
 - [2026-08-06-message-execution-plan.md](./2026-08-06-message-execution-plan.md) - implementation plan and task status for the message execution plan.
+- [2026-08-10-execution-plan-first-deploy-bugfix-audit.md](./2026-08-10-execution-plan-first-deploy-bugfix-audit.md) - first real deployment of multi-service execution plan (F57E0F29): env-param stale-code fix, service-control failure propagation fix, and audit confirming no out-of-band deployment.
 
 ## Keep In Root
 

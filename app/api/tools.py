@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +20,7 @@ from app.services.tool_token import (
     _normalize_approver_ids,
     _normalize_bound_room_ids,
     create_tool_token,
+    enforce_room_binding,
     recommended_tool_token_templates,
     token_to_dict,
     validate_tool_token,
@@ -31,7 +35,6 @@ from app.services.tool_registry import (
     tool_profile_manifest,
     bump_capability_version as _bump_capability_version,
 )
-from app.services.tool_token import create_tool_token, recommended_tool_token_templates, validate_tool_token, token_to_dict
 from app.services.mcp_capability_service import (
     mcp_call_tool,
     mcp_call_tool_stream,
@@ -440,34 +443,128 @@ async def upload_package_by_tool_token(
     system: str = Form(""),
     service: str = Form(""),
     overwrite: bool = Form(False),
+    approval_intake: bool = Form(False),
+    room_id: str = Form(""),
+    request_event_id: str = Form(""),
+    content_sha256: str = Form(""),
+    package_sha256: str = Form(""),
     db: Session = Depends(get_db),
 ):
     ctx = get_tool_context(request, db)
     register_builtin_tools()
-    # Reuse policy enforcement through the registered tool, but save via multipart
-    # to avoid base64 overhead for local stdio MCP clients.
-    from app.services.tool_policy import enforce_tool_policy
-    from app.services.package_retention import save_package_fileobj
-    tool = registry.get("ops.upload_package")
-    enforce_tool_policy(tool, {"system": system, "service": service}, ctx, db)
+    from app.services.package_retention import (
+        package_path,
+        package_to_dict,
+        safe_package_name,
+        save_package_fileobj,
+        sha256_file,
+        upsert_package_metadata,
+    )
+
+    filename = file.filename or "uploaded_package"
+    effective_overwrite = bool(overwrite)
+    meta = None
+    reused = False
+    if approval_intake:
+        bound_rooms = _normalize_bound_room_ids(getattr(ctx, "bound_room_ids", None))
+        if getattr(ctx, "auth_type", "") != "tool_token" or not ctx.has_scope("ops:read"):
+            raise HTTPException(status_code=403, detail="Approval package intake requires an ops:read Tool Token")
+        if not bound_rooms:
+            raise HTTPException(status_code=403, detail="Approval package intake requires a room-bound Tool Token")
+        enforce_room_binding(bound_rooms, room_id)
+        expected_package_sha256 = str(package_sha256 or "").strip().lower()
+        if (
+            not str(request_event_id or "").strip()
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", content_sha256 or "")
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Approval package intake requires request_event_id, content_sha256, and package_sha256",
+            )
+
+        digest = hashlib.sha256()
+        try:
+            file.file.seek(0)
+        except Exception:
+            pass
+        for chunk in iter(lambda: file.file.read(1024 * 1024), b""):
+            digest.update(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+        if digest.hexdigest() != expected_package_sha256:
+            raise HTTPException(status_code=409, detail="Uploaded package checksum does not match package_sha256")
+
+        safe_name = safe_package_name(filename)
+        filename = f"approval-{content_sha256.lower()[:12]}-{expected_package_sha256[:16]}-{safe_name[-190:]}"
+        effective_overwrite = False
+        existing_path = package_path(filename)
+        if os.path.isfile(existing_path):
+            if sha256_file(existing_path).lower() != expected_package_sha256:
+                raise HTTPException(status_code=409, detail="Approval package name already exists with different content")
+            row = upsert_package_metadata(
+                db,
+                filename,
+                existing_path,
+                system=system or "",
+                service=service or "",
+                uploaded_by=ctx.username or ctx.token_owner or "tool",
+                sha256=expected_package_sha256,
+            )
+            meta = package_to_dict(row, include_retention=False)
+            reused = True
+    else:
+        # Generic File Center writes retain the normal write/scope/capability gates.
+        from app.services.tool_policy import enforce_tool_policy
+        tool = registry.get("ops.upload_package")
+        enforce_tool_policy(tool, {"system": system, "service": service}, ctx, db)
     try:
         await file.seek(0)
     except Exception:
         pass
-    meta = save_package_fileobj(
-        db,
-        filename=file.filename or "uploaded_package",
-        fileobj=file.file,
-        system=system or "",
-        service=service or "",
-        uploaded_by=ctx.username or ctx.token_owner or "tool",
-        overwrite=bool(overwrite),
+    if meta is None:
+        try:
+            meta = save_package_fileobj(
+                db,
+                filename=filename,
+                fileobj=file.file,
+                system=system or "",
+                service=service or "",
+                uploaded_by=ctx.username or ctx.token_owner or "tool",
+                overwrite=effective_overwrite,
+            )
+        except HTTPException as exc:
+            existing_path = package_path(filename)
+            expected_package_sha256 = str(package_sha256 or "").strip().lower()
+            if not approval_intake or exc.status_code != 409 or not os.path.isfile(existing_path):
+                raise
+            if sha256_file(existing_path).lower() != expected_package_sha256:
+                raise
+            row = upsert_package_metadata(
+                db,
+                filename,
+                existing_path,
+                system=system or "",
+                service=service or "",
+                uploaded_by=ctx.username or ctx.token_owner or "tool",
+                sha256=expected_package_sha256,
+            )
+            meta = package_to_dict(row, include_retention=False)
+            reused = True
+    audit(
+        "tool.package.approval_intake" if approval_intake else "tool.package.upload",
+        "file",
+        meta.get("package_name") or meta.get("name"),
+        f"client={ctx.client_name} owner={ctx.token_owner or ctx.username} room={room_id if approval_intake else ''} "
+        f"event={request_event_id if approval_intake else ''} size={meta.get('size_bytes')} sha256={meta.get('sha256')}",
     )
-    audit("tool.package.upload", "file", meta.get("package_name") or meta.get("name"), f"client={ctx.client_name} owner={ctx.token_owner or ctx.username} size={meta.get('size_bytes')} sha256={meta.get('sha256')}")
     return api_response(data={
         "ok": True,
         "tool": "ops.upload_package",
-        "result": {**meta, "uploaded_via": "multipart"},
+        "result": {
+            **meta,
+            "uploaded_via": "multipart",
+            "approval_intake": approval_intake,
+            "reused": reused,
+        },
         "summary": "Package uploaded to OPS File Center",
         "risk": "high",
         "blocked": False,

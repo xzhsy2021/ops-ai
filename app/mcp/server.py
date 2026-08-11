@@ -103,6 +103,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.list_packages": "List local release packages managed by OPS File Center. 中文: 查看发布包列表/有哪些发布包.",
     "ops.get_package_checksum": "Get package checksum and metadata for a local release package. 中文: 查看发布包校验/包验证.",
     "ops.upload_package": "Upload a local deploy package into OPS File Center. stdio MCP can read local_path; Remote HTTP MCP should use normal file upload first. 中文: 上传发布包/上传部署包.",
+    "ops.upload_file": "Upload a validated package from the controlled OPS upload/staging directory to an allowed server path over SFTP. High risk; requires human approval. 中文: 通过 SFTP 上传部署包到目标服务器.",
     "ops.inspect_local_package": "Inspect a local deploy package path before uploading it into OPS File Center. stdio MCP reads local_path on this computer. 中文: 检查本地发布包/查看本地包信息.",
     "ops.prepare_release_from_local_package": "Inspect and upload a local package, then create a release plan and run precheck. This never executes deployment. 中文: 从本地包准备发布/打包发布.",
     "ops.get_package_retention_preview": "Preview package cleanup candidates without deleting files. Protects running, failed, rollback, and latest successful packages. 中文: 预览包清理/查看可清理的发布包.",
@@ -579,7 +580,7 @@ def _local_release_prepare_tool(error: str = "") -> Dict[str, Any]:
     }
 
 
-def _multipart_upload_package(args: Dict[str, Any]) -> Dict[str, Any]:
+def _multipart_upload_package(args: Dict[str, Any], *, approval_intake: bool = False) -> Dict[str, Any]:
     manifest = _local_package_manifest_for_mcp(args)
     if manifest.get("blockers"):
         raise RuntimeError("; ".join(manifest["blockers"]))
@@ -593,6 +594,14 @@ def _multipart_upload_package(args: Dict[str, Any]) -> Dict[str, Any]:
         "service": str(args.get("service") or ""),
         "overwrite": "true" if args.get("overwrite") else "false",
     }
+    if approval_intake:
+        fields.update({
+            "approval_intake": "true",
+            "room_id": str(args.get("room_id") or ""),
+            "request_event_id": str(args.get("request_event_id") or ""),
+            "content_sha256": str(args.get("content_sha256") or ""),
+            "package_sha256": str(manifest.get("sha256") or ""),
+        })
     preamble_parts = []
     for key, value in fields.items():
         preamble_parts.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n").encode("utf-8"))
@@ -673,6 +682,103 @@ def _prepare_release_from_local_package_for_mcp(args: Dict[str, Any]) -> Dict[st
     return {"data": data}
 
 
+def _prepare_file_upload_for_mcp(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Stage a stdio-local package, then create an approval bound to its File Center name."""
+    action_parameters = dict(args.get("action_parameters") or {})
+    local_path = str(action_parameters.get("local_path") or "").strip()
+    if not local_path:
+        return _request("POST", "/api/v2/tools/call", {"tool": "ops.approval.prepare_file_upload", "arguments": args})
+
+    manifest_args = {
+        **args,
+        **action_parameters,
+        "local_path": local_path,
+        "filename": action_parameters.get("filename") or "",
+    }
+    manifest = _local_package_manifest_for_mcp(manifest_args)
+    if manifest.get("blockers"):
+        raise RuntimeError("; ".join(manifest["blockers"]))
+
+    upload_payload = _multipart_upload_package({
+        **manifest_args,
+        "system": args.get("system_name") or "",
+        "service": args.get("service_name") or "",
+    }, approval_intake=True).get("data", {})
+    upload_result = upload_payload.get("result") if isinstance(upload_payload, dict) else {}
+    package_name = (upload_result or {}).get("package_name") or (upload_result or {}).get("name") or manifest.get("package_name")
+    if not package_name:
+        raise RuntimeError("Package upload did not return a package name")
+    returned_sha256 = str((upload_result or {}).get("sha256") or "").lower()
+    if returned_sha256 and returned_sha256 != str(manifest.get("sha256") or "").lower():
+        raise RuntimeError("Package upload checksum differs from local package inspection")
+
+    prepare_args = dict(args)
+    prepared_parameters = dict(action_parameters)
+    prepared_parameters.pop("local_path", None)
+    prepared_parameters["package_name"] = package_name
+    prepared_parameters["expected_sha256"] = manifest.get("sha256") or ""
+    prepared_parameters["expected_size_bytes"] = int(manifest.get("size_bytes") or 0)
+    prepare_args["action_parameters"] = prepared_parameters
+    data = _request(
+        "POST",
+        "/api/v2/tools/call",
+        {"tool": "ops.approval.prepare_file_upload", "arguments": prepare_args},
+    ).get("data", {})
+    if isinstance(data, dict) and isinstance(data.get("result"), dict):
+        data["result"]["local_inspection"] = manifest
+        data["result"]["upload_result"] = upload_result
+    return {"data": data}
+
+
+def _prepare_plan_for_mcp(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Stage local FILE_UPLOAD inputs, then create one approval for the frozen plan."""
+    prepare_args = dict(args)
+    prepared_steps = []
+    staged_uploads = []
+    for raw_step in args.get("steps") or []:
+        step = dict(raw_step)
+        parameters = dict(step.get("parameters") or {})
+        action_parameters = dict(parameters.get("action_parameters") or {})
+        local_path = str(action_parameters.get("local_path") or "").strip()
+        if str(step.get("action_type") or "").strip() == "FILE_UPLOAD" and local_path:
+            manifest_args = {
+                **args,
+                **action_parameters,
+                "local_path": local_path,
+                "filename": action_parameters.get("filename") or "",
+                "system": args.get("system_name") or "",
+                "service": args.get("service_name") or "",
+            }
+            manifest = _local_package_manifest_for_mcp(manifest_args)
+            if manifest.get("blockers"):
+                raise RuntimeError("; ".join(manifest["blockers"]))
+            upload_payload = _multipart_upload_package(manifest_args, approval_intake=True).get("data", {})
+            upload_result = upload_payload.get("result") if isinstance(upload_payload, dict) else {}
+            package_name = (upload_result or {}).get("package_name") or (upload_result or {}).get("name")
+            if not package_name:
+                raise RuntimeError("Package upload did not return a package name")
+            returned_sha256 = str((upload_result or {}).get("sha256") or "").lower()
+            if returned_sha256 != str(manifest.get("sha256") or "").lower():
+                raise RuntimeError("Package upload checksum differs from local package inspection")
+            action_parameters.pop("local_path", None)
+            action_parameters["package_name"] = package_name
+            action_parameters["expected_sha256"] = manifest.get("sha256") or ""
+            action_parameters["expected_size_bytes"] = int(manifest.get("size_bytes") or 0)
+            parameters["action_parameters"] = action_parameters
+            step["parameters"] = parameters
+            staged_uploads.append({"manifest": manifest, "upload_result": upload_result})
+        prepared_steps.append(step)
+    prepare_args["steps"] = prepared_steps
+    data = _request(
+        "POST",
+        "/api/v2/tools/call",
+        {"tool": "ops.approval.prepare_plan", "arguments": prepare_args},
+    ).get("data", {})
+    if isinstance(data, dict) and isinstance(data.get("result"), dict):
+        data["result"]["staged_uploads"] = staged_uploads
+    return {"data": data}
+
+
 def _call_tool_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
     tool_name = _from_mcp_tool_name(params.get("name") or params.get("tool"))
     args = params.get("arguments") or {}
@@ -688,7 +794,15 @@ def _call_tool_for_mcp(params: Dict[str, Any]) -> Dict[str, Any]:
             "message": "MCP server process is running. If OPS tools are not listed, start OPS backend, verify OPS_BASE_URL, and create/pass OPS_TOOL_TOKEN.",
         }
         return {"content": [{"type": "text", "text": json.dumps(diagnostic, ensure_ascii=False, indent=2)}], "isError": False}
-    if tool_name == "ops.prepare_release_from_local_package" and args.get("local_path") and not args.get("content_base64"):
+    if tool_name == "ops.approval.prepare_file_upload" and (args.get("action_parameters") or {}).get("local_path"):
+        data = _prepare_file_upload_for_mcp(args).get("data", {})
+    elif tool_name == "ops.approval.prepare_plan" and any(
+        str(step.get("action_type") or "").strip() == "FILE_UPLOAD"
+        and ((step.get("parameters") or {}).get("action_parameters") or {}).get("local_path")
+        for step in (args.get("steps") or [])
+    ):
+        data = _prepare_plan_for_mcp(args).get("data", {})
+    elif tool_name == "ops.prepare_release_from_local_package" and args.get("local_path") and not args.get("content_base64"):
         data = _prepare_release_from_local_package_for_mcp(args).get("data", {})
     elif tool_name == "ops.upload_package" and args.get("local_path") and not args.get("content_base64"):
         data = _multipart_upload_package(args).get("data", {})

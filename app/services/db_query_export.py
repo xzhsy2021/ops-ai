@@ -43,7 +43,6 @@ MAX_EXPORT_ROWS = 5000
 EXPORT_FORMATS = {"csv", "json", "md", "markdown", "html", "sql_query", "xlsx"}
 SENSITIVE_FIELD_PATTERNS = re.compile(r"(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|key_content|credential)", re.IGNORECASE)
 DENIED_TABLES = {
-    "config_kv",
     "tool_tokens",
     "schema_migrations",
     "users",

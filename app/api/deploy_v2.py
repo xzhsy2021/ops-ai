@@ -420,19 +420,22 @@ resource_v2_router = APIRouter(prefix="/api/v2", tags=["资源管理v2"])
 
 
 @resource_v2_router.get("/systems")
-async def list_systems_v2(request: Request):
-    from config_manager import load_config_cached
-    config = load_config_cached()
-    systems = config.get("systems", {})
+async def list_systems_v2(request: Request, db: Session = Depends(get_db)):
+    from app.db import ServiceRepository
+    from app.db.repository import SystemEnvironmentRepository, SystemRepository
+
+    systems = SystemRepository(db).list_all()
+    service_repo = ServiceRepository(db)
+    environment_repo = SystemEnvironmentRepository(db)
     return api_response(data=[
         {
-            "name": name,
-            "display_name": cfg.get("display_name", name),
-            "strategy": cfg.get("strategy", "DIRECT"),
-            "environment_count": len(cfg.get("environments", {})),
-            "service_count": len(cfg.get("services", [])),
+            "name": system.name,
+            "display_name": system.display_name or system.name,
+            "strategy": system.strategy or "DIRECT",
+            "environment_count": len(environment_repo.list_by_system(system.name)),
+            "service_count": len(service_repo.list_by_system(system.name)),
         }
-        for name, cfg in systems.items()
+        for system in systems
     ])
 
 
@@ -587,7 +590,7 @@ async def delete_system_v2(system_name: str, request: Request, db: Session = Dep
 @resource_v2_router.get("/services")
 async def list_services_v2(system: str = "", environment: str = "", db: Session = Depends(get_db)):
     from app.db import ServiceRepository
-    from config_manager import load_config_cached
+    from app.db.repository import ServerGroupRepository, SystemEnvironmentRepository, SystemRepository
 
     result: List[Dict[str, Any]] = []
     seen = set()
@@ -600,70 +603,57 @@ async def list_services_v2(system: str = "", environment: str = "", db: Session 
         result.append(item)
 
     repo = ServiceRepository(db)
+    environment_cfg: Dict[str, Any] = {}
+    if system and environment:
+        environment_row = SystemEnvironmentRepository(db).get_by_name(system, environment)
+        if environment_row is not None:
+            environment_cfg = {
+                "service_overrides": environment_row.service_overrides or {},
+                "servers": environment_row.servers or [],
+            }
     db_services = repo.list_by_system(system) if system else repo.list_all()
     for s in db_services:
+        override = (environment_cfg.get("service_overrides") or {}).get(s.name, {})
+        template_variables = dict(s.template_variables or {})
+        if isinstance(override, dict):
+            template_variables.update(override.get("template_variables") or {})
         add_service({
             "id": s.id,
             "name": s.name,
             "display_name": s.display_name or s.name,
             "system_name": s.system_name,
-            "repo": s.repo,
-            "template": s.template,
-            "pipeline_id": s.pipeline_id or "",
-            "template_variables": s.template_variables or {},
-            "servers": s.servers or [],
-            "servers_by_env": (s.template_variables or {}).get("servers_by_env", {}),
-            "server_keywords": (s.template_variables or {}).get("server_keywords", []),
+            "repo": override.get("repo", s.repo) if isinstance(override, dict) else s.repo,
+            "template": override.get("template", s.template) if isinstance(override, dict) else s.template,
+            "pipeline_id": override.get("pipeline_id", s.pipeline_id or "") if isinstance(override, dict) else s.pipeline_id or "",
+            "template_variables": template_variables,
+            "servers": (override.get("servers") if isinstance(override, dict) else None) or s.servers or environment_cfg.get("servers") or [],
+            "servers_by_env": template_variables.get("servers_by_env", {}),
+            "server_keywords": template_variables.get("server_keywords", []),
             "source": "db",
         })
 
-    config = load_config_cached()
-    systems = config.get("systems", {}) or {}
-    if system and environment:
-        try:
-            from app.config.systems import resolve_system_config
-            selected = {system: resolve_system_config(system, environment=environment)}
-        except Exception:
-            logger.exception("Failed to resolve system services for %s/%s", system, environment)
-            selected = {system: systems.get(system, {})}
-    else:
-        selected = {system: systems.get(system, {})} if system else systems
-    for sys_name, sys_cfg in selected.items():
-        if not sys_cfg:
+    system_names = {row.name for row in SystemRepository(db).list_all()}
+    for group in ServerGroupRepository(db).list_all():
+        matching_system = next(
+            (name for name in system_names if group.name.startswith(f"{name}-")),
+            "",
+        )
+        if not matching_system or (system and matching_system != system):
             continue
-        for svc in sys_cfg.get("services", []) or []:
-            if not isinstance(svc, dict):
-                continue
-            add_service({
-                "id": f"config:{sys_name}:{svc.get('name')}",
-                "name": svc.get("name", ""),
-                "display_name": svc.get("display_name") or svc.get("name", ""),
-                "system_name": sys_name,
-                "repo": svc.get("repo", ""),
-                "template": svc.get("template", ""),
-                "pipeline_id": svc.get("pipeline_id", ""),
-                "template_variables": svc.get("template_variables", {}) or {},
-                "servers": svc.get("servers", []) or sys_cfg.get("servers", []),
-                "servers_by_env": svc.get("servers_by_env", (svc.get("template_variables", {}) or {}).get("servers_by_env", {})),
-                "server_keywords": svc.get("server_keywords", (svc.get("template_variables", {}) or {}).get("server_keywords", [])),
-                "source": "config",
-            })
-        # Dovo and similar grouped systems are exposed as selectable release units.
-        for group_code, group_cfg in (sys_cfg.get("groups") or sys_cfg.get("regions") or {}).items():
-            if not isinstance(group_cfg, dict):
-                continue
-            add_service({
-                "id": f"group:{sys_name}:{group_code}",
+        group_code = group.name[len(matching_system) + 1:]
+        metadata = group.metadata_json or {}
+        add_service({
+                "id": f"group:{matching_system}:{group_code}",
                 "name": group_code,
-                "display_name": group_cfg.get("display_name") or group_code.upper(),
-                "system_name": sys_name,
+                "display_name": group.display_name or group_code.upper(),
+                "system_name": matching_system,
                 "repo": "",
-                "template": "dovo_bluegreen_update" if sys_name == "dovo" else "grouped_release",
-                "template_variables": {**group_cfg, "group_code": group_code},
-                "servers": [group_cfg.get("server")] if group_cfg.get("server") else [],
-                "servers_by_env": group_cfg.get("servers_by_env", {}),
-                "server_keywords": group_cfg.get("server_keywords", []),
-                "source": "config_group",
+                "template": "dovo_bluegreen_update" if matching_system == "dovo" else "grouped_release",
+                "template_variables": {**metadata, "group_code": group_code},
+                "servers": list(group.server_names or []),
+                "servers_by_env": metadata.get("servers_by_env", {}),
+                "server_keywords": metadata.get("server_keywords", []),
+                "source": "database_group",
             })
 
     return api_response(data=result)
@@ -703,11 +693,6 @@ async def create_system_service_v2(system_name: str, payload: SystemServicePaylo
         template_variables=new_service.get("template_variables") or {},
         servers=new_service.get("servers") or [],
     )
-    try:
-        from app.config.cache import invalidate_config_cache
-        invalidate_config_cache()
-    except Exception:
-        logger.debug("Failed to invalidate config cache after service create", exc_info=True)
     audit("system.service.create", "service", f"{system_name}/{created.name}", getattr(request.state, "username", ""))
     return api_response(data=_db_service_to_response(created), message="Service created")
 
@@ -736,11 +721,6 @@ async def update_system_service_v2(system_name: str, service_name: str, payload:
     existing.servers = updated_payload.get("servers") or existing.servers
     existing.template_variables = updated_payload.get("template_variables") or existing.template_variables
     repo.update(existing)
-    try:
-        from app.config.cache import invalidate_config_cache
-        invalidate_config_cache()
-    except Exception:
-        logger.debug("Failed to invalidate config cache after service update", exc_info=True)
     audit("system.service.update", "service", f"{system_name}/{service_name}", getattr(request.state, "username", ""))
     return api_response(data=_db_service_to_response(existing), message="Service updated")
 
@@ -774,11 +754,6 @@ async def delete_system_service_v2(system_name: str, service_name: str, request:
         logger.warning("Failed to check active deployments for service %s/%s: %s", system_name, service_name, _e)
     if not repo.delete(existing.id):
         raise HTTPException(status_code=500, detail="Failed to delete service")
-    try:
-        from app.config.cache import invalidate_config_cache
-        invalidate_config_cache()
-    except Exception:
-        logger.debug("Failed to invalidate config cache after service delete", exc_info=True)
     audit("system.service.delete", "service", f"{system_name}/{service_name}", getattr(request.state, "username", ""))
     return api_response(data={"name": existing.name}, message="Service deleted")
 
@@ -843,7 +818,8 @@ def _default_environment_records() -> List[Dict[str, Any]]:
 @resource_v2_router.get("/environments")
 async def list_environments_v2(system: str = "", db: Session = Depends(get_db)):
     from app.db import EnvironmentRepository
-    from config_manager import load_config_cached
+    from app.db import ServiceRepository
+    from app.db.repository import SystemEnvironmentRepository
 
     result: List[Dict[str, Any]] = []
 
@@ -868,19 +844,25 @@ async def list_environments_v2(system: str = "", db: Session = Depends(get_db)):
             "variables": variables,
         })
 
-    config = load_config_cached()
-    if system:
-        sys_cfg = config.get("systems", {}).get(system, {})
-        for env_name, env_cfg in (sys_cfg.get("environments", {}) or {}).items():
-            if isinstance(env_cfg, dict):
-                add_env(_env_response(env_name, env_cfg, "system"))
+    system_environments = (
+        SystemEnvironmentRepository(db).list_by_system(system)
+        if system else SystemEnvironmentRepository(db).list_all()
+    )
+    for row in system_environments:
+        add_env(_env_response(row.name, {
+            "display_name": row.display_name,
+            "category": row.category,
+            "description": row.description,
+            "base_path": row.base_path,
+            "servers": row.servers or [],
+            "variables": row.variables or {},
+        }, "system"))
 
-        # 服务上的 servers_by_env 可能先于系统环境定义出现；也纳入下拉，避免发布页找不到自定义场景。
-        for svc in sys_cfg.get("services", []) or []:
-            if not isinstance(svc, dict):
-                continue
-            tv = svc.get("template_variables", {}) or {}
-            env_map = svc.get("servers_by_env") or tv.get("servers_by_env") or {}
+    if system:
+        # Service mappings can define an environment before a dedicated row is created.
+        for svc in ServiceRepository(db).list_by_system(system):
+            tv = svc.template_variables or {}
+            env_map = tv.get("servers_by_env") or {}
             if isinstance(env_map, dict):
                 for env_name in env_map.keys():
                     if env_name:
@@ -926,70 +908,85 @@ def _normalize_environment_payload(payload: SystemEnvironmentPayload, existing: 
 @resource_v2_router.post("/systems/{system_name}/environments")
 async def create_system_environment_v2(system_name: str, payload: SystemEnvironmentPayload, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    from config_manager import load_config, save_config
+    from app.db.repository import SystemEnvironmentRepository, SystemRepository
 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
     env_name = _normalize_env_name(payload.name)
-    config = load_config()
-    systems = config.setdefault("systems", {})
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
+    if SystemRepository(db).get_by_name(system_name) is None:
         raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    envs = sys_cfg.setdefault("environments", {})
-    if env_name in envs:
+    repo = SystemEnvironmentRepository(db)
+    if repo.get_by_name(system_name, env_name) is not None:
         raise HTTPException(status_code=409, detail=f"Environment already exists: {env_name}")
-    envs[env_name] = _normalize_environment_payload(payload)
-    if not save_config(config):
-        raise HTTPException(status_code=500, detail="Failed to save environment configuration")
+    env_cfg = _normalize_environment_payload(payload)
+    repo.create(
+        system_name=system_name,
+        name=env_name,
+        display_name=env_cfg["display_name"],
+        category=env_cfg["category"],
+        description=env_cfg["description"],
+        base_path=env_cfg["base_path"],
+        servers=env_cfg["servers"],
+        variables=env_cfg["variables"],
+    )
+    db.commit()
     audit("system.environment.create", "environment", f"{system_name}/{env_name}", getattr(request.state, "username", ""))
-    return api_response(data=_env_response(env_name, envs[env_name], "system"), message="Environment created")
+    return api_response(data=_env_response(env_name, env_cfg, "system"), message="Environment created")
 
 
 @resource_v2_router.put("/systems/{system_name}/environments/{env_name}")
 async def update_system_environment_v2(system_name: str, env_name: str, payload: SystemEnvironmentPayload, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    from config_manager import load_config, save_config
+    from app.db.repository import SystemEnvironmentRepository, SystemRepository
 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
     current_name = _normalize_env_name(env_name)
     new_name = _normalize_env_name(payload.name or env_name)
-    config = load_config()
-    systems = config.setdefault("systems", {})
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
+    if SystemRepository(db).get_by_name(system_name) is None:
         raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    envs = sys_cfg.setdefault("environments", {})
-    existing = envs.get(current_name, {})
-    if new_name != current_name and new_name in envs:
+    repo = SystemEnvironmentRepository(db)
+    existing_row = repo.get_by_name(system_name, current_name)
+    if existing_row is None:
+        raise HTTPException(status_code=404, detail=f"Environment not found: {current_name}")
+    if new_name != current_name and repo.get_by_name(system_name, new_name) is not None:
         raise HTTPException(status_code=409, detail=f"Environment already exists: {new_name}")
-    if current_name in envs:
-        del envs[current_name]
-    envs[new_name] = _normalize_environment_payload(payload, existing)
-    if not save_config(config):
-        raise HTTPException(status_code=500, detail="Failed to save environment configuration")
+    existing = {
+        "display_name": existing_row.display_name,
+        "category": existing_row.category,
+        "description": existing_row.description,
+        "base_path": existing_row.base_path,
+        "servers": existing_row.servers or [],
+        "variables": existing_row.variables or {},
+    }
+    env_cfg = _normalize_environment_payload(payload, existing)
+    existing_row.name = new_name
+    existing_row.display_name = env_cfg["display_name"]
+    existing_row.category = env_cfg["category"]
+    existing_row.description = env_cfg["description"]
+    existing_row.base_path = env_cfg["base_path"]
+    existing_row.servers = env_cfg["servers"]
+    existing_row.variables = env_cfg["variables"]
+    db.commit()
     audit("system.environment.update", "environment", f"{system_name}/{current_name}->{new_name}", getattr(request.state, "username", ""))
-    return api_response(data=_env_response(new_name, envs[new_name], "system"), message="Environment updated")
+    return api_response(data=_env_response(new_name, env_cfg, "system"), message="Environment updated")
 
 
 @resource_v2_router.delete("/systems/{system_name}/environments/{env_name}")
 async def delete_system_environment_v2(system_name: str, env_name: str, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
-    from config_manager import load_config, save_config
+    from app.db.repository import SystemEnvironmentRepository, SystemRepository
 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
     env_name = _normalize_env_name(env_name)
     if env_name in {"test", "prod"}:
         raise HTTPException(status_code=400, detail="Default environments test/prod cannot be deleted")
-    config = load_config()
-    systems = config.setdefault("systems", {})
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
+    if SystemRepository(db).get_by_name(system_name) is None:
         raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    envs = sys_cfg.setdefault("environments", {})
-    if env_name not in envs:
+    repo = SystemEnvironmentRepository(db)
+    row = repo.get_by_name(system_name, env_name)
+    if row is None:
         raise HTTPException(status_code=404, detail=f"Environment not found: {env_name}")
     try:
         from app.db.models import Deployment
@@ -1007,9 +1004,8 @@ async def delete_system_environment_v2(system_name: str, env_name: str, request:
         raise
     except Exception as _e:
         logger.warning("Failed to check active deployments for environment %s/%s: %s", system_name, env_name, _e)
-    del envs[env_name]
-    if not save_config(config):
-        raise HTTPException(status_code=500, detail="Failed to save environment configuration")
+    repo.delete(row.id)
+    db.commit()
     audit("system.environment.delete", "environment", f"{system_name}/{env_name}", getattr(request.state, "username", ""))
     return api_response(data={"name": env_name}, message="Environment deleted")
 

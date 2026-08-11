@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 from fastapi import HTTPException
 
-from app.db.repository import ConfigRepository
+from app.db.repository import CapabilitySettingsRepository
 from app.services.tool_context import ToolContext
 
 # Default capability settings.
@@ -91,6 +91,7 @@ APPROVAL_TOOL_MAP: Dict[str, str] = {
 APPROVAL_TOOL_NAME_MAP: Dict[str, str] = {
     "ops.execute_rollback_plan": "ops.approval.prepare_rollback",
     "ops.execute_deploy_plan": "ops.approval.prepare_release",
+    "ops.upload_file": "ops.approval.prepare_file_upload",
 }
 
 
@@ -129,7 +130,7 @@ def ai_tool_policy_metadata(tool_def) -> Dict[str, Any]:
 
 
 def get_capability_settings(db) -> Dict[str, Any]:
-    cfg = ConfigRepository(db).get("capability_server")
+    cfg = CapabilitySettingsRepository(db).get()
     merged = dict(DEFAULT_CAPABILITY_SETTINGS)
     if isinstance(cfg, dict):
         merged.update(cfg)
@@ -139,7 +140,7 @@ def get_capability_settings(db) -> Dict[str, Any]:
 def save_capability_settings(db, data: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(DEFAULT_CAPABILITY_SETTINGS)
     merged.update(data or {})
-    ConfigRepository(db).set("capability_server", merged)
+    CapabilitySettingsRepository(db).set(merged)
     db.commit()
     return merged
 

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_runtime_path
 from app.db.models import Deployment, DeployTask, ToolPlan, DeployPackage, DeployPackageRef
-from app.db import ConfigRepository
+from app.db.repository import RetentionPolicyRepository
 
 
 DEFAULT_PACKAGE_RETENTION: Dict[str, Any] = {
@@ -92,13 +92,13 @@ def _normalize_policy(policy: Dict[str, Any] | None) -> Dict[str, Any]:
 
 
 def get_package_retention_policy(db: Session) -> Dict[str, Any]:
-    cfg = ConfigRepository(db).get("package_retention") or {}
+    cfg = RetentionPolicyRepository(db).get("package") or {}
     return _normalize_policy(cfg if isinstance(cfg, dict) else {})
 
 
 def save_package_retention_policy(db: Session, policy: Dict[str, Any]) -> Dict[str, Any]:
     merged = _normalize_policy({**get_package_retention_policy(db), **(policy or {})})
-    ConfigRepository(db).set("package_retention", merged)
+    RetentionPolicyRepository(db).set("package", merged)
     db.commit()
     return merged
 
@@ -208,9 +208,8 @@ def _infer_system_from_hint(service_hint: str) -> str:
     if not service_hint:
         return ""
     try:
-        from config_manager import load_config_cached
-        config = load_config_cached()
-        systems = config.get("systems") or {}
+        from app.config.systems import get_all_systems
+        systems = get_all_systems()
         hint_l = service_hint.lower()
         for sys_name, sys_cfg in systems.items():
             services = (sys_cfg or {}).get("services") or []

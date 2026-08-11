@@ -9,9 +9,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.models import InspectionIssue
-from app.db.repository import ConfigRepository
-
-PROFILE_CONFIG_KEY = "inspection_profiles"
 
 LIGHTWEIGHT_CATEGORIES = ["DISK", "MEMORY", "SERVICE_STATUS", "BACKUP"]
 SECURITY_CATEGORIES = ["LOGIN_SECURITY", "ACCOUNT_SECURITY", "COMMAND_HISTORY", "PROCESS_PORT", "FIREWALL"]
@@ -167,11 +164,9 @@ def _normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _configured_profiles(db: Session) -> List[Dict[str, Any]]:
-    stored = ConfigRepository(db).get(PROFILE_CONFIG_KEY)
-    if isinstance(stored, dict):
-        stored = stored.get("items")
-    if not isinstance(stored, list):
-        stored = []
+    from app.db.repository import InspectionProfileRepository
+
+    stored = list(InspectionProfileRepository(db).get_all().values())
     defaults = {item["id"]: item for item in _default_profiles()}
     merged = {key: deepcopy(value) for key, value in defaults.items()}
     for item in stored:

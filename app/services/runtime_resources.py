@@ -122,8 +122,8 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 
 
 def get_runtime_retention_policy(db: Session) -> Dict[str, Any]:
-    from app.db.repository import ConfigRepository
-    cfg = ConfigRepository(db).get("runtime_retention") or {}
+    from app.db.repository import RetentionPolicyRepository
+    cfg = RetentionPolicyRepository(db).get("runtime") or {}
     if not isinstance(cfg, dict):
         cfg = {}
     merged = {**DEFAULT_RUNTIME_RETENTION, **cfg}
@@ -134,12 +134,12 @@ def get_runtime_retention_policy(db: Session) -> Dict[str, Any]:
 
 
 def save_runtime_retention_policy(db: Session, policy: Dict[str, Any]) -> Dict[str, Any]:
-    from app.db.repository import ConfigRepository
+    from app.db.repository import RetentionPolicyRepository
     merged = {**get_runtime_retention_policy(db), **(policy or {})}
     for key in ["log_file_keep_days", "backup_keep_days", "backup_keep_max", "runtime_tmp_keep_hours"]:
         merged[key] = _as_int(merged.get(key), DEFAULT_RUNTIME_RETENTION[key])
     merged["dry_run"] = _as_bool(merged.get("dry_run"), True)
-    ConfigRepository(db).set("runtime_retention", merged)
+    RetentionPolicyRepository(db).set("runtime", merged)
     db.commit()
     return merged
 

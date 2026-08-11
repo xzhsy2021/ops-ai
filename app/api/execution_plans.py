@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.auth_v2 import get_current_user
 from app.db.base import get_db
 from app.db.models import ExecutionPlan
-from app.services.execution_plan import ExecutionPlanService
+from app.services.execution_plan import ExecutionPlanService, step_approval_details
 
 router = APIRouter(prefix="/api/v2/execution-plans", tags=["qclaw执行计划管理"])
 
@@ -28,6 +28,7 @@ class PlanStepSummary(BaseModel):
     finished_at: str | None = None
     error_message: str | None = None
     result: dict[str, Any] | None = None
+    approval_details: dict[str, Any] = {}
 
 
 class PlanSummary(BaseModel):
@@ -105,6 +106,7 @@ def _to_detail(p: ExecutionPlan) -> PlanDetail:
                 finished_at=st.finished_at.isoformat() if st.finished_at else None,
                 error_message=st.error_message,
                 result=st.result,
+                approval_details=step_approval_details(st.action_type, st.parameters, p.targets),
             )
             for st in p.steps
         ],

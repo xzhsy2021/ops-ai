@@ -259,7 +259,7 @@ def _filter_items(items, keyword: str = "", limit: int = 100):
 @registry.register(
     name="ops.list_servers",
     title="查询服务器资产",
-    description="列出已配置服务器（兼容数据库 servers 表和配置中心 config_kv）。支持按 group / env 分组筛选与 keyword 关键字过滤。group 字段可与 'ops.list_server_groups' 工具配合使用，先列出可选分组，再按 group 名称发起巡检。",
+    description="列出数据库中的服务器。支持按 group / env 分组筛选与 keyword 关键字过滤。group 字段可与 'ops.list_server_groups' 工具配合使用，先列出可选分组，再按 group 名称发起巡检。",
     scopes=["ops:read", "server:read"],
     risk="low",
     category="server_read",
@@ -335,7 +335,7 @@ def list_systems_tool(args, ctx, db):
 @registry.register(
     name="ops.list_services",
     title="查询服务配置",
-    description="列出系统/项目下的服务配置，兼容数据库 services 表和配置中心 config_kv。",
+    description="列出数据库中的系统/项目服务配置。",
     scopes=["ops:read"],
     risk="low",
     category="app",
@@ -350,48 +350,20 @@ def list_systems_tool(args, ctx, db):
 def list_services_tool(args, ctx, db):
     system = str(args.get("system") or "").strip()
     items = []
-    seen = set()
-    systems = _inventory.list_systems() or {}
-    for sys_name, cfg in systems.items():
-        if system and sys_name != system:
-            continue
-        for svc in (cfg or {}).get("services") or []:
-            if not isinstance(svc, dict):
-                continue
-            name = svc.get("name") or svc.get("display_name")
-            if not name:
-                continue
-            key = (sys_name, name)
-            seen.add(key)
-            items.append({
-                "system_name": sys_name,
-                "name": name,
-                "display_name": svc.get("display_name") or name,
-                "template": svc.get("template") or "",
-                "servers": svc.get("servers") or (cfg or {}).get("servers") or [],
-                "template_variables": svc.get("template_variables") or {},
-                "source": "config_kv",
-            })
-    try:
-        from app.db.models import Service
-        query = db.query(Service)
-        if system:
-            query = query.filter(Service.system_name == system)
-        for row in query.all():
-            key = (row.system_name, row.name)
-            if key in seen:
-                continue
-            items.append({
-                "system_name": row.system_name,
-                "name": row.name,
-                "display_name": row.display_name or row.name,
-                "template": row.template or "",
-                "servers": row.servers or [],
-                "template_variables": row.template_variables or {},
-                "source": "database",
-            })
-    except Exception:
-        pass
+    from app.db.models import Service
+    query = db.query(Service)
+    if system:
+        query = query.filter(Service.system_name == system)
+    for row in query.order_by(Service.system_name, Service.name).all():
+        items.append({
+            "system_name": row.system_name,
+            "name": row.name,
+            "display_name": row.display_name or row.name,
+            "template": row.template or "",
+            "servers": row.servers or [],
+            "template_variables": row.template_variables or {},
+            "source": "database",
+        })
     items = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
     return {"items": items, "total": len(items), "summary": f"查询到 {len(items)} 个服务"}
 
@@ -411,21 +383,26 @@ def list_environments_tool(args, ctx, db):
     system = str(args.get("system") or "").strip()
     items = []
     seen = set()
-    systems = _inventory.list_systems() or {}
-    for sys_name, cfg in systems.items():
-        if system and sys_name != system:
-            continue
-        for env_name, env_cfg in ((cfg or {}).get("environments") or {}).items():
-            seen.add(env_name)
-            items.append({"system_name": sys_name, "name": env_name, "display_name": (env_cfg or {}).get("display_name") or env_name, "variables": (env_cfg or {}).get("variables") or {}, "source": "config_kv"})
-    try:
-        from app.db.models import Environment
-        for row in db.query(Environment).all():
-            if row.name in seen:
-                continue
-            items.append({"name": row.name, "display_name": (row.variables or {}).get("display_name") or row.name, "variables": row.variables or {}, "source": "database"})
-    except Exception:
-        pass
+    from app.db.models import Environment, SystemEnvironment
+    query = db.query(SystemEnvironment)
+    if system:
+        query = query.filter(SystemEnvironment.system_name == system)
+    for row in query.order_by(SystemEnvironment.system_name, SystemEnvironment.name).all():
+        seen.add((row.system_name, row.name))
+        items.append({
+            "system_name": row.system_name,
+            "name": row.name,
+            "display_name": row.display_name or row.name,
+            "variables": row.variables or {},
+            "source": "database",
+        })
+    for row in db.query(Environment).order_by(Environment.name).all():
+        items.append({
+            "name": row.name,
+            "display_name": (row.variables or {}).get("display_name") or row.name,
+            "variables": row.variables or {},
+            "source": "database",
+        })
     try:
         limit = max(1, min(int(args.get("limit") or 100), 500))
     except Exception:
@@ -530,6 +507,13 @@ def _resolve_service_control_command(
     svc_arg = shlex.quote(svc_target) if svc_target else ""
 
     extra = (" " + " ".join(compose_args)) if compose_args else ""
+
+    if template == "generic_frontend":
+        if action == "update":
+            deploy_path = tv.get("deploy_path") or tv.get("service_dir") or "."
+            update_script = tv.get("update_script") or "./www.sh"
+            script_prefix = _env_prefix(env)
+            return f"cd {shlex.quote(str(deploy_path))} && {script_prefix}{update_script}".strip()
 
     if template in ("docker_compose", "crypto_docker_compose") or compose_dir:
         compose_file = tv.get("compose_file", "docker-compose.yml")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import HTTPException
 
+from app.core.config import APPROVAL_STAGING_DIR, get_runtime_path
 from app.services.package_retention import (
     get_package_retention_policy,
     save_package_retention_policy,
@@ -21,6 +23,24 @@ from app.services.package_retention import (
 )
 from app.db.models import DeployPackage
 from app.services.tool_registry import registry
+
+
+def _controlled_local_package_path(value: str) -> Path:
+    path = Path(os.path.abspath(os.path.expanduser(str(value or "")))).resolve()
+    roots = [
+        Path(get_runtime_path("UPLOAD_DIR", "uploads")).resolve(),
+        Path(APPROVAL_STAGING_DIR).resolve(),
+    ]
+    for root in roots:
+        try:
+            if os.path.commonpath([os.path.normcase(str(path)), os.path.normcase(str(root))]) == os.path.normcase(str(root)):
+                return path
+        except ValueError:
+            continue
+    raise HTTPException(
+        status_code=400,
+        detail="local_path must be inside OPS uploads or approval staging directory",
+    )
 
 
 @registry.register(
@@ -128,6 +148,34 @@ def get_package_retention_preview(args, ctx, db):
 
 # ─── Utility: upload_package (used by deploy_tools.py, not registered as AI tool) ───
 
+@registry.register(
+    name="ops.upload_package",
+    title="Upload package to OPS File Center",
+    description=(
+        "Upload a package into the local OPS File Center for later review or deployment. "
+        "This only stages the package; it does not upload to a target server or deploy."
+    ),
+    scopes=["ops:read", "package:write"],
+    risk="medium",
+    category="package_write",
+    write=True,
+    data_sensitivity="sensitive",
+    keywords=["upload package", "file center", "package intake"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "system": {"type": "string"},
+            "service": {"type": "string"},
+            "filename": {"type": "string"},
+            "local_path": {"type": "string", "description": "Path available to the local stdio MCP bridge"},
+            "content_base64": {"type": "string"},
+            "overwrite": {"type": "boolean", "default": False},
+            "dry_run": {"type": "boolean", "default": False},
+            "calculate_sha256": {"type": "boolean", "default": True},
+        },
+        "additionalProperties": False,
+    },
+)
 def upload_package(args, ctx, db):
     """上传发布包到 OPS 文件中心。供 deploy_tools.py 内部调用。"""
     system = args.get("system") or ""
@@ -152,20 +200,21 @@ def upload_package(args, ctx, db):
         return meta
     local_path = args.get("local_path") or ""
     if local_path:
-        if not os.path.isfile(local_path):
+        controlled_path = _controlled_local_package_path(local_path)
+        if not controlled_path.is_file():
             raise HTTPException(status_code=400, detail="local_path is not readable by OPS backend. Use stdio MCP bridge or content_base64.")
         if args.get("dry_run"):
             policy = get_package_retention_policy(db)
             return inspect_package_file(
-                local_path,
-                filename=args.get("filename") or os.path.basename(local_path),
+                controlled_path,
+                filename=args.get("filename") or controlled_path.name,
                 policy=policy,
                 calculate_sha256=bool(args.get("calculate_sha256", True)),
             )
-        with open(local_path, "rb") as f:
+        with controlled_path.open("rb") as f:
             meta = save_package_fileobj(
                 db,
-                filename=args.get("filename") or os.path.basename(local_path),
+                filename=args.get("filename") or controlled_path.name,
                 fileobj=f,
                 system=system,
                 service=service,
@@ -178,5 +227,3 @@ def upload_package(args, ctx, db):
         ]
         return meta
     raise HTTPException(status_code=400, detail="Provide local_path for stdio MCP or content_base64 for HTTP tools")
-
-

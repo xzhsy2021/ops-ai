@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -25,11 +26,15 @@ def _dir_check(label: str, path: str) -> Dict[str, Any]:
         "path": str(p),
         "message": "目录可用" if p.exists() and p.is_dir() else "目录不存在或不是目录",
     }
+    probe = None
     try:
         if p.exists():
-            test_file = p / ".ops_write_test"
-            test_file.write_text("ok", encoding="utf-8")
-            test_file.unlink(missing_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix=".ops_health_", suffix=".tmp",
+                dir=p, delete=False,
+            ) as handle:
+                probe = Path(handle.name)
+                handle.write("ok")
             result["writable"] = True
         else:
             result["writable"] = False
@@ -37,6 +42,12 @@ def _dir_check(label: str, path: str) -> Dict[str, Any]:
         result["status"] = "error"
         result["writable"] = False
         result["message"] = f"目录不可写: {exc}"
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except Exception:
+                pass
     result["label"] = label
     return result
 

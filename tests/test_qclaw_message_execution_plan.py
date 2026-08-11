@@ -278,13 +278,157 @@ class TestMessageExecutionPlanFlow:
         assert result["ok"] is True
         assert result["status"] == "SUCCEEDED"
         assert [a for a, _ in order] == ["SERVICE_CONTROL", "HEALTH_CHECK"]
-
         # 没有产生新的单动作审批
         assert db.query(AiActionApproval).count() == approval_count_before
         # 步骤都已成功，且不重复
         plan = db.query(ExecutionPlan).filter(ExecutionPlan.id == prepared["plan_id"]).first()
         assert plan.status == "SUCCEEDED"
         assert all(s.status == "SUCCEEDED" for s in plan.steps)
+
+    def test_file_upload_is_one_step_in_the_single_plan_approval(self, db, monkeypatch):
+        from pathlib import Path
+        from app.services.tool_adapters import file_transfer_tools
+        from app.services.tool_adapters import approval_tools
+        from app.services.tool_adapters.approval_tools import (
+            approval_prepare_plan,
+            approval_execute_plan,
+        )
+
+        upload_calls = []
+
+        def fake_upload(args, ctx, db):
+            upload_calls.append(args)
+            return {"ok": True, "server": args["server"]}
+
+        monkeypatch.setattr(file_transfer_tools, "upload_file", fake_upload)
+        monkeypatch.setattr(
+            approval_tools,
+            "_resolve_source",
+            lambda params: (Path("C:/ops/uploads/frontend.tar.gz"), "frontend.tar.gz"),
+        )
+        monkeypatch.setattr(
+            approval_tools,
+            "inspect_package_file",
+            lambda source, filename, policy, calculate_sha256: {
+                "blockers": [],
+                "sha256": "a" * 64,
+                "size_bytes": 12,
+            },
+        )
+        suffix = "plan-upload"
+        room_id = _room(suffix)
+        ctx = _ctx(bound_room_ids=[room_id])
+        approval_count_before = db.query(AiActionApproval).count()
+
+        prepared = approval_prepare_plan(
+            args={
+                "room_id": room_id,
+                "request_event_id": _event(suffix),
+                "content_sha256": _content_hash(suffix),
+                "system_name": "crypto-trader",
+                "service_name": "trader-api",
+                "environment": "test",
+                "targets": ["cc-test2"],
+                "steps": [{
+                    "step_key": "upload",
+                    "action_type": "FILE_UPLOAD",
+                    "parameters": {
+                        "action_parameters": {
+                            "package_name": "frontend.tar.gz",
+                            "remote_path": "/srv/releases/frontend.tar.gz",
+                            "expected_sha256": "a" * 64,
+                            "expected_size_bytes": 12,
+                        },
+                    },
+                    "dependencies": [],
+                }],
+                "policy": {"continue_on_error": False},
+                "routing_config_revision": f"rev-{_RUN_ID}-{suffix}",
+                "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
+            },
+            ctx=ctx,
+            db=db,
+        )
+
+        result = approval_execute_plan(
+            args={
+                "plan_id": prepared["plan_id"],
+                "short_code": prepared["short_code"],
+                "approver_matrix_id": "@admin:matrix.org",
+                "room_id": room_id,
+                "approval_event_id": _event(f"approve-{suffix}"),
+            },
+            ctx=ctx,
+            db=db,
+        )
+
+        assert result["ok"] is True
+        assert result["status"] == "SUCCEEDED"
+        assert db.query(AiActionApproval).count() == approval_count_before
+        assert upload_calls[0]["server"] == "cc-test2"
+
+    def test_batch_file_upload_freezes_package_manifest_before_approval(self, db, monkeypatch):
+        from pathlib import Path
+        from app.services.tool_adapters import approval_tools
+        from app.services.tool_adapters.approval_tools import approval_prepare_plan
+
+        monkeypatch.setattr(
+            approval_tools,
+            "_resolve_source",
+            lambda params: (Path("C:/ops/uploads/frontend.tar.gz"), "frontend.tar.gz"),
+        )
+        monkeypatch.setattr(
+            approval_tools,
+            "inspect_package_file",
+            lambda source, filename, policy, calculate_sha256: {
+                "blockers": [],
+                "sha256": "c" * 64,
+                "size_bytes": 12,
+            },
+        )
+
+        suffix = "plan-upload-freeze"
+        room_id = _room(suffix)
+        prepared = approval_prepare_plan(
+            args={
+                "room_id": room_id,
+                "request_event_id": _event(suffix),
+                "content_sha256": _content_hash(suffix),
+                "system_name": "crypto-trader",
+                "service_name": "trader-api",
+                "environment": "test",
+                "targets": ["cc-test2"],
+                "steps": [{
+                    "step_key": "upload",
+                    "action_type": "FILE_UPLOAD",
+                    "parameters": {
+                        "action_parameters": {
+                            "package_name": "frontend.tar.gz",
+                            "remote_path": "/srv/releases/frontend.tar.gz",
+                        },
+                    },
+                    "dependencies": [],
+                }],
+                "policy": {"continue_on_error": False},
+                "routing_config_revision": f"rev-{_RUN_ID}-{suffix}",
+                "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
+            },
+            ctx=_ctx(bound_room_ids=[room_id]),
+            db=db,
+        )
+
+        plan = db.query(ExecutionPlan).filter(ExecutionPlan.id == prepared["plan_id"]).first()
+        action_parameters = plan.steps[0].parameters["action_parameters"]
+        assert action_parameters["expected_sha256"] == "c" * 64
+        assert action_parameters["expected_size_bytes"] == 12
+        assert prepared["steps"][0]["approval_details"] == {
+            "package_name": "frontend.tar.gz",
+            "remote_path": "/srv/releases/frontend.tar.gz",
+            "overwrite": False,
+            "expected_sha256": "c" * 64,
+            "expected_size_bytes": 12,
+            "targets": ["cc-test2"],
+        }
 
     def test_duplicate_message_is_idempotent(self, db):
         """重复消息（相同 plan_digest）不生成第二个待审批计划或新短码。"""

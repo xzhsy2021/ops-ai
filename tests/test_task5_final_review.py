@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import shutil
 import subprocess
 import sys
 
@@ -206,6 +207,71 @@ def test_documented_launch_chains_have_one_dotenv_loading_boundary():
     )
     for filename in delegates:
         assert "load_dotenv.py" not in (ROOT / filename).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    [
+        "start.sh",
+        "scripts/dev.sh",
+        "scripts/preflight_start_check.sh",
+        "scripts/start_single_process.sh",
+    ],
+)
+def test_posix_launchers_reenter_through_bash_with_dotenv_precedence(tmp_path, launcher):
+    bash = shutil.which("bash")
+    if not bash and os.name == "nt":
+        candidate = Path(r"C:\Program Files\Git\bin\bash.exe")
+        bash = str(candidate) if candidate.exists() else None
+    if not bash:
+        pytest.skip("bash is unavailable")
+
+    for relative in (
+        "start.sh",
+        "scripts/dev.sh",
+        "scripts/preflight_start_check.sh",
+        "scripts/start_single_process.sh",
+        "scripts/load_dotenv.py",
+    ):
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, destination)
+    (tmp_path / "frontend/dist").mkdir(parents=True)
+    (tmp_path / ".env").write_text(
+        "PREFLIGHT_KEY=from-root\nEXPORTED_KEY=from-root\nDEV_MODE=single\n",
+        encoding="utf-8",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python_shim = bin_dir / "python3"
+    python_shim.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"${1:-}\" in\n"
+        "  *load_dotenv.py) exec py -3 \"$@\" ;;\n"
+        "esac\n"
+        "printf 'PRECHECK:%s:%s\\n' \"$PREFLIGHT_KEY\" \"$EXPORTED_KEY\" >&2\n"
+        "exit 73\n",
+        encoding="utf-8",
+    )
+    python_shim.chmod(0o755)
+
+    env = os.environ.copy()
+    env.pop("OPS_DOTENV_LOADED", None)
+    env["EXPORTED_KEY"] = "from-process"
+    env["PATH"] = (
+        f"{bin_dir}{os.pathsep}{Path(bash).parent}{os.pathsep}{env.get('PATH', '')}"
+    )
+    result = subprocess.run(
+        [bash, str(tmp_path / launcher)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    output = result.stdout + result.stderr
+    assert "PRECHECK:from-root:from-process" in output
+    assert "PermissionError" not in output
 
 
 @pytest.mark.parametrize("value", [[], "", 0, False])

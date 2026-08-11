@@ -8,6 +8,6 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 if [ "${OPS_DOTENV_LOADED:-0}" != "1" ]; then
   export OPS_DOTENV_LOADED=1
-  exec "$PYTHON_BIN" "$ROOT_DIR/scripts/load_dotenv.py" "$ROOT_DIR/.env" --run "$0" "$@"
+  exec "$PYTHON_BIN" "$ROOT_DIR/scripts/load_dotenv.py" "$ROOT_DIR/.env" --run bash "$0" "$@"
 fi
 exec "$PYTHON_BIN" scripts/preflight_start_check.py "$@"

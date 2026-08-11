@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 if [ "${OPS_DOTENV_LOADED:-0}" != "1" ]; then
   export OPS_DOTENV_LOADED=1
   DOTENV_PYTHON="${PYTHON_BIN:-$(command -v python3 || command -v python)}"
-  exec "$DOTENV_PYTHON" "$ROOT/scripts/load_dotenv.py" "$ROOT/.env" --run "$0" "$@"
+  exec "$DOTENV_PYTHON" "$ROOT/scripts/load_dotenv.py" "$ROOT/.env" --run bash "$0" "$@"
 fi
 VENV="$ROOT/venv"
 FRONTEND_DIR="$ROOT/frontend"

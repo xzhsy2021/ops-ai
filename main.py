@@ -345,7 +345,6 @@ from app.api.inspection import router as inspection_router
 from app.api.db_tools import router as db_tools_router
 from app.api.dashboard import router as dashboard_router
 from app.api.mcp_gateway import router as mcp_gateway_router
-from app.api.ai_analysis import router as ai_analysis_router
 from app.api.approvals import router as approvals_router
 from app.api.execution_plans import router as execution_plans_router
 from app.api.v2.status import router as status_aggregate_router
@@ -354,7 +353,7 @@ _v2_routers = [
     deploy_v2_router, pipeline_v2_router, resource_v2_router,
     auth_v2_router, groups_v2_router,
     servers_v2_router, jump_hosts_v2_router, admin_ops_router, sftp_router,
-    maintenance_router, task_center_router, audit_router, tools_router, mcp_router, capabilities_router, system_router, reports_router, inspection_router, db_tools_router, dashboard_router, mcp_gateway_router, status_aggregate_router, ai_analysis_router, approvals_router, execution_plans_router,
+    maintenance_router, task_center_router, audit_router, tools_router, mcp_router, capabilities_router, system_router, reports_router, inspection_router, db_tools_router, dashboard_router, mcp_gateway_router, status_aggregate_router, approvals_router, execution_plans_router,
 ]
 _v2_routers_ws = [
     terminal_ws_router,

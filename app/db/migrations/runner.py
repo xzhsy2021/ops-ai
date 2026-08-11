@@ -1310,6 +1310,17 @@ SERVICE_IDENTITY_MIGRATION: Dict[str, str] = {
     "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_services_system_name ON services(system_name, name)",
 }
 
+AI_ANALYSIS_RETIREMENT_MIGRATION: Dict[str, str] = {
+    "version": "084_001_drop_ai_analysis_tables",
+    "name": "Drop retired built-in AI analysis tables",
+    "sql": "python:retire_ai_analysis_tables",
+}
+
+AI_ANALYSIS_TABLE_DROPS = (
+    ("ai_analysis_findings", "DROP TABLE IF EXISTS ai_analysis_findings"),
+    ("ai_analysis_runs", "DROP TABLE IF EXISTS ai_analysis_runs"),
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -1340,6 +1351,26 @@ def _mark_applied(conn, mig: Dict[str, str]):
         text("INSERT OR REPLACE INTO schema_migrations(version, name, applied_at, checksum) VALUES(:v, :n, :a, :c)"),
         {"v": mig["version"], "n": mig.get("name", mig["version"]), "a": _now_iso(), "c": _checksum(mig)},
     )
+
+
+def retire_ai_analysis_tables(engine) -> List[str]:
+    """Drop the retired analysis tables in dependency order."""
+    dropped: List[str] = []
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, AI_ANALYSIS_RETIREMENT_MIGRATION["version"]):
+            return dropped
+
+        names = set(inspect(conn).get_table_names())
+        for table_name, drop_sql in AI_ANALYSIS_TABLE_DROPS:
+            if table_name in names:
+                conn.execute(text(drop_sql))
+                dropped.append(table_name)
+        _mark_applied(conn, AI_ANALYSIS_RETIREMENT_MIGRATION)
+
+    if dropped:
+        logger.info("Retired built-in AI analysis tables: %s", ", ".join(dropped))
+    return dropped
 
 
 def _json_object(value: Any, *, key: str) -> Dict[str, Any]:
@@ -1981,4 +2012,6 @@ def run_schema_migrations(engine) -> List[str]:
         applied.append(CONFIG_KV_RETIREMENT_MIGRATION["version"])
     if ensure_service_identity_index(engine):
         applied.append(SERVICE_IDENTITY_MIGRATION["version"])
+    if retire_ai_analysis_tables(engine):
+        applied.append(AI_ANALYSIS_RETIREMENT_MIGRATION["version"])
     return applied

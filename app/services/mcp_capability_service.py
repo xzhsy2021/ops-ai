@@ -244,7 +244,6 @@ def mcp_resource_items() -> List[Dict[str, str]]:
         {"uri": "ops://systems", "name": "OPS Systems", "description": "OPS system list", "mimeType": "application/json"},
         {"uri": "ops://deployments/recent", "name": "Recent Deployments", "description": "Recent deployment history", "mimeType": "application/json"},
         {"uri": "ops://tools", "name": "Tool Catalog", "description": "OPS tool catalog", "mimeType": "application/json"},
-        {"uri": "ops://ai-diagnostics", "name": "AI Diagnostics Analysis", "description": "Read-only AI diagnostic analysis and safe MCP toolchain", "mimeType": "application/json"},
         {"uri": "ops://operation-chains", "name": "Recent Operation Chains", "description": "Read-only audit replay index for OPS/MCP/AI actions", "mimeType": "application/json"},
         {"uri": "ops://reports", "name": "Report Center", "description": "Generated OPS diagnostic/release/audit reports", "mimeType": "application/json"},
         {"uri": "ops://db/exports", "name": "Database Exports", "description": "Read-only database query export artifacts", "mimeType": "application/json"},
@@ -258,7 +257,6 @@ def mcp_resource_items() -> List[Dict[str, str]]:
         {"uri": "ops://backups/status", "name": "Backup Status", "description": "Backup status", "mimeType": "application/json"},
         {"uri": "ops://deployments/failed", "name": "Failed Deployments", "description": "Recent failed deployments", "mimeType": "application/json"},
         {"uri": "ops://tool-risk-policy", "name": "Tool Risk Policy", "description": "Tool risk policy", "mimeType": "application/json"},
-        {"uri": "ops://ai-workflows", "name": "AI Workflows", "description": "AI workflow catalog", "mimeType": "application/json"},
     ]
 
 
@@ -282,9 +280,6 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
         data = registry.call(db, "ops.list_deployments", {"limit": 20}, ctx)["result"]
     elif uri == "ops://tools":
         data = registry.list_tools(db, ctx, include_schema=True, profile="daily_ops").get("tools", [])
-    elif uri == "ops://ai-diagnostics":
-        from app.services.ai_diagnostics import build_ai_diagnostic_analysis
-        data = build_ai_diagnostic_analysis(db, mode="summary", focus="mcp")
     elif uri == "ops://operation-chains":
         from app.services.audit_chain import list_operation_chains
         data = list_operation_chains(db, limit=50)
@@ -317,22 +312,6 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
         data = registry.call(db, "ops.list_deployments", {"limit": 50, "status": "failed"}, ctx).get("result")
     elif uri == "ops://tool-risk-policy":
         data = {"settings": get_capability_settings(db), "risk_policy": risk_policy_manifest()}
-    elif uri == "ops://ai-workflows":
-        data = {
-            "items": [
-                {
-                    "tool": "ops.inspection.run_servers_batch",
-                    "description": "Batch server inspection with preview-first confirmation flow.",
-                    "recommended_before": ["ops.list_server_groups", "ops.inspection.preview_servers_batch"],
-                    "recommended_after": ["ops.inspection.get_run", "ops.inspection.list_issues", "ops.inspection.generate_report_for_runs"],
-                    "natural_language_examples": [
-                        "巡检 crypto 分组并输出报告",
-                        "巡检全部服务器，按分组分批巡检并输出报告",
-                        "Run all servers by group with batch size 8 and generate a merged report",
-                    ],
-                },
-            ]
-        }
     else:
         raise ValueError("Resource not found")
     wrapped = {"generated_at": generated_at, "source": "ops-platform", "uri": uri, "data": data}
@@ -350,17 +329,12 @@ def mcp_resource_read(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str
 def mcp_prompt_items() -> List[Dict[str, Any]]:
     return [
         {"name": "ops_release_plan", "description": "Create a safe OPS release plan.", "arguments": [{"name": "request", "description": "Natural language release request", "required": True}]},
-        {"name": "ops_failure_analysis", "description": "Analyze a failed OPS deployment.", "arguments": [{"name": "deployment_id", "description": "Deployment id", "required": True}]},
-        {"name": "ops_diagnostic_triage", "description": "Triage OPS runtime issues with read-only MCP tools.", "arguments": [{"name": "focus", "description": "Optional focus such as frontend, mcp, backup, deploy", "required": False}]},
         {"name": "ops_operation_replay", "description": "Replay an OPS/MCP/AI operation chain from audit evidence.", "arguments": [{"name": "chain_id", "description": "tool:/job:/plan:/deployment:/audit id", "required": True}]},
         {"name": "ops_report_brief", "description": "Summarize a generated OPS report artifact.", "arguments": [{"name": "report_id", "description": "Report artifact id", "required": True}]},
         {"name": "ops_db_export_request", "description": "Plan a safe database workflow: query, export, or maintain tables.", "arguments": [{"name": "request", "description": "Natural language query/export request", "required": True}]},
         {"name": "ops_inspection_workflow", "description": "Run OPS server inspection from natural language, including all-server grouped batch inspection.", "arguments": [{"name": "request", "description": "Natural language inspection request", "required": True}]},
         {"name": "ops_server_management", "description": "Manage OPS server assets.", "arguments": [{"name": "request", "description": "Natural language server management request", "required": True}]},
         {"name": "ops_backup_workflow", "description": "Safe OPS database backup workflow.", "arguments": [{"name": "request", "description": "Natural language backup request", "required": True}]},
-        {"name": "ops_project_health_brief", "description": "Generate a lightweight single-project health brief.", "arguments": [{"name": "project_id", "description": "Project/system identifier", "required": True}]},
-        {"name": "ops_risk_triage", "description": "Triage open risks without executing remediation.", "arguments": [{"name": "request", "description": "Natural language risk triage request", "required": False}]},
-        {"name": "ops_monthly_ops_report", "description": "Generate a monthly OPS report from saved evidence.", "arguments": [{"name": "month", "description": "YYYY-MM", "required": False}]},
     ]
 
 
@@ -378,18 +352,6 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "Use ops.list_systems, ops.list_services, ops.list_environments, ops.list_servers, and ops.list_packages. "
             "Create a deploy plan with ops.create_deploy_plan and run precheck with ops.run_precheck first. "
             "Do not execute deployment unless explicitly confirmed. User request: " + str(args.get("request") or "")
-        )
-    elif name == "ops_failure_analysis":
-        text = (
-            "Use ops.get_deployment_report, ops.get_deployment_tasks, and ops.get_deployment_logs to analyze failure. "
-            "Provide recommendations only; do not execute rollback. deployment_id=" + str(args.get("deployment_id") or "")
-        )
-    elif name == "ops_diagnostic_triage":
-        text = (
-            "Use only read-only OPS tools to triage runtime issues: ops.analyze_diagnostics, ops.run_diagnostics, "
-            "ops.get_recent_errors, ops.get_build_info, ops.list_jobs, and deploy read tools when relevant. "
-            "Do not execute deploy, rollback, restore, delete, SQL write, or terminal actions. focus="
-            + str(args.get("focus") or "general")
         )
     elif name == "ops_operation_replay":
         text = (
@@ -439,24 +401,6 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "Help user manage OPS database backups safely. Use ops.list_backups, ops.verify_backup, ops.create_backup, "
             "ops.restore_backup, and ops.delete_backup. Always verify before restore and create a safety backup first. "
             "User request=" + str(args.get("request") or "")
-        )
-    elif name == "ops_project_health_brief":
-        text = (
-            "Use MCP resources first: ops://projects, ops://status/overview, ops://risks/open, ops://inspection/recent. "
-            "Then use ops.inspection.list_runs and ops.risk.list to analyze project health. Output facts, inferences, recommendations and evidence separately. "
-            "Do not execute high-risk actions. project_id=" + str(args.get("project_id") or "")
-        )
-    elif name == "ops_risk_triage":
-        text = (
-            "Use ops.risk.list and ops.risk.triage to prioritize open risks. Only generate a plan; "
-            "do not update risk status, verify, ignore, deploy, rollback, or run shell. request="
-            + str(args.get("request") or "")
-        )
-    elif name == "ops_monthly_ops_report":
-        text = (
-            "Use ops.list_reports, ops.risk.list and ops.inspection.list_runs to generate monthly report. The output must separate facts, inferences, recommendations and evidence. "
-            "Generate reports only from saved evidence and do not execute high-risk actions. month="
-            + str(args.get("month") or "")
         )
     else:
         raise ValueError("Prompt not found")

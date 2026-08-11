@@ -26,7 +26,6 @@ from app.services.dashboard import build_dashboard_summary
 from app.services.diagnostics import build_diagnostics, build_startup_checks, export_diagnostics_bundle, build_diagnostics_report, export_diagnostics_report_json
 from app.services.build_info import get_build_info, get_frontend_build_check
 from app.services.error_log import get_recent_errors
-from app.services.ai_diagnostics import build_ai_diagnostic_analysis
 from app.domain.snapshot import capture_asset_snapshot, save_asset_snapshot, list_asset_snapshots, diff_asset_snapshots
 
 system_router = APIRouter(prefix="/api/v2/system", tags=["系统状态"])
@@ -105,18 +104,6 @@ def export_diagnostics_report(request: Request, db: Session = Depends(get_db)):
 def system_recent_errors(request: Request, limit: int = 20, include_warnings: bool = True, db: Session = Depends(get_db)):
     require_auth(request, db)
     return api_response(data=get_recent_errors(limit=limit, include_warnings=include_warnings))
-
-
-@system_router.get("/ai-diagnostics")
-def system_ai_diagnostics(
-    request: Request,
-    mode: str = "summary",
-    focus: str = "",
-    include_report: bool = False,
-    db: Session = Depends(get_db),
-):
-    require_auth(request, db)
-    return api_response(data=build_ai_diagnostic_analysis(db, mode=mode, focus=focus, include_report=include_report))
 
 
 @system_router.get("/startup-check")

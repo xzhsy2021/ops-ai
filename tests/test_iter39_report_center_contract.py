@@ -28,7 +28,7 @@ def test_report_center_generates_operation_chain_artifact(tmp_path, monkeypatch)
     db = Session()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     try:
-        db.add(ToolCallLog(id="call_report", tool_name="ops.analyze_diagnostics", username="alice", status="success", risk_level="low", result_preview='{"ok":true}', created_at=now))
+        db.add(ToolCallLog(id="call_report", tool_name="ops.run_diagnostics", username="alice", status="success", risk_level="low", result_preview='{"ok":true}', created_at=now))
         db.commit()
 
         result = generate_report(db, report_type="operation_chain", target_id="tool:call_report", fmt="json", created_by="alice")

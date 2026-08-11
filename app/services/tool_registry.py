@@ -166,7 +166,6 @@ def _default_output_schema() -> Dict[str, Any]:
 DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.describe_capabilities",
     "ops.get_tool_risk_policy",
-    "ops.analyze_diagnostics",
     "ops.run_diagnostics",
     "ops.get_system_status",
     "ops.get_build_info",
@@ -603,7 +602,6 @@ class ToolRegistry:
                 {"uri": "ops://systems", "name": "OPS Systems", "description": "系统列表"},
                 {"uri": "ops://deployments/recent", "name": "Recent Deployments", "description": "最近发布历史"},
                 {"uri": "ops://tools", "name": "Tool Catalog", "description": "工具目录"},
-                {"uri": "ops://ai-diagnostics", "name": "AI Diagnostics Analysis", "description": "只读 AI 诊断分析与安全 MCP 工具链"},
                 {"uri": "ops://operation-chains", "name": "Recent Operation Chains", "description": "OPS/MCP/AI 操作链路只读回放索引"},
                 {"uri": "ops://reports", "name": "Report Center", "description": "诊断、发布、备份和 MCP/AI 操作链路报告中心"},
                 {"uri": "ops://db/exports", "name": "Database Exports", "description": "只读数据库查询导出制品"},
@@ -617,20 +615,14 @@ class ToolRegistry:
                 {"uri": "ops://backups/status", "name": "Backup Status", "description": "备份状态摘要"},
                 {"uri": "ops://deployments/failed", "name": "Failed Deployments", "description": "最近失败发布"},
                 {"uri": "ops://tool-risk-policy", "name": "Tool Risk Policy", "description": "工具风险策略"},
-                {"uri": "ops://ai-workflows", "name": "AI Workflows", "description": "AI 工作流目录"},
             ],
             "prompts": [
                 {"name": "ops_release_plan", "description": "帮助用户生成发布计划"},
-                {"name": "ops_failure_analysis", "description": "帮助分析发布失败原因"},
-                {"name": "ops_diagnostic_triage", "description": "使用只读 MCP 工具对 OPS 运行问题进行分流诊断"},
                 {"name": "ops_operation_replay", "description": "基于审计证据回放 OPS/MCP/AI 操作链路"},
                 {"name": "ops_report_brief", "description": "基于报告中心制品生成只读简报"},
                 {"name": "ops_db_export_request", "description": "安全数据库工作流：查询、导出或维护表"},
                 {"name": "ops_server_management", "description": "管理 OPS 服务器资产"},
                 {"name": "ops_backup_workflow", "description": "安全 OPS 数据库备份工作流（列出、创建、校验、恢复）"},
-                {"name": "ops_project_health_brief", "description": "生成项目健康分析，要求事实、推断、建议、证据分离"},
-                {"name": "ops_risk_triage", "description": "对未闭环风险进行优先级分流，不直接执行处置"},
-                {"name": "ops_monthly_ops_report", "description": "基于状态、诊断、巡检、备份、风险生成月度运维复盘"},
             ],
         }
 
@@ -831,7 +823,7 @@ def ensure_builtin_registered():
     with _builtin_lock:
         if _builtin_registered:
             return registry
-        from app.services.tool_adapters import deploy_tools, file_tools, file_transfer_tools, server_tools, audit_tools, capability_tools, diagnostic_tools, backup_tools, job_tools, ai_tools, report_tools, db_tools, inspection_tools, risk_tools, log_tools, ai_analysis_tools, connection_tools, ssh_key_tools, pipeline_tools, approval_tools, remote_exec_tools  # noqa: F401
+        from app.services.tool_adapters import deploy_tools, file_tools, file_transfer_tools, server_tools, audit_tools, capability_tools, diagnostic_tools, backup_tools, job_tools, report_tools, db_tools, inspection_tools, risk_tools, log_tools, connection_tools, ssh_key_tools, pipeline_tools, approval_tools, remote_exec_tools  # noqa: F401
         _builtin_registered = True
         registry.invalidate_capability_cache()
         return registry

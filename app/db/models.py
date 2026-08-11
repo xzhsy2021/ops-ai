@@ -603,41 +603,6 @@ class ToolPlanEvent(Base):
 
 
 
-class AiAnalysisRun(Base):
-    """AI analysis result persisted from MCP/workflow outputs."""
-    __tablename__ = "ai_analysis_runs"
-
-    id = Column(String(32), primary_key=True, default=_uuid)
-    analysis_type = Column(String(64), nullable=False, index=True)
-    target_type = Column(String(64), nullable=True, index=True)
-    target_id = Column(String(255), nullable=True, index=True)
-    source_type = Column(String(64), nullable=True, index=True)
-    source_id = Column(String(255), nullable=True, index=True)
-    prompt_name = Column(String(128), nullable=True)
-    input_refs = Column(Text, nullable=True)
-    output_json = Column(JSON, default=dict)
-    summary = Column(Text, nullable=True)
-    confidence = Column(String(32), nullable=True)
-    created_by = Column(String(128), nullable=True, index=True)
-    created_at = Column(DateTime, default=_utcnow, index=True)
-
-
-class AiAnalysisFinding(Base):
-    """Individual AI finding with evidence and recommendation."""
-    __tablename__ = "ai_analysis_findings"
-
-    id = Column(String(32), primary_key=True, default=_uuid)
-    analysis_run_id = Column(String(32), ForeignKey("ai_analysis_runs.id"), nullable=False, index=True)
-    title = Column(String(255), nullable=True)
-    finding_type = Column(String(64), nullable=True, index=True)
-    severity = Column(String(32), nullable=True, index=True)
-    claim = Column(Text, nullable=True)
-    evidence_json = Column(JSON, default=list)
-    suggestion = Column(Text, nullable=True)
-    confidence = Column(String(32), nullable=True)
-    created_at = Column(DateTime, default=_utcnow, index=True)
-
-
 class AiActionApproval(Base):
     """Human approval request for high-risk AI/MCP suggested actions.
 

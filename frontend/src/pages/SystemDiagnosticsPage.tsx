@@ -4,7 +4,7 @@ import { ROUTES } from '../routes'
 import { systemHealth } from '../api'
 import { diagnosticsApi } from '../api/diagnostics'
 import { ErrorState, LoadingState, PageSection } from '../components/ui'
-import type { AiDiagnosticsPayload, DiagnosticCheck, DiagnosticsPayload, RecentErrorItem, Recommendation } from '../types/diagnostics'
+import type { DiagnosticCheck, DiagnosticsPayload, RecentErrorItem, Recommendation } from '../types/diagnostics'
 
 function getData(res: any) {
   return res?.data ?? res
@@ -136,90 +136,12 @@ function RecentErrors({ items }: { items: RecentErrorItem[] }) {
   )
 }
 
-function AiDiagnosticsPanel({ data, loading, error, onAnalyze }: { data: AiDiagnosticsPayload | null; loading: boolean; error: string; onAnalyze: (focus?: string) => void }) {
-  return (
-    <PageSection title="AI 诊断助手" subtitle="基于诊断报告、最近错误、MCP 工具目录、工具调用审计和任务中心生成只读分析，不会执行发布、恢复、删除、SQL 或终端动作。">
-      <div style={{ display: 'grid', gap: '12px' }}>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={() => onAnalyze('general')} disabled={loading}>{loading ? '分析中...' : '运行只读分析'}</button>
-          <button className="btn" onClick={() => onAnalyze('frontend')} disabled={loading} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)' }}>聚焦前端/白屏</button>
-          <button className="btn" onClick={() => onAnalyze('mcp')} disabled={loading} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)' }}>聚焦 MCP</button>
-          <button className="btn" onClick={() => onAnalyze('deploy')} disabled={loading} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)' }}>聚焦发布</button>
-          <button className="btn" onClick={() => onAnalyze('backup')} disabled={loading} style={{ background: 'var(--border-strong)', color: 'var(--text-primary)' }}>聚焦备份恢复</button>
-        </div>
-        {error && <ErrorState title="AI 诊断分析失败" description={error} />}
-        {data ? (
-          <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
-              <KeyValue label="分析状态" value={statusLabel(data.status)} />
-              <KeyValue label="最高风险" value={statusLabel(data.severity)} />
-              <KeyValue label="发现项" value={data.summary?.finding_count ?? 0} />
-              <KeyValue label="阻断项" value={data.summary?.blocker_count ?? 0} />
-              <KeyValue label="只读工具" value={data.summary?.safe_read_tools ?? 0} />
-              <KeyValue label="受控写工具" value={data.summary?.guarded_write_tools ?? 0} />
-            </div>
-            <div style={{ border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', background: 'var(--bg-page)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
-                <strong>{data.headline || '诊断分析完成'}</strong>
-                <StatusPill status={data.severity} />
-              </div>
-            </div>
-            <div style={{ display: 'grid', gap: '10px' }}>
-              {(data.findings || []).map((finding) => (
-                <details key={finding.key} open={finding.severity === 'high' || finding.severity === 'critical'} style={{ border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', background: 'var(--bg-page)' }}>
-                  <summary style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
-                    <strong>{finding.title}</strong>
-                    <StatusPill status={finding.severity} />
-                  </summary>
-                  <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '8px' }}>{finding.detail}</div>
-                  {finding.related_tools?.length ? <div style={{ marginTop: '8px', color: 'var(--text-muted)', fontSize: '12px' }}>相关只读工具：{finding.related_tools.join(' / ')}</div> : null}
-                  {finding.next_steps?.length ? (
-                    <ol style={{ margin: '8px 0 0 18px', padding: 0, color: 'var(--text-secondary)', fontSize: '13px' }}>
-                      {finding.next_steps.map((step, index) => <li key={index}>{step}</li>)}
-                    </ol>
-                  ) : null}
-                </details>
-              ))}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>
-              <div style={{ border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', background: 'var(--bg-page)' }}>
-                <strong>推荐 MCP 只读工具链</strong>
-                <ol style={{ margin: '10px 0 0 18px', padding: 0, fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  {(data.safe_mcp_toolchain || []).map((step) => (
-                    <li key={`${step.order}-${step.tool}`} style={{ marginBottom: '6px' }}>
-                      <code>{step.tool}</code>：{step.purpose}
-                    </li>
-                  ))}
-                </ol>
-              </div>
-              <div style={{ border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', background: 'var(--bg-page)' }}>
-                <strong>安全边界</strong>
-                <div style={{ display: 'grid', gap: '6px', marginTop: '10px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  <div>自动允许风险：<strong>{(data.guardrails?.ai_auto_allowed_risks || []).join(' / ')}</strong></div>
-                  <div>必须人工确认：<strong>{(data.guardrails?.requires_human_confirmation || []).join(' / ')}</strong></div>
-                  <div>必须任务中心：<strong>{(data.guardrails?.must_use_task_center || []).join(' / ')}</strong></div>
-                  <div>模式：<strong>{data.guardrails?.mode || 'read_only_analysis'}</strong></div>
-                </div>
-              </div>
-            </div>
-          </>
-        ) : (
-          <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>点击“运行只读分析”生成 AI 诊断视角与安全 MCP 工具链。</div>
-        )}
-      </div>
-    </PageSection>
-  )
-}
-
 const SectionCard = PageSection
 
 export default function SystemDiagnosticsPage() {
   const [data, setData] = useState<DiagnosticsPayload | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [aiData, setAiData] = useState<AiDiagnosticsPayload | null>(null)
-  const [aiLoading, setAiLoading] = useState(false)
-  const [aiError, setAiError] = useState('')
   const [snapshot, setSnapshot] = useState<any>(null)
 
   const refresh = async () => {
@@ -242,19 +164,6 @@ export default function SystemDiagnosticsPage() {
   const copyReport = () => {
     const text = JSON.stringify(data || {}, null, 2)
     void navigator.clipboard?.writeText(text)
-  }
-
-  const analyzeWithAi = async (focus = 'general') => {
-    setAiLoading(true)
-    setAiError('')
-    try {
-      const res = await diagnosticsApi.aiDiagnostics({ mode: 'summary', focus })
-      setAiData(getData(res))
-    } catch (e: any) {
-      setAiError(String(e?.message || e || 'AI 诊断分析失败'))
-    } finally {
-      setAiLoading(false)
-    }
   }
 
   useEffect(() => { refresh() }, [])
@@ -349,8 +258,6 @@ export default function SystemDiagnosticsPage() {
           </SectionCard>
 
           <Recommendations items={recommendations} />
-
-          <AiDiagnosticsPanel data={aiData} loading={aiLoading} error={aiError} onAnalyze={analyzeWithAi} />
 
           <SectionCard title="最近错误与警告" subtitle={`扫描 ${recentErrors.scanned_files?.length || 0} 个日志文件，错误 ${recentErrors.error_count || 0} 条，警告 ${recentErrors.warning_count || 0} 条。`}>
             <RecentErrors items={recentErrors.items || []} />

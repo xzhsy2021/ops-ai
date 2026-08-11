@@ -276,7 +276,6 @@ export const systemHealth = {
   diagnosticsReport: () => api.get('/system/diagnostics/report'),
   buildInfo: () => api.get('/system/build-info'),
   recentErrors: (params?: { limit?: number; include_warnings?: boolean }) => api.get('/system/recent-errors', { params }),
-  aiDiagnostics: (params?: { mode?: string; focus?: string; include_report?: boolean }) => api.get('/system/ai-diagnostics', { params }),
   diagnosticsExportUrl: () => `${getBaseURL()}/system/diagnostics/export`,
   diagnosticsReportExportUrl: () => `${getBaseURL()}/system/diagnostics/report/export`,
   startupCheck: () => api.get('/system/startup-check'),
@@ -614,11 +613,4 @@ export const mcpAi = {
   readResource: (uri: string) => api.post('/mcp/resources/read', { uri }),
   workflow: (tool: string, arguments_: Record<string, any>) => api.post('/tools/call', { tool, arguments: arguments_ }),
   recommendTools: (scenario: string) => api.get('/mcp/tools/recommend', { params: { scenario } }),
-}
-
-export const aiAnalysis = {
-  list: (params?: { analysis_type?: string; target_type?: string; target_id?: string; limit?: number }) => api.get('/ai/analysis', { params }),
-  get: (id: string) => api.get(`/ai/analysis/${encodeURIComponent(id)}`),
-  save: (data: any) => api.post('/ai/analysis', data),
-  generateReport: (id: string) => api.post(`/ai/analysis/${encodeURIComponent(id)}/generate-report`),
 }

@@ -38,6 +38,8 @@ const deployPrecheckApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy'
 const deployExecutionsApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy', 'executions.py'), 'utf8')
 const deployApiRoutes = [deployApiV2, deployPlansApi, deployPrecheckApi, deployExecutionsApi].join('\n')
 const frontendApi = fs.readFileSync(path.join(root, 'frontend', 'src', 'api.ts'), 'utf8')
+const frontendDiagnosticsApi = fs.readFileSync(path.join(root, 'frontend', 'src', 'api', 'diagnostics.ts'), 'utf8')
+const diagnosticsTypes = fs.readFileSync(path.join(root, 'frontend', 'src', 'types', 'diagnostics.ts'), 'utf8')
 const auditChainService = fs.readFileSync(path.join(root, 'app', 'services', 'audit_chain.py'), 'utf8')
 const auditTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'audit_tools.py'), 'utf8')
 const auditPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'AuditLogPage.tsx'), 'utf8')
@@ -196,8 +198,28 @@ if (!frontendApi.includes('toolPlans') || !frontendApi.includes('toolPlanRunbook
 if (!fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'DeployPage.tsx'), 'utf8').includes('ReleasePlanPanel')) failures.push('DeployPage ReleasePlanPanel integration missing')
 
 
-if (!diagnosticsPage.includes('AI 诊断助手') || !diagnosticsPage.includes('safe_mcp_toolchain') || !diagnosticsPage.includes('aiDiagnostics')) failures.push('Iter37 diagnostics page AI assistant UI missing')
-if (!frontendApi.includes('aiDiagnostics')) failures.push('Iter37 frontend API aiDiagnostics method missing')
+const retiredFrontendSources = [app, routesSource, frontendApi, frontendDiagnosticsApi, diagnosticsTypes, diagnosticsPage, reportPage].join('\n')
+const retiredFrontendMarkers = [
+  '/system/ai-diagnostics',
+  '/ai/analysis',
+  '/ai/workflows',
+  'AiWorkflowsPage',
+  'AiAnalysisPage',
+  'aiDiagnostics',
+  'AiDiagnosticsPayload',
+  'ai_diagnostics',
+]
+for (const marker of retiredFrontendMarkers) {
+  if (retiredFrontendSources.includes(marker)) failures.push(`Retired frontend AI analysis marker remains: ${marker}`)
+}
+for (const relativePath of [
+  ['pages', 'AiWorkflowsPage.tsx'],
+  ['pages', 'AiAnalysisPage.tsx'],
+  ['pages', 'AiAnalysisDetailPage.tsx'],
+  ['components', 'AiEvidenceView.tsx'],
+]) {
+  if (fs.existsSync(path.join(root, 'frontend', 'src', ...relativePath))) failures.push(`Retired frontend AI analysis file remains: ${relativePath.join('/')}`)
+}
 
 
 

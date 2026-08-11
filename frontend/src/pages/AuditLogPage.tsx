@@ -161,7 +161,7 @@ export default function AuditLogPage() {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
           <div>
             <h3 style={{ margin: 0 }}>MCP / AI 操作链路回放</h3>
-            <p style={{ margin: '4px 0 0', color: 'var(--text-muted)', fontSize: 13 }}>把工具调用、风险策略、统一任务、发布计划、发布单和审计记录串成只读证据链；适合排查“AI 分析了什么、MCP 调用了什么、任务最终怎样”。</p>
+            <p style={{ margin: '4px 0 0', color: 'var(--text-muted)', fontSize: 13 }}>把外部 Agent 请求、工具调用、风险策略、统一任务、发布计划、发布单和审计记录串成只读证据链；适合排查“外部 Agent 请求了什么、MCP 调用了什么、任务最终怎样”。</p>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <select value={chainKind} onChange={(e) => setChainKind(e.target.value)}>

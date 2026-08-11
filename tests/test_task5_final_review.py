@@ -340,6 +340,52 @@ def test_posix_wrappers_delegate_to_non_executable_target_via_bash(tmp_path, wra
     assert result.stdout.strip() == "DELEGATED:probe"
 
 
+def test_separated_dev_invokes_setup_scripts_through_bash(tmp_path):
+    bash = shutil.which("bash")
+    if not bash and os.name == "nt":
+        candidate = Path(r"C:\Program Files\Git\bin\bash.exe")
+        bash = str(candidate) if candidate.exists() else None
+    if not bash:
+        pytest.skip("bash is unavailable")
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    shutil.copyfile(ROOT / "scripts/dev.sh", scripts_dir / "dev.sh")
+    for name, marker in (("check_env.sh", "CHECK_ENV"), ("init_db.sh", "INIT_DB")):
+        hook = scripts_dir / name
+        hook.write_text(f"#!/usr/bin/env bash\nprintf '{marker}\\n'\n", encoding="utf-8")
+        hook.chmod(0o644)
+
+    (tmp_path / "frontend").mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for command in ("python3", "npm"):
+        shim = bin_dir / command
+        shim.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+
+    env = os.environ.copy()
+    env["DEV_MODE"] = "separated"
+    env["OPS_DOTENV_LOADED"] = "1"
+    env["PATH"] = f"{bin_dir}{os.pathsep}{Path(bash).parent}{os.pathsep}{env.get('PATH', '')}"
+    result = subprocess.run(
+        [bash, str(scripts_dir / "dev.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "CHECK_ENV" in output
+    assert "INIT_DB" in output
+    assert "Permission denied" not in output
+
+    source = (ROOT / "scripts/dev.sh").read_text(encoding="utf-8")
+    assert 'bash "$ROOT_DIR/scripts/check_env.sh"' in source
+    assert 'bash "$ROOT_DIR/scripts/init_db.sh"' in source
+
+
 def test_package_zip_preserves_posix_launcher_modes(tmp_path):
     package_dir = tmp_path / "ops-package"
     for relative in PUBLIC_POSIX_LAUNCHERS:

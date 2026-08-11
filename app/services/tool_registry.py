@@ -632,13 +632,45 @@ class ToolRegistry:
             raise HTTPException(status_code=404, detail=f"Tool not found: {name}")
         return tool
 
+    def normalize_and_enforce_call(
+        self,
+        tool: ToolDefinition,
+        arguments: Dict[str, Any],
+        ctx,
+    ) -> Dict[str, Any]:
+        normalized = validate_schema(arguments or {}, tool.input_schema)
+        category = str(getattr(tool, "category", "") or "")
+        if not (
+            category == "routing"
+            or category.startswith("approval")
+            or category.startswith("qclaw")
+        ):
+            return normalized
+
+        from app.services.tool_token import enforce_conversation_binding
+
+        bindings = getattr(ctx, "channel_bindings", None)
+        if "message_context" in normalized:
+            enforce_conversation_binding(
+                bindings,
+                message_context=normalized.get("message_context"),
+            )
+        else:
+            enforce_conversation_binding(
+                bindings,
+                channel="matrix",
+                channel_account_id="default",
+                conversation_id=normalized.get("room_id"),
+            )
+        return normalized
+
     def call(self, db, tool_name: str, arguments: Dict[str, Any], ctx, stream_callback=None) -> Dict[str, Any]:
         started = time.monotonic()
         tool = self.get(tool_name)
         normalized = {}
         policy_result = {}
         try:
-            normalized = validate_schema(arguments or {}, tool.input_schema)
+            normalized = self.normalize_and_enforce_call(tool, arguments, ctx)
             policy_result = enforce_tool_policy(tool, normalized, ctx, db)
             risk_policy = policy_result.get("risk_policy") if isinstance(policy_result, dict) else {}
             if isinstance(risk_policy, dict) and risk_policy.get("must_create_job"):

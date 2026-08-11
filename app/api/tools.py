@@ -416,6 +416,8 @@ async def call_tool_stream(payload: ToolCallPayload, request: Request, db: Sessi
         result = registry.call(db, payload.tool, payload.arguments or {}, ctx)
         return api_response(data=result)
 
+    registry.normalize_and_enforce_call(tool, payload.arguments or {}, ctx)
+
     async def _stream():
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 

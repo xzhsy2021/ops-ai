@@ -459,6 +459,140 @@ def test_legacy_matrix_approval_rejects_cross_channel_token_approvers(
         engine.dispose()
 
 
+def test_central_registry_guard_covers_direct_rest_stream_and_stdio_dispatch(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from app.api import tools as tools_api
+    from app.mcp import server as stdio_server
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import registry
+
+    engine = _engine(tmp_path, "central-registry-channel-guard.db")
+    db = _session(engine)
+    tool_name = "ops.contract.central_channel_guard"
+    handled = []
+
+    @registry.register(
+        name=tool_name,
+        description="central channel guard integration",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message_context": {"type": "object"},
+                "room_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+        scopes=["ops:read"],
+        category="routing",
+        streamable=True,
+    )
+    def _guarded(args, ctx, db, stream_callback=None):
+        handled.append(args)
+        return {"accepted": True}
+
+    def _ctx(channel, account_id, conversation_id):
+        return ToolContext(
+            username="tester",
+            auth_type="session",
+            is_admin=True,
+            scopes=["*"],
+            channel_bindings=[
+                {
+                    "channel": channel,
+                    "channel_account_id": account_id,
+                    "conversation_id": conversation_id,
+                }
+            ],
+        )
+
+    def _generic_args(channel, account_id, conversation_id):
+        return {
+            "message_context": {
+                "channel": channel,
+                "channel_account_id": account_id,
+                "conversation_id": conversation_id,
+                "message_id": "msg-1",
+                "sender_id": "owner-1",
+                "content_sha256": "c" * 64,
+            }
+        }
+
+    try:
+        with pytest.raises(HTTPException) as direct_exc:
+            registry.call(db, tool_name, {}, _ctx("wechat", "corp-a", "group-7"))
+        assert direct_exc.value.status_code == 403
+
+        with pytest.raises(HTTPException) as direct_stream_exc:
+            registry.call(
+                db,
+                tool_name,
+                _generic_args("telegram", "bot-a", "chat-8"),
+                _ctx("telegram", "bot-a", "chat-7"),
+                stream_callback=lambda chunk: None,
+            )
+        assert direct_stream_exc.value.status_code == 403
+
+        active_ctx = [_ctx("matrix", "secondary", "!ops:example.org")]
+        monkeypatch.setattr(
+            tools_api,
+            "get_tool_context",
+            lambda request, session: active_ctx[0],
+        )
+        with pytest.raises(HTTPException) as rest_exc:
+            tools_api.call_tool(
+                tools_api.ToolCallPayload(
+                    tool=tool_name,
+                    arguments={"room_id": "!ops:example.org"},
+                ),
+                SimpleNamespace(),
+                db,
+            )
+        assert rest_exc.value.status_code == 403
+
+        active_ctx[0] = _ctx("wechat", "corp-a", "group-7")
+        with pytest.raises(HTTPException) as rest_stream_exc:
+            asyncio.run(
+                tools_api.call_tool_stream(
+                    tools_api.ToolCallPayload(
+                        tool=tool_name,
+                        arguments={"message_context": {"channel": "wechat"}},
+                    ),
+                    SimpleNamespace(),
+                    db,
+                )
+            )
+        assert rest_stream_exc.value.status_code == 403
+
+        active_ctx[0] = _ctx("telegram", "bot-a", "chat-7")
+
+        def _stdio_request(method, path, payload):
+            assert method == "POST"
+            assert path == "/api/v2/tools/call"
+            return tools_api.call_tool(
+                tools_api.ToolCallPayload(**payload),
+                SimpleNamespace(),
+                db,
+            )
+
+        monkeypatch.setattr(stdio_server, "_request", _stdio_request)
+        with pytest.raises(HTTPException) as stdio_exc:
+            stdio_server._call_tool_for_mcp(
+                {
+                    "name": tool_name.replace(".", "_"),
+                    "arguments": _generic_args("telegram", "bot-a", "chat-8"),
+                }
+            )
+        assert stdio_exc.value.status_code == 403
+        assert handled == []
+    finally:
+        registry._tools.pop(tool_name, None)
+        db.close()
+        engine.dispose()
+
+
 def test_token_and_preview_contexts_read_only_generic_columns(tmp_path, monkeypatch):
     from app.api.tools import ToolPolicyPreviewPayload, _ctx_from_token, _preview_context_from_payload
     from app.db.models import ToolToken

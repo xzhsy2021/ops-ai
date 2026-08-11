@@ -154,7 +154,6 @@ def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_ov
 
 def mcp_call_tool(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     from app.services.tool_registry import register_builtin_tools, registry
-    from app.services.tool_token import enforce_conversation_binding
 
     register_builtin_tools()
     params = params or {}
@@ -162,9 +161,6 @@ def mcp_call_tool(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, An
     args = params.get("arguments") or {}
     if not tool_name:
         raise ValueError("tools/call requires params.name")
-    _enforce_qclaw_conversation_binding(
-        registry, tool_name, args, ctx, enforce_conversation_binding
-    )
     result = registry.call(db, tool_name, args, ctx)
     is_error = not bool(result.get("ok", True)) if isinstance(result, dict) else False
     return {
@@ -178,39 +174,8 @@ def mcp_call_tool(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, An
     }
 
 
-def _enforce_qclaw_conversation_binding(
-    registry,
-    tool_name: str,
-    args: Dict[str, Any],
-    ctx,
-    enforce_conversation_binding_fn,
-) -> None:
-    """Enforce generic token conversation policy before qclaw handlers."""
-    tool = registry.get(tool_name)
-    if not tool:
-        return
-    category = str(getattr(tool, "category", "") or "")
-    if not (category == "routing" or category.startswith("approval") or category.startswith("qclaw")):
-        return
-    arguments = args or {}
-    bindings = getattr(ctx, "channel_bindings", None)
-    if "message_context" in arguments:
-        enforce_conversation_binding_fn(
-            bindings,
-            message_context=arguments.get("message_context"),
-        )
-        return
-    enforce_conversation_binding_fn(
-        bindings,
-        channel="matrix",
-        channel_account_id="default",
-        conversation_id=arguments.get("room_id"),
-    )
-
-
 def mcp_call_tool_stream(db, ctx, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     from app.services.tool_registry import register_builtin_tools, registry
-    from app.services.tool_token import enforce_conversation_binding
 
     register_builtin_tools()
     params = params or {}
@@ -218,10 +183,6 @@ def mcp_call_tool_stream(db, ctx, params: Dict[str, Any] | None = None) -> Dict[
     args = params.get("arguments") or {}
     if not tool_name:
         raise ValueError("tools/call.stream requires params.name")
-
-    _enforce_qclaw_conversation_binding(
-        registry, tool_name, args, ctx, enforce_conversation_binding
-    )
 
     events: List[Dict[str, Any]] = []
 

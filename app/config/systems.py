@@ -3,9 +3,16 @@ import copy
 import logging
 from typing import Any, Dict, List, Optional
 
-from app.services.qclaw_routing import normalize_message_routing_config
+from app.services.qclaw_routing import (
+    normalize_message_routing_config as _normalize_message_routing_config,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_message_routing_config(value: Any) -> Dict[str, Any]:
+    """Database configuration boundary for strict message-routing values."""
+    return _normalize_message_routing_config(value)
 
 
 # ── DB SSOT 读写 ──

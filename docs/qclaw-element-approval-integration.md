@@ -281,7 +281,20 @@ OPS 内部定时任务（每 5 分钟）调用 `ActionApprovalService.expire_sta
 - `issued_at` / `expires_at` - 时间窗口（15 分钟）
 - `nonce` - 随机数防重放
 
-票据使用 HMAC-SHA256 签名，签名密钥配置在 `QCLAW_APPROVAL_SIGNING_KEY`。
+票据使用 HMAC-SHA256 签名。优先通过 `APPROVAL_SIGNING_KEY` 配置签名密钥；
+`QCLAW_APPROVAL_SIGNING_KEY` 仅作为旧版兼容别名。密钥缺失、少于 32 个字符或明显弱密钥时，启动预检失败，不存在开发环境 fallback。
+
+为每个 OPS 实例生成独立密钥，不要提交到仓库或在实例间复用：
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+也可使用 OpenSSL：
+
+```bash
+openssl rand -base64 48
+```
 
 ### 5.3 审批码安全
 
@@ -353,7 +366,8 @@ POST /api/v2/tools/tokens
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `QCLAW_APPROVAL_SIGNING_KEY` | (空，使用 dev fallback) | 路由票据 HMAC 签名密钥，**生产必须配置** |
+| `APPROVAL_SIGNING_KEY` | 无 | 路由票据 HMAC 签名密钥，必须使用至少 32 个字符的强随机值，否则启动预检失败 |
+| `QCLAW_APPROVAL_SIGNING_KEY` | 无 | 旧版兼容别名，仅在未设置 `APPROVAL_SIGNING_KEY` 时读取 |
 | `QCLAW_APPROVAL_TTL_SECONDS` | `900` (15 分钟) | 审批码有效期 |
 | `QCLAW_STAGING_DIR` | `runtime/qclaw-staging` | qclaw 上传 staging 目录 |
 

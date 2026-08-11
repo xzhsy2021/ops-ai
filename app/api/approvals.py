@@ -2,7 +2,7 @@
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.auth_v2 import get_current_user
@@ -10,10 +10,11 @@ from app.db.base import get_db
 from app.db.models import AiActionApproval
 from app.services.action_approval import ActionApprovalService
 from app.services.approval_executor import ApprovalExecutor
-from app.config.systems import get_all_systems, get_system_by_name, save_system
-from app.services.qclaw_routing import (
+from app.config.systems import (
+    get_all_systems,
+    get_system_by_name,
     normalize_message_routing_config,
-    normalize_routing_approvers,
+    save_system,
 )
 
 router = APIRouter(prefix="/api/v2/approvals", tags=["qclaw审批管理"])
@@ -176,10 +177,10 @@ class MessageRoutingConfig(BaseModel):
     priority: int = 0
     approvers: list[dict[str, str]] = Field(default_factory=list)
 
-    @field_validator("approvers", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_approvers(cls, value):
-        return normalize_routing_approvers(value)
+    def normalize_config(cls, value):
+        return normalize_message_routing_config(value)
 
 
 def _routing_summary(value: Any) -> dict[str, Any]:

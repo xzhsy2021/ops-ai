@@ -104,14 +104,53 @@ def normalize_routing_approvers(value: Any) -> list[dict[str, str]]:
 
 
 def normalize_message_routing_config(value: Any) -> dict[str, Any]:
-    """Normalize one persisted message-routing object without adding defaults."""
+    """Validate and normalize one complete persisted message-routing object."""
     if value is None:
-        return {}
+        value = {}
     if not isinstance(value, dict):
         raise ValueError("message_routing must be an object")
-    normalized = dict(value)
-    if "approvers" in normalized:
-        normalized["approvers"] = normalize_routing_approvers(normalized["approvers"])
+
+    allowed_keys = {"enabled", "aliases", "keywords", "priority", "approvers"}
+    unsupported = sorted(set(value) - allowed_keys)
+    if unsupported:
+        raise ValueError(f"unsupported message_routing keys: {', '.join(unsupported)}")
+
+    normalized: dict[str, Any] = {}
+    if "enabled" in value:
+        enabled = value["enabled"]
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
+        normalized["enabled"] = enabled
+
+    def normalize_string_list(field: str) -> list[str]:
+        items = value[field]
+        if not isinstance(items, list):
+            raise ValueError(f"{field} must be a list")
+        result: list[str] = []
+        seen: set[str] = set()
+        for index, item in enumerate(items):
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"{field}[{index}] must be a nonblank string")
+            normalized_item = item.strip()
+            if normalized_item not in seen:
+                seen.add(normalized_item)
+                result.append(normalized_item)
+        return result
+
+    for field in ("aliases", "keywords"):
+        if field in value:
+            normalized[field] = normalize_string_list(field)
+
+    if "priority" in value:
+        priority = value["priority"]
+        if type(priority) is not int:
+            raise ValueError("priority must be an integer")
+        if not 0 <= priority <= 1000:
+            raise ValueError("priority must be between 0 and 1000")
+        normalized["priority"] = priority
+
+    if "approvers" in value:
+        normalized["approvers"] = normalize_routing_approvers(value["approvers"])
     return normalized
 
 

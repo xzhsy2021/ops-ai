@@ -34,7 +34,7 @@ from app.deploy.logs import deployment_logs_payload, deployment_tasks_payload
 from app.deploy.state import task_cancel_requested, normalize_status
 from app.deploy.locks import acquire_deployment_locks, release_deployment_locks, list_deployment_locks_payload
 from app.deploy.preflight import build_preflight_payload
-from app.services.qclaw_routing import normalize_message_routing_config
+from app.config.systems import normalize_message_routing_config
 from app.deploy.schemas import (
     BatchUpdateRequest, DeployRequest, PipelineCreateRequest, PipelineUpdateRequest,
     ResolutionPreviewRequest, StepCreateRequest, StepUpdateRequest,
@@ -483,7 +483,7 @@ async def get_system_v2(system_name: str, request: Request):
     svcs = _normalize_api_service_routing(system.get("services", []) or [])
     envs = system.get("environments", {}) or {}
     groups = system.get("groups") or system.get("regions") or {}
-    # qclaw Element 消息路由配置（透传，可能不存在）
+    # qclaw 消息渠道路由配置
     routing = _normalize_api_message_routing(system.get("message_routing"))
     return api_response(data={
         "name": system_name,
@@ -524,7 +524,7 @@ async def create_system_v2(payload: Dict[str, Any], request: Request, db: Sessio
         "variables": payload.get("variables", {}) or {},
         "servers": payload.get("servers", []) or [],
     }
-    # qclaw Element 消息路由配置（可选）
+    # qclaw 消息渠道路由配置（可选）
     routing = payload.get("message_routing")
     if isinstance(routing, dict):
         system["message_routing"] = _normalize_api_message_routing(routing)
@@ -560,7 +560,7 @@ async def update_system_v2(system_name: str, payload: Dict[str, Any], request: R
     if "servers" in payload:
         system["servers"] = payload["servers"] if isinstance(payload["servers"], list) else []
     if "message_routing" in payload:
-        # qclaw Element 消息路由配置：{enabled, aliases, keywords, priority}
+        # qclaw 消息渠道路由配置
         routing = payload["message_routing"]
         if isinstance(routing, dict):
             system["message_routing"] = _normalize_api_message_routing(routing)

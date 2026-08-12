@@ -216,7 +216,7 @@ class TestRejectPlan:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "REJECTED"
-        assert body["rejected_by"] == "tester"
+        assert body["rejected_by"] == "matrix:default:tester"
 
     def test_reject_terminal_plan_fails(self, db, client):
         info = _create_plan(db, "reject-twice")

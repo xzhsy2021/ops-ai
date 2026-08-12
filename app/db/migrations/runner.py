@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from sqlalchemy import inspect, text
@@ -1347,6 +1348,23 @@ TOOL_TOKEN_BINDING_BACKFILL_MIGRATION: Dict[str, str] = {
     "sql": "python:backfill_tool_token_bindings",
 }
 
+APPROVAL_CONTEXT_MIGRATION: Dict[str, str] = {
+    "version": "084_005_approval_context",
+    "name": "Add and backfill channel-neutral approval context",
+    "sql": "python:backfill_approval_context",
+}
+
+APPROVAL_CONTEXT_COLUMNS = {
+    "channel": "VARCHAR(32)",
+    "channel_account_id": "VARCHAR(128)",
+    "conversation_id": "VARCHAR(255)",
+    "request_message_id": "VARCHAR(255)",
+    "request_sender_id": "VARCHAR(255)",
+    "approval_message_id": "VARCHAR(255)",
+    "authorized_identities": "JSON",
+    "temporary_grant_id": "VARCHAR(32)",
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -1519,6 +1537,204 @@ def backfill_tool_token_bindings(engine) -> bool:
                 )
         _mark_applied(conn, migration)
     return True
+
+
+def _json_list_or_empty(value: Any) -> list:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+_MIGRATION_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _migration_json_object(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _migration_content_sha256(value: Any) -> str:
+    raw = str(value or "")
+    if _MIGRATION_SHA256_RE.fullmatch(raw):
+        return raw.lower()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _migration_sender_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    prefix = "matrix:default:"
+    return raw[len(prefix):] if raw.startswith(prefix) else (raw or "legacy-requester")
+
+
+def _migration_context(room_id: Any, message_id: Any, content_sha256: Any, sender: Any) -> dict:
+    return {
+        "channel": "matrix",
+        "channel_account_id": "default",
+        "conversation_id": str(room_id or "").strip(),
+        "message_id": str(message_id or "").strip(),
+        "sender_id": _migration_sender_id(sender),
+        "content_sha256": _migration_content_sha256(content_sha256),
+    }
+
+
+def _migration_digest(payload: dict) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _backfill_action_digest(row: Any, context: dict, request_payload: dict) -> str | None:
+    if not row.get("action_type") or not row.get("room_id") or not row.get("request_event_id"):
+        return None
+    return _migration_digest({
+        "action_type": row["action_type"],
+        "message_context": context,
+        "system_name": request_payload.get("system_name") or "",
+        "service_name": request_payload.get("service_name"),
+        "environment": request_payload.get("environment") or "",
+        "targets": sorted(request_payload.get("targets") or []),
+        "action_parameters": request_payload.get("action_parameters") or {},
+        "routing_config_revision": row.get("routing_config_revision") or "",
+    })
+
+
+def _backfill_plan_manifest(row: Any, context: dict) -> tuple[dict, str] | None:
+    manifest = _migration_json_object(row.get("manifest"))
+    steps = manifest.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    normalized = {
+        "message_context": context,
+        "system_name": manifest.get("system_name") or row.get("system_name") or "",
+        "service_name": manifest.get("service_name") if "service_name" in manifest else row.get("service_name"),
+        "environment": manifest.get("environment") or row.get("environment") or "",
+        "targets": sorted(manifest.get("targets") or row.get("targets") or []),
+        "steps": steps,
+        "policy": manifest.get("policy") or row.get("policy") or {},
+        "routing_config_revision": manifest.get("routing_config_revision") or row.get("routing_config_revision") or "",
+        "routing_ticket_digest": manifest.get("routing_ticket_digest") or row.get("routing_ticket_digest") or "",
+    }
+    return normalized, _migration_digest(normalized)
+
+
+def backfill_approval_context(engine) -> bool:
+    """Add generic approval fields and backfill legacy Matrix data once."""
+    migration = APPROVAL_CONTEXT_MIGRATION
+    changed = False
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, migration["version"]):
+            return False
+        inspector = inspect(conn)
+        for table in ("ai_action_approvals", "execution_plans"):
+            if not inspector.has_table(table):
+                continue
+            columns = {item["name"] for item in inspector.get_columns(table)}
+            for name, sql_type in APPROVAL_CONTEXT_COLUMNS.items():
+                if name not in columns:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+                    changed = True
+
+            rows = conn.execute(text(f"SELECT * FROM {table}")).mappings().all()
+            for row in rows:
+                if row.get("channel") and row.get("conversation_id") and row.get("request_message_id"):
+                    continue
+                room_id = row.get("room_id")
+                request_message_id = row.get("request_event_id")
+                if not room_id or not request_message_id:
+                    continue
+                payload = _json_list_or_empty(row.get("authorized_matrix_users"))
+                if not payload:
+                    request_payload = row.get("request_payload")
+                    if isinstance(request_payload, str):
+                        try:
+                            request_payload = json.loads(request_payload)
+                        except json.JSONDecodeError:
+                            request_payload = {}
+                    if isinstance(request_payload, dict):
+                        payload = _json_list_or_empty(request_payload.get("authorized_matrix_users"))
+                identities = [
+                    {"channel": "matrix", "channel_account_id": "default", "sender_id": sender}
+                    for sender in payload if isinstance(sender, str) and sender.strip()
+                ]
+                updates = {
+                    "channel": "matrix",
+                    "channel_account_id": "default",
+                    "conversation_id": room_id,
+                    "request_message_id": request_message_id,
+                    "request_sender_id": _migration_sender_id(row.get("requested_by")),
+                    "authorized_identities": json.dumps(identities, ensure_ascii=False),
+                }
+                request_payload = _migration_json_object(row.get("request_payload"))
+                action_digest = _backfill_action_digest(row, _migration_context(
+                    room_id,
+                    request_message_id,
+                    row.get("content_sha256"),
+                    row.get("requested_by"),
+                ), request_payload)
+                if table == "ai_action_approvals" and action_digest:
+                    updates["action_digest"] = action_digest
+                plan_context = _migration_context(
+                    room_id,
+                    request_message_id,
+                    row.get("content_sha256"),
+                    row.get("requested_by"),
+                )
+                if table == "execution_plans":
+                    plan_result = _backfill_plan_manifest(row, plan_context)
+                    if plan_result:
+                        updates["manifest"], updates["plan_digest"] = plan_result
+                if row.get("approval_event_id"):
+                    updates["approval_message_id"] = row["approval_event_id"]
+                fields = [
+                    "channel=:channel",
+                    "channel_account_id=:channel_account_id",
+                    "conversation_id=:conversation_id",
+                    "request_message_id=:request_message_id",
+                    "request_sender_id=:request_sender_id",
+                    "approval_message_id=:approval_message_id",
+                    "authorized_identities=:authorized_identities",
+                ]
+                params = {
+                    "approval_message_id": None,
+                    **updates,
+                    "id": row["id"],
+                }
+                if table == "ai_action_approvals":
+                    fields.append("action_digest=:action_digest")
+                    params["action_digest"] = row.get("action_digest")
+                else:
+                    fields.extend(["manifest=:manifest", "plan_digest=:plan_digest"])
+                    params["manifest"] = row.get("manifest")
+                    params["plan_digest"] = row.get("plan_digest")
+                conn.execute(
+                    text(f"UPDATE {table} SET {', '.join(fields)} WHERE id=:id"),
+                    params,
+                )
+                changed = True
+        for table, name in (("ai_action_approvals", "ix_ai_approval_context"), ("execution_plans", "ix_execution_plan_context")):
+            if inspector.has_table(table):
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} "
+                    "(channel, channel_account_id, conversation_id, request_message_id)"
+                ))
+        _mark_applied(conn, migration)
+        changed = True
+    return changed
 
 
 def _json_object(value: Any, *, key: str) -> Dict[str, Any]:
@@ -2164,4 +2380,6 @@ def run_schema_migrations(engine) -> List[str]:
         applied.append(AI_ANALYSIS_RETIREMENT_MIGRATION["version"])
     if backfill_tool_token_bindings(engine):
         applied.append(TOOL_TOKEN_BINDING_BACKFILL_MIGRATION["version"])
+    if backfill_approval_context(engine):
+        applied.append(APPROVAL_CONTEXT_MIGRATION["version"])
     return applied

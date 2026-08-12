@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Column, String, Integer, DateTime, Text, Boolean, ForeignKey, JSON,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import relationship
 from .base import Base
@@ -650,6 +651,20 @@ class AiActionApproval(Base):
     failure_reason = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
+    # Channel-neutral message binding. Legacy Matrix columns above remain for
+    # compatibility with existing databases and clients.
+    channel = Column(String(32), nullable=True)
+    channel_account_id = Column(String(128), nullable=True)
+    conversation_id = Column(String(255), nullable=True)
+    request_message_id = Column(String(255), nullable=True)
+    request_sender_id = Column(String(255), nullable=True)
+    approval_message_id = Column(String(255), nullable=True)
+    authorized_identities = Column(JSON, default=list)
+    temporary_grant_id = Column(String(32), nullable=True, index=True)
+    __table_args__ = (
+        Index("ix_ai_approval_context", "channel", "channel_account_id", "conversation_id", "request_message_id"),
+    )
+
 
 class ExecutionPlan(Base):
     """消息级执行计划：一条 Element/qclaw 消息对应一次人工审批。
@@ -709,6 +724,20 @@ class ExecutionPlan(Base):
 
     created_at = Column(DateTime, default=_utcnow, index=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    # Channel-neutral message binding. Legacy Matrix columns above remain for
+    # compatibility with existing databases and clients.
+    channel = Column(String(32), nullable=True)
+    channel_account_id = Column(String(128), nullable=True)
+    conversation_id = Column(String(255), nullable=True)
+    request_message_id = Column(String(255), nullable=True)
+    request_sender_id = Column(String(255), nullable=True)
+    approval_message_id = Column(String(255), nullable=True)
+    authorized_identities = Column(JSON, default=list)
+    temporary_grant_id = Column(String(32), nullable=True, index=True)
+    __table_args__ = (
+        Index("ix_execution_plan_context", "channel", "channel_account_id", "conversation_id", "request_message_id"),
+    )
 
     steps = relationship(
         "ExecutionPlanStep",

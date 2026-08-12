@@ -41,6 +41,7 @@ class ApprovalSummary(BaseModel):
     execution_job_id: int | str | None = None
     package_name: str | None = None
     failure_reason: str | None = None
+    message_context: dict[str, str] | None = None
 
 
 class ApprovalDetail(ApprovalSummary):
@@ -53,10 +54,33 @@ class ApprovalDetail(ApprovalSummary):
     routing_config_revision: str | None = None
     request_payload: dict[str, Any] = {}
     execution_result: dict[str, Any] | None = None
+    channel: str | None = None
+    channel_account_id: str | None = None
+    conversation_id: str | None = None
+    request_message_id: str | None = None
+    request_sender_id: str | None = None
+    approval_message_id: str | None = None
 
 
 def _to_summary(a: AiActionApproval) -> ApprovalSummary:
     payload = a.request_payload or {}
+    message_context = None
+    if (
+        a.channel
+        and a.channel_account_id
+        and a.conversation_id
+        and a.request_message_id
+        and a.request_sender_id
+        and a.content_sha256
+    ):
+        message_context = {
+            "channel": a.channel,
+            "channel_account_id": a.channel_account_id,
+            "conversation_id": a.conversation_id,
+            "message_id": a.request_message_id,
+            "sender_id": a.request_sender_id,
+            "content_sha256": a.content_sha256,
+        }
     return ApprovalSummary(
         approval_id=a.id,
         action_type=a.action_type,
@@ -76,6 +100,7 @@ def _to_summary(a: AiActionApproval) -> ApprovalSummary:
         execution_job_id=a.execution_job_id,
         package_name=a.package_name,
         failure_reason=a.failure_reason,
+        message_context=message_context,
     )
 
 
@@ -92,6 +117,12 @@ def _to_detail(a: AiActionApproval) -> ApprovalDetail:
         routing_config_revision=a.routing_config_revision,
         request_payload=a.request_payload or {},
         execution_result=a.execution_result,
+        channel=a.channel,
+        channel_account_id=a.channel_account_id,
+        conversation_id=a.conversation_id,
+        request_message_id=a.request_message_id,
+        request_sender_id=a.request_sender_id,
+        approval_message_id=a.approval_message_id,
     )
 
 

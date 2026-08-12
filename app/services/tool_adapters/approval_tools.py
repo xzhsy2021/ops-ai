@@ -506,9 +506,7 @@ def approval_prepare_service_control(args, ctx, db):
     approval, short_code = service.prepare(
         action_type="SERVICE_CONTROL",
         tool_name="ops.approval.prepare_service_control",
-        room_id=message_context.conversation_id,
-        request_event_id=message_context.message_id,
-        content_sha256=message_context.content_sha256,
+        message_context=message_context,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
@@ -521,7 +519,10 @@ def approval_prepare_service_control(args, ctx, db):
         routing_ticket_digest=ticket_digest,
         risk_level="high",
         ai_reason=args.get("ai_reason", ""),
-        authorized_matrix_users=approvers,
+        authorized_identities=[
+            {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+            for sender_id in approvers
+        ],
     )
     return {
         "approval_id": approval.id,
@@ -603,9 +604,7 @@ def approval_prepare_file_upload(args, ctx, db):
     approval, short_code = service.prepare(
         action_type="FILE_UPLOAD",
         tool_name="ops.approval.prepare_file_upload",
-        room_id=message_context.conversation_id,
-        request_event_id=message_context.message_id,
-        content_sha256=message_context.content_sha256,
+        message_context=message_context,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
@@ -618,7 +617,10 @@ def approval_prepare_file_upload(args, ctx, db):
         package_name=filename,
         package_sha256=package_sha256,
         package_size_bytes=package_size_bytes,
-        authorized_matrix_users=approvers,
+        authorized_identities=[
+            {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+            for sender_id in approvers
+        ],
     )
     return {
         "approval_id": approval.id,
@@ -656,25 +658,38 @@ def approval_prepare_file_upload(args, ctx, db):
         "properties": {
             "approval_id": {"type": "string", "description": "审批工单 ID"},
             "short_code": {"type": "string", "description": "一次性审批短码"},
+            "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
             "approval_event_id": {"type": "string", "description": "审批消息的 Matrix 事件 ID"},
         },
-        "required": ["approval_id", "short_code", "approver_matrix_id", "room_id", "approval_event_id"],
+        "required": ["approval_id", "short_code"],
         "additionalProperties": False,
     },
 )
 def approval_execute(args, ctx, db):
     # execute is called from the same room that prepared the approval, so the
     # room_id is the natural anchor for the binding check.
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+    approval_context = normalize_message_context(
+        args.get("message_context") or {
+            "room_id": args.get("room_id"),
+            "request_event_id": args.get("approval_event_id"),
+            "sender_matrix_id": args.get("approver_matrix_id"),
+            "content_sha256": args.get("content_sha256") or "0" * 64,
+        }
+    )
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
+        message_context=approval_context,
+    )
     service = ActionApprovalService(db)
     approval = service.consume(
         approval_id=args["approval_id"],
         short_code=args["short_code"],
-        approver_matrix_id=args["approver_matrix_id"],
-        room_id=args["room_id"],
-        approval_event_id=args["approval_event_id"],
+        approver_matrix_id=approval_context.sender_id,
+        room_id=approval_context.conversation_id,
+        approval_event_id=approval_context.message_id,
+        approval_context=approval_context,
     )
     if not approval:
         return {
@@ -699,6 +714,14 @@ def approval_execute(args, ctx, db):
     return {
         "ok": approval.status == "SUCCEEDED",
         "approval_id": approval.id,
+        "message_context": {
+            "channel": approval.channel,
+            "channel_account_id": approval.channel_account_id,
+            "conversation_id": approval.conversation_id,
+            "message_id": approval.request_message_id,
+            "sender_id": approval.request_sender_id,
+            "content_sha256": approval.content_sha256,
+        },
         "action_type": approval.action_type,
         "status": approval.status,
         "approved_by": approval.approved_by,
@@ -744,28 +767,32 @@ def approval_list(args, ctx, db):
     from app.db.models import AiActionApproval
 
     query = db.query(AiActionApproval)
-    room_id = None
     if "message_context" in args:
-        message_context = normalize_message_context(args["message_context"])
-        if not (
-            message_context.channel == "matrix"
-            and message_context.channel_account_id == "default"
-        ):
-            return {"ok": True, "total": 0, "items": []}
-        room_id = message_context.conversation_id
+        context = normalize_message_context(args["message_context"])
+        query = query.filter(
+            AiActionApproval.channel == context.channel,
+            AiActionApproval.channel_account_id == context.channel_account_id,
+            AiActionApproval.conversation_id == context.conversation_id,
+        )
     elif "room_id" in args:
-        room_id = str(args.get("room_id") or "").strip()
+        context = normalize_message_context({
+            "room_id": str(args.get("room_id") or "").strip(),
+            "request_event_id": "approval-list",
+            "sender_matrix_id": "approval-list",
+            "content_sha256": "0" * 64,
+        })
+        query = query.filter(
+            AiActionApproval.channel == context.channel,
+            AiActionApproval.channel_account_id == context.channel_account_id,
+            AiActionApproval.conversation_id == context.conversation_id,
+        )
     elif getattr(ctx, "channel_bindings", None):
         return {"ok": True, "total": 0, "items": []}
-    if room_id is not None:
-        query = query.filter(AiActionApproval.room_id == room_id)
     if args.get("status"):
         query = query.filter(AiActionApproval.status == args["status"])
     if args.get("action_type"):
         query = query.filter(AiActionApproval.action_type == args["action_type"])
-    query = query.order_by(AiActionApproval.created_at.desc())
-    limit = int(args.get("limit", 50))
-    items = query.limit(limit).all()
+    items = query.order_by(AiActionApproval.created_at.desc()).limit(int(args.get("limit", 50))).all()
 
     return {
         "ok": True,
@@ -781,6 +808,14 @@ def approval_list(args, ctx, db):
                 "created_at": a.created_at.isoformat() if a.created_at else None,
                 "expires_at": a.expires_at.isoformat() if a.expires_at else None,
                 "approved_by": a.approved_by,
+                "message_context": {
+                    "channel": a.channel,
+                    "channel_account_id": a.channel_account_id,
+                    "conversation_id": a.conversation_id,
+                    "message_id": a.request_message_id,
+                    "sender_id": a.request_sender_id,
+                    "content_sha256": a.content_sha256,
+                },
             }
             for a in items
         ],
@@ -866,9 +901,7 @@ def approval_prepare_plan(args, ctx, db):
     service = ExecutionPlanService(db)
 
     plan, short_code = service.prepare(
-        room_id=message_context.conversation_id,
-        request_event_id=message_context.message_id,
-        content_sha256=message_context.content_sha256,
+        message_context=message_context,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
@@ -879,7 +912,10 @@ def approval_prepare_plan(args, ctx, db):
         routing_ticket_digest=ticket_digest,
         risk_level=args.get("risk_level", "high"),
         ai_reason=args.get("ai_reason", ""),
-        authorized_matrix_users=approvers,
+        authorized_identities=[
+            {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+            for sender_id in approvers
+        ],
     )
 
     return {
@@ -920,24 +956,37 @@ def approval_prepare_plan(args, ctx, db):
         "properties": {
             "plan_id": {"type": "string", "description": "执行计划 ID"},
             "short_code": {"type": "string", "description": "一次性审批短码"},
+            "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
             "approval_event_id": {"type": "string", "description": "审批消息的 Matrix 事件 ID"},
         },
-        "required": ["plan_id", "short_code", "approver_matrix_id", "room_id", "approval_event_id"],
+        "required": ["plan_id", "short_code"],
         "additionalProperties": False,
     },
 )
 def approval_execute_plan(args, ctx, db):
     """消费短码并执行已审批的计划。"""
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+    approval_context = normalize_message_context(
+        args.get("message_context") or {
+            "room_id": args.get("room_id"),
+            "request_event_id": args.get("approval_event_id"),
+            "sender_matrix_id": args.get("approver_matrix_id"),
+            "content_sha256": args.get("content_sha256") or "0" * 64,
+        }
+    )
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
+        message_context=approval_context,
+    )
     service = ExecutionPlanService(db)
     plan = service.consume(
         plan_id=args["plan_id"],
         short_code=args["short_code"],
-        approver_matrix_id=args["approver_matrix_id"],
-        room_id=args["room_id"],
-        approval_event_id=args["approval_event_id"],
+        approver_matrix_id=approval_context.sender_id,
+        room_id=approval_context.conversation_id,
+        approval_event_id=approval_context.message_id,
+        approval_context=approval_context,
     )
     if not plan:
         return {
@@ -961,6 +1010,14 @@ def approval_execute_plan(args, ctx, db):
     return {
         "ok": plan.status == "SUCCEEDED",
         "plan_id": plan.id,
+        "message_context": {
+            "channel": plan.channel,
+            "channel_account_id": plan.channel_account_id,
+            "conversation_id": plan.conversation_id,
+            "message_id": plan.request_message_id,
+            "sender_id": plan.request_sender_id,
+            "content_sha256": plan.content_sha256,
+        },
         "plan_digest": plan.plan_digest,
         "status": plan.status,
         "approved_by": plan.approved_by,

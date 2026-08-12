@@ -81,7 +81,7 @@ def test_consume_approves_plan_exactly_once(db):
     assert result is not None
     assert result.status == "APPROVED"
     assert result.consumed_at is not None
-    assert result.approved_by == "@alice:matrix.org"
+    assert result.approved_by == "matrix:default:@alice:matrix.org"
 
     # 再次消费失败
     result2 = service.consume(
@@ -129,7 +129,7 @@ def test_wrong_room_cannot_consume(db):
     assert plan.status == "PENDING_APPROVAL"
 
 
-def test_unauthorized_approver_is_rejected_and_recorded(db):
+def test_unauthorized_approver_leaves_plan_pending(db):
     """未授权审批人被拒绝并记录，不执行步骤。"""
     service = ExecutionPlanService(db)
     plan, short_code = _prepare(service, "unauthorized")
@@ -143,9 +143,9 @@ def test_unauthorized_approver_is_rejected_and_recorded(db):
     )
     assert result is None
     db.refresh(plan)
-    assert plan.status == "REJECTED"
-    assert plan.rejected_by == "@mallory:matrix.org"
-    assert plan.rejected_at is not None
+    assert plan.status == "PENDING_APPROVAL"
+    assert plan.rejected_by is None
+    assert plan.rejected_at is None
     # 步骤未被执行（仍是 PENDING）
     assert all(s.status == "PENDING" for s in plan.steps)
 
@@ -241,7 +241,7 @@ def test_reject_is_terminal(db):
     rejected = service.reject(plan.id, "@alice:matrix.org")
     assert rejected is not None
     assert rejected.status == "REJECTED"
-    assert rejected.rejected_by == "@alice:matrix.org"
+    assert rejected.rejected_by == "matrix:default:@alice:matrix.org"
     assert rejected.rejected_at is not None
 
     result = service.consume(

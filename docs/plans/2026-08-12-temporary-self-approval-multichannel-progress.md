@@ -22,9 +22,9 @@ Do not continue in the root worktree. Resume in the dedicated worktree above.
 | 2. Remove frontend AI analysis | Complete, spec and quality approved | Old pages, routes, clients and diagnostics panel removed. Production build passed. |
 | 3. Generic message context | Complete, spec and quality approved | Matrix, WeChat and Telegram context, strict identity validation and collision-safe actor keys added. |
 | 4. Generic Tool Token bindings | Complete, spec and quality approved | Generic conversation/approver policy is the runtime source; Matrix fields are compatibility aliases. Central tool guard covers dispatch paths. |
-| 5. Generic routing tickets and approvers | Implementation complete; final independent review interrupted | All known findings were fixed through `d0c1be8`. Run one fresh focused spec/quality review before marking complete. |
-| 6. Generic approvals and execution plans | Not started | Next implementation task after Task 5 review. |
-| 7. Temporary self-approval grant service | Not started | |
+| 5. Generic routing tickets and approvers | Complete, spec and quality approved | Fresh focused review `tests\test_qclaw_routing.py tests\test_multichannel_routing_tools.py tests\test_task5_quality_review.py tests\test_task5_final_quality.py tests\test_task5_final_review.py` passed 81/81 on this checkpoint. |
+| 6. Generic approvals and execution plans | Complete, focused regression passed | Added generic persisted context, actor keys, approval identities, temporary grant reference, idempotent Matrix backfill/digest migration, generic MCP/API context, and non-mutating unauthorized consumption. Focused regression: `137 passed`. |
+| 7. Temporary self-approval grant service | Not started | Next task. |
 | 8. MCP grant and plan integration | Not started | |
 | 9. Contextual OPS help | Not started | |
 | 10. Multichannel package intake | Not started | |
@@ -85,6 +85,7 @@ Most recent focused results reported by the implementation/review loops:
 - Task 5 launcher suite after final fixes: `32 passed`; separated-mode preflight check passed.
 - Frontend structured approver behavior tests: `4 passed`.
 - Frontend production build passed after the Task 5 UI changes.
+- Task 6 approval/plan regression: `137 passed`.
 - `git diff --check` passed after every recorded task commit.
 
 Known baseline issues that were not introduced here:

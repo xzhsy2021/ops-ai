@@ -207,7 +207,7 @@ class TestEndToEndReleaseFlow:
         )
         assert consumed is not None
         assert consumed.status == "EXECUTING"
-        assert consumed.approved_by == "@alice:matrix.org"
+        assert consumed.approved_by == "matrix:default:@alice:matrix.org"
         assert consumed.consumed_at is not None
 
         # Step 5: 执行器执行（mock 部署部分，避免依赖真实部署逻辑）
@@ -490,7 +490,7 @@ class TestExpiryAndReject:
         )
         assert rejected is not None
         assert rejected.status == "REJECTED"
-        assert rejected.rejected_by == "@bob:matrix.org"
+        assert rejected.rejected_by == "matrix:default:@bob:matrix.org"
 
         # 拒绝后不能再消费
         consume_after_reject = service.consume(

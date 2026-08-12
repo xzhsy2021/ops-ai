@@ -231,7 +231,7 @@ def test_reject_is_terminal(db):
     rejected = service.reject(approval.id, "@carol:matrix.org")
     assert rejected is not None
     assert rejected.status == "REJECTED"
-    assert rejected.rejected_by == "@carol:matrix.org"
+    assert rejected.rejected_by == "matrix:default:@carol:matrix.org"
     assert rejected.rejected_at is not None
 
     # 尝试消费，应该失败

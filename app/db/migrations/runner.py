@@ -1316,6 +1316,45 @@ MIGRATIONS: List[Dict[str, str]] = [
             "TEXT DEFAULT '[]' NOT NULL"
         ),
     },
+    {
+        "version": "084_006_temporary_approval_grants",
+        "name": "Create temporary self-approval grants table",
+        "table": "temporary_approval_grants",
+        "sql": """CREATE TABLE IF NOT EXISTS temporary_approval_grants (
+            id VARCHAR(32) PRIMARY KEY,
+            beneficiary_actor_key VARCHAR(255) NOT NULL,
+            channel VARCHAR(32) NOT NULL,
+            channel_account_id VARCHAR(128) NOT NULL,
+            conversation_id VARCHAR(255) NOT NULL,
+            system_id VARCHAR(32) NOT NULL,
+            environment_id VARCHAR(32) NOT NULL,
+            allowed_actions JSON NOT NULL,
+            authorized_identities JSON NOT NULL,
+            reason TEXT NOT NULL,
+            starts_at DATETIME,
+            expires_at DATETIME,
+            status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+            requested_by_actor_key VARCHAR(255) NOT NULL,
+            approved_by_actor_key VARCHAR(255),
+            request_message_id VARCHAR(255) NOT NULL,
+            confirmation_message_id VARCHAR(255),
+            request_digest VARCHAR(64) NOT NULL,
+            confirmation_code_hash VARCHAR(255) NOT NULL,
+            confirmation_expires_at DATETIME NOT NULL,
+            confirmation_consumed_at DATETIME,
+            revoked_by_actor_key VARCHAR(255),
+            revoked_at DATETIME,
+            revoke_reason TEXT,
+            requested_duration_seconds INTEGER NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL
+        )""",
+    },
+    {
+        "version": "084_007_temporary_approval_grant_indexes",
+        "name": "Create temporary self-approval grant indexes",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_scope ON temporary_approval_grants(system_id, environment_id, status)",
+    },
 ]
 
 

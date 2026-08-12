@@ -770,6 +770,45 @@ class ExecutionPlanStep(Base):
     plan = relationship("ExecutionPlan", back_populates="steps")
 
 
+class TemporaryApprovalGrant(Base):
+    """Time-boxed self-approval scope for test-environment changes."""
+    __tablename__ = "temporary_approval_grants"
+    __table_args__ = (
+        Index("ix_temporary_grant_status", "status"),
+        Index("ix_temporary_grant_expires", "expires_at"),
+        Index("ix_temporary_grant_beneficiary", "beneficiary_actor_key"),
+        Index("ix_temporary_grant_scope", "system_id", "environment_id", "status"),
+    )
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    beneficiary_actor_key = Column(String(255), nullable=False, index=True)
+    channel = Column(String(32), nullable=False)
+    channel_account_id = Column(String(128), nullable=False)
+    conversation_id = Column(String(255), nullable=False)
+    system_id = Column(String(32), ForeignKey("systems.id"), nullable=False, index=True)
+    environment_id = Column(String(32), ForeignKey("system_environments.id"), nullable=False, index=True)
+    allowed_actions = Column(JSON, nullable=False, default=list)
+    authorized_identities = Column(JSON, nullable=False, default=list)
+    reason = Column(Text, nullable=False)
+    starts_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    status = Column(String(16), nullable=False, default="PENDING", index=True)
+    requested_by_actor_key = Column(String(255), nullable=False)
+    approved_by_actor_key = Column(String(255), nullable=True)
+    request_message_id = Column(String(255), nullable=False)
+    confirmation_message_id = Column(String(255), nullable=True)
+    request_digest = Column(String(64), nullable=False, index=True)
+    confirmation_code_hash = Column(String(255), nullable=False)
+    confirmation_expires_at = Column(DateTime, nullable=False)
+    confirmation_consumed_at = Column(DateTime, nullable=True)
+    revoked_by_actor_key = Column(String(255), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_reason = Column(Text, nullable=True)
+    requested_duration_seconds = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
 class DeployPackage(Base):
     """Local deploy package metadata managed by File Center."""
     __tablename__ = "deploy_packages"

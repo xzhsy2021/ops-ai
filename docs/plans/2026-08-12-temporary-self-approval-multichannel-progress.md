@@ -9,8 +9,8 @@ Updated: 2026-08-12 (Asia/Shanghai)
 - Branch: `codex/temp-self-approval-multichannel`
 - Implementation plan: `docs/plans/2026-08-11-temporary-self-approval-multichannel-implementation.md`
 - Design: `docs/plans/2026-08-11-temporary-self-approval-multichannel-design.md`
-- Last implementation commit before this checkpoint: `d0c1be8`
-- Worktree was clean before this progress document was added.
+- Last implementation commit before this checkpoint: `da89b9a`
+- Task 6 follow-up fixes are currently being validated.
 
 Do not continue in the root worktree. Resume in the dedicated worktree above.
 
@@ -23,7 +23,7 @@ Do not continue in the root worktree. Resume in the dedicated worktree above.
 | 3. Generic message context | Complete, spec and quality approved | Matrix, WeChat and Telegram context, strict identity validation and collision-safe actor keys added. |
 | 4. Generic Tool Token bindings | Complete, spec and quality approved | Generic conversation/approver policy is the runtime source; Matrix fields are compatibility aliases. Central tool guard covers dispatch paths. |
 | 5. Generic routing tickets and approvers | Complete, spec and quality approved | Fresh focused review `tests\test_qclaw_routing.py tests\test_multichannel_routing_tools.py tests\test_task5_quality_review.py tests\test_task5_final_quality.py tests\test_task5_final_review.py` passed 81/81 on this checkpoint. |
-| 6. Generic approvals and execution plans | Complete, focused regression passed | Added generic persisted context, actor keys, approval identities, temporary grant reference, idempotent Matrix backfill/digest migration, generic MCP/API context, and non-mutating unauthorized consumption. Focused regression: `137 passed`. |
+| 6. Generic approvals and execution plans | In progress, follow-up review | Added generic persisted context, actor keys, approval identities, temporary grant reference, idempotent Matrix backfill/digest migration, generic MCP/API context, and non-mutating unauthorized consumption. Follow-up fixes cover migration digest preservation and fail-closed empty approvers. Current regression: `139 passed`. |
 | 7. Temporary self-approval grant service | Not started | Next task. |
 | 8. MCP grant and plan integration | Not started | |
 | 9. Contextual OPS help | Not started | |

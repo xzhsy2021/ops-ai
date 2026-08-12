@@ -118,7 +118,21 @@ def test_matrix_legacy_rows_are_backfilled_once(tmp_path):
             "event": "$plan:matrix.org",
             "hash": "d" * 64,
             "users": json.dumps(["@bob:matrix.org"]),
-            "manifest": json.dumps({}),
+            "manifest": json.dumps({
+                "system_name": "payment",
+                "service_name": "api",
+                "environment": "test",
+                "targets": ["s1"],
+                "steps": [{
+                    "step_key": "restart",
+                    "action_type": "SERVICE_CONTROL",
+                    "parameters": {"control_action": "restart"},
+                    "dependencies": [],
+                }],
+                "policy": {"max_retries": 0},
+                "routing_config_revision": "rev-legacy",
+                "routing_ticket_digest": "ticket-legacy",
+            }),
             "policy": json.dumps({}),
         })
 
@@ -143,6 +157,32 @@ def test_matrix_legacy_rows_are_backfilled_once(tmp_path):
         assert plan.authorized_identities == [
             {"channel": "matrix", "channel_account_id": "default", "sender_id": "@bob:matrix.org"}
         ]
+        assert approval.action_digest == compute_action_digest(
+            action_type="RELEASE",
+            room_id="!ops:matrix.org",
+            request_event_id="$request:matrix.org",
+            content_sha256="b" * 64,
+        )
+        expected_plan_context = MessageContext(
+            channel="matrix",
+            channel_account_id="default",
+            conversation_id="!ops:matrix.org",
+            message_id="$plan:matrix.org",
+            sender_id="legacy-requester",
+            content_sha256="d" * 64,
+        )
+        assert plan.manifest["message_context"] == expected_plan_context.to_dict()
+        assert plan.plan_digest == compute_plan_digest(
+            system_name="payment",
+            service_name="api",
+            environment="test",
+            targets=["s1"],
+            steps=plan.manifest["steps"],
+            policy={"max_retries": 0},
+            routing_config_revision="rev-legacy",
+            routing_ticket_digest="ticket-legacy",
+            message_context=expected_plan_context,
+        )
 
 
 def test_digests_include_canonical_message_context():
@@ -236,6 +276,36 @@ def test_prepare_fails_closed_when_effective_approvers_are_empty(tmp_path):
             _action_prepare(ActionApprovalService(session), _context(), authorized_identities=[])
         with pytest.raises(ValueError, match="authorized"):
             _plan_prepare(ExecutionPlanService(session), _context(), authorized_identities=[])
+
+
+@pytest.mark.parametrize("service_kind", ["action", "plan"])
+def test_persisted_empty_approvers_fail_closed(tmp_path, service_kind):
+    engine = _engine(tmp_path)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        context = _context(channel="wechat", account="ops", sender="requester")
+        service = ActionApprovalService(session) if service_kind == "action" else ExecutionPlanService(session)
+        request, code = (
+            _action_prepare(service, context)
+            if service_kind == "action"
+            else _plan_prepare(service, context)
+        )
+        request.authorized_identities = []
+        if service_kind == "action":
+            request.request_payload = {**request.request_payload, "legacy_matrix_compat": False}
+        else:
+            request.manifest = {**request.manifest, "legacy_matrix_compat": False}
+        session.commit()
+        approval_context = _context(channel="wechat", account="ops", sender="approver", message="approval-1")
+        result = service.consume(
+            request.id,
+            code,
+            approval_context=approval_context,
+            digest=request.action_digest if service_kind == "action" else request.plan_digest,
+        )
+        assert result is None
+        session.refresh(request)
+        assert request.status == "PENDING_APPROVAL"
 
 
 def test_approval_tools_execute_schemas_accept_generic_context():

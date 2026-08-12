@@ -242,6 +242,11 @@ class ExecutionPlanService:
         context = _context(message_context, room_id=room_id, request_event_id=request_event_id, content_sha256=content_sha256)
         if authorized_identities is None and authorized_matrix_users is not None:
             authorized_identities = authorized_matrix_users
+        legacy_matrix_compat = (
+            message_context is None
+            and authorized_identities is None
+            and authorized_matrix_users is None
+        )
         identities = [normalize_identity(item) for item in (authorized_identities or [])]
         if message_context is not None and authorized_identities is None and authorized_matrix_users is None:
             raise PlanValidationError("authorized approvers must not be empty")
@@ -260,6 +265,9 @@ class ExecutionPlanService:
         )
 
         # 幂等：相同 digest 的 PENDING_APPROVAL 计划已存在则直接返回
+        if legacy_matrix_compat:
+            manifest["legacy_matrix_compat"] = True
+
         existing = self.db.query(ExecutionPlan).filter(
             and_(
                 ExecutionPlan.plan_digest == digest,
@@ -394,7 +402,12 @@ class ExecutionPlanService:
             f"{item.get('channel')}:{item.get('channel_account_id')}:{item.get('sender_id')}"
             for item in plan.authorized_identities or [] if isinstance(item, dict)
         }
-        if _request_actor_key(plan) == context.actor_key or (authorized_keys and context.actor_key not in authorized_keys):
+        if _request_actor_key(plan) == context.actor_key:
+            return None
+        if not plan.authorized_identities:
+            if not (plan.manifest or {}).get("legacy_matrix_compat"):
+                return None
+        elif context.actor_key not in authorized_keys:
             return None
         if digest is not None and digest != plan.plan_digest:
             return None

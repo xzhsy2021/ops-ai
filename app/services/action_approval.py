@@ -173,6 +173,11 @@ class ActionApprovalService:
         )
         if authorized_identities is None and authorized_matrix_users is not None:
             authorized_identities = authorized_matrix_users
+        legacy_matrix_compat = (
+            message_context is None
+            and authorized_identities is None
+            and authorized_matrix_users is None
+        )
         identities = [normalize_identity(item) for item in (authorized_identities or [])]
         if message_context is not None and authorized_identities is None and authorized_matrix_users is None:
             raise ValueError("authorized approvers must not be empty")
@@ -226,6 +231,7 @@ class ActionApprovalService:
                 "targets": sorted(targets or []),
                 "action_parameters": action_parameters or {},
                 "authorized_matrix_users": [item["sender_id"] for item in identities],
+                "legacy_matrix_compat": legacy_matrix_compat,
             },
         )
         self.db.add(approval)
@@ -263,7 +269,10 @@ class ActionApprovalService:
         request_actor_key = _request_actor_key(approval)
         if request_actor_key == context.actor_key:
             return None
-        if approval.authorized_identities and context.actor_key not in _identity_keys(approval.authorized_identities):
+        if not approval.authorized_identities:
+            if not (approval.request_payload or {}).get("legacy_matrix_compat"):
+                return None
+        elif context.actor_key not in _identity_keys(approval.authorized_identities):
             return None
         stored_context = _stored_context(approval)
         if stored_context is None:

@@ -1680,10 +1680,11 @@ def backfill_approval_context(engine) -> bool:
                     "authorized_identities": json.dumps(identities, ensure_ascii=False),
                 }
                 request_payload = _migration_json_object(row.get("request_payload"))
+                normalized_content_sha256 = _migration_content_sha256(row.get("content_sha256"))
                 action_digest = _backfill_action_digest(row, _migration_context(
                     room_id,
                     request_message_id,
-                    row.get("content_sha256"),
+                    normalized_content_sha256,
                     row.get("requested_by"),
                 ), request_payload)
                 if table == "ai_action_approvals" and action_digest:
@@ -1691,7 +1692,7 @@ def backfill_approval_context(engine) -> bool:
                 plan_context = _migration_context(
                     room_id,
                     request_message_id,
-                    row.get("content_sha256"),
+                    normalized_content_sha256,
                     row.get("requested_by"),
                 )
                 if table == "execution_plans":
@@ -1708,19 +1709,26 @@ def backfill_approval_context(engine) -> bool:
                     "request_sender_id=:request_sender_id",
                     "approval_message_id=:approval_message_id",
                     "authorized_identities=:authorized_identities",
+                    "content_sha256=:content_sha256",
                 ]
                 params = {
                     "approval_message_id": None,
+                    "content_sha256": normalized_content_sha256,
                     **updates,
                     "id": row["id"],
                 }
                 if table == "ai_action_approvals":
                     fields.append("action_digest=:action_digest")
-                    params["action_digest"] = row.get("action_digest")
+                    params["action_digest"] = updates.get("action_digest", row.get("action_digest"))
                 else:
                     fields.extend(["manifest=:manifest", "plan_digest=:plan_digest"])
-                    params["manifest"] = row.get("manifest")
-                    params["plan_digest"] = row.get("plan_digest")
+                    manifest_value = updates.get("manifest", row.get("manifest"))
+                    params["manifest"] = (
+                        json.dumps(manifest_value, ensure_ascii=False)
+                        if isinstance(manifest_value, dict)
+                        else manifest_value
+                    )
+                    params["plan_digest"] = updates.get("plan_digest", row.get("plan_digest"))
                 conn.execute(
                     text(f"UPDATE {table} SET {', '.join(fields)} WHERE id=:id"),
                     params,

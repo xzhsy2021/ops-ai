@@ -402,9 +402,29 @@ class ExecutionPlanService:
             f"{item.get('channel')}:{item.get('channel_account_id')}:{item.get('sender_id')}"
             for item in plan.authorized_identities or [] if isinstance(item, dict)
         }
+        # 自审批路径：请求方==消费方时，必须存在绑定的临时授权且仍活跃；
+        # 否则拒绝（防止申请人自批）。原始审批人不受此限制。
         if _request_actor_key(plan) == context.actor_key:
-            return None
-        if not plan.authorized_identities:
+            if not plan.temporary_grant_id:
+                return None
+            from app.services.temporary_approval import TemporaryApprovalService
+            grant_service = TemporaryApprovalService(self.db)
+            if not grant_service.is_self_approval_allowed(
+                actor_key=context.actor_key,
+                system_name=plan.system_name or "",
+                environment_name=plan.environment or "",
+                action_types=[step.action_type for step in plan.steps],
+                message_context=context,
+            ):
+                return None
+            if grant_service.get_active_grant(
+                actor_key=context.actor_key,
+                system_name=plan.system_name or "",
+                environment_name=plan.environment or "",
+                message_context=context,
+            ) is None:
+                return None
+        elif not plan.authorized_identities:
             if not (plan.manifest or {}).get("legacy_matrix_compat"):
                 return None
         elif context.actor_key not in authorized_keys:

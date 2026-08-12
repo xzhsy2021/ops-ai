@@ -880,13 +880,28 @@ def _plan_steps_schema() -> dict:
                 "description": "执行策略（如 continue_on_error / max_retries）",
             },
             "risk_level": {"type": "string", "description": "风险等级（low/medium/high）"},
+            "temporary_grant_id": {
+                "type": "string",
+                "description": "临时自审批授权 ID（可选；存在时校验当前请求方为活跃受益人）",
+            },
+            "grant_self_approval": {
+                "type": "boolean",
+                "description": "请求方申请自审批路径（可选；存在活跃授权时自动附加）",
+            },
         },
         "required": _common_prepare_schema()["required"] + ["steps"],
         "additionalProperties": False,
     },
 )
 def approval_prepare_plan(args, ctx, db):
-    """创建消息级执行计划并返回一次性审批短码。"""
+    """创建消息级执行计划并返回一次性审批短码。
+
+    若存在活跃临时自审批授权且当前请求方为授权受益人，则把受益人加入
+    授权身份集合并记录 temporary_grant_id，使受益人可通过自审批路径消费计划。
+    原始审批人始终保留在授权身份中。
+    """
+    from app.services.temporary_approval import TemporaryApprovalService
+
     message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
         args, ctx
     )
@@ -900,6 +915,37 @@ def approval_prepare_plan(args, ctx, db):
     steps = _freeze_file_upload_plan_steps(args["steps"], db)
     service = ExecutionPlanService(db)
 
+    # 临时自审批授权：请求方为活跃授权受益人时自动附加自审批路径。
+    temporary_grant_id = None
+    authorized = [
+        {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+        for sender_id in approvers
+    ]
+    grant_service = TemporaryApprovalService(db)
+    action_types = [step.get("action_type") for step in steps if isinstance(step, dict)]
+    if grant_service.is_self_approval_allowed(
+        actor_key=message_context.actor_key,
+        system_name=args["system_name"],
+        environment_name=args["environment"],
+        action_types=action_types,
+        message_context=message_context,
+    ):
+        active = grant_service.get_active_grant(
+            actor_key=message_context.actor_key,
+            system_name=args["system_name"],
+            environment_name=args["environment"],
+            message_context=message_context,
+        )
+        if active is not None:
+            temporary_grant_id = active.id
+            beneficiary_identity = {
+                "channel": message_context.channel,
+                "channel_account_id": message_context.channel_account_id,
+                "sender_id": message_context.sender_id,
+            }
+            if beneficiary_identity not in authorized:
+                authorized.append(beneficiary_identity)
+
     plan, short_code = service.prepare(
         message_context=message_context,
         system_name=args["system_name"],
@@ -912,10 +958,8 @@ def approval_prepare_plan(args, ctx, db):
         routing_ticket_digest=ticket_digest,
         risk_level=args.get("risk_level", "high"),
         ai_reason=args.get("ai_reason", ""),
-        authorized_identities=[
-            {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
-            for sender_id in approvers
-        ],
+        authorized_identities=authorized,
+        temporary_grant_id=temporary_grant_id,
     )
 
     return {
@@ -929,6 +973,7 @@ def approval_prepare_plan(args, ctx, db):
         "environment": plan.environment,
         "targets": plan.targets,
         "step_count": len(plan.steps),
+        "temporary_grant_id": plan.temporary_grant_id,
         "steps": [
             {
                 "step_key": s.step_key,
@@ -1040,3 +1085,163 @@ def approval_execute_plan(args, ctx, db):
             else f"执行计划状态: {plan.status}"
         ),
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# ops.approval.temporary_access — 临时自审批授权
+# ──────────────────────────────────────────────────────────────
+
+@registry.register(
+    name="ops.approval.temporary_access",
+    title="管理临时自审批授权",
+    description="为测试环境变更创建/确认/撤销限时自审批授权。操作身份只从 message_context.sender_id 推导；仅配置的原始审批人能确认/撤销；授权只允许固定受益人、固定测试系统/环境、固定动作集与授权生命周期。确认码 15 分钟有效且仅能消费一次。",
+    scopes=["ops:read"],
+    risk="low",
+    category="approval_prepare",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["request", "confirm", "revoke"],
+                "description": "操作类型：request 发起授权申请 / confirm 确认授权 / revoke 撤销授权",
+            },
+            "message_context": message_context_schema(),
+            "system_name": {"type": "string", "description": "目标系统名（request 必填）"},
+            "environment": {"type": "string", "description": "测试环境名（request 必填）"},
+            "beneficiary_identity": {"type": "string", "description": "受益人 actor key，如 matrix:default:@user:example.org（request 必填）"},
+            "allowed_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "允许的自审批动作集（request 必填）：FILE_UPLOAD / RELEASE / SERVICE_CONTROL / HEALTH_CHECK",
+            },
+            "reason": {"type": "string", "description": "授权理由（request 必填）"},
+            "duration_value": {"type": "integer", "description": "授权时长数值（request 可选，默认 1）"},
+            "duration_unit": {"type": "string", "enum": ["day", "week"], "description": "授权时长单位（request 可选，默认 day）"},
+            "grant_id": {"type": "string", "description": "授权 ID（confirm/revoke 必填）"},
+            "short_code": {"type": "string", "description": "一次性确认码（confirm 必填）"},
+            "revoke_reason": {"type": "string", "description": "撤销理由（revoke 可选）"},
+        },
+        "required": ["operation", "message_context"],
+        "additionalProperties": False,
+    },
+)
+def temporary_access(args, ctx, db):
+    """临时自审批授权管理工具：request / confirm / revoke。
+
+    操作身份只从 message_context.sender_id 推导；原始审批人从
+    _lookup_approvers（数据库/Token 策略）解析，绝不信任消息文本里的用户名。
+    """
+    from app.services.temporary_approval import TemporaryApprovalService
+
+    operation = str(args.get("operation") or "").strip()
+    if operation not in ("request", "confirm", "revoke"):
+        return {"ok": False, "error": "operation must be request, confirm or revoke"}
+
+    try:
+        message_context = normalize_message_context(args.get("message_context") or {})
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": f"invalid message_context: {exc}"}
+
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
+        message_context=message_context,
+    )
+
+    service = TemporaryApprovalService(db)
+
+    if operation == "request":
+        system_name = str(args.get("system_name") or "").strip()
+        environment = str(args.get("environment") or "").strip()
+        beneficiary = str(args.get("beneficiary_identity") or "").strip()
+        allowed_actions = args.get("allowed_actions") or []
+        reason = str(args.get("reason") or "").strip()
+        if not system_name or not environment:
+            return {"ok": False, "error": "system_name and environment are required for request"}
+        if not beneficiary:
+            return {"ok": False, "error": "beneficiary_identity is required for request"}
+        if not isinstance(allowed_actions, list) or not allowed_actions:
+            return {"ok": False, "error": "allowed_actions must not be empty"}
+        if not reason:
+            return {"ok": False, "error": "reason is required for request"}
+
+        try:
+            approvers = _lookup_approvers(
+                ctx,
+                system_name,
+                None,
+                channel=message_context.channel,
+                channel_account_id=message_context.channel_account_id,
+            )
+        except HTTPException as exc:
+            return {"ok": False, "error": str(exc.detail)}
+        if not approvers:
+            return {"ok": False, "error": "no authorized approver is configured for this channel account"}
+
+        try:
+            grant, short_code = service.request(
+                message_context=message_context,
+                beneficiary_actor_key=beneficiary,
+                system_name=system_name,
+                environment_name=environment,
+                allowed_actions=allowed_actions,
+                reason=reason,
+                authorized_identities=[
+                    {
+                        "channel": message_context.channel,
+                        "channel_account_id": message_context.channel_account_id,
+                        "sender_id": approver,
+                    }
+                    for approver in approvers
+                ],
+                duration_value=int(args.get("duration_value") or 1),
+                duration_unit=str(args.get("duration_unit") or "day"),
+            )
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+        payload = grant.to_dict()
+        if short_code:
+            payload["short_code"] = short_code
+        payload["ok"] = True
+        payload["grant_id"] = payload.get("id")
+        return payload
+
+    if operation in ("confirm", "revoke"):
+        grant_id = str(args.get("grant_id") or "").strip()
+        if not grant_id:
+            return {"ok": False, "error": "grant_id is required"}
+        actor_key = message_context.actor_key
+
+        if operation == "confirm":
+            short_code = str(args.get("short_code") or "").strip()
+            if not short_code:
+                return {"ok": False, "error": "short_code is required for confirm"}
+            confirmed = service.confirm(
+                grant_id,
+                short_code,
+                actor_key=actor_key,
+                message_context=message_context,
+            )
+            if confirmed is None:
+                return {"ok": False, "error": "confirmation failed: invalid code, expired, wrong actor or wrong conversation"}
+            payload = confirmed.to_dict()
+            payload["ok"] = True
+            payload["grant_id"] = payload.get("id")
+            return payload
+
+        reason = str(args.get("revoke_reason") or "").strip()
+        revoked = service.revoke(
+            grant_id,
+            actor_key=actor_key,
+            message_context=message_context,
+            reason=reason,
+        )
+        if revoked is None:
+            return {"ok": False, "error": "revoke failed: grant not found, not active, wrong actor or wrong conversation"}
+        payload = revoked.to_dict()
+        payload["ok"] = True
+        payload["grant_id"] = payload.get("id")
+        return payload
+
+    return {"ok": False, "error": f"unsupported operation: {operation}"}

@@ -778,6 +778,10 @@ class TemporaryApprovalGrant(Base):
         Index("ix_temporary_grant_expires", "expires_at"),
         Index("ix_temporary_grant_beneficiary", "beneficiary_actor_key"),
         Index("ix_temporary_grant_scope", "system_id", "environment_id", "status"),
+        Index(
+            "uq_temporary_grant_active_scope_key",
+            "active_scope_key", unique=True,
+        ),
     )
 
     id = Column(String(32), primary_key=True, default=_uuid)
@@ -801,6 +805,8 @@ class TemporaryApprovalGrant(Base):
     confirmation_code_hash = Column(String(255), nullable=False)
     confirmation_expires_at = Column(DateTime, nullable=False)
     confirmation_consumed_at = Column(DateTime, nullable=True)
+    confirmation_attempts = Column(Integer, nullable=False, default=0)
+    active_scope_key = Column(String(1024), nullable=True)
     revoked_by_actor_key = Column(String(255), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_reason = Column(Text, nullable=True)

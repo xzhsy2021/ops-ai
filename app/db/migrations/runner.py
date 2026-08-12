@@ -1355,6 +1355,45 @@ MIGRATIONS: List[Dict[str, str]] = [
         "name": "Create temporary self-approval grant indexes",
         "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_scope ON temporary_approval_grants(system_id, environment_id, status)",
     },
+    {
+        "version": "084_008_temporary_approval_grant_status_index",
+        "name": "Create temporary self-approval status index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_status ON temporary_approval_grants(status)",
+    },
+    {
+        "version": "084_009_temporary_approval_grant_expiry_index",
+        "name": "Create temporary self-approval expiry index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_expires ON temporary_approval_grants(expires_at)",
+    },
+    {
+        "version": "084_010_temporary_approval_grant_beneficiary_index",
+        "name": "Create temporary self-approval beneficiary index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_beneficiary ON temporary_approval_grants(beneficiary_actor_key)",
+    },
+    {
+        "version": "084_011_temporary_approval_confirmation_attempts",
+        "name": "Add temporary approval confirmation attempt counter",
+        "table": "temporary_approval_grants",
+        "column": "confirmation_attempts",
+        "sql": "ALTER TABLE temporary_approval_grants ADD COLUMN confirmation_attempts INTEGER NOT NULL DEFAULT 0",
+    },
+    {
+        "version": "084_012_temporary_approval_active_scope_key",
+        "name": "Add nullable active temporary approval scope key",
+        "table": "temporary_approval_grants",
+        "column": "active_scope_key",
+        "sql": "ALTER TABLE temporary_approval_grants ADD COLUMN active_scope_key VARCHAR(1024)",
+    },
+    {
+        "version": "084_013_temporary_approval_active_scope_key_unique_index",
+        "name": "Create unique active temporary approval scope key index",
+        "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_temporary_grant_active_scope_key ON temporary_approval_grants(active_scope_key)",
+    },
+    {
+        "version": "084_014_temporary_approval_drop_legacy_unique_index",
+        "name": "Drop legacy broad temporary approval uniqueness",
+        "sql": "DROP INDEX IF EXISTS uq_temporary_grant_active_scope",
+    },
 ]
 
 

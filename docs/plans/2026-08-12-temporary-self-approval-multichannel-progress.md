@@ -24,7 +24,7 @@ Do not continue in the root worktree. Resume in the dedicated worktree above.
 | 4. Generic Tool Token bindings | Complete, spec and quality approved | Generic conversation/approver policy is the runtime source; Matrix fields are compatibility aliases. Central tool guard covers dispatch paths. |
 | 5. Generic routing tickets and approvers | Complete, spec and quality approved | Fresh focused review `tests\test_qclaw_routing.py tests\test_multichannel_routing_tools.py tests\test_task5_quality_review.py tests\test_task5_final_quality.py tests\test_task5_final_review.py` passed 81/81 on this checkpoint. |
 | 6. Generic approvals and execution plans | In progress, follow-up review | Added generic persisted context, actor keys, approval identities, temporary grant reference, idempotent Matrix backfill/digest migration, generic MCP/API context, and non-mutating unauthorized consumption. Follow-up fixes cover migration digest preservation and fail-closed empty approvers. Current regression: `139 passed`. |
-| 7. Temporary self-approval grant service | In progress, security follow-up review | Added test-only scoped grants with day/week duration, fixed action allowlist, policy-derived original approvers, original-approver confirmation/revocation, channel/session binding, one-time PBKDF2 confirmation code with attempt limit, active-scope deduplication and lazy expiry. Task-specific regression: `11 passed`; combined Task 6/7 regression: `52 passed`. |
+| 7. Temporary self-approval grant service | In progress, final security review | Added test-only scoped grants with day/week duration, fixed action allowlist, policy-derived original approvers, original-approver confirmation/revocation, channel/session binding, one-time PBKDF2 confirmation code with atomic attempt limit, active-scope deduplication and lazy expiry. Task-specific regression: `12 passed`; full Task 6/7 related regression: `151 passed`. |
 | 8. MCP grant and plan integration | Not started | |
 | 9. Contextual OPS help | Not started | |
 | 10. Multichannel package intake | Not started | |
@@ -86,7 +86,7 @@ Most recent focused results reported by the implementation/review loops:
 - Frontend structured approver behavior tests: `4 passed`.
 - Frontend production build passed after the Task 5 UI changes.
 - Task 6 approval/plan regression: `137 passed`.
-- Task 7 temporary approval service and migration tests: `11 passed`; combined Task 6/7 regression: `52 passed`.
+- Task 7 temporary approval service and migration tests: `12 passed`; full Task 6/7 related regression: `151 passed`.
 - `git diff --check` passed after every recorded task commit.
 
 Known baseline issues that were not introduced here:

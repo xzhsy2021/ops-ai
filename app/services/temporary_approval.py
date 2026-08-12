@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import and_
+from sqlalchemy import and_, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -347,9 +347,22 @@ class TemporaryApprovalService:
         if actor_key not in _identity_keys(grant.authorized_identities or []):
             return None
         if not _verify_code(code, grant.confirmation_code_hash or ""):
-            grant.confirmation_attempts += 1
-            if grant.confirmation_attempts >= MAX_CONFIRMATION_ATTEMPTS:
-                grant.status = "EXPIRED"
+            next_attempts = TemporaryApprovalGrant.confirmation_attempts + 1
+            self.db.query(TemporaryApprovalGrant).filter(
+                and_(
+                    TemporaryApprovalGrant.id == grant_id,
+                    TemporaryApprovalGrant.status == "PENDING",
+                    TemporaryApprovalGrant.confirmation_consumed_at.is_(None),
+                    TemporaryApprovalGrant.confirmation_attempts < MAX_CONFIRMATION_ATTEMPTS,
+                )
+            ).update({
+                "confirmation_attempts": next_attempts,
+                "status": case(
+                    (next_attempts >= MAX_CONFIRMATION_ATTEMPTS, "EXPIRED"),
+                    else_=TemporaryApprovalGrant.status,
+                ),
+                "updated_at": _utcnow(),
+            }, synchronize_session=False)
             self.db.commit()
             return None
         now = _utcnow()

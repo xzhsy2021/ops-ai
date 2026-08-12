@@ -155,6 +155,32 @@ def test_confirmation_code_attempt_limit_and_environment_recheck(tmp_path):
     assert stored.status == "PENDING"
 
 
+def test_confirmation_attempt_limit_survives_stale_sessions(tmp_path):
+    engine, session, service_cls = _service(tmp_path)
+    Session = sessionmaker(bind=engine)
+    service = service_cls(session)
+    grant, _ = _request(service, _context(message="stale-attempts"))
+    confirmation = _context(message="confirm-stale", sender="owner")
+
+    stale_sessions = [Session() for _ in range(6)]
+    services = [service_cls(item) for item in stale_sessions]
+    for item in stale_sessions:
+        item.query(TemporaryApprovalGrant).filter(TemporaryApprovalGrant.id == grant.id).one()
+
+    for item in services:
+        assert item.confirm(
+            grant.id,
+            "BADCODE",
+            actor_key=confirmation.actor_key,
+            message_context=confirmation,
+        ) is None
+
+    fresh = Session()
+    stored = fresh.query(TemporaryApprovalGrant).filter(TemporaryApprovalGrant.id == grant.id).one()
+    assert stored.confirmation_attempts == 5
+    assert stored.status == "EXPIRED"
+
+
 def test_pending_requests_can_exist_but_only_one_can_become_active(tmp_path):
     _, session, service_cls = _service(tmp_path)
     service = service_cls(session)

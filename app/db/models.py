@@ -836,6 +836,9 @@ class DeployPackage(Base):
     deleted = Column(Boolean, default=False, index=True)
     deleted_at = Column(DateTime, nullable=True)
     delete_reason = Column(Text, nullable=True)
+    # 通道来源元数据：规范化后的 message_context 与来源消息键（channel:account:conversation:message:sha256）
+    source_context = Column(JSON, nullable=True)
+    source_message_key = Column(String(512), nullable=True, index=True)
 
 
 class DeployPackageRef(Base):

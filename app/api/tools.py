@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from app.api.helpers import api_response, audit
 from app.core.auth_v2 import require_auth, require_admin, normalize_role
 from app.db import get_db
-from app.db.models import ToolToken, ToolCallLog, ToolPlan, ToolPlanEvent
+from app.db.models import ToolToken, ToolCallLog, ToolPlan, ToolPlanEvent, DeployPackage
+from app.services.message_context import normalize_message_context
 from app.services.tool_context import ToolContext
 from app.services.tool_token import (
     create_tool_token,
@@ -466,6 +467,7 @@ async def upload_package_by_tool_token(
     request_event_id: str = Form(""),
     content_sha256: str = Form(""),
     package_sha256: str = Form(""),
+    message_context: str = Form(""),
     db: Session = Depends(get_db),
 ):
     ctx = get_tool_context(request, db)
@@ -483,6 +485,8 @@ async def upload_package_by_tool_token(
     effective_overwrite = bool(overwrite)
     meta = None
     reused = False
+    source_context = None
+    source_message_key = None
     if approval_intake:
         channel_bindings = normalize_channel_bindings(
             getattr(ctx, "channel_bindings", None)
@@ -491,21 +495,31 @@ async def upload_package_by_tool_token(
             raise HTTPException(status_code=403, detail="Approval package intake requires an ops:read Tool Token")
         if not channel_bindings:
             raise HTTPException(status_code=403, detail="Approval package intake requires a room-bound Tool Token")
-        enforce_conversation_binding(
-            channel_bindings,
-            channel="matrix",
-            channel_account_id="default",
-            conversation_id=room_id,
-        )
+        # 规范化消息上下文：优先通用 JSON message_context 字段，兼容旧 Matrix 表单字段。
+        if isinstance(message_context, str) and str(message_context).strip():
+            try:
+                raw_context = json.loads(message_context)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid message_context JSON: {exc}") from exc
+        else:
+            raw_context = {
+                "room_id": room_id,
+                "request_event_id": request_event_id,
+                "sender_matrix_id": getattr(ctx, "token_owner", "") or getattr(ctx, "username", "") or "",
+                "content_sha256": content_sha256,
+            }
+        try:
+            context = normalize_message_context(raw_context)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid message_context: {exc}") from exc
+
+        enforce_conversation_binding(channel_bindings, message_context=context)
+
         expected_package_sha256 = str(package_sha256 or "").strip().lower()
-        if (
-            not str(request_event_id or "").strip()
-            or not re.fullmatch(r"[0-9a-fA-F]{64}", content_sha256 or "")
-            or not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256)
-        ):
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256):
             raise HTTPException(
                 status_code=400,
-                detail="Approval package intake requires request_event_id, content_sha256, and package_sha256",
+                detail="Approval package intake requires package_sha256",
             )
 
         digest = hashlib.sha256()
@@ -518,24 +532,48 @@ async def upload_package_by_tool_token(
         if digest.hexdigest() != expected_package_sha256:
             raise HTTPException(status_code=409, detail="Uploaded package checksum does not match package_sha256")
 
-        safe_name = safe_package_name(filename)
-        filename = f"approval-{content_sha256.lower()[:12]}-{expected_package_sha256[:16]}-{safe_name[-190:]}"
-        effective_overwrite = False
-        existing_path = package_path(filename)
-        if os.path.isfile(existing_path):
-            if sha256_file(existing_path).lower() != expected_package_sha256:
-                raise HTTPException(status_code=409, detail="Approval package name already exists with different content")
-            row = upsert_package_metadata(
-                db,
-                filename,
-                existing_path,
-                system=system or "",
-                service=service or "",
-                uploaded_by=ctx.username or ctx.token_owner or "tool",
-                sha256=expected_package_sha256,
-            )
-            meta = package_to_dict(row, include_retention=False)
+        source_context = context.to_dict()
+        message_prefix = f"{context.channel}:{context.channel_account_id}:{context.conversation_id}:{context.message_id}"
+        source_message_key = f"{message_prefix}:{expected_package_sha256}"
+
+        # 同源消息复用：同一消息同一哈希复用，同一消息不同哈希 409。
+        existing_by_key = None
+        if db is not None:
+            existing_by_key = db.query(DeployPackage).filter(
+                DeployPackage.source_message_key == source_message_key
+            ).first()
+            if existing_by_key is None:
+                conflict = db.query(DeployPackage).filter(
+                    DeployPackage.source_message_key.like(f"{message_prefix}:%")
+                ).first()
+                if conflict is not None:
+                    raise HTTPException(status_code=409, detail="Same source message already uploaded with different content")
+
+        if existing_by_key is not None:
+            filename = existing_by_key.package_name
+            meta = package_to_dict(existing_by_key, include_retention=False)
             reused = True
+        else:
+            safe_name = safe_package_name(filename)
+            filename = f"approval-{context.content_sha256.lower()[:12]}-{expected_package_sha256[:16]}-{safe_name[-190:]}"
+            effective_overwrite = False
+            existing_path = package_path(filename)
+            if os.path.isfile(existing_path):
+                if sha256_file(existing_path).lower() != expected_package_sha256:
+                    raise HTTPException(status_code=409, detail="Approval package name already exists with different content")
+                row = upsert_package_metadata(
+                    db,
+                    filename,
+                    existing_path,
+                    system=system or "",
+                    service=service or "",
+                    uploaded_by=ctx.username or ctx.token_owner or "tool",
+                    sha256=expected_package_sha256,
+                    source_context=source_context,
+                    source_message_key=source_message_key,
+                )
+                meta = package_to_dict(row, include_retention=False)
+                reused = True
     else:
         # Generic File Center writes retain the normal write/scope/capability gates.
         from app.services.tool_policy import enforce_tool_policy
@@ -555,6 +593,8 @@ async def upload_package_by_tool_token(
                 service=service or "",
                 uploaded_by=ctx.username or ctx.token_owner or "tool",
                 overwrite=effective_overwrite,
+                source_context=source_context,
+                source_message_key=source_message_key,
             )
         except HTTPException as exc:
             existing_path = package_path(filename)
@@ -571,6 +611,8 @@ async def upload_package_by_tool_token(
                 service=service or "",
                 uploaded_by=ctx.username or ctx.token_owner or "tool",
                 sha256=expected_package_sha256,
+                source_context=source_context,
+                source_message_key=source_message_key,
             )
             meta = package_to_dict(row, include_retention=False)
             reused = True

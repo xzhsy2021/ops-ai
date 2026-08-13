@@ -1394,6 +1394,25 @@ MIGRATIONS: List[Dict[str, str]] = [
         "name": "Drop legacy broad temporary approval uniqueness",
         "sql": "DROP INDEX IF EXISTS uq_temporary_grant_active_scope",
     },
+    {
+        "version": "084_015_deploy_package_source_context",
+        "name": "Add source context to deploy packages",
+        "table": "deploy_packages",
+        "column": "source_context",
+        "sql": "ALTER TABLE deploy_packages ADD COLUMN source_context TEXT",
+    },
+    {
+        "version": "084_016_deploy_package_source_message_key",
+        "name": "Add source message key to deploy packages",
+        "table": "deploy_packages",
+        "column": "source_message_key",
+        "sql": "ALTER TABLE deploy_packages ADD COLUMN source_message_key VARCHAR(512)",
+    },
+    {
+        "version": "084_017_deploy_package_source_message_key_index",
+        "name": "Create source message key index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_deploy_packages_source_message_key ON deploy_packages(source_message_key)",
+    },
 ]
 
 

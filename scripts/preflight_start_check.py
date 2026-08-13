@@ -20,7 +20,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import which
-from typing import Iterable, List
+from typing import Iterable, List, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
@@ -138,6 +138,46 @@ def _package_files_check() -> Check:
     return _check("package_files", "ok", "依赖声明文件存在", files=["requirements.txt", "frontend/package.json", "frontend/package-lock.json"])
 
 
+def _approval_signing_key_check(environ: Mapping[str, str] | None = None) -> Check:
+    env = os.environ if environ is None else environ
+    source = "APPROVAL_SIGNING_KEY"
+    key = str(env.get(source) or "").strip()
+    if not key:
+        source = "QCLAW_APPROVAL_SIGNING_KEY"
+        key = str(env.get(source) or "").strip()
+    insecure_values = {
+        "changeme",
+        "change-me",
+        "default",
+        "dev-fallback-key-do-not-use-in-production",
+        "password",
+        "secret",
+        "test",
+    }
+    secure = (
+        len(key) >= 32
+        and key.lower() not in insecure_values
+        and len(set(key)) >= 8
+    )
+    if not secure:
+        return _check(
+            "approval_signing_key",
+            "error",
+            "审批签名密钥缺失或强度不足；请配置至少 32 位的 APPROVAL_SIGNING_KEY",
+            configured=bool(key),
+            source=source if key else "",
+            minimum_length=32,
+        )
+    return _check(
+        "approval_signing_key",
+        "ok",
+        "审批签名密钥已配置",
+        configured=True,
+        source=source,
+        minimum_length=32,
+    )
+
+
 def _writable_dir(path: Path) -> tuple[bool, str]:
     probe = None
     try:
@@ -216,6 +256,7 @@ def run_checks(host: str, port: int, require_dist: bool, deep_scan: bool = False
         _python_check(),
         _node_check(),
         _package_files_check(),
+        _approval_signing_key_check(),
         _frontend_dist_check(require_dist=require_dist, deep_scan=deep_scan),
         _runtime_dirs_check(),
         _sqlite_check(),

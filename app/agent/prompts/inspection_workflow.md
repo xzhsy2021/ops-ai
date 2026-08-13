@@ -74,4 +74,3 @@ Return:
 - Default to Path A for general inspection requests.
 - Explain why Path A is blocked if confirmation is required.
 - If Path A fails partway, keep the partial `run_id` and report what succeeded.
-- Persist the final analysis with `ops.ai.save_analysis`.

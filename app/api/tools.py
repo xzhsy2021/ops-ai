@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
@@ -14,14 +15,17 @@ from sqlalchemy.orm import Session
 from app.api.helpers import api_response, audit
 from app.core.auth_v2 import require_auth, require_admin, normalize_role
 from app.db import get_db
-from app.db.models import ToolToken, ToolCallLog, ToolPlan, ToolPlanEvent
+from app.db.models import ToolToken, ToolCallLog, ToolPlan, ToolPlanEvent, DeployPackage
+from app.services.message_context import normalize_message_context
 from app.services.tool_context import ToolContext
 from app.services.tool_token import (
-    _normalize_approver_ids,
-    _normalize_bound_room_ids,
     create_tool_token,
-    enforce_room_binding,
+    enforce_conversation_binding,
+    normalize_approver_identities,
+    normalize_channel_bindings,
     recommended_tool_token_templates,
+    resolve_approver_identities,
+    resolve_channel_bindings,
     token_to_dict,
     validate_tool_token,
 )
@@ -93,6 +97,8 @@ class CreateToolTokenPayload(BaseModel):
     # token-level restriction. Non-empty list = only these Matrix user IDs
     # may consume approval short codes created through this token.
     approver_matrix_ids: List[str] = Field(default_factory=list)
+    channel_bindings: List[Dict[str, str]] = Field(default_factory=list)
+    approver_identities: List[Dict[str, str]] = Field(default_factory=list)
 
 
 
@@ -111,6 +117,8 @@ class UpdateToolTokenPayload(BaseModel):
     # Pass an empty list to clear the approver whitelist; pass None to leave
     # it unchanged. Frontend always sends the current list on edit.
     approver_matrix_ids: Optional[List[str]] = None
+    channel_bindings: Optional[List[Dict[str, str]]] = None
+    approver_identities: Optional[List[Dict[str, str]]] = None
 
 
 class ToolPolicyPreviewPayload(BaseModel):
@@ -174,6 +182,12 @@ def _ctx_from_user(request: Request, user: Dict[str, Any]) -> ToolContext:
 
 def _ctx_from_token(request: Request, db: Session, raw_token: str) -> ToolContext:
     token = validate_tool_token(db, raw_token)
+    channel_bindings = normalize_channel_bindings(
+        getattr(token, "channel_bindings", None)
+    )
+    approver_identities = normalize_approver_identities(
+        getattr(token, "approver_identities", None)
+    )
     return ToolContext(
         username=token.owner,
         role="operator" if token.allow_write else "readonly",
@@ -186,8 +200,8 @@ def _ctx_from_token(request: Request, db: Session, raw_token: str) -> ToolContex
         scopes=token.scopes or [],
         allow_write=bool(token.allow_write),
         allow_prod=bool(token.allow_prod),
-        bound_room_ids=_normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
-        approver_matrix_ids=_normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
+        channel_bindings=channel_bindings,
+        approver_identities=approver_identities,
         client_name=token.name,
         ip_address=request.client.host if request.client else "",
         user_agent=request.headers.get("user-agent", ""),
@@ -201,6 +215,7 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             raise HTTPException(status_code=404, detail="Token not found")
         if not user.get("is_admin") and token.owner != user.get("username"):
             raise HTTPException(status_code=403, detail="Cannot preview another user's token")
+        serialized = token_to_dict(token)
         ctx = ToolContext(
             username=token.owner,
             role="operator" if token.allow_write else "readonly",
@@ -211,8 +226,8 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             scopes=token.scopes or [],
             allow_write=bool(token.allow_write),
             allow_prod=bool(token.allow_prod),
-            bound_room_ids=_normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
-            approver_matrix_ids=_normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
+            channel_bindings=serialized["channel_bindings"],
+            approver_identities=serialized["approver_identities"],
             client_name=token.name,
             ip_address=request.client.host if request.client else "",
             user_agent=request.headers.get("user-agent", "") if request else "",
@@ -225,8 +240,10 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             "scopes": token.scopes or [],
             "allow_write": bool(token.allow_write),
             "allow_prod": bool(token.allow_prod),
-            "bound_room_ids": _normalize_bound_room_ids(getattr(token, "bound_room_ids", None)),
-            "approver_matrix_ids": _normalize_approver_ids(getattr(token, "approver_matrix_ids", None)),
+            "channel_bindings": serialized["channel_bindings"],
+            "approver_identities": serialized["approver_identities"],
+            "bound_room_ids": serialized["bound_room_ids"],
+            "approver_matrix_ids": serialized["approver_matrix_ids"],
         }
 
     templates = {item["key"]: item for item in recommended_tool_token_templates()}
@@ -401,6 +418,8 @@ async def call_tool_stream(payload: ToolCallPayload, request: Request, db: Sessi
         result = registry.call(db, payload.tool, payload.arguments or {}, ctx)
         return api_response(data=result)
 
+    registry.normalize_and_enforce_call(tool, payload.arguments or {}, ctx)
+
     async def _stream():
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
@@ -448,6 +467,7 @@ async def upload_package_by_tool_token(
     request_event_id: str = Form(""),
     content_sha256: str = Form(""),
     package_sha256: str = Form(""),
+    message_context: str = Form(""),
     db: Session = Depends(get_db),
 ):
     ctx = get_tool_context(request, db)
@@ -465,22 +485,41 @@ async def upload_package_by_tool_token(
     effective_overwrite = bool(overwrite)
     meta = None
     reused = False
+    source_context = None
+    source_message_key = None
     if approval_intake:
-        bound_rooms = _normalize_bound_room_ids(getattr(ctx, "bound_room_ids", None))
+        channel_bindings = normalize_channel_bindings(
+            getattr(ctx, "channel_bindings", None)
+        )
         if getattr(ctx, "auth_type", "") != "tool_token" or not ctx.has_scope("ops:read"):
             raise HTTPException(status_code=403, detail="Approval package intake requires an ops:read Tool Token")
-        if not bound_rooms:
+        if not channel_bindings:
             raise HTTPException(status_code=403, detail="Approval package intake requires a room-bound Tool Token")
-        enforce_room_binding(bound_rooms, room_id)
+        # 规范化消息上下文：优先通用 JSON message_context 字段，兼容旧 Matrix 表单字段。
+        if isinstance(message_context, str) and str(message_context).strip():
+            try:
+                raw_context = json.loads(message_context)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid message_context JSON: {exc}") from exc
+        else:
+            raw_context = {
+                "room_id": room_id,
+                "request_event_id": request_event_id,
+                "sender_matrix_id": getattr(ctx, "token_owner", "") or getattr(ctx, "username", "") or "",
+                "content_sha256": content_sha256,
+            }
+        try:
+            context = normalize_message_context(raw_context)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid message_context: {exc}") from exc
+
+        enforce_conversation_binding(channel_bindings, message_context=context)
+
         expected_package_sha256 = str(package_sha256 or "").strip().lower()
-        if (
-            not str(request_event_id or "").strip()
-            or not re.fullmatch(r"[0-9a-fA-F]{64}", content_sha256 or "")
-            or not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256)
-        ):
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256):
             raise HTTPException(
                 status_code=400,
-                detail="Approval package intake requires request_event_id, content_sha256, and package_sha256",
+                detail="Approval package intake requires package_sha256",
             )
 
         digest = hashlib.sha256()
@@ -493,24 +532,48 @@ async def upload_package_by_tool_token(
         if digest.hexdigest() != expected_package_sha256:
             raise HTTPException(status_code=409, detail="Uploaded package checksum does not match package_sha256")
 
-        safe_name = safe_package_name(filename)
-        filename = f"approval-{content_sha256.lower()[:12]}-{expected_package_sha256[:16]}-{safe_name[-190:]}"
-        effective_overwrite = False
-        existing_path = package_path(filename)
-        if os.path.isfile(existing_path):
-            if sha256_file(existing_path).lower() != expected_package_sha256:
-                raise HTTPException(status_code=409, detail="Approval package name already exists with different content")
-            row = upsert_package_metadata(
-                db,
-                filename,
-                existing_path,
-                system=system or "",
-                service=service or "",
-                uploaded_by=ctx.username or ctx.token_owner or "tool",
-                sha256=expected_package_sha256,
-            )
-            meta = package_to_dict(row, include_retention=False)
+        source_context = context.to_dict()
+        message_prefix = f"{context.channel}:{context.channel_account_id}:{context.conversation_id}:{context.message_id}"
+        source_message_key = f"{message_prefix}:{expected_package_sha256}"
+
+        # 同源消息复用：同一消息同一哈希复用，同一消息不同哈希 409。
+        existing_by_key = None
+        if db is not None:
+            existing_by_key = db.query(DeployPackage).filter(
+                DeployPackage.source_message_key == source_message_key
+            ).first()
+            if existing_by_key is None:
+                conflict = db.query(DeployPackage).filter(
+                    DeployPackage.source_message_key.like(f"{message_prefix}:%")
+                ).first()
+                if conflict is not None:
+                    raise HTTPException(status_code=409, detail="Same source message already uploaded with different content")
+
+        if existing_by_key is not None:
+            filename = existing_by_key.package_name
+            meta = package_to_dict(existing_by_key, include_retention=False)
             reused = True
+        else:
+            safe_name = safe_package_name(filename)
+            filename = f"approval-{context.content_sha256.lower()[:12]}-{expected_package_sha256[:16]}-{safe_name[-190:]}"
+            effective_overwrite = False
+            existing_path = package_path(filename)
+            if os.path.isfile(existing_path):
+                if sha256_file(existing_path).lower() != expected_package_sha256:
+                    raise HTTPException(status_code=409, detail="Approval package name already exists with different content")
+                row = upsert_package_metadata(
+                    db,
+                    filename,
+                    existing_path,
+                    system=system or "",
+                    service=service or "",
+                    uploaded_by=ctx.username or ctx.token_owner or "tool",
+                    sha256=expected_package_sha256,
+                    source_context=source_context,
+                    source_message_key=source_message_key,
+                )
+                meta = package_to_dict(row, include_retention=False)
+                reused = True
     else:
         # Generic File Center writes retain the normal write/scope/capability gates.
         from app.services.tool_policy import enforce_tool_policy
@@ -530,6 +593,8 @@ async def upload_package_by_tool_token(
                 service=service or "",
                 uploaded_by=ctx.username or ctx.token_owner or "tool",
                 overwrite=effective_overwrite,
+                source_context=source_context,
+                source_message_key=source_message_key,
             )
         except HTTPException as exc:
             existing_path = package_path(filename)
@@ -546,6 +611,8 @@ async def upload_package_by_tool_token(
                 service=service or "",
                 uploaded_by=ctx.username or ctx.token_owner or "tool",
                 sha256=expected_package_sha256,
+                source_context=source_context,
+                source_message_key=source_message_key,
             )
             meta = package_to_dict(row, include_retention=False)
             reused = True
@@ -679,19 +746,49 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
         effective_write = bool(allow_write) or any(s in dangerous or s.endswith(":*") for s in scopes) or any(s == "ops:write" for s in scopes)
         if effective_write or allow_prod or any(s in dangerous or s.endswith(":*") for s in scopes):
             raise HTTPException(status_code=403, detail="Only admin can create write/prod tool tokens")
-    created = create_tool_token(
-        db,
-        name=payload.name,
-        owner=user.get("username") or "",
-        description=payload.description,
-        scopes=scopes,
-        allow_write=allow_write,
-        allow_prod=allow_prod,
-        expires_in_days=payload.expires_in_days,
-        bound_room_ids=payload.bound_room_ids,
-        approver_matrix_ids=payload.approver_matrix_ids,
+    fields_set = (
+        payload.model_fields_set
+        if hasattr(payload, "model_fields_set")
+        else payload.__fields_set__
     )
-    audit("tool.token.create", "tool_token", payload.name, f"user={user.get('username')} scopes={','.join(scopes)} bound_rooms={','.join(_normalize_bound_room_ids(payload.bound_room_ids))} approvers={','.join(_normalize_approver_ids(payload.approver_matrix_ids))}")
+    binding_kwargs: Dict[str, Any] = {}
+    if "channel_bindings" in fields_set:
+        binding_kwargs["channel_bindings"] = payload.channel_bindings
+    if "bound_room_ids" in fields_set:
+        binding_kwargs["bound_room_ids"] = payload.bound_room_ids
+    if "approver_identities" in fields_set:
+        binding_kwargs["approver_identities"] = payload.approver_identities
+    if "approver_matrix_ids" in fields_set:
+        binding_kwargs["approver_matrix_ids"] = payload.approver_matrix_ids
+    try:
+        created = create_tool_token(
+            db,
+            name=payload.name,
+            owner=user.get("username") or "",
+            description=payload.description,
+            scopes=scopes,
+            allow_write=allow_write,
+            allow_prod=allow_prod,
+            expires_in_days=payload.expires_in_days,
+            **binding_kwargs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    serialized = token_to_dict(created["record"])
+    audit(
+        "tool.token.create",
+        "tool_token",
+        payload.name,
+        (
+            f"user={user.get('username')} scopes={','.join(scopes)} "
+            f"bound_rooms={','.join(serialized['bound_room_ids'])} "
+            f"approvers={','.join(serialized['approver_matrix_ids'])} "
+            "channel_bindings="
+            f"{json.dumps(serialized['channel_bindings'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))} "
+            "approver_identities="
+            f"{json.dumps(serialized['approver_identities'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        ),
+    )
     _bump_capability_version(db)
     return api_response(data={"token": created["token"], "record": token_to_dict(created["record"])}, message="Token created; copy it now, it will be shown only once")
 
@@ -739,14 +836,50 @@ def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Reques
             token.expires_at = _utcnow() + timedelta(days=min(max(days, 1), 3650))
     if payload.revoke is not None:
         token.revoked_at = _utcnow() if payload.revoke else None
-    if payload.bound_room_ids is not None:
-        token.bound_room_ids = _normalize_bound_room_ids(payload.bound_room_ids)
-    if payload.approver_matrix_ids is not None:
-        token.approver_matrix_ids = _normalize_approver_ids(payload.approver_matrix_ids)
+    fields_set = (
+        payload.model_fields_set
+        if hasattr(payload, "model_fields_set")
+        else payload.__fields_set__
+    )
+    if {"channel_bindings", "bound_room_ids"} & fields_set:
+        kwargs: Dict[str, Any] = {}
+        if "channel_bindings" in fields_set:
+            kwargs["generic"] = payload.channel_bindings
+        if "bound_room_ids" in fields_set:
+            kwargs["legacy"] = payload.bound_room_ids
+        try:
+            token.channel_bindings = resolve_channel_bindings(**kwargs)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if {"approver_identities", "approver_matrix_ids"} & fields_set:
+        kwargs = {}
+        if "approver_identities" in fields_set:
+            kwargs["generic"] = payload.approver_identities
+        if "approver_matrix_ids" in fields_set:
+            kwargs["legacy"] = payload.approver_matrix_ids
+        try:
+            token.approver_identities = resolve_approver_identities(**kwargs)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     db.commit()
     db.refresh(token)
-    audit("tool.token.update", "tool_token", token.name, f"user={user.get('username')} scopes={','.join(token.scopes or [])} allow_write={token.allow_write} allow_prod={token.allow_prod} bound_rooms={','.join(_normalize_bound_room_ids(token.bound_room_ids))} approvers={','.join(_normalize_approver_ids(token.approver_matrix_ids))}")
+    serialized = token_to_dict(token)
+    audit(
+        "tool.token.update",
+        "tool_token",
+        token.name,
+        (
+            f"user={user.get('username')} scopes={','.join(token.scopes or [])} "
+            f"allow_write={token.allow_write} allow_prod={token.allow_prod} "
+            f"bound_rooms={','.join(serialized['bound_room_ids'])} "
+            f"approvers={','.join(serialized['approver_matrix_ids'])} "
+            "channel_bindings="
+            f"{json.dumps(serialized['channel_bindings'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))} "
+            "approver_identities="
+            f"{json.dumps(serialized['approver_identities'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        ),
+    )
     _bump_capability_version(db)
     return api_response(data=token_to_dict(token), message="Token updated")
 

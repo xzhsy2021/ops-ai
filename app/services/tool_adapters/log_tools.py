@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-from app.services.ai_evidence import mask_sensitive
+from app.services.sensitive_data import mask_sensitive
 from app.services.tool_registry import registry
 
 LOG_DIRS = [Path("data/logs"), Path("logs")]

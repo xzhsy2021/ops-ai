@@ -7,12 +7,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [ "${OPS_DOTENV_LOADED:-0}" != "1" ]; then
+  export OPS_DOTENV_LOADED=1
+  exec python3 "$ROOT_DIR/scripts/load_dotenv.py" "$ROOT_DIR/.env" --run bash "$0" "$@"
+fi
+
 DEV_MODE="${DEV_MODE:-single}"
 
 if [ "$DEV_MODE" = "separated" ]; then
   # 前后端分离模式（开发热更新）
-  "$ROOT_DIR/scripts/check_env.sh"
-  "$ROOT_DIR/scripts/init_db.sh"
+  bash "$ROOT_DIR/scripts/check_env.sh"
+  bash "$ROOT_DIR/scripts/init_db.sh"
 
   HOST="${HOST:-127.0.0.1}"
   PORT="${PORT:-8000}"

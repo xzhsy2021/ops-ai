@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import QCLAW_APPROVAL_TTL_SECONDS
 from app.db.models import ExecutionPlan, ExecutionPlanStep
+from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
 class PlanValidationError(ValueError):
@@ -37,6 +38,36 @@ def _utcnow() -> datetime:
 def _canonical_json(data: dict) -> str:
     """规范化 JSON：排序键 + 紧凑分隔符，保证 digest 计算的稳定性。"""
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _context(value, *, room_id=None, request_event_id=None, content_sha256=None, sender_id="legacy-requester") -> MessageContext:
+    if value is not None:
+        return normalize_message_context(value)
+    if not room_id or not request_event_id or not content_sha256:
+        raise PlanValidationError("message_context is required")
+    legacy_hash = content_sha256
+    if not isinstance(legacy_hash, str) or len(legacy_hash) != 64 or any(
+        char not in "0123456789abcdefABCDEF" for char in legacy_hash
+    ):
+        legacy_hash = hashlib.sha256(str(legacy_hash).encode("utf-8")).hexdigest()
+    return MessageContext("matrix", "default", room_id, request_event_id, sender_id, legacy_hash)
+
+
+def _request_actor_key(plan: ExecutionPlan) -> str | None:
+    sender_id = str(plan.request_sender_id or "").strip()
+    if not sender_id:
+        return None
+    prefix = f"{plan.channel}:{plan.channel_account_id}:"
+    if sender_id.startswith(prefix):
+        return sender_id
+    return f"{prefix}{sender_id}"
+
+
+def _legacy_actor_key(value: str) -> str:
+    value = str(value or "").strip()
+    if value.startswith("matrix:default:"):
+        return value
+    return f"matrix:default:{value}"
 
 
 def _hash_approval_code(code: str) -> str:
@@ -108,17 +139,18 @@ def step_approval_details(action_type: str, parameters: dict | None, default_tar
 
 
 def compute_plan_digest(
-    room_id: str,
-    request_event_id: str,
-    content_sha256: str,
-    system_name: str,
-    service_name: str | None,
-    environment: str,
-    targets: list[str],
-    steps: list[dict],
-    policy: dict,
-    routing_config_revision: str,
-    routing_ticket_digest: str,
+    room_id: str | None = None,
+    request_event_id: str | None = None,
+    content_sha256: str | None = None,
+    system_name: str = "",
+    service_name: str | None = None,
+    environment: str = "",
+    targets: list[str] | None = None,
+    steps: list[dict] | None = None,
+    policy: dict | None = None,
+    routing_config_revision: str = "",
+    routing_ticket_digest: str = "",
+    message_context: MessageContext | dict | None = None,
 ) -> str:
     """计算不可变 plan manifest 的 SHA-256 摘要。
 
@@ -126,17 +158,16 @@ def compute_plan_digest(
     待审批计划；审批后 manifest 的任何实质变化都必须导致 digest 不同，
     从而禁止执行被篡改的计划。
     """
-    normalized_steps = _normalize_steps(steps)
+    context = _context(message_context, room_id=room_id, request_event_id=request_event_id, content_sha256=content_sha256)
+    normalized_steps = _normalize_steps(steps or [])
     manifest = {
-        "room_id": room_id,
-        "request_event_id": request_event_id,
-        "content_sha256": content_sha256,
+        "message_context": context.to_dict(),
         "system_name": system_name,
         "service_name": service_name,
         "environment": environment,
-        "targets": sorted(targets),
+        "targets": sorted(targets or []),
         "steps": normalized_steps,
-        "policy": policy,
+        "policy": policy or {},
         "routing_config_revision": routing_config_revision,
         "routing_ticket_digest": routing_ticket_digest,
     }
@@ -156,12 +187,12 @@ def build_plan_manifest(
     policy: dict,
     routing_config_revision: str,
     routing_ticket_digest: str,
+    message_context: MessageContext | dict | None = None,
 ) -> dict:
     """构建并规范化完整 plan manifest（冻结所有步骤和参数）。"""
+    context = _context(message_context, room_id=room_id, request_event_id=request_event_id, content_sha256=content_sha256)
     return {
-        "room_id": room_id,
-        "request_event_id": request_event_id,
-        "content_sha256": content_sha256,
+        "message_context": context.to_dict(),
         "system_name": system_name,
         "service_name": service_name,
         "environment": environment,
@@ -181,44 +212,62 @@ class ExecutionPlanService:
 
     def prepare(
         self,
-        room_id: str,
-        request_event_id: str,
-        content_sha256: str,
-        system_name: str,
-        service_name: str | None,
-        environment: str,
-        targets: list[str],
-        steps: list[dict],
-        policy: dict,
-        routing_config_revision: str,
-        routing_ticket_digest: str,
+        room_id: str | None = None,
+        request_event_id: str | None = None,
+        content_sha256: str | None = None,
+        system_name: str = "",
+        service_name: str | None = None,
+        environment: str = "",
+        targets: list[str] | None = None,
+        steps: list[dict] | None = None,
+        policy: dict | None = None,
+        routing_config_revision: str = "",
+        routing_ticket_digest: str = "",
         risk_level: str = "high",
         ai_reason: str = "",
         package_name: str | None = None,
         package_sha256: str | None = None,
         package_size_bytes: int | None = None,
         authorized_matrix_users: list[str] | None = None,
+        *,
+        message_context: MessageContext | dict | None = None,
+        authorized_identities: list[dict | str] | None = None,
+        temporary_grant_id: str | None = None,
     ) -> tuple[ExecutionPlan, str]:
         """创建待审批执行计划，返回 (plan, plaintext_short_code)。
 
         相同 plan_digest 的 PENDING_APPROVAL 计划已存在时，返回已有计划（幂等），
         第二返回值为空字符串。
         """
-        if not room_id or not request_event_id:
-            raise PlanValidationError("执行计划必须绑定 room_id 和 request_event_id")
+        context = _context(message_context, room_id=room_id, request_event_id=request_event_id, content_sha256=content_sha256)
+        if authorized_identities is None and authorized_matrix_users is not None:
+            authorized_identities = authorized_matrix_users
+        legacy_matrix_compat = (
+            message_context is None
+            and authorized_identities is None
+            and authorized_matrix_users is None
+        )
+        identities = [normalize_identity(item) for item in (authorized_identities or [])]
+        if message_context is not None and authorized_identities is None and authorized_matrix_users is None:
+            raise PlanValidationError("authorized approvers must not be empty")
+        if (authorized_identities is not None or authorized_matrix_users is not None) and not identities:
+            raise PlanValidationError("authorized approvers must not be empty")
 
         manifest = build_plan_manifest(
             room_id, request_event_id, content_sha256,
             system_name, service_name, environment, targets,
-            steps, policy, routing_config_revision, routing_ticket_digest,
+            steps, policy, routing_config_revision, routing_ticket_digest, message_context=context,
         )
         digest = compute_plan_digest(
             room_id, request_event_id, content_sha256,
             system_name, service_name, environment, targets,
-            steps, policy, routing_config_revision, routing_ticket_digest,
+            steps, policy, routing_config_revision, routing_ticket_digest, message_context=context,
         )
 
         # 幂等：相同 digest 的 PENDING_APPROVAL 计划已存在则直接返回
+        if legacy_matrix_compat:
+            manifest["legacy_matrix_compat"] = True
+
         existing = self.db.query(ExecutionPlan).filter(
             and_(
                 ExecutionPlan.plan_digest == digest,
@@ -236,13 +285,21 @@ class ExecutionPlanService:
             status="PENDING_APPROVAL",
             plan_digest=digest,
             risk_level=risk_level,
-            room_id=room_id,
-            request_event_id=request_event_id,
-            content_sha256=content_sha256,
+            room_id=room_id or context.conversation_id,
+            request_event_id=request_event_id or context.message_id,
+            content_sha256=content_sha256 or context.content_sha256,
+            channel=context.channel,
+            channel_account_id=context.channel_account_id,
+            conversation_id=context.conversation_id,
+            request_message_id=context.message_id,
+            request_sender_id=context.sender_id,
+            authorized_identities=identities,
+            temporary_grant_id=temporary_grant_id,
+            requested_by=context.actor_key,
             system_name=system_name,
             service_name=service_name,
             environment=environment,
-            targets=sorted(targets),
+            targets=sorted(targets or []),
             routing_ticket_digest=routing_ticket_digest,
             routing_config_revision=routing_config_revision,
             package_name=package_name,
@@ -251,7 +308,7 @@ class ExecutionPlanService:
             manifest=manifest,
             policy=dict(policy or {}),
             ai_reason=ai_reason,
-            authorized_matrix_users=authorized_matrix_users or [],
+            authorized_matrix_users=[item["sender_id"] for item in identities],
             approval_code_hash=code_hash,
             expires_at=expires_at,
         )
@@ -291,10 +348,11 @@ class ExecutionPlanService:
     def _verify_stored_manifest(self, plan: ExecutionPlan) -> bool:
         """校验存储 manifest 未发生实质变化：重新计算 digest 与计划一致。"""
         m = plan.manifest or {}
+        stored_context = m.get("message_context")
+        if not isinstance(stored_context, dict):
+            return False
         current_digest = compute_plan_digest(
-            room_id=m.get("room_id") or plan.room_id,
-            request_event_id=m.get("request_event_id") or plan.request_event_id,
-            content_sha256=m.get("content_sha256") or plan.content_sha256 or "",
+            content_sha256=stored_context["content_sha256"],
             system_name=m.get("system_name") or plan.system_name or "",
             service_name=m.get("service_name") or plan.service_name,
             environment=m.get("environment") or plan.environment or "",
@@ -303,6 +361,7 @@ class ExecutionPlanService:
             policy=m.get("policy") or plan.policy or {},
             routing_config_revision=m.get("routing_config_revision") or plan.routing_config_revision or "",
             routing_ticket_digest=m.get("routing_ticket_digest") or plan.routing_ticket_digest or "",
+            message_context=stored_context,
         )
         return current_digest == plan.plan_digest
 
@@ -310,9 +369,12 @@ class ExecutionPlanService:
         self,
         plan_id: str,
         short_code: str,
-        approver_matrix_id: str,
-        room_id: str,
-        approval_event_id: str,
+        approver_matrix_id: str | None = None,
+        room_id: str | None = None,
+        approval_event_id: str | None = None,
+        *,
+        approval_context: MessageContext | dict | None = None,
+        digest: str | None = None,
     ) -> ExecutionPlan | None:
         """原子消费审批码。成功返回 plan（状态 APPROVED），失败返回 None。
 
@@ -332,18 +394,42 @@ class ExecutionPlanService:
         if not _verify_approval_code(short_code, plan.approval_code_hash or ""):
             return None
         # 验证房间一致，防止跨房间重放
-        if plan.room_id != room_id:
+        context = _context(approval_context, room_id=room_id, request_event_id=approval_event_id, content_sha256=plan.content_sha256 or "0" * 64, sender_id=approver_matrix_id or "")
+        if (plan.channel, plan.channel_account_id, plan.conversation_id) != (context.channel, context.channel_account_id, context.conversation_id):
             return None
         # 验证授权审批人
-        authorized_users = plan.authorized_matrix_users or []
-        if authorized_users and approver_matrix_id not in authorized_users:
-            plan.status = "REJECTED"
-            plan.rejected_by = approver_matrix_id
-            plan.rejected_at = _utcnow()
-            plan.failure_reason = (
-                f"approver {approver_matrix_id} not in authorized list: {','.join(authorized_users)}"
-            )
-            self.db.commit()
+        authorized_keys = {
+            f"{item.get('channel')}:{item.get('channel_account_id')}:{item.get('sender_id')}"
+            for item in plan.authorized_identities or [] if isinstance(item, dict)
+        }
+        # 自审批路径：请求方==消费方时，必须存在绑定的临时授权且仍活跃；
+        # 否则拒绝（防止申请人自批）。原始审批人不受此限制。
+        if _request_actor_key(plan) == context.actor_key:
+            if not plan.temporary_grant_id:
+                return None
+            from app.services.temporary_approval import TemporaryApprovalService
+            grant_service = TemporaryApprovalService(self.db)
+            if not grant_service.is_self_approval_allowed(
+                actor_key=context.actor_key,
+                system_name=plan.system_name or "",
+                environment_name=plan.environment or "",
+                action_types=[step.action_type for step in plan.steps],
+                message_context=context,
+            ):
+                return None
+            if grant_service.get_active_grant(
+                actor_key=context.actor_key,
+                system_name=plan.system_name or "",
+                environment_name=plan.environment or "",
+                message_context=context,
+            ) is None:
+                return None
+        elif not plan.authorized_identities:
+            if not (plan.manifest or {}).get("legacy_matrix_compat"):
+                return None
+        elif context.actor_key not in authorized_keys:
+            return None
+        if digest is not None and digest != plan.plan_digest:
             return None
         # 验证是否过期
         if plan.expires_at and _utcnow() > plan.expires_at:
@@ -366,8 +452,9 @@ class ExecutionPlanService:
         ).update(
             {
                 "status": "APPROVED",
-                "approved_by": approver_matrix_id,
-                "approval_event_id": approval_event_id,
+                "approved_by": context.actor_key,
+                "approval_event_id": context.message_id,
+                "approval_message_id": context.message_id,
                 "approved_at": _utcnow(),
                 "consumed_at": _utcnow(),
             },
@@ -383,6 +470,8 @@ class ExecutionPlanService:
         self,
         plan_id: str,
         rejecter_matrix_id: str,
+        *,
+        rejection_context: MessageContext | dict | None = None,
     ) -> ExecutionPlan | None:
         """拒绝审批，终态操作。拒绝后不能再消费。"""
         plan = self.db.query(ExecutionPlan).filter(
@@ -393,7 +482,12 @@ class ExecutionPlanService:
         if plan.status != "PENDING_APPROVAL":
             return None
         plan.status = "REJECTED"
-        plan.rejected_by = rejecter_matrix_id
+        if rejection_context is not None:
+            context = _context(rejection_context)
+            plan.rejected_by = context.actor_key
+            plan.approval_message_id = context.message_id
+        else:
+            plan.rejected_by = _legacy_actor_key(rejecter_matrix_id)
         plan.rejected_at = _utcnow()
         self.db.commit()
         self.db.refresh(plan)

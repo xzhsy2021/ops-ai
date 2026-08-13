@@ -481,27 +481,6 @@ def test_mcp_capability_service_owns_resource_catalog_and_read_wrapper(tmp_path)
         engine.dispose()
 
 
-def test_mcp_ai_workflows_resource_explains_grouped_inspection(tmp_path):
-    from app.services.mcp_capability_service import mcp_resource_read
-    from app.services.tool_context import ToolContext
-
-    engine, Session = _sqlite_session(tmp_path)
-    db = Session()
-    ctx = ToolContext(username="tester", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
-    try:
-        response = mcp_resource_read(db, ctx, {"uri": "ops://ai-workflows"})
-        payload = json.loads(response["contents"][0]["text"])
-        items = (payload["data"] or {}).get("items") or []
-        inspect_item = next(item for item in items if item.get("tool") == "ops.inspection.run_servers_batch")
-
-        assert "batch" in inspect_item["description"].lower()
-        assert "ops.inspection.generate_report_for_runs" in inspect_item["recommended_after"]
-        assert "ops.inspection.preview_servers_batch" in inspect_item["recommended_before"]
-    finally:
-        db.close()
-        engine.dispose()
-
-
 def test_mcp_capability_service_owns_prompt_catalog_and_get_contract():
     from app.services.mcp_capability_service import mcp_prompt_get, mcp_prompt_items, mcp_prompts_list
 

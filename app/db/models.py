@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Column, String, Integer, DateTime, Text, Boolean, ForeignKey, JSON,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import relationship
 from .base import Base
@@ -491,6 +492,8 @@ class ToolToken(Base):
     expires_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
+    channel_bindings = Column(JSON, default=list)
+    approver_identities = Column(JSON, default=list)
     # qclaw Element room binding: if non-empty, this token is only allowed to
     # call qclaw routing/approval tools from the listed Matrix room IDs.
     # Empty list (= []) means no room restriction; default is empty for
@@ -603,41 +606,6 @@ class ToolPlanEvent(Base):
 
 
 
-class AiAnalysisRun(Base):
-    """AI analysis result persisted from MCP/workflow outputs."""
-    __tablename__ = "ai_analysis_runs"
-
-    id = Column(String(32), primary_key=True, default=_uuid)
-    analysis_type = Column(String(64), nullable=False, index=True)
-    target_type = Column(String(64), nullable=True, index=True)
-    target_id = Column(String(255), nullable=True, index=True)
-    source_type = Column(String(64), nullable=True, index=True)
-    source_id = Column(String(255), nullable=True, index=True)
-    prompt_name = Column(String(128), nullable=True)
-    input_refs = Column(Text, nullable=True)
-    output_json = Column(JSON, default=dict)
-    summary = Column(Text, nullable=True)
-    confidence = Column(String(32), nullable=True)
-    created_by = Column(String(128), nullable=True, index=True)
-    created_at = Column(DateTime, default=_utcnow, index=True)
-
-
-class AiAnalysisFinding(Base):
-    """Individual AI finding with evidence and recommendation."""
-    __tablename__ = "ai_analysis_findings"
-
-    id = Column(String(32), primary_key=True, default=_uuid)
-    analysis_run_id = Column(String(32), ForeignKey("ai_analysis_runs.id"), nullable=False, index=True)
-    title = Column(String(255), nullable=True)
-    finding_type = Column(String(64), nullable=True, index=True)
-    severity = Column(String(32), nullable=True, index=True)
-    claim = Column(Text, nullable=True)
-    evidence_json = Column(JSON, default=list)
-    suggestion = Column(Text, nullable=True)
-    confidence = Column(String(32), nullable=True)
-    created_at = Column(DateTime, default=_utcnow, index=True)
-
-
 class AiActionApproval(Base):
     """Human approval request for high-risk AI/MCP suggested actions.
 
@@ -682,6 +650,20 @@ class AiActionApproval(Base):
     execution_result = Column(JSON, nullable=True)
     failure_reason = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    # Channel-neutral message binding. Legacy Matrix columns above remain for
+    # compatibility with existing databases and clients.
+    channel = Column(String(32), nullable=True)
+    channel_account_id = Column(String(128), nullable=True)
+    conversation_id = Column(String(255), nullable=True)
+    request_message_id = Column(String(255), nullable=True)
+    request_sender_id = Column(String(255), nullable=True)
+    approval_message_id = Column(String(255), nullable=True)
+    authorized_identities = Column(JSON, default=list)
+    temporary_grant_id = Column(String(32), nullable=True, index=True)
+    __table_args__ = (
+        Index("ix_ai_approval_context", "channel", "channel_account_id", "conversation_id", "request_message_id"),
+    )
 
 
 class ExecutionPlan(Base):
@@ -743,6 +725,20 @@ class ExecutionPlan(Base):
     created_at = Column(DateTime, default=_utcnow, index=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
+    # Channel-neutral message binding. Legacy Matrix columns above remain for
+    # compatibility with existing databases and clients.
+    channel = Column(String(32), nullable=True)
+    channel_account_id = Column(String(128), nullable=True)
+    conversation_id = Column(String(255), nullable=True)
+    request_message_id = Column(String(255), nullable=True)
+    request_sender_id = Column(String(255), nullable=True)
+    approval_message_id = Column(String(255), nullable=True)
+    authorized_identities = Column(JSON, default=list)
+    temporary_grant_id = Column(String(32), nullable=True, index=True)
+    __table_args__ = (
+        Index("ix_execution_plan_context", "channel", "channel_account_id", "conversation_id", "request_message_id"),
+    )
+
     steps = relationship(
         "ExecutionPlanStep",
         back_populates="plan",
@@ -774,6 +770,51 @@ class ExecutionPlanStep(Base):
     plan = relationship("ExecutionPlan", back_populates="steps")
 
 
+class TemporaryApprovalGrant(Base):
+    """Time-boxed self-approval scope for test-environment changes."""
+    __tablename__ = "temporary_approval_grants"
+    __table_args__ = (
+        Index("ix_temporary_grant_status", "status"),
+        Index("ix_temporary_grant_expires", "expires_at"),
+        Index("ix_temporary_grant_beneficiary", "beneficiary_actor_key"),
+        Index("ix_temporary_grant_scope", "system_id", "environment_id", "status"),
+        Index(
+            "uq_temporary_grant_active_scope_key",
+            "active_scope_key", unique=True,
+        ),
+    )
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    beneficiary_actor_key = Column(String(255), nullable=False, index=True)
+    channel = Column(String(32), nullable=False)
+    channel_account_id = Column(String(128), nullable=False)
+    conversation_id = Column(String(255), nullable=False)
+    system_id = Column(String(32), ForeignKey("systems.id"), nullable=False, index=True)
+    environment_id = Column(String(32), ForeignKey("system_environments.id"), nullable=False, index=True)
+    allowed_actions = Column(JSON, nullable=False, default=list)
+    authorized_identities = Column(JSON, nullable=False, default=list)
+    reason = Column(Text, nullable=False)
+    starts_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    status = Column(String(16), nullable=False, default="PENDING", index=True)
+    requested_by_actor_key = Column(String(255), nullable=False)
+    approved_by_actor_key = Column(String(255), nullable=True)
+    request_message_id = Column(String(255), nullable=False)
+    confirmation_message_id = Column(String(255), nullable=True)
+    request_digest = Column(String(64), nullable=False, index=True)
+    confirmation_code_hash = Column(String(255), nullable=False)
+    confirmation_expires_at = Column(DateTime, nullable=False)
+    confirmation_consumed_at = Column(DateTime, nullable=True)
+    confirmation_attempts = Column(Integer, nullable=False, default=0)
+    active_scope_key = Column(String(1024), nullable=True)
+    revoked_by_actor_key = Column(String(255), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_reason = Column(Text, nullable=True)
+    requested_duration_seconds = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
 class DeployPackage(Base):
     """Local deploy package metadata managed by File Center."""
     __tablename__ = "deploy_packages"
@@ -795,6 +836,9 @@ class DeployPackage(Base):
     deleted = Column(Boolean, default=False, index=True)
     deleted_at = Column(DateTime, nullable=True)
     delete_reason = Column(Text, nullable=True)
+    # 通道来源元数据：规范化后的 message_context 与来源消息键（channel:account:conversation:message:sha256）
+    source_context = Column(JSON, nullable=True)
+    source_message_key = Column(String(512), nullable=True, index=True)
 
 
 class DeployPackageRef(Base):

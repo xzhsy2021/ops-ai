@@ -47,38 +47,3 @@ export interface DiagnosticsPayload {
   recommendations?: Recommendation[]
   sections?: Record<string, any>
 }
-
-
-export interface AiDiagnosticFinding {
-  key: string
-  severity: string
-  title: string
-  detail: string
-  evidence?: any
-  related_tools?: string[]
-  next_steps?: string[]
-}
-
-export interface AiDiagnosticToolchainStep {
-  order: number
-  tool: string
-  purpose: string
-  risk: string
-  auto_allowed: boolean
-}
-
-export interface AiDiagnosticsPayload {
-  schema_version?: string
-  generated_at?: string
-  mode?: string
-  focus?: string
-  status?: string
-  severity?: string
-  headline?: string
-  summary?: Record<string, any>
-  findings?: AiDiagnosticFinding[]
-  safe_mcp_toolchain?: AiDiagnosticToolchainStep[]
-  guardrails?: Record<string, any>
-  recommended_next_actions?: any[]
-  evidence?: Record<string, any>
-}

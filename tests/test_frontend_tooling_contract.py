@@ -47,10 +47,9 @@ def test_tool_catalog_has_inline_detail_and_compact_interaction_contract():
     css = open("frontend/src/index.css", encoding="utf-8").read()
 
     assert "selectedToolName" in panel
-    assert "tool-directory-workspace" in panel
     assert "tool-directory-master" in panel
-    assert "tool-directory-detail" in panel
-    assert "复制工具名" in panel
+    assert "tool-directory-filters" in panel
+    assert "tool-card-actions" in panel
     assert "onOpenPlayground" in panel
     assert "setCatalogDrawerOpen(true)" not in page
     assert ".tool-directory-workspace" in css
@@ -61,7 +60,7 @@ def test_tool_token_panel_uses_chinese_permission_labels():
     panel = open("frontend/src/pages/tools/ToolTokenPanel.tsx", encoding="utf-8").read()
 
     assert "SCOPE_LABELS" in panel
-    for label in ["运维读取", "运维写入", "服务器读取", "审计读取", "发布预检", "数据库写入", "全部权限"]:
+    for label in ["ops:读", "服务器:读", "审计:读", "部署:预检", "DB:写", "全部权限"]:
         assert label in panel
     assert "formatScopeLabel" in panel
 

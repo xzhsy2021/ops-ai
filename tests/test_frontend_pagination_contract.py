@@ -39,7 +39,7 @@ def test_inspection_page_exposes_profile_preview_and_confirmation_workflow():
     assert "profileRun: (data: { profile_id: string; confirm_text: string; expected_count?: number; fingerprint?: string }) => api.post('/inspection/profiles/run'" in api
     assert "profilePreview" in page
     assert "runInspectionProfile" in page
-    assert "profile-confirm-hint" in page
+    assert "profileConfirmValue" in page
     assert "confirmMode=\"one-click\"" in page
     assert "showConfirmTextInOneClick={false}" in page
     assert "无需手动输入字符串" in page

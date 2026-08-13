@@ -67,9 +67,6 @@ def main() -> int:
     status, ctype, body = fetch(base + "/api/v2/system/recent-errors")
     require(status in {200, 401}, "/api/v2/system/recent-errors is routed to API (200 or auth 401)", failures)
 
-    status, ctype, body = fetch(base + "/api/v2/system/ai-diagnostics")
-    require(status in {200, 401}, "/api/v2/system/ai-diagnostics is routed to API (200 or auth 401)", failures)
-
     status, ctype, body = fetch(base + "/api/v2/tools/risk-policy")
     require(status in {200, 401}, "/api/v2/tools/risk-policy is routed to API (200 or auth 401)", failures)
 

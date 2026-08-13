@@ -8,7 +8,8 @@
     "prebuild": "node ./scripts/generate-build-info.cjs",
     "build": "node ./node_modules/vite/bin/vite.js build",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:approvers": "node --test ./tests/approverIdentities.test.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

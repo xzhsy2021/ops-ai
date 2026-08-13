@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from sqlalchemy import inspect, text
@@ -1295,6 +1296,123 @@ MIGRATIONS: List[Dict[str, str]] = [
             updated_at DATETIME
         )""",
     },
+    {
+        "version": "084_002_tool_token_channel_bindings",
+        "name": "Add generic channel bindings to tool tokens",
+        "table": "tool_tokens",
+        "column": "channel_bindings",
+        "sql": (
+            "ALTER TABLE tool_tokens ADD COLUMN channel_bindings "
+            "TEXT DEFAULT '[]' NOT NULL"
+        ),
+    },
+    {
+        "version": "084_003_tool_token_approver_identities",
+        "name": "Add generic approver identities to tool tokens",
+        "table": "tool_tokens",
+        "column": "approver_identities",
+        "sql": (
+            "ALTER TABLE tool_tokens ADD COLUMN approver_identities "
+            "TEXT DEFAULT '[]' NOT NULL"
+        ),
+    },
+    {
+        "version": "084_006_temporary_approval_grants",
+        "name": "Create temporary self-approval grants table",
+        "table": "temporary_approval_grants",
+        "sql": """CREATE TABLE IF NOT EXISTS temporary_approval_grants (
+            id VARCHAR(32) PRIMARY KEY,
+            beneficiary_actor_key VARCHAR(255) NOT NULL,
+            channel VARCHAR(32) NOT NULL,
+            channel_account_id VARCHAR(128) NOT NULL,
+            conversation_id VARCHAR(255) NOT NULL,
+            system_id VARCHAR(32) NOT NULL,
+            environment_id VARCHAR(32) NOT NULL,
+            allowed_actions JSON NOT NULL,
+            authorized_identities JSON NOT NULL,
+            reason TEXT NOT NULL,
+            starts_at DATETIME,
+            expires_at DATETIME,
+            status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+            requested_by_actor_key VARCHAR(255) NOT NULL,
+            approved_by_actor_key VARCHAR(255),
+            request_message_id VARCHAR(255) NOT NULL,
+            confirmation_message_id VARCHAR(255),
+            request_digest VARCHAR(64) NOT NULL,
+            confirmation_code_hash VARCHAR(255) NOT NULL,
+            confirmation_expires_at DATETIME NOT NULL,
+            confirmation_consumed_at DATETIME,
+            revoked_by_actor_key VARCHAR(255),
+            revoked_at DATETIME,
+            revoke_reason TEXT,
+            requested_duration_seconds INTEGER NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL
+        )""",
+    },
+    {
+        "version": "084_007_temporary_approval_grant_indexes",
+        "name": "Create temporary self-approval grant indexes",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_scope ON temporary_approval_grants(system_id, environment_id, status)",
+    },
+    {
+        "version": "084_008_temporary_approval_grant_status_index",
+        "name": "Create temporary self-approval status index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_status ON temporary_approval_grants(status)",
+    },
+    {
+        "version": "084_009_temporary_approval_grant_expiry_index",
+        "name": "Create temporary self-approval expiry index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_expires ON temporary_approval_grants(expires_at)",
+    },
+    {
+        "version": "084_010_temporary_approval_grant_beneficiary_index",
+        "name": "Create temporary self-approval beneficiary index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_temporary_grant_beneficiary ON temporary_approval_grants(beneficiary_actor_key)",
+    },
+    {
+        "version": "084_011_temporary_approval_confirmation_attempts",
+        "name": "Add temporary approval confirmation attempt counter",
+        "table": "temporary_approval_grants",
+        "column": "confirmation_attempts",
+        "sql": "ALTER TABLE temporary_approval_grants ADD COLUMN confirmation_attempts INTEGER NOT NULL DEFAULT 0",
+    },
+    {
+        "version": "084_012_temporary_approval_active_scope_key",
+        "name": "Add nullable active temporary approval scope key",
+        "table": "temporary_approval_grants",
+        "column": "active_scope_key",
+        "sql": "ALTER TABLE temporary_approval_grants ADD COLUMN active_scope_key VARCHAR(1024)",
+    },
+    {
+        "version": "084_013_temporary_approval_active_scope_key_unique_index",
+        "name": "Create unique active temporary approval scope key index",
+        "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_temporary_grant_active_scope_key ON temporary_approval_grants(active_scope_key)",
+    },
+    {
+        "version": "084_014_temporary_approval_drop_legacy_unique_index",
+        "name": "Drop legacy broad temporary approval uniqueness",
+        "sql": "DROP INDEX IF EXISTS uq_temporary_grant_active_scope",
+    },
+    {
+        "version": "084_015_deploy_package_source_context",
+        "name": "Add source context to deploy packages",
+        "table": "deploy_packages",
+        "column": "source_context",
+        "sql": "ALTER TABLE deploy_packages ADD COLUMN source_context TEXT",
+    },
+    {
+        "version": "084_016_deploy_package_source_message_key",
+        "name": "Add source message key to deploy packages",
+        "table": "deploy_packages",
+        "column": "source_message_key",
+        "sql": "ALTER TABLE deploy_packages ADD COLUMN source_message_key VARCHAR(512)",
+    },
+    {
+        "version": "084_017_deploy_package_source_message_key_index",
+        "name": "Create source message key index",
+        "sql": "CREATE INDEX IF NOT EXISTS ix_deploy_packages_source_message_key ON deploy_packages(source_message_key)",
+    },
 ]
 
 
@@ -1308,6 +1426,40 @@ SERVICE_IDENTITY_MIGRATION: Dict[str, str] = {
     "version": "083_011_service_identity",
     "name": "Enforce unique service identity per system",
     "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_services_system_name ON services(system_name, name)",
+}
+
+AI_ANALYSIS_RETIREMENT_MIGRATION: Dict[str, str] = {
+    "version": "084_001_drop_ai_analysis_tables",
+    "name": "Drop retired built-in AI analysis tables",
+    "sql": "python:retire_ai_analysis_tables",
+}
+
+AI_ANALYSIS_TABLE_DROPS = (
+    ("ai_analysis_findings", "DROP TABLE IF EXISTS ai_analysis_findings"),
+    ("ai_analysis_runs", "DROP TABLE IF EXISTS ai_analysis_runs"),
+)
+
+TOOL_TOKEN_BINDING_BACKFILL_MIGRATION: Dict[str, str] = {
+    "version": "084_004_tool_token_binding_backfill",
+    "name": "Backfill generic tool token bindings from Matrix aliases",
+    "sql": "python:backfill_tool_token_bindings",
+}
+
+APPROVAL_CONTEXT_MIGRATION: Dict[str, str] = {
+    "version": "084_005_approval_context",
+    "name": "Add and backfill channel-neutral approval context",
+    "sql": "python:backfill_approval_context",
+}
+
+APPROVAL_CONTEXT_COLUMNS = {
+    "channel": "VARCHAR(32)",
+    "channel_account_id": "VARCHAR(128)",
+    "conversation_id": "VARCHAR(255)",
+    "request_message_id": "VARCHAR(255)",
+    "request_sender_id": "VARCHAR(255)",
+    "approval_message_id": "VARCHAR(255)",
+    "authorized_identities": "JSON",
+    "temporary_grant_id": "VARCHAR(32)",
 }
 
 
@@ -1340,6 +1492,354 @@ def _mark_applied(conn, mig: Dict[str, str]):
         text("INSERT OR REPLACE INTO schema_migrations(version, name, applied_at, checksum) VALUES(:v, :n, :a, :c)"),
         {"v": mig["version"], "n": mig.get("name", mig["version"]), "a": _now_iso(), "c": _checksum(mig)},
     )
+
+
+def retire_ai_analysis_tables(engine) -> List[str]:
+    """Drop the retired analysis tables in dependency order."""
+    dropped: List[str] = []
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, AI_ANALYSIS_RETIREMENT_MIGRATION["version"]):
+            return dropped
+
+        names = set(inspect(conn).get_table_names())
+        for table_name, drop_sql in AI_ANALYSIS_TABLE_DROPS:
+            if table_name in names:
+                conn.execute(text(drop_sql))
+                dropped.append(table_name)
+        _mark_applied(conn, AI_ANALYSIS_RETIREMENT_MIGRATION)
+
+    if dropped:
+        logger.info("Retired built-in AI analysis tables: %s", ", ".join(dropped))
+    return dropped
+
+
+def _migration_json_list(value: Any, *, token_id: str, column: str) -> List[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+            ) from exc
+    else:
+        raise RuntimeError(
+            f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+        )
+    if not isinstance(parsed, list):
+        raise RuntimeError(
+            f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+        )
+    return parsed
+
+
+def _migration_legacy_strings(value: Any, *, token_id: str, column: str) -> List[str]:
+    parsed = _migration_json_list(value, token_id=token_id, column=column)
+    result: List[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, str) or not item.strip():
+            raise RuntimeError(
+                f"Invalid legacy ToolToken JSON in {column} for token {token_id}"
+            )
+        normalized = item.strip()
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def backfill_tool_token_bindings(engine) -> bool:
+    """Convert legacy Matrix token policy fields exactly once and atomically."""
+    migration = TOOL_TOKEN_BINDING_BACKFILL_MIGRATION
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, migration["version"]):
+            return False
+        inspector = inspect(conn)
+        if not inspector.has_table("tool_tokens"):
+            return False
+        columns = {item["name"] for item in inspector.get_columns("tool_tokens")}
+        required = {
+            "channel_bindings",
+            "approver_identities",
+            "bound_room_ids",
+            "approver_matrix_ids",
+        }
+        if not required.issubset(columns):
+            return False
+
+        rows = conn.execute(text(
+            "SELECT id, channel_bindings, approver_identities, "
+            "bound_room_ids, approver_matrix_ids FROM tool_tokens"
+        )).fetchall()
+        for row in rows:
+            token_id = str(row[0])
+            channel_bindings = _migration_json_list(
+                row[1], token_id=token_id, column="channel_bindings"
+            )
+            approver_identities = _migration_json_list(
+                row[2], token_id=token_id, column="approver_identities"
+            )
+            updates: Dict[str, str] = {}
+            if not channel_bindings:
+                room_ids = _migration_legacy_strings(
+                    row[3], token_id=token_id, column="bound_room_ids"
+                )
+                if room_ids:
+                    updates["channel_bindings"] = json.dumps(
+                        [
+                            {
+                                "channel": "matrix",
+                                "channel_account_id": "default",
+                                "conversation_id": room_id,
+                            }
+                            for room_id in room_ids
+                        ],
+                        ensure_ascii=False,
+                    )
+            if not approver_identities:
+                approver_ids = _migration_legacy_strings(
+                    row[4], token_id=token_id, column="approver_matrix_ids"
+                )
+                if approver_ids:
+                    updates["approver_identities"] = json.dumps(
+                        [
+                            {
+                                "channel": "matrix",
+                                "channel_account_id": "default",
+                                "sender_id": sender_id,
+                            }
+                            for sender_id in approver_ids
+                        ],
+                        ensure_ascii=False,
+                    )
+            if "channel_bindings" in updates:
+                conn.execute(
+                    text(
+                        "UPDATE tool_tokens SET channel_bindings=:value WHERE id=:id"
+                    ),
+                    {"value": updates["channel_bindings"], "id": token_id},
+                )
+            if "approver_identities" in updates:
+                conn.execute(
+                    text(
+                        "UPDATE tool_tokens SET approver_identities=:value WHERE id=:id"
+                    ),
+                    {"value": updates["approver_identities"], "id": token_id},
+                )
+        _mark_applied(conn, migration)
+    return True
+
+
+def _json_list_or_empty(value: Any) -> list:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+_MIGRATION_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _migration_json_object(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _migration_content_sha256(value: Any) -> str:
+    raw = str(value or "")
+    if _MIGRATION_SHA256_RE.fullmatch(raw):
+        return raw.lower()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _migration_sender_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    prefix = "matrix:default:"
+    return raw[len(prefix):] if raw.startswith(prefix) else (raw or "legacy-requester")
+
+
+def _migration_context(room_id: Any, message_id: Any, content_sha256: Any, sender: Any) -> dict:
+    return {
+        "channel": "matrix",
+        "channel_account_id": "default",
+        "conversation_id": str(room_id or "").strip(),
+        "message_id": str(message_id or "").strip(),
+        "sender_id": _migration_sender_id(sender),
+        "content_sha256": _migration_content_sha256(content_sha256),
+    }
+
+
+def _migration_digest(payload: dict) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _backfill_action_digest(row: Any, context: dict, request_payload: dict) -> str | None:
+    if not row.get("action_type") or not row.get("room_id") or not row.get("request_event_id"):
+        return None
+    return _migration_digest({
+        "action_type": row["action_type"],
+        "message_context": context,
+        "system_name": request_payload.get("system_name") or "",
+        "service_name": request_payload.get("service_name"),
+        "environment": request_payload.get("environment") or "",
+        "targets": sorted(request_payload.get("targets") or []),
+        "action_parameters": request_payload.get("action_parameters") or {},
+        "routing_config_revision": row.get("routing_config_revision") or "",
+    })
+
+
+def _backfill_plan_manifest(row: Any, context: dict) -> tuple[dict, str] | None:
+    manifest = _migration_json_object(row.get("manifest"))
+    steps = manifest.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    normalized = {
+        "message_context": context,
+        "system_name": manifest.get("system_name") or row.get("system_name") or "",
+        "service_name": manifest.get("service_name") if "service_name" in manifest else row.get("service_name"),
+        "environment": manifest.get("environment") or row.get("environment") or "",
+        "targets": sorted(manifest.get("targets") or row.get("targets") or []),
+        "steps": steps,
+        "policy": manifest.get("policy") or row.get("policy") or {},
+        "routing_config_revision": manifest.get("routing_config_revision") or row.get("routing_config_revision") or "",
+        "routing_ticket_digest": manifest.get("routing_ticket_digest") or row.get("routing_ticket_digest") or "",
+    }
+    return normalized, _migration_digest(normalized)
+
+
+def backfill_approval_context(engine) -> bool:
+    """Add generic approval fields and backfill legacy Matrix data once."""
+    migration = APPROVAL_CONTEXT_MIGRATION
+    changed = False
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        if _is_applied(conn, migration["version"]):
+            return False
+        inspector = inspect(conn)
+        for table in ("ai_action_approvals", "execution_plans"):
+            if not inspector.has_table(table):
+                continue
+            columns = {item["name"] for item in inspector.get_columns(table)}
+            for name, sql_type in APPROVAL_CONTEXT_COLUMNS.items():
+                if name not in columns:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+                    changed = True
+
+            rows = conn.execute(text(f"SELECT * FROM {table}")).mappings().all()
+            for row in rows:
+                if row.get("channel") and row.get("conversation_id") and row.get("request_message_id"):
+                    continue
+                room_id = row.get("room_id")
+                request_message_id = row.get("request_event_id")
+                if not room_id or not request_message_id:
+                    continue
+                payload = _json_list_or_empty(row.get("authorized_matrix_users"))
+                if not payload:
+                    request_payload = row.get("request_payload")
+                    if isinstance(request_payload, str):
+                        try:
+                            request_payload = json.loads(request_payload)
+                        except json.JSONDecodeError:
+                            request_payload = {}
+                    if isinstance(request_payload, dict):
+                        payload = _json_list_or_empty(request_payload.get("authorized_matrix_users"))
+                identities = [
+                    {"channel": "matrix", "channel_account_id": "default", "sender_id": sender}
+                    for sender in payload if isinstance(sender, str) and sender.strip()
+                ]
+                updates = {
+                    "channel": "matrix",
+                    "channel_account_id": "default",
+                    "conversation_id": room_id,
+                    "request_message_id": request_message_id,
+                    "request_sender_id": _migration_sender_id(row.get("requested_by")),
+                    "authorized_identities": json.dumps(identities, ensure_ascii=False),
+                }
+                request_payload = _migration_json_object(row.get("request_payload"))
+                normalized_content_sha256 = _migration_content_sha256(row.get("content_sha256"))
+                action_digest = _backfill_action_digest(row, _migration_context(
+                    room_id,
+                    request_message_id,
+                    normalized_content_sha256,
+                    row.get("requested_by"),
+                ), request_payload)
+                if table == "ai_action_approvals" and action_digest:
+                    updates["action_digest"] = action_digest
+                plan_context = _migration_context(
+                    room_id,
+                    request_message_id,
+                    normalized_content_sha256,
+                    row.get("requested_by"),
+                )
+                if table == "execution_plans":
+                    plan_result = _backfill_plan_manifest(row, plan_context)
+                    if plan_result:
+                        updates["manifest"], updates["plan_digest"] = plan_result
+                if row.get("approval_event_id"):
+                    updates["approval_message_id"] = row["approval_event_id"]
+                fields = [
+                    "channel=:channel",
+                    "channel_account_id=:channel_account_id",
+                    "conversation_id=:conversation_id",
+                    "request_message_id=:request_message_id",
+                    "request_sender_id=:request_sender_id",
+                    "approval_message_id=:approval_message_id",
+                    "authorized_identities=:authorized_identities",
+                    "content_sha256=:content_sha256",
+                ]
+                params = {
+                    "approval_message_id": None,
+                    "content_sha256": normalized_content_sha256,
+                    **updates,
+                    "id": row["id"],
+                }
+                if table == "ai_action_approvals":
+                    fields.append("action_digest=:action_digest")
+                    params["action_digest"] = updates.get("action_digest", row.get("action_digest"))
+                else:
+                    fields.extend(["manifest=:manifest", "plan_digest=:plan_digest"])
+                    manifest_value = updates.get("manifest", row.get("manifest"))
+                    params["manifest"] = (
+                        json.dumps(manifest_value, ensure_ascii=False)
+                        if isinstance(manifest_value, dict)
+                        else manifest_value
+                    )
+                    params["plan_digest"] = updates.get("plan_digest", row.get("plan_digest"))
+                conn.execute(
+                    text(f"UPDATE {table} SET {', '.join(fields)} WHERE id=:id"),
+                    params,
+                )
+                changed = True
+        for table, name in (("ai_action_approvals", "ix_ai_approval_context"), ("execution_plans", "ix_execution_plan_context")):
+            if inspector.has_table(table):
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} "
+                    "(channel, channel_account_id, conversation_id, request_message_id)"
+                ))
+        _mark_applied(conn, migration)
+        changed = True
+    return changed
 
 
 def _json_object(value: Any, *, key: str) -> Dict[str, Any]:
@@ -1981,4 +2481,10 @@ def run_schema_migrations(engine) -> List[str]:
         applied.append(CONFIG_KV_RETIREMENT_MIGRATION["version"])
     if ensure_service_identity_index(engine):
         applied.append(SERVICE_IDENTITY_MIGRATION["version"])
+    if retire_ai_analysis_tables(engine):
+        applied.append(AI_ANALYSIS_RETIREMENT_MIGRATION["version"])
+    if backfill_tool_token_bindings(engine):
+        applied.append(TOOL_TOKEN_BINDING_BACKFILL_MIGRATION["version"])
+    if backfill_approval_context(engine):
+        applied.append(APPROVAL_CONTEXT_MIGRATION["version"])
     return applied

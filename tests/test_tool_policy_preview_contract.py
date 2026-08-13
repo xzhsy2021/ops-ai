@@ -46,6 +46,8 @@ def test_policy_preview_uses_existing_token_record_context():
     token.scopes = ["ops:read", "ops:write"]
     token.allow_write = True
     token.allow_prod = False
+    token.channel_bindings = []
+    token.approver_identities = []
 
     payload = ToolPolicyPreviewPayload(token_id="tok-1", tool="ops.inspection.run_server")
 

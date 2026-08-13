@@ -76,9 +76,6 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.get_recent_errors": "Read recent local error and warning log summaries. Read-only. 中文: 查看最近错误/日志错误/报错信息.",
     "ops.export_diagnostics_report": "Generate a JSON diagnostics report with overview, health, build info, recent errors, MCP self-check, and recommendations. 中文: 导出诊断报告/生成诊断报告.",
 
-    # ── AI Diagnostics ──
-    "ops.analyze_diagnostics": "Build a read-only AI diagnostic analysis from diagnostics, recent errors, tool audit trail, operation jobs, and MCP tool catalog. Does not execute risky actions. 中文: AI诊断分析/智能分析/问题分析.",
-
     # ── Backup Management ──
     "ops.list_backups": "List local OPS SQLite database backups with file names, sizes, timestamps, types, and confirmation phrases. 中文: 查看备份列表/有哪些备份.",
     "ops.verify_backup": "Verify one local SQLite database backup using sqlite quick_check and optional SHA256 checksum. Read-only. 中文: 校验备份/验证备份完整性.",
@@ -162,7 +159,7 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.get_report": "Get report metadata and download URL by report_id. 中文: 查看报告详情/下载报告.",
     "ops.get_report_summary": "View report center summary including counts by type and total size. 中文: 查看报告概览/报告统计.",
     "ops.list_report_types": "List available report types that can be generated. 中文: 查看可生成报告类型.",
-    "ops.generate_report": "Generate a report artifact (diagnostics, AI analysis, operation chain, or deployment). Low risk. 中文: 生成报告/创建报告.",
+    "ops.generate_report": "Generate a report artifact (diagnostics, operation chain, operation-chain index, deployment, or inspection). Low risk. 中文: 生成报告/创建报告.",
 
     # ── Runtime & Storage (removed - use ops.exec_remote for remote operations) ──
 
@@ -226,13 +223,6 @@ ENGLISH_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ops.log.summarize_errors": "Summarize error patterns in OPS application logs. Medium risk. 中文: 汇总错误日志/错误统计.",
     "ops.log.find_patterns": "Find security and error patterns in OPS application logs. Medium risk. 中文: 识别日志模式/日志模式分析.",
     "ops.log.get_recent_exceptions": "Get recent exception summaries from OPS application logs. Medium risk. 中文: 查看近期异常/异常摘要.",
-
-    # ── AI Analysis ──
-    "ops.ai.save_analysis": "Save an AI analysis result to the OPS database. Low risk. 中文: 保存AI分析结果/保存分析.",
-    "ops.ai.get_analysis": "Get one AI analysis result by analysis_id. Low risk. 中文: 查看AI分析详情/分析结果.",
-    "ops.ai.list_analysis": "List AI analysis records with filters. Low risk. 中文: 查看AI分析列表/分析记录.",
-    "ops.ai.generate_report_from_analysis": "Generate a report from an AI analysis result. Low risk. 中文: 从AI分析生成报告/分析报告.",
-    "ops.ai.find_similar_analysis": "Find similar AI analysis records. Low risk. 中文: 查找相似分析/相似分析记录.",
 
     # ── Agent & Workflow Tools (removed - pseudo-orchestration, use direct tools instead) ──
 

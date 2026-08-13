@@ -34,6 +34,7 @@ from app.deploy.logs import deployment_logs_payload, deployment_tasks_payload
 from app.deploy.state import task_cancel_requested, normalize_status
 from app.deploy.locks import acquire_deployment_locks, release_deployment_locks, list_deployment_locks_payload
 from app.deploy.preflight import build_preflight_payload
+from app.config.systems import normalize_message_routing_config
 from app.deploy.schemas import (
     BatchUpdateRequest, DeployRequest, PipelineCreateRequest, PipelineUpdateRequest,
     ResolutionPreviewRequest, StepCreateRequest, StepUpdateRequest,
@@ -439,17 +440,51 @@ async def list_systems_v2(request: Request, db: Session = Depends(get_db)):
     ])
 
 
+def _normalize_api_message_routing(value: Any) -> Dict[str, Any]:
+    try:
+        routing = normalize_message_routing_config({} if value is None else value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid message_routing: {exc}") from exc
+    routing.setdefault("enabled", False)
+    routing.setdefault("aliases", [])
+    routing.setdefault("keywords", [])
+    routing.setdefault("priority", 0)
+    routing.setdefault("approvers", [])
+    return routing
+
+
+def _normalize_api_service_routing(services: Any) -> List[Dict[str, Any]]:
+    if not isinstance(services, list):
+        raise HTTPException(status_code=400, detail="services must be a list")
+    normalized = []
+    for index, service in enumerate(services):
+        if not isinstance(service, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"services[{index}] must be an object",
+            )
+        item = dict(service)
+        template_variables = dict(item.get("template_variables") or {})
+        if "message_routing" in template_variables:
+            template_variables["message_routing"] = _normalize_api_message_routing(
+                template_variables["message_routing"]
+            )
+        item["template_variables"] = template_variables
+        normalized.append(item)
+    return normalized
+
+
 @resource_v2_router.get("/systems/{system_name}")
 async def get_system_v2(system_name: str, request: Request):
     from app.config.systems import get_system_by_name
     system = get_system_by_name(system_name)
     if not system:
         raise HTTPException(status_code=404, detail=f"System not found: {system_name}")
-    svcs = system.get("services", []) or []
+    svcs = _normalize_api_service_routing(system.get("services", []) or [])
     envs = system.get("environments", {}) or {}
     groups = system.get("groups") or system.get("regions") or {}
-    # qclaw Element 消息路由配置（透传，可能不存在）
-    routing = system.get("message_routing") or {}
+    # qclaw 消息渠道路由配置
+    routing = _normalize_api_message_routing(system.get("message_routing"))
     return api_response(data={
         "name": system_name,
         "display_name": system.get("display_name", system_name),
@@ -460,12 +495,7 @@ async def get_system_v2(system_name: str, request: Request):
         "groups": groups,
         "variables": system.get("variables", {}),
         "servers": system.get("servers", []),
-        "message_routing": {
-            "enabled": bool(routing.get("enabled", False)),
-            "aliases": list(routing.get("aliases", []) or []),
-            "keywords": list(routing.get("keywords", []) or []),
-            "priority": int(routing.get("priority", 0) or 0),
-        },
+        "message_routing": routing,
         "environment_count": len(envs),
         "service_count": len(svcs),
         "group_count": len(groups),
@@ -489,21 +519,17 @@ async def create_system_v2(payload: Dict[str, Any], request: Request, db: Sessio
         "display_name": str(payload.get("display_name", name)).strip(),
         "strategy": str(payload.get("strategy", "DIRECT")).strip() or "DIRECT",
         "description": str(payload.get("description", "")).strip(),
-        "services": payload.get("services", []) or [],
+        "services": _normalize_api_service_routing(payload.get("services", []) or []),
         "environments": payload.get("environments", {}) or {},
         "variables": payload.get("variables", {}) or {},
         "servers": payload.get("servers", []) or [],
     }
-    # qclaw Element 消息路由配置（可选）
+    # qclaw 消息渠道路由配置（可选）
     routing = payload.get("message_routing")
     if isinstance(routing, dict):
-        system["message_routing"] = {
-            "enabled": bool(routing.get("enabled", False)),
-            "aliases": [str(a).strip() for a in routing.get("aliases", []) if str(a).strip()],
-            "keywords": [str(k).strip() for k in routing.get("keywords", []) if str(k).strip()],
-            "priority": int(routing.get("priority", 0)),
-            "approvers": [str(u).strip() for u in routing.get("approvers", []) if str(u).strip()],
-        }
+        system["message_routing"] = _normalize_api_message_routing(routing)
+    elif routing is not None:
+        raise HTTPException(status_code=400, detail="message_routing must be an object")
     groups = payload.get("groups") or payload.get("regions") or {}
     if isinstance(groups, dict) and groups:
         system["groups"] = groups
@@ -534,19 +560,16 @@ async def update_system_v2(system_name: str, payload: Dict[str, Any], request: R
     if "servers" in payload:
         system["servers"] = payload["servers"] if isinstance(payload["servers"], list) else []
     if "message_routing" in payload:
-        # qclaw Element 消息路由配置：{enabled, aliases, keywords, priority}
+        # qclaw 消息渠道路由配置
         routing = payload["message_routing"]
         if isinstance(routing, dict):
-            system["message_routing"] = {
-                "enabled": bool(routing.get("enabled", False)),
-                "aliases": [str(a).strip() for a in routing.get("aliases", []) if str(a).strip()],
-                "keywords": [str(k).strip() for k in routing.get("keywords", []) if str(k).strip()],
-                "priority": int(routing.get("priority", 0)),
-            }
-        else:
+            system["message_routing"] = _normalize_api_message_routing(routing)
+        elif routing is None:
             system.pop("message_routing", None)
+        else:
+            raise HTTPException(status_code=400, detail="message_routing must be an object")
     if "services" in payload:
-        system["services"] = payload["services"] if isinstance(payload["services"], list) else system.get("services", [])
+        system["services"] = _normalize_api_service_routing(payload["services"])
     if "environments" in payload:
         system["environments"] = payload["environments"] if isinstance(payload["environments"], dict) else system.get("environments", {})
     groups = payload.get("groups") or payload.get("regions")

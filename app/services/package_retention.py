@@ -200,6 +200,8 @@ def upsert_package_metadata(
     service: str = "",
     uploaded_by: str = "",
     sha256: str | None = None,
+    source_context: dict | None = None,
+    source_message_key: str | None = None,
     commit: bool = True,
     refresh_uploaded_at_from_file: bool = False,
 ) -> DeployPackage:
@@ -229,6 +231,10 @@ def upsert_package_metadata(
     row.service_hint = meta["service_hint"]
     row.version_hint = meta["version_hint"]
     row.uploaded_by = uploaded_by or row.uploaded_by or ""
+    if source_context is not None:
+        row.source_context = source_context
+    if source_message_key is not None:
+        row.source_message_key = source_message_key
     row.deleted = False
     row.deleted_at = None
     row.delete_reason = ""
@@ -356,6 +362,8 @@ def save_package_fileobj(
     service: str = "",
     uploaded_by: str = "",
     overwrite: bool = False,
+    source_context: dict | None = None,
+    source_message_key: str | None = None,
 ) -> Dict[str, Any]:
     """Stream a file-like object into the File Center with size/hash checks."""
     policy = get_package_retention_policy(db)
@@ -396,7 +404,17 @@ def save_package_fileobj(
             pass
         raise
     sha = h.hexdigest()
-    row = upsert_package_metadata(db, name, path, system=system, service=service, uploaded_by=uploaded_by, sha256=sha)
+    row = upsert_package_metadata(
+        db,
+        name,
+        path,
+        system=system,
+        service=service,
+        uploaded_by=uploaded_by,
+        sha256=sha,
+        source_context=source_context,
+        source_message_key=source_message_key,
+    )
     return package_to_dict(row, include_retention=False)
 
 

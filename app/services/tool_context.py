@@ -20,6 +20,8 @@ class ToolContext:
     scopes: List[str] = field(default_factory=list)
     allow_write: bool = False
     allow_prod: bool = False
+    channel_bindings: List[Dict[str, str]] = field(default_factory=list)
+    approver_identities: List[Dict[str, str]] = field(default_factory=list)
     # qclaw Element room binding: when the underlying token has a non-empty
     # list of allowed room IDs, MCP routing/approval tools must reject calls
     # coming from a room not on the list. Empty list = no binding.
@@ -31,6 +33,23 @@ class ToolContext:
     client_name: str = ""
     ip_address: str = ""
     user_agent: str = ""
+
+    def __post_init__(self) -> None:
+        from app.services.tool_token import (
+            matrix_approver_ids_from_identities,
+            matrix_room_ids_from_bindings,
+            normalize_approver_identities,
+            normalize_channel_bindings,
+        )
+
+        self.channel_bindings = normalize_channel_bindings(self.channel_bindings)
+        self.approver_identities = normalize_approver_identities(
+            self.approver_identities
+        )
+        self.bound_room_ids = matrix_room_ids_from_bindings(self.channel_bindings)
+        self.approver_matrix_ids = matrix_approver_ids_from_identities(
+            self.approver_identities
+        )
 
     def has_scope(self, scope: str) -> bool:
         if self.is_admin and self.auth_type == "session":
@@ -54,6 +73,8 @@ class ToolContext:
             "scopes": self.scopes,
             "allow_write": self.allow_write,
             "allow_prod": self.allow_prod,
+            "channel_bindings": self.channel_bindings,
+            "approver_identities": self.approver_identities,
             # Include room binding so downstream audit logs can correlate a
             # qclaw MCP call with the room restriction in force at call time.
             "bound_room_ids": self.bound_room_ids,

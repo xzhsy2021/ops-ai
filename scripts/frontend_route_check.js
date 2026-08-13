@@ -15,8 +15,6 @@ const systemApi = fs.readFileSync(path.join(root, 'app', 'api', 'system.py'), 'u
 const diagnosticsService = fs.readFileSync(path.join(root, 'app', 'services', 'diagnostics.py'), 'utf8')
 const errorLogService = fs.readFileSync(path.join(root, 'app', 'services', 'error_log.py'), 'utf8')
 const diagnosticTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'diagnostic_tools.py'), 'utf8')
-const aiDiagnosticsService = fs.readFileSync(path.join(root, 'app', 'services', 'ai_diagnostics.py'), 'utf8')
-const aiTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'ai_tools.py'), 'utf8')
 const diagnosticsPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'SystemDiagnosticsPage.tsx'), 'utf8')
 const backupService = fs.readFileSync(path.join(root, 'app', 'services', 'backup_service.py'), 'utf8')
 const backupTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'backup_tools.py'), 'utf8')
@@ -40,6 +38,8 @@ const deployPrecheckApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy'
 const deployExecutionsApi = fs.readFileSync(path.join(root, 'app', 'api', 'deploy', 'executions.py'), 'utf8')
 const deployApiRoutes = [deployApiV2, deployPlansApi, deployPrecheckApi, deployExecutionsApi].join('\n')
 const frontendApi = fs.readFileSync(path.join(root, 'frontend', 'src', 'api.ts'), 'utf8')
+const frontendDiagnosticsApi = fs.readFileSync(path.join(root, 'frontend', 'src', 'api', 'diagnostics.ts'), 'utf8')
+const diagnosticsTypes = fs.readFileSync(path.join(root, 'frontend', 'src', 'types', 'diagnostics.ts'), 'utf8')
 const auditChainService = fs.readFileSync(path.join(root, 'app', 'services', 'audit_chain.py'), 'utf8')
 const auditTools = fs.readFileSync(path.join(root, 'app', 'services', 'tool_adapters', 'audit_tools.py'), 'utf8')
 const auditPage = fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'AuditLogPage.tsx'), 'utf8')
@@ -198,15 +198,28 @@ if (!frontendApi.includes('toolPlans') || !frontendApi.includes('toolPlanRunbook
 if (!fs.readFileSync(path.join(root, 'frontend', 'src', 'pages', 'DeployPage.tsx'), 'utf8').includes('ReleasePlanPanel')) failures.push('DeployPage ReleasePlanPanel integration missing')
 
 
-for (const marker of ['build_ai_diagnostic_analysis', 'safe_mcp_toolchain', 'guardrails', 'read_only_analysis']) {
-  if (!aiDiagnosticsService.includes(marker)) failures.push(`Iter37 AI diagnostics service marker missing: ${marker}`)
+const retiredFrontendSources = [app, routesSource, frontendApi, frontendDiagnosticsApi, diagnosticsTypes, diagnosticsPage, reportPage].join('\n')
+const retiredFrontendMarkers = [
+  '/system/ai-diagnostics',
+  '/ai/analysis',
+  '/ai/workflows',
+  'AiWorkflowsPage',
+  'AiAnalysisPage',
+  'aiDiagnostics',
+  'AiDiagnosticsPayload',
+  'ai_diagnostics',
+]
+for (const marker of retiredFrontendMarkers) {
+  if (retiredFrontendSources.includes(marker)) failures.push(`Retired frontend AI analysis marker remains: ${marker}`)
 }
-if (!systemApi.includes('/ai-diagnostics')) failures.push('Iter37 system AI diagnostics API missing')
-if (!aiTools.includes('ops.analyze_diagnostics') || !aiTools.includes('ai_read')) failures.push('Iter37 MCP AI diagnostics tool missing')
-if (!fs.readFileSync(path.join(root, 'app', 'services', 'tool_registry.py'), 'utf8').includes('ai_tools')) failures.push('Iter37 tool registry ai_tools import missing')
-if (!diagnosticsPage.includes('AI 诊断助手') || !diagnosticsPage.includes('safe_mcp_toolchain') || !diagnosticsPage.includes('aiDiagnostics')) failures.push('Iter37 diagnostics page AI assistant UI missing')
-if (!frontendApi.includes('aiDiagnostics')) failures.push('Iter37 frontend API aiDiagnostics method missing')
-if (!mcpCapabilitySurface.includes('ops_diagnostic_triage')) failures.push('Iter37 MCP diagnostic triage prompt missing')
+for (const relativePath of [
+  ['pages', 'AiWorkflowsPage.tsx'],
+  ['pages', 'AiAnalysisPage.tsx'],
+  ['pages', 'AiAnalysisDetailPage.tsx'],
+  ['components', 'AiEvidenceView.tsx'],
+]) {
+  if (fs.existsSync(path.join(root, 'frontend', 'src', ...relativePath))) failures.push(`Retired frontend AI analysis file remains: ${relativePath.join('/')}`)
+}
 
 
 

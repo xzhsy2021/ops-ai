@@ -104,8 +104,20 @@ def test_create_and_round_trip_bound_room_ids(tmp_path):
         )
 
         record = created["record"]
-        # Persisted to the row.
-        assert record.bound_room_ids == ["!ops:matrix.org", "!ops-backup:matrix.org"]
+        # Runtime policy is persisted only in the generic column.
+        assert record.channel_bindings == [
+            {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "conversation_id": "!ops:matrix.org",
+            },
+            {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "conversation_id": "!ops-backup:matrix.org",
+            },
+        ]
+        assert record.bound_room_ids == []
         # Returned via token_to_dict for the API.
         as_dict = token_to_dict(record)
         assert as_dict["bound_room_ids"] == ["!ops:matrix.org", "!ops-backup:matrix.org"]
@@ -194,18 +206,19 @@ def test_frontend_renders_bound_room_ids_editor_and_table_badge():
 
 def test_enforce_room_binding_runs_at_top_of_qclaw_mcp_tools():
     """Defense-in-depth check: every qclaw routing/approval tool that
-    touches room_id calls enforce_room_binding before doing real work.
-    This test inspects the source to prevent accidental removal of the gate.
+    touches a conversation calls enforce_conversation_binding before
+    doing real work. This test inspects the source to prevent accidental
+    removal of the gate.
 
     `ops.approval.get` / `list` / `expire_stale` are intentionally NOT in
     this list because they are read-only / maintenance tools that do not
-    take a room_id argument and do not modify approval state.
+    take a conversation argument and do not modify approval state.
     """
     src = open("app/services/tool_adapters/approval_tools.py", encoding="utf-8").read()
 
     # Function-level guard sites. reject is included because it mutates
-    # approval state (PENDING -> REJECTED); room_id is optional in its
-    # schema but enforce_room_binding still runs (no-op when unbound).
+    # approval state (PENDING -> REJECTED); the binding check still runs
+    # (no-op when unbound).
     expected_sites = [
         "def routing_resolve_message_target",
         "def approval_prepare_service_control",
@@ -213,8 +226,7 @@ def test_enforce_room_binding_runs_at_top_of_qclaw_mcp_tools():
     ]
     for fn in expected_sites:
         assert fn in src, f"missing qclaw tool: {fn}"
-    # enforce_room_binding is imported and referenced.
-    assert "enforce_room_binding" in src
-    # At least one call site per tool (reject's call uses args.get, which
-    # still counts as an enforce_room_binding( call).
-    assert src.count("enforce_room_binding(") >= len(expected_sites)
+    # enforce_conversation_binding is imported and referenced.
+    assert "enforce_conversation_binding" in src
+    # At least one call site per tool.
+    assert src.count("enforce_conversation_binding(") >= len(expected_sites)

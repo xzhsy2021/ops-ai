@@ -96,7 +96,7 @@ def test_release_step_calls_shared_executor(db):
     assert payload["action_parameters"] == {"strategy": "DIRECT"}
     # 发布包从步骤参数取，回退到 plan 级别字段
     assert kwargs["package_name"] == "pkg-v1"
-    assert kwargs["operator"] == "@alice:matrix.org"
+    assert kwargs["operator"] == "matrix:default:@alice:matrix.org"
 
 
 def test_release_step_falls_back_to_plan_package(db):
@@ -164,7 +164,7 @@ def test_rollback_step_calls_shared_executor(db):
     payload = args[1]
     assert payload["action_parameters"] == {"deployment_id": "dep-123"}
     assert payload["targets"] == ["s1"]
-    assert kwargs["operator"] == "@alice:matrix.org"
+    assert kwargs["operator"] == "matrix:default:@alice:matrix.org"
 
 
 def test_rollback_step_failure_marks_plan_failed(db):
@@ -218,7 +218,7 @@ def test_dml_step_calls_shared_executor(db):
     payload = args[1]
     assert payload["action_parameters"]["database_connection_id"] == "conn-1"
     assert payload["action_parameters"]["sql_text"] == "UPDATE users SET flag=1 WHERE id=1"
-    assert kwargs["operator"] == "@alice:matrix.org"
+    assert kwargs["operator"] == "matrix:default:@alice:matrix.org"
 
 
 # ── PACKAGE_CLEANUP ──
@@ -244,7 +244,7 @@ def test_package_cleanup_step_calls_shared_executor(db):
     args, kwargs = mock_cleanup.call_args
     payload = args[1]
     assert payload["action_parameters"] == {"package_ids": ["pkg-a", "pkg-b"]}
-    assert kwargs["operator"] == "@alice:matrix.org"
+    assert kwargs["operator"] == "matrix:default:@alice:matrix.org"
 
 
 # ── 组合：发布 + 健康检查 ──

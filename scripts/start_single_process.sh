@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [ "${OPS_DOTENV_LOADED:-0}" != "1" ]; then
+  export OPS_DOTENV_LOADED=1
+  exec python3 "$ROOT_DIR/scripts/load_dotenv.py" "$ROOT_DIR/.env" --run bash "$0" "$@"
+fi
+
 APP_DATA_DIR="${APP_DATA_DIR:-$ROOT_DIR/data}"
 export APP_DATA_DIR
 export UPLOAD_DIR="${UPLOAD_DIR:-$APP_DATA_DIR/uploads}"

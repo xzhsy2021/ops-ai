@@ -14,7 +14,7 @@ copy_path() {
   local src="$1"
   if [ -e "$ROOT/$src" ]; then
     mkdir -p "$PKG_DIR/$(dirname "$src")"
-    cp -R "$ROOT/$src" "$PKG_DIR/$src"
+    cp -a "$ROOT/$src" "$PKG_DIR/$src"
   fi
 }
 
@@ -39,6 +39,9 @@ copy_path config_manager.py
 copy_path requirements.txt
 copy_path pytest.ini
 copy_path start.sh
+copy_path start_prod.sh
+copy_path start_dev.sh
+copy_path start_diag.sh
 copy_path start.bat
 copy_path start_single_process.bat
 copy_path start_single_process.ps1
@@ -70,7 +73,10 @@ find "$PKG_DIR" -type f \( \
   -name "*.key" \
 \) -delete
 
-cd "$DIST"
-zip -qr "$PKG_NAME.zip" "$PKG_NAME"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python)}"
+"$PYTHON_BIN" "$ROOT/scripts/create_package_zip.py" \
+  --root "$ROOT" \
+  --package-dir "$PKG_DIR" \
+  --output "$DIST/$PKG_NAME.zip"
 
 echo "Package created: $DIST/$PKG_NAME.zip"

@@ -38,8 +38,6 @@ export const ROUTES = {
   tools: '/tools',
   mcpTools: '/mcp/tools',
   mcpAudit: '/mcp/audit',
-  aiWorkflows: '/ai/workflows',
-  aiAnalysis: '/ai/analysis',
   systemEdit: '/systems/:name/edit',
   systemCreate: '/systems/create',
   serviceEdit: '/systems/:systemName/services/:serviceName/edit',
@@ -71,7 +69,7 @@ export const NAV_LINKS: NavItem[] = [
   { path: ROUTES.audit, label: '审计', icon: ClipboardCheck, desc: '操作审计与导出', minRole: 'admin' },
   { path: ROUTES.reports, label: '报告', icon: FileText, desc: '诊断、发布与链路报告' },
   { path: ROUTES.database, label: '数据库', icon: Database, desc: '连接、查询、清理与导出' },
-  { path: ROUTES.tools, label: 'MCP / AI', icon: PlugZap, desc: 'MCP 工具、AI 辅助分析与安全策略' },
+  { path: ROUTES.tools, label: 'MCP / AI', icon: PlugZap, desc: 'MCP 工具、审批与安全策略' },
 ]
 
 export const SPA_PAGE_ROUTES: AppRoute[] = [
@@ -97,8 +95,6 @@ export const SPA_PAGE_ROUTES: AppRoute[] = [
   ROUTES.tools,
   ROUTES.mcpTools,
   ROUTES.mcpAudit,
-  ROUTES.aiWorkflows,
-  ROUTES.aiAnalysis,
   '/systems/:name/edit',
   '/systems/create',
   '/systems/:systemName/services/:serviceName/edit',

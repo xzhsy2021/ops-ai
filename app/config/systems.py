@@ -3,12 +3,26 @@ import copy
 import logging
 from typing import Any, Dict, List, Optional
 
+from app.services.qclaw_routing import (
+    normalize_message_routing_config as _normalize_message_routing_config,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def normalize_message_routing_config(value: Any) -> Dict[str, Any]:
+    """Database configuration boundary for strict message-routing values."""
+    return _normalize_message_routing_config(value)
 
 
 # ── DB SSOT 读写 ──
 
 def _service_row_to_dict(row) -> Dict[str, Any]:
+    template_variables = dict(row.template_variables or {})
+    if "message_routing" in template_variables:
+        template_variables["message_routing"] = normalize_message_routing_config(
+            template_variables["message_routing"]
+        )
     return {
         "id": row.id,
         "name": row.name,
@@ -19,7 +33,7 @@ def _service_row_to_dict(row) -> Dict[str, Any]:
         "start_cmd": row.start_cmd or "",
         "template": row.template or "",
         "pipeline_id": row.pipeline_id or "",
-        "template_variables": dict(row.template_variables or {}),
+        "template_variables": template_variables,
         "servers": list(row.servers or []),
         "source": "db",
     }
@@ -52,7 +66,9 @@ def _system_row_to_dict(row, services=None, environments=None) -> Dict[str, Any]
             for item in (environments or [])
         },
         "variables": dict(row.variables or {}),
-        "message_routing": dict(row.message_routing or {}),
+        "message_routing": normalize_message_routing_config(
+            row.message_routing if row.message_routing is not None else {}
+        ),
         # groups 已迁移到 ServerGroup 表（Phase 3b），这里不返回
         "source": "db",
     }
@@ -105,6 +121,11 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
     if "groups" in system:
         logger.debug("groups field ignored (migrated to ServerGroup table, Phase 3b)")
     try:
+        message_routing = normalize_message_routing_config(
+            system.get("message_routing")
+            if system.get("message_routing") is not None
+            else {}
+        )
         from app.db.base import SessionLocal
         from app.db.models import Service, System, SystemEnvironment
         from app.db.repository import SystemRepository
@@ -118,7 +139,7 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
                 existing.description = system.get("description")
                 existing.variables = system.get("variables", {}) or {}
                 existing.servers = system.get("servers", []) or []
-                existing.message_routing = system.get("message_routing", {}) or {}
+                existing.message_routing = message_routing
                 existing.environments = {}
                 existing.services = []
                 logger.info(f"Updated system: {name}")
@@ -133,7 +154,7 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
                     servers=system.get("servers", []) or [],
                     environments={},
                     services=[],
-                    message_routing=system.get("message_routing", {}) or {},
+                    message_routing=message_routing,
                 )
                 db.add(existing)
                 db.flush()
@@ -163,7 +184,12 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
                     row.start_cmd = payload.get("start_cmd") or None
                     row.template = payload.get("template") or None
                     row.pipeline_id = payload.get("pipeline_id") or None
-                    row.template_variables = payload.get("template_variables") or {}
+                    template_variables = dict(payload.get("template_variables") or {})
+                    if "message_routing" in template_variables:
+                        template_variables["message_routing"] = normalize_message_routing_config(
+                            template_variables["message_routing"]
+                        )
+                    row.template_variables = template_variables
                     row.servers = payload.get("servers") or []
 
             if "environments" in system:

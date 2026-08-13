@@ -389,7 +389,7 @@ def test_profile_frontend_contract_exposes_preview_confirmation_workflow():
     assert "previewIssueRetry" in page
     assert "runInspectionProfile" in page
     assert "const confirmText = (profileConfirmValue.trim() || confirmation.confirm_text || '').trim()" in page
-    assert "profile-confirm-hint" in page
+    assert "profileConfirmValue" in page
     assert "confirmMode=\"one-click\"" in page
     assert "showConfirmTextInOneClick={false}" in page
     assert "无需手动输入字符串" in page

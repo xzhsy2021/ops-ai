@@ -1,6 +1,6 @@
 param(
-    [string]$HostName = $(if ($env:HOST) { $env:HOST } else { "0.0.0.0" }),
-    [int]$Port = $(if ($env:PORT) { [int]$env:PORT } else { 8000 }),
+    [string]$HostName = "",
+    [Nullable[int]]$Port = $null,
     [switch]$SkipFrontendBuild
 )
 
@@ -34,6 +34,20 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host "[single] creating virtual environment"
     Invoke-Expression "$PythonCmd -m venv `"$Venv`""
 }
+
+if ($env:OPS_DOTENV_LOADED -ne "1") {
+    $DotEnvPath = Join-Path $Root ".env"
+    $DotEnvJson = & $VenvPython (Join-Path $Root "scripts\load_dotenv.py") --format json $DotEnvPath
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load $DotEnvPath" }
+    $DotEnvValues = $DotEnvJson | ConvertFrom-Json
+    foreach ($property in $DotEnvValues.PSObject.Properties) {
+        [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
+    }
+    $env:OPS_DOTENV_LOADED = "1"
+}
+
+if (-not $HostName) { $HostName = if ($env:HOST) { $env:HOST } else { "0.0.0.0" } }
+if ($null -eq $Port) { $Port = if ($env:PORT) { [int]$env:PORT } else { 8000 } }
 
 Write-Host "[single] checking backend dependencies"
 & $VenvPython -c "import fastapi,uvicorn,paramiko,pydantic,sqlalchemy,yaml" 2>$null

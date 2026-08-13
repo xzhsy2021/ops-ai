@@ -9,10 +9,20 @@ from app.db.migrations.runner import run_schema_migrations
 from app.services.tool_registry import registry, register_builtin_tools
 from app.services.tool_context import ToolContext
 from app.db.models import ExecutionPlan
+from app.services.message_context import MessageContext
+from app.services.qclaw_routing import compute_routing_revision, issue_ticket
 
 _RUN_ID = uuid.uuid4().hex[:8]
 
 register_builtin_tools()
+
+
+@pytest.fixture(autouse=True)
+def _strong_signing_key(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+        "execution-plan-test-key-0123456789abcdef",
+    )
 
 
 def _room(suffix: str) -> str:
@@ -41,13 +51,20 @@ def _steps() -> list[dict]:
 
 
 def _ctx(bound_room_ids=None, approver_matrix_ids=None):
+    from app.services.tool_token import (
+        resolve_approver_identities,
+        resolve_channel_bindings,
+    )
+
     return ToolContext(
         auth_type="tool_token",
         token_name="test-token",
         token_owner="test",
         allow_write=True,
-        bound_room_ids=bound_room_ids or [],
-        approver_matrix_ids=approver_matrix_ids or [],
+        channel_bindings=resolve_channel_bindings(legacy=bound_room_ids or []),
+        approver_identities=resolve_approver_identities(
+            legacy=approver_matrix_ids or []
+        ),
     )
 
 
@@ -62,18 +79,33 @@ def db():
 
 
 def _prepare_args(suffix, **overrides):
-    defaults = dict(
-        room_id=_room(suffix),
-        request_event_id=_event(suffix),
+    from app.services.tool_adapters.approval_tools import _routing_systems
+
+    context = MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id=_room(suffix),
+        message_id=_event(suffix),
+        sender_id="@requester:matrix.org",
         content_sha256="a" * 64,
+    )
+    system_name = overrides.get("system_name", "payment")
+    service_name = overrides.get("service_name", "api")
+    ticket = issue_ticket(
+        context,
+        system_name,
+        service_name,
+        compute_routing_revision(_routing_systems()),
+    )
+    defaults = dict(
+        message_context=context.to_dict(),
+        routing_ticket=ticket.ticket,
         system_name="payment",
         service_name="api",
         environment="test",
         targets=["s1"],
         steps=_steps(),
         policy={"continue_on_error": False, "max_retries": 0},
-        routing_config_revision=f"rev-{_RUN_ID}-{suffix}",
-        routing_ticket_digest=f"ticket-{_RUN_ID}-{suffix}",
         risk_level="high",
         ai_reason="test",
     )
@@ -88,11 +120,13 @@ def test_prepare_plan_is_registered():
     tool = registry.get("ops.approval.prepare_plan")
     props = tool.input_schema["properties"]
     for field in (
-        "room_id", "request_event_id", "content_sha256",
+        "message_context", "routing_ticket",
         "system_name", "environment", "targets",
-        "steps", "policy", "routing_config_revision", "routing_ticket_digest",
+        "steps", "policy",
     ):
         assert field in props, f"prepare_plan schema 缺少 {field}"
+    assert "routing_config_revision" not in props
+    assert "routing_ticket_digest" not in props
     assert "steps" in tool.input_schema["required"]
 
 

@@ -3,6 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { resource } from '../api'
 import { useNotificationStore } from '../store'
 import KeyValueEditor from '../components/KeyValueEditor'
+import {
+  approverKey,
+  approverLabel,
+  normalizeApprovers,
+  withStructuredApprovers,
+} from '../utils/approverIdentities.js'
+import type { ApproverChannel, ApproverIdentity } from '../utils/approverIdentities.js'
 
 const STRATEGY_LABELS: Record<string, string> = {
   DIRECT: 'Direct 直推',
@@ -15,7 +22,7 @@ interface MessageRouting {
   aliases: string[]
   keywords: string[]
   priority: number
-  approvers: string[]
+  approvers: ApproverIdentity[]
 }
 
 const DEFAULT_ROUTING: MessageRouting = {
@@ -46,7 +53,9 @@ export default function SystemEditPage() {
   const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
   const [aliasInput, setAliasInput] = useState('')
   const [keywordInput, setKeywordInput] = useState('')
-  const [approverInput, setApproverInput] = useState('')
+  const [approverChannel, setApproverChannel] = useState<ApproverChannel>('matrix')
+  const [approverAccount, setApproverAccount] = useState('default')
+  const [approverSender, setApproverSender] = useState('')
 
   useEffect(() => {
     if (!name) return
@@ -68,7 +77,7 @@ export default function SystemEditPage() {
         aliases: Array.isArray(r.aliases) ? r.aliases : [],
         keywords: Array.isArray(r.keywords) ? r.keywords : [],
         priority: typeof r.priority === 'number' ? r.priority : 0,
-        approvers: Array.isArray(r.approvers) ? r.approvers : [],
+        approvers: normalizeApprovers(r.approvers),
       })
     }).catch(() => {
       notify('无法加载系统配置', 'error')
@@ -127,14 +136,18 @@ export default function SystemEditPage() {
   }
 
   const addApprover = () => {
-    const v = approverInput.trim()
-    if (!v) return
-    if (routing.approvers.includes(v)) {
+    const identity: ApproverIdentity = {
+      channel: approverChannel,
+      channel_account_id: approverAccount.trim() || 'default',
+      sender_id: approverSender.trim(),
+    }
+    if (!identity.sender_id) return
+    if (routing.approvers.some((item) => approverKey(item) === approverKey(identity))) {
       notify('授权人已存在', 'error')
       return
     }
-    setRouting({ ...routing, approvers: [...routing.approvers, v] })
-    setApproverInput('')
+    setRouting({ ...routing, approvers: [...routing.approvers, identity] })
+    setApproverSender('')
   }
 
   const removeApprover = (idx: number) => {
@@ -152,7 +165,7 @@ export default function SystemEditPage() {
       description: form.description.trim(),
       variables: form.variables,
       servers,
-      message_routing: routing,
+      message_routing: withStructuredApprovers(routing),
     }
     setSaving(true)
     try {
@@ -268,13 +281,13 @@ export default function SystemEditPage() {
           </div>
         </div>
 
-        {/* qclaw Element 消息路由配置 */}
+        {/* QClaw 消息渠道路由配置 */}
         <div style={{
           marginTop: '24px', paddingTop: '20px',
           borderTop: '1px solid var(--border-strong)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-            <h3 style={{ margin: 0, fontSize: '15px' }}>qclaw Element 消息路由</h3>
+            <h3 style={{ margin: 0, fontSize: '15px' }}>QClaw 消息渠道路由</h3>
             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
               <input
                 type="checkbox"
@@ -285,7 +298,7 @@ export default function SystemEditPage() {
             </label>
           </div>
           <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '12px' }}>
-            配置后，qclaw 可将 Element 房间消息确定性路由到此系统。详见{' '}
+            配置后，QClaw 可将 Matrix、微信或 Telegram 消息确定性路由到此系统。详见{' '}
             <a href="/docs/qclaw-element-approval-integration.md" target="_blank" rel="noreferrer">
               集成文档
             </a>
@@ -387,33 +400,51 @@ export default function SystemEditPage() {
                 </div>
               </div>
               <div style={{ gridColumn: '1 / -1' }}>
-                <label>授权审批人（Matrix user ID）</label>
+                <label>授权审批人</label>
                 <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '6px' }}>
-                  填写后，只有列表中的用户才能审批此系统的发布/回滚/DML/服务控制操作。留空表示不限制审批人。
+                  审批身份按消息渠道、渠道账号和发送者 ID 精确匹配。
                 </div>
-                <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+                  <select
+                    aria-label="审批人渠道"
+                    style={{ ...inputStyle, width: '130px' }}
+                    value={approverChannel}
+                    onChange={(e) => setApproverChannel(e.target.value as ApproverChannel)}
+                  >
+                    <option value="matrix">Matrix</option>
+                    <option value="wechat">微信</option>
+                    <option value="telegram">Telegram</option>
+                  </select>
                   <input
-                    style={{ ...inputStyle, flex: 1 }}
-                    value={approverInput}
-                    onChange={(e) => setApproverInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addApprover() } }}
-                    placeholder="如：@han:hubtel.xyz"
+                    aria-label="渠道账号"
+                    style={{ ...inputStyle, width: '160px' }}
+                    value={approverAccount}
+                    onChange={(e) => setApproverAccount(e.target.value)}
+                    placeholder="default"
                   />
-                  <button className="btn" onClick={addApprover} type="button">+</button>
+                  <input
+                    aria-label="审批人发送者 ID"
+                    style={{ ...inputStyle, flex: '1 1 240px' }}
+                    value={approverSender}
+                    onChange={(e) => setApproverSender(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addApprover() } }}
+                    placeholder={approverChannel === 'matrix' ? '@user:example.org' : '发送者 ID'}
+                  />
+                  <button className="btn" onClick={addApprover} type="button" title="添加审批人" aria-label="添加审批人">+</button>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                   {routing.approvers.map((a, i) => (
                     <span
-                      key={i}
+                      key={approverKey(a)}
                       style={{
                         display: 'inline-flex', alignItems: 'center', gap: '4px',
                         padding: '2px 8px', borderRadius: '12px',
                         background: 'var(--bg-hover)', fontSize: '12px',
                         fontFamily: 'monospace',
                       }}
-                      title={a}
+                      title={approverLabel(a)}
                     >
-                      {a}
+                      {approverLabel(a)}
                       <button
                         onClick={() => removeApprover(i)}
                         type="button"

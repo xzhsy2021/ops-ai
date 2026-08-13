@@ -1,16 +1,21 @@
 """qclaw 审批管理 API 路由。"""
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
-from app.core.auth_v2 import get_current_user
+from app.core.auth_v2 import require_admin, require_auth
 from app.db.base import get_db
 from app.db.models import AiActionApproval
 from app.services.action_approval import ActionApprovalService
 from app.services.approval_executor import ApprovalExecutor
-from app.config.systems import get_all_systems, get_system_by_name, save_system
+from app.config.systems import (
+    get_all_systems,
+    get_system_by_name,
+    normalize_message_routing_config,
+    save_system,
+)
 
 router = APIRouter(prefix="/api/v2/approvals", tags=["qclaw审批管理"])
 
@@ -36,6 +41,7 @@ class ApprovalSummary(BaseModel):
     execution_job_id: int | str | None = None
     package_name: str | None = None
     failure_reason: str | None = None
+    message_context: dict[str, str] | None = None
 
 
 class ApprovalDetail(ApprovalSummary):
@@ -48,10 +54,33 @@ class ApprovalDetail(ApprovalSummary):
     routing_config_revision: str | None = None
     request_payload: dict[str, Any] = {}
     execution_result: dict[str, Any] | None = None
+    channel: str | None = None
+    channel_account_id: str | None = None
+    conversation_id: str | None = None
+    request_message_id: str | None = None
+    request_sender_id: str | None = None
+    approval_message_id: str | None = None
 
 
 def _to_summary(a: AiActionApproval) -> ApprovalSummary:
     payload = a.request_payload or {}
+    message_context = None
+    if (
+        a.channel
+        and a.channel_account_id
+        and a.conversation_id
+        and a.request_message_id
+        and a.request_sender_id
+        and a.content_sha256
+    ):
+        message_context = {
+            "channel": a.channel,
+            "channel_account_id": a.channel_account_id,
+            "conversation_id": a.conversation_id,
+            "message_id": a.request_message_id,
+            "sender_id": a.request_sender_id,
+            "content_sha256": a.content_sha256,
+        }
     return ApprovalSummary(
         approval_id=a.id,
         action_type=a.action_type,
@@ -71,6 +100,7 @@ def _to_summary(a: AiActionApproval) -> ApprovalSummary:
         execution_job_id=a.execution_job_id,
         package_name=a.package_name,
         failure_reason=a.failure_reason,
+        message_context=message_context,
     )
 
 
@@ -87,6 +117,12 @@ def _to_detail(a: AiActionApproval) -> ApprovalDetail:
         routing_config_revision=a.routing_config_revision,
         request_payload=a.request_payload or {},
         execution_result=a.execution_result,
+        channel=a.channel,
+        channel_account_id=a.channel_account_id,
+        conversation_id=a.conversation_id,
+        request_message_id=a.request_message_id,
+        request_sender_id=a.request_sender_id,
+        approval_message_id=a.approval_message_id,
     )
 
 
@@ -94,12 +130,13 @@ def _to_detail(a: AiActionApproval) -> ApprovalDetail:
 
 @router.get("", summary="查询审批列表")
 def list_approvals(
+    request: Request,
     status: Optional[str] = Query(None, description="状态过滤"),
     action_type: Optional[str] = Query(None, description="操作类型过滤"),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    require_auth(request, db)
     query = db.query(AiActionApproval)
     if status:
         query = query.filter(AiActionApproval.status == status)
@@ -112,9 +149,10 @@ def list_approvals(
 @router.get("/{approval_id}", summary="查询审批详情")
 def get_approval(
     approval_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    require_auth(request, db)
     service = ActionApprovalService(db)
     approval = service.get(approval_id)
     if not approval:
@@ -125,9 +163,10 @@ def get_approval(
 @router.post("/{approval_id}/reject", summary="拒绝审批")
 def reject_approval(
     approval_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    user = require_auth(request, db)
     service = ActionApprovalService(db)
     approval = service.reject(
         approval_id=approval_id,
@@ -140,9 +179,10 @@ def reject_approval(
 
 @router.post("/expire-stale", summary="清理过期审批")
 def expire_stale_approvals(
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    require_admin(request, db)
     service = ActionApprovalService(db)
     count = service.expire_stale()
     return {"expired_count": count}
@@ -151,10 +191,11 @@ def expire_stale_approvals(
 @router.post("/{approval_id}/execute", summary="手动触发执行（调试用）")
 def manual_execute(
     approval_id: str,
+    request: Request,
     db: Session = Depends(get_db),
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
     """手动触发已审批操作的执行。正常流程由 qclaw 审批后自动触发。"""
+    require_admin(request, db)
     executor = ApprovalExecutor(db)
     approval = executor.execute(approval_id)
     if not approval:
@@ -167,20 +208,40 @@ def manual_execute(
 class MessageRoutingConfig(BaseModel):
     """消息路由配置"""
     enabled: bool = False
-    aliases: list[str] = []
-    keywords: list[str] = []
+    aliases: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
     priority: int = 0
-    approvers: list[str] = []
+    approvers: list[dict[str, str]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_config(cls, value):
+        if value is None:
+            raise ValueError("message_routing must be an object")
+        return normalize_message_routing_config(value)
+
+
+def _routing_summary(value: Any) -> dict[str, Any]:
+    routing = normalize_message_routing_config(value if value is not None else {})
+    return {
+        "enabled": routing.get("enabled", False),
+        "aliases": routing.get("aliases", []),
+        "keywords": routing.get("keywords", []),
+        "priority": routing.get("priority", 0),
+        "approvers": routing.get("approvers", []),
+    }
 
 
 @router.get("/routing/systems", summary="查询所有系统的路由配置")
 def list_routing_configs(
-    user: Dict[str, Any] = Depends(get_current_user),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
+    require_auth(request, db)
     systems = get_all_systems()
     result = []
     for name, cfg in systems.items():
-        routing = cfg.get("message_routing", {})
+        routing = _routing_summary(cfg.get("message_routing", {}))
         result.append({
             "system_name": name,
             "enabled": routing.get("enabled", False),
@@ -191,11 +252,9 @@ def list_routing_configs(
             "services": [
                 {
                     "service_name": svc.get("name", ""),
-                    "enabled": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("enabled", False),
-                    "aliases": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("aliases", []),
-                    "keywords": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("keywords", []),
-                    "priority": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("priority", 0),
-                    "approvers": (svc.get("template_variables", {}).get("message_routing", {}) or {}).get("approvers", []),
+                    **_routing_summary(
+                        svc.get("template_variables", {}).get("message_routing", {})
+                    ),
                 }
                 for svc in cfg.get("services", [])
             ],
@@ -207,13 +266,16 @@ def list_routing_configs(
 def update_system_routing(
     system_name: str,
     config: MessageRoutingConfig,
-    user: Dict[str, Any] = Depends(get_current_user),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
+    require_admin(request, db)
     sys_cfg = get_system_by_name(system_name)
     if not sys_cfg:
         raise HTTPException(status_code=404, detail=f"系统不存在: {system_name}")
     sys_cfg["message_routing"] = config.model_dump()
-    save_system(system_name, sys_cfg)
+    if not save_system(system_name, sys_cfg):
+        raise HTTPException(status_code=500, detail="保存系统消息路由配置失败")
     return {"ok": True, "system_name": system_name, "message_routing": config.model_dump()}
 
 
@@ -222,8 +284,10 @@ def update_service_routing(
     system_name: str,
     service_name: str,
     config: MessageRoutingConfig,
-    user: Dict[str, Any] = Depends(get_current_user),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
+    require_admin(request, db)
     sys_cfg = get_system_by_name(system_name)
     if not sys_cfg:
         raise HTTPException(status_code=404, detail=f"系统不存在: {system_name}")
@@ -237,5 +301,6 @@ def update_service_routing(
             break
     if not found:
         raise HTTPException(status_code=404, detail=f"服务不存在: {service_name}")
-    save_system(system_name, sys_cfg)
+    if not save_system(system_name, sys_cfg):
+        raise HTTPException(status_code=500, detail="保存服务消息路由配置失败")
     return {"ok": True, "system_name": system_name, "service_name": service_name, "message_routing": config.model_dump()}

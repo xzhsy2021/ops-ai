@@ -276,7 +276,6 @@ export const systemHealth = {
   diagnosticsReport: () => api.get('/system/diagnostics/report'),
   buildInfo: () => api.get('/system/build-info'),
   recentErrors: (params?: { limit?: number; include_warnings?: boolean }) => api.get('/system/recent-errors', { params }),
-  aiDiagnostics: (params?: { mode?: string; focus?: string; include_report?: boolean }) => api.get('/system/ai-diagnostics', { params }),
   diagnosticsExportUrl: () => `${getBaseURL()}/system/diagnostics/export`,
   diagnosticsReportExportUrl: () => `${getBaseURL()}/system/diagnostics/report/export`,
   startupCheck: () => api.get('/system/startup-check'),
@@ -472,8 +471,31 @@ export const capabilityTools = {
   updateSettings: (settings: Record<string, any>) => api.put('/tools/settings', { settings }),
   tokens: () => api.get('/tools/tokens'),
   tokenTemplates: () => cachedGet('tools.tokenTemplates', 60000, () => api.get('/tools/token-templates')),
-  createToken: (data: any) => api.post('/tools/tokens', data),
-  updateToken: (id: string, data: any) => api.patch(`/tools/tokens/${encodeURIComponent(id)}`, data),
+  createToken: (data: {
+    name: string
+    description?: string
+    scopes?: string[]
+    allow_write?: boolean
+    allow_prod?: boolean
+    expires_in_days?: number
+    bound_room_ids?: string[]
+    approver_matrix_ids?: string[]
+    channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
+    approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
+  }) => api.post('/tools/tokens', data),
+  updateToken: (id: string, data: {
+    name?: string
+    description?: string
+    scopes?: string[]
+    allow_write?: boolean
+    allow_prod?: boolean
+    expires_in_days?: number
+    revoke?: boolean
+    bound_room_ids?: string[]
+    approver_matrix_ids?: string[]
+    channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
+    approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
+  }) => api.patch(`/tools/tokens/${encodeURIComponent(id)}`, data),
   revokeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}`),
   purgeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}/purge`),
   calls: (params?: { limit?: number; offset?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
@@ -484,6 +506,13 @@ export const capabilityTools = {
   mcpResources: () => cachedGet('mcp.resources', 60000, () => api.get('/mcp/resources')),
   mcpPrompts: () => cachedGet('mcp.prompts', 60000, () => api.get('/mcp/prompts')),
   prompts: () => cachedGet('capability.prompts', 60000, () => api.get('/prompts')),
+}
+
+export const temporaryApprovals = {
+  list: (params?: { status?: string; limit?: number }) => api.get('/temporary-approvals', { params }),
+  detail: (id: string) => api.get(`/temporary-approvals/${encodeURIComponent(id)}`),
+  confirm: (id: string, data: { confirmation_phrase: string }) => api.post(`/temporary-approvals/${encodeURIComponent(id)}/confirm`, data),
+  revoke: (id: string, data: { reason?: string }) => api.post(`/temporary-approvals/${encodeURIComponent(id)}/revoke`, data),
 }
 
 export const reports = {
@@ -614,11 +643,4 @@ export const mcpAi = {
   readResource: (uri: string) => api.post('/mcp/resources/read', { uri }),
   workflow: (tool: string, arguments_: Record<string, any>) => api.post('/tools/call', { tool, arguments: arguments_ }),
   recommendTools: (scenario: string) => api.get('/mcp/tools/recommend', { params: { scenario } }),
-}
-
-export const aiAnalysis = {
-  list: (params?: { analysis_type?: string; target_type?: string; target_id?: string; limit?: number }) => api.get('/ai/analysis', { params }),
-  get: (id: string) => api.get(`/ai/analysis/${encodeURIComponent(id)}`),
-  save: (data: any) => api.post('/ai/analysis', data),
-  generateReport: (id: string) => api.post(`/ai/analysis/${encodeURIComponent(id)}/generate-report`),
 }

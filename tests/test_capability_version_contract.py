@@ -136,6 +136,7 @@ class TestTokenWriteBumpsVersion:
         from app.api.tools import create_token
         with patch("app.api.tools.require_auth", return_value={"is_admin": True, "username": "admin"}), \
              patch("app.api.tools.create_tool_token", return_value={"token": "tk_123", "record": MagicMock()}), \
+             patch("app.api.tools.token_to_dict", return_value={"bound_room_ids": [], "approver_matrix_ids": [], "channel_bindings": [], "approver_identities": []}), \
              patch("app.api.tools.audit"), \
              patch("app.api.tools._bump_capability_version") as mock_bump:
             from app.api.tools import CreateToolTokenPayload

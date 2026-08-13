@@ -29,12 +29,6 @@ REPORT_TYPES = {
         "description": "系统健康、构建状态、运行目录、最近错误和建议。",
         "formats": ["json", "md"],
     },
-    "ai_diagnostics": {
-        "title": "AI 诊断分析报告",
-        "target_type": "system",
-        "description": "只读 AI 诊断分析、MCP 工具链与安全边界。",
-        "formats": ["json", "md"],
-    },
     "operation_chain": {
         "title": "MCP/AI 操作链路报告",
         "target_type": "operation_chain",
@@ -45,12 +39,6 @@ REPORT_TYPES = {
         "title": "操作链路索引报告",
         "target_type": "audit",
         "description": "最近 OPS/MCP/AI 操作链路摘要索引。",
-        "formats": ["json", "md"],
-    },
-    "ai_analysis": {
-        "title": "AI 分析报告",
-        "target_type": "ai_analysis",
-        "description": "AI 工作流分析结果、事实、推断、建议和证据链报告。",
         "formats": ["json", "md"],
     },
     "deployment": {
@@ -1051,11 +1039,6 @@ def _payload_for_report(db: Session, report_type: str, target_id: str = "", incl
         data = build_diagnostics_report(db)
         summary = data.get("summary") or data.get("health") or {}
         return {"data": data, "summary": summary, "metadata": {"focus": focus or "general"}}
-    if report_type == "ai_diagnostics":
-        from app.services.ai_diagnostics import build_ai_diagnostic_analysis
-        data = build_ai_diagnostic_analysis(db, mode="full" if include_raw else "summary", focus=focus or "general", include_report=include_raw)
-        summary = data.get("summary") or {"status": data.get("status"), "highest_risk": data.get("highest_risk"), "finding_count": len(data.get("findings") or [])}
-        return {"data": data, "summary": summary, "metadata": {"focus": focus or "general"}}
     if report_type == "operation_chain":
         if not target_id:
             raise HTTPException(status_code=400, detail="target_id is required for operation_chain reports")
@@ -1098,10 +1081,6 @@ def _format_summary(report_type: str, summary: Dict[str, Any]) -> str:
         return f"{summary.get('report_title') or '巡检报告'}：记录 {summary.get('run_count') or 1} 条，评分 {summary.get('score') or summary.get('avg_score') or 0}，高危 {summary.get('high_count') or 0}，中危 {summary.get('medium_count') or 0}，低危 {summary.get('low_count') or 0}，未闭环 {summary.get('open_issue_count') or 0}。"
     if report_type == "db_query_export":
         return f"数据库查询导出，格式 {summary.get('format') or '-'}，行数 {summary.get('row_count') or 0}。"
-    if report_type == "ai_diagnostics":
-        return f"AI 诊断分析，最高风险 {summary.get('highest_risk') or '-'}，发现 {summary.get('finding_count') or 0} 项。"
-    if report_type == "ai_analysis":
-        return f"AI 分析报告，置信度 {summary.get('confidence') or '-'}：{summary.get('summary') or '-'}"
     return "报告已生成。"
 
 

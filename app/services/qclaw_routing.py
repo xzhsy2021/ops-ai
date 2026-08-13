@@ -1,6 +1,6 @@
-"""确定性消息路由和签名票据签发，用于 qclaw Element 集成。
+"""确定性消息路由和签名票据签发，用于 QClaw 渠道集成。
 
-qclaw 从 Element 房间读取消息后，调用此模块将消息确定性路由到
+QClaw 从消息渠道读取消息后，调用此模块将消息确定性路由到
 对应的 OPS 系统/服务，并签发一个 15 分钟有效的路由票据。
 """
 import base64
@@ -12,9 +12,10 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 from app.core.config import QCLAW_APPROVAL_SIGNING_KEY, QCLAW_APPROVAL_TTL_SECONDS
+from app.services.message_context import MessageContext, normalize_identity
 
 
 class RoutingOutcome(str, Enum):
@@ -35,7 +36,7 @@ class RoutingDecision:
     matched_by: str | None = None
     routing_config_revision: str | None = None
     candidates: tuple[str, ...] = ()
-    approvers: tuple[str, ...] = ()  # 授权审批人 Matrix user ID 列表
+    approvers: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,89 @@ def _extract_routing(system_or_service: dict) -> dict:
     return {}
 
 
+def normalize_routing_approvers(value: Any) -> list[dict[str, str]]:
+    """Normalize structured approvers and legacy Matrix sender IDs."""
+    if value is None:
+        raise ValueError("approvers must be a list")
+    if not isinstance(value, list):
+        raise ValueError("approvers must be a list")
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, item in enumerate(value):
+        try:
+            identity = normalize_identity(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"approvers[{index}]: {exc}") from exc
+        key = (
+            identity["channel"],
+            identity["channel_account_id"],
+            identity["sender_id"],
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(identity)
+    return result
+
+
+def normalize_message_routing_config(value: Any) -> dict[str, Any]:
+    """Validate and normalize one complete persisted message-routing object."""
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("message_routing must be an object")
+
+    allowed_keys = {"enabled", "aliases", "keywords", "priority", "approvers"}
+    unsupported = sorted(set(value) - allowed_keys)
+    if unsupported:
+        raise ValueError(f"unsupported message_routing keys: {', '.join(unsupported)}")
+
+    normalized: dict[str, Any] = {}
+    if "enabled" in value:
+        enabled = value["enabled"]
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
+        normalized["enabled"] = enabled
+
+    def normalize_string_list(field: str) -> list[str]:
+        items = value[field]
+        if not isinstance(items, list):
+            raise ValueError(f"{field} must be a list")
+        result: list[str] = []
+        seen: set[str] = set()
+        for index, item in enumerate(items):
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"{field}[{index}] must be a nonblank string")
+            normalized_item = item.strip()
+            if normalized_item not in seen:
+                seen.add(normalized_item)
+                result.append(normalized_item)
+        return result
+
+    for field in ("aliases", "keywords"):
+        if field in value:
+            normalized[field] = normalize_string_list(field)
+
+    if "priority" in value:
+        priority = value["priority"]
+        if type(priority) is not int:
+            raise ValueError("priority must be an integer")
+        if not 0 <= priority <= 1000:
+            raise ValueError("priority must be between 0 and 1000")
+        normalized["priority"] = priority
+
+    if "approvers" in value:
+        normalized["approvers"] = normalize_routing_approvers(value["approvers"])
+    return normalized
+
+
+def _approver_sort_key(identity: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        identity["channel"],
+        identity["channel_account_id"],
+        identity["sender_id"],
+    )
+
+
 def normalize_routing_config(systems: list[dict]) -> str:
     """规范化路由配置 JSON，用于计算 config revision。"""
     normalized = []
@@ -90,20 +174,29 @@ def normalize_routing_config(systems: list[dict]) -> str:
             "aliases": sorted(routing.get("aliases", [])),
             "keywords": sorted(routing.get("keywords", [])),
             "priority": routing.get("priority", 0),
-            "approvers": sorted(routing.get("approvers", [])),
+            "approvers": sorted(
+                normalize_routing_approvers(routing.get("approvers", [])),
+                key=_approver_sort_key,
+            ),
         }
-        # 服务级路由
-        for svc in sys_cfg.get("services", []):
+        services = []
+        # Resolver considers every service under an active system, even when
+        # the service-level message_routing.enabled flag is false or absent.
+        for svc in sys_cfg.get("services", []) or []:
             svc_routing = _extract_routing(svc)
-            if svc_routing.get("enabled", False):
-                entry.setdefault("services", []).append({
-                    "name": svc.get("name", ""),
-                    "aliases": sorted(svc_routing.get("aliases", [])),
-                    "keywords": sorted(svc_routing.get("keywords", [])),
-                    "priority": svc_routing.get("priority", 0),
-                    "approvers": sorted(svc_routing.get("approvers", [])),
-                })
+            services.append({
+                "name": svc.get("name", ""),
+                "aliases": sorted(svc_routing.get("aliases", [])),
+                "keywords": sorted(svc_routing.get("keywords", [])),
+                "priority": svc_routing.get("priority", 0),
+                "approvers": sorted(
+                    _extract_approvers(routing, svc_routing),
+                    key=_approver_sort_key,
+                ),
+            })
+        entry["services"] = sorted(services, key=lambda item: item["name"])
         normalized.append(entry)
+    normalized.sort(key=lambda item: item["name"])
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return canonical
 
@@ -117,26 +210,27 @@ def compute_routing_revision(systems: list[dict]) -> str:
 # 路由解析
 # ──────────────────────────────────────────────────────────────
 
-def _extract_approvers(routing: dict, svc_routing: dict | None = None) -> tuple[str, ...]:
+def _extract_approvers(
+    routing: dict,
+    svc_routing: dict | None = None,
+) -> tuple[dict[str, str], ...]:
     """从路由配置提取授权审批人。
 
     优先使用服务级 approvers（如果非空），否则回退到系统级 approvers。
-    去重并保留顺序。
+    配置在边界统一规范化；无效身份会抛错并由调用方 fail closed。
     """
-    candidates: list[str] = []
-    seen: set[str] = set()
-    sources = [svc_routing, routing] if svc_routing else [routing]
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        for user in src.get("approvers", []) or []:
-            if not isinstance(user, str):
-                continue
-            u = user.strip()
-            if u and u not in seen:
-                seen.add(u)
-                candidates.append(u)
-    return tuple(candidates)
+    if not isinstance(routing, dict):
+        raise ValueError("system message_routing must be an object")
+    system_approvers = normalize_routing_approvers(routing.get("approvers", []))
+    if svc_routing is not None:
+        if not isinstance(svc_routing, dict):
+            raise ValueError("service message_routing must be an object")
+        service_approvers = normalize_routing_approvers(
+            svc_routing.get("approvers", [])
+        )
+        if service_approvers:
+            return tuple(service_approvers)
+    return tuple(system_approvers)
 
 
 def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDecision:
@@ -164,30 +258,54 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
         routing = _extract_routing(sys_cfg)
         if routing.get("enabled", False):
             active_systems.append((sys_cfg, routing))
+    active_systems.sort(key=lambda item: str(item[0].get("name", "")))
 
     # 1. 精确匹配系统规范名
-    for sys_cfg, routing in active_systems:
-        sys_name = sys_cfg.get("name", "")
-        if sys_name and normalize_text(sys_name) == normalized_msg:
-            return RoutingDecision(
-                outcome=RoutingOutcome.RESOLVED,
-                system_name=sys_name,
-                matched_by="system_name",
-                routing_config_revision=revision,
-                approvers=_extract_approvers(routing),
-            )
+    system_name_matches = [
+        (sys_cfg.get("name", ""), routing)
+        for sys_cfg, routing in active_systems
+        if sys_cfg.get("name", "")
+        and normalize_text(sys_cfg.get("name", "")) == normalized_msg
+    ]
+    if len(system_name_matches) == 1:
+        sys_name, routing = system_name_matches[0]
+        return RoutingDecision(
+            outcome=RoutingOutcome.RESOLVED,
+            system_name=sys_name,
+            matched_by="system_name",
+            routing_config_revision=revision,
+            approvers=_extract_approvers(routing),
+        )
+    if len(system_name_matches) > 1:
+        return RoutingDecision(
+            outcome=RoutingOutcome.AMBIGUOUS,
+            candidates=tuple(sorted(item[0] for item in system_name_matches)),
+            routing_config_revision=revision,
+        )
 
     # 2. 精确匹配系统别名
+    system_alias_matches = []
     for sys_cfg, routing in active_systems:
-        for alias in routing.get("aliases", []):
-            if alias and normalize_text(alias) == normalized_msg:
-                return RoutingDecision(
-                    outcome=RoutingOutcome.RESOLVED,
-                    system_name=sys_cfg.get("name", ""),
-                    matched_by="system_alias",
-                    routing_config_revision=revision,
-                    approvers=_extract_approvers(routing),
-                )
+        if any(
+            alias and normalize_text(alias) == normalized_msg
+            for alias in routing.get("aliases", [])
+        ):
+            system_alias_matches.append((sys_cfg.get("name", ""), routing))
+    if len(system_alias_matches) == 1:
+        sys_name, routing = system_alias_matches[0]
+        return RoutingDecision(
+            outcome=RoutingOutcome.RESOLVED,
+            system_name=sys_name,
+            matched_by="system_alias",
+            routing_config_revision=revision,
+            approvers=_extract_approvers(routing),
+        )
+    if len(system_alias_matches) > 1:
+        return RoutingDecision(
+            outcome=RoutingOutcome.AMBIGUOUS,
+            candidates=tuple(sorted(item[0] for item in system_alias_matches)),
+            routing_config_revision=revision,
+        )
 
     # 3. 唯一服务名或服务别名，返回其父系统
     service_matches = []  # (system_name, service_name, matched_by, sys_routing, svc_routing)
@@ -205,6 +323,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
                     service_matches.append((sys_cfg.get("name", ""), svc_name, "service_alias", routing, svc_routing))
                     break
 
+    service_matches.sort(key=lambda item: (item[0], item[1], item[2]))
     if len(service_matches) == 1:
         sys_name, svc_name, matched_by, sys_routing, svc_routing = service_matches[0]
         return RoutingDecision(
@@ -216,7 +335,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
             approvers=_extract_approvers(sys_routing, svc_routing),
         )
     if len(service_matches) > 1:
-        candidates = tuple(f"{s}/{sv}" for s, sv, *_ in service_matches)
+        candidates = tuple(sorted(f"{s}/{sv}" for s, sv, *_ in service_matches))
         return RoutingDecision(
             outcome=RoutingOutcome.AMBIGUOUS,
             candidates=candidates,
@@ -248,7 +367,10 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
 
     # 找最高优先级
     max_priority = max(m[2] for m in keyword_matches)
-    top_matches = [m for m in keyword_matches if m[2] == max_priority]
+    top_matches = sorted(
+        (m for m in keyword_matches if m[2] == max_priority),
+        key=lambda item: (item[0], item[1] or "", item[3]),
+    )
 
     if len(top_matches) == 1:
         sys_name, svc_name, _, matched_by, sys_routing, svc_routing = top_matches[0]
@@ -262,7 +384,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
         )
 
     # 同优先级多匹配 → AMBIGUOUS
-    candidates = tuple(f"{s}/{sv}" if sv else s for s, sv, *_ in top_matches)
+    candidates = tuple(sorted(f"{s}/{sv}" if sv else s for s, sv, *_ in top_matches))
     return RoutingDecision(
         outcome=RoutingOutcome.AMBIGUOUS,
         candidates=candidates,
@@ -275,36 +397,53 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
 # ──────────────────────────────────────────────────────────────
 
 def _get_signing_key() -> str:
-    """获取签名密钥，为空时生成临时密钥（测试场景）。"""
-    key = QCLAW_APPROVAL_SIGNING_KEY
-    if not key:
-        # 临时密钥：进程内一致即可
-        key = "dev-fallback-key-do-not-use-in-production"
+    """Return a configured high-entropy signing key or fail closed."""
+    key = str(QCLAW_APPROVAL_SIGNING_KEY or "").strip()
+    insecure_values = {
+        "changeme",
+        "change-me",
+        "default",
+        "dev-fallback-key-do-not-use-in-production",
+        "password",
+        "secret",
+        "test",
+    }
+    if len(key) < 32 or key.lower() in insecure_values or len(set(key)) < 8:
+        raise RuntimeError(
+            "APPROVAL_SIGNING_KEY must be configured with at least 32 non-trivial characters"
+        )
     return key
 
 
+def _strict_message_context(
+    value: MessageContext | Mapping[str, Any],
+) -> MessageContext:
+    if isinstance(value, MessageContext):
+        return value
+    if isinstance(value, Mapping):
+        return MessageContext.from_dict(value)
+    raise ValueError("message_context must be a MessageContext or generic object")
+
+
 def issue_ticket(
-    room_id: str,
-    event_id: str,
-    content_sha256: str,
+    message_context: MessageContext | Mapping[str, Any],
     system_name: str,
     service_name: str | None,
     routing_config_revision: str,
 ) -> RoutingTicket:
     """签发 HMAC-SHA256 签名的路由票据，15 分钟有效。"""
+    context = _strict_message_context(message_context)
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(seconds=QCLAW_APPROVAL_TTL_SECONDS)
     nonce = secrets.token_hex(16)
 
     payload = {
-        "room_id": room_id,
-        "event_id": event_id,
-        "content_sha256": content_sha256,
+        "message_context": context.to_dict(),
         "system_name": system_name,
         "service_name": service_name,
         "routing_config_revision": routing_config_revision,
-        "issued_at": issued_at.replace(tzinfo=None).isoformat(),
-        "expires_at": expires_at.replace(tzinfo=None).isoformat(),
+        "issued_at": issued_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "nonce": nonce,
     }
 
@@ -317,19 +456,21 @@ def issue_ticket(
     ticket = f"{payload_b64}.{sig}"
     digest = hashlib.sha256(ticket.encode("ascii")).hexdigest()
 
-    return RoutingTicket(ticket=ticket, digest=digest, expires_at=expires_at.replace(tzinfo=None))
+    return RoutingTicket(ticket=ticket, digest=digest, expires_at=expires_at)
 
 
 def verify_ticket(
     ticket_str: str,
-    expected_room_id: str,
-    expected_event_id: str,
-    expected_content_sha256: str,
+    expected_message_context: MessageContext | Mapping[str, Any],
     expected_system_name: str,
     expected_service_name: str | None,
     expected_revision: str,
 ) -> bool:
     """验证路由票据：签名、过期时间、所有绑定字段。"""
+    try:
+        context = _strict_message_context(expected_message_context)
+    except (TypeError, ValueError):
+        return False
     if not ticket_str or "." not in ticket_str:
         return False
 
@@ -350,6 +491,8 @@ def verify_ticket(
         payload = json.loads(payload_json)
     except Exception:
         return False
+    if not isinstance(payload, dict):
+        return False
 
     # 验证过期
     expires_str = payload.get("expires_at", "")
@@ -357,14 +500,14 @@ def verify_ticket(
         expires_at = datetime.fromisoformat(expires_str)
     except Exception:
         return False
-    if datetime.now(timezone.utc).replace(tzinfo=None) > expires_at:
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
         return False
 
     # 验证绑定字段
     checks = [
-        ("room_id", payload.get("room_id") == expected_room_id),
-        ("event_id", payload.get("event_id") == expected_event_id),
-        ("content_sha256", payload.get("content_sha256") == expected_content_sha256),
+        ("message_context", payload.get("message_context") == context.to_dict()),
         ("system_name", payload.get("system_name") == expected_system_name),
         ("service_name", payload.get("service_name") == expected_service_name),
         ("revision", payload.get("routing_config_revision") == expected_revision),

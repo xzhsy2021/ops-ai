@@ -12,8 +12,10 @@ import pytest
 from app.db.base import SessionLocal, Base, engine
 from app.db.migrations.runner import run_schema_migrations
 from app.db.models import AiActionApproval, ExecutionPlan
+from app.services.message_context import MessageContext
 from app.services.qclaw_routing import (
     RoutingOutcome,
+    compute_routing_revision,
     resolve_message_target,
     issue_ticket,
     verify_ticket,
@@ -24,6 +26,18 @@ from app.services.tool_registry import register_builtin_tools
 _RUN_ID = uuid.uuid4().hex[:8]
 
 register_builtin_tools()
+
+
+@pytest.fixture(autouse=True)
+def _routing_test_config(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+        "qclaw-plan-test-key-0123456789abcdef",
+    )
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools.get_all_systems",
+        lambda: {item["name"]: {k: v for k, v in item.items() if k != "name"} for item in ROUTING_SYSTEMS},
+    )
 
 
 def _room(suffix: str) -> str:
@@ -77,13 +91,41 @@ def db():
 
 
 def _ctx(bound_room_ids=None):
+    from app.services.tool_token import resolve_channel_bindings
+
     return ToolContext(
         auth_type="tool_token",
         token_name="test-token",
         token_owner="test",
         allow_write=True,
-        bound_room_ids=bound_room_ids or [],
+        channel_bindings=resolve_channel_bindings(legacy=bound_room_ids or []),
     )
+
+
+def _signed_prepare_args(raw: dict) -> dict:
+    args = dict(raw)
+    room_id = args.pop("room_id")
+    event_id = args.pop("request_event_id")
+    content_sha256 = args.pop("content_sha256")
+    args.pop("routing_config_revision", None)
+    args.pop("routing_ticket_digest", None)
+    context = MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id=room_id,
+        message_id=event_id,
+        sender_id="@requester:matrix.org",
+        content_sha256=content_sha256,
+    )
+    ticket = issue_ticket(
+        context,
+        args["system_name"],
+        args.get("service_name"),
+        compute_routing_revision(ROUTING_SYSTEMS),
+    )
+    args["message_context"] = context.to_dict()
+    args["routing_ticket"] = ticket.ticket
+    return args
 
 
 def _multi_step_plan():
@@ -126,19 +168,23 @@ class TestMessageExecutionPlanFlow:
         assert decision.outcome == RoutingOutcome.RESOLVED
         assert decision.system_name == "crypto-trader"
 
-        ticket = issue_ticket(
-            room_id=room_id,
-            event_id=request_event,
+        message_context = MessageContext(
+            channel="matrix",
+            channel_account_id="default",
+            conversation_id=room_id,
+            message_id=request_event,
+            sender_id="@requester:matrix.org",
             content_sha256=content_sha,
+        )
+        ticket = issue_ticket(
+            message_context=message_context,
             system_name=decision.system_name,
             service_name=decision.service_name,
             routing_config_revision=decision.routing_config_revision,
         )
         assert verify_ticket(
             ticket_str=ticket.ticket,
-            expected_room_id=room_id,
-            expected_event_id=request_event,
-            expected_content_sha256=content_sha,
+            expected_message_context=message_context,
             expected_system_name=decision.system_name,
             expected_service_name=decision.service_name,
             expected_revision=decision.routing_config_revision,
@@ -146,7 +192,7 @@ class TestMessageExecutionPlanFlow:
 
         # Step 2: prepare_plan 创建一次审批（一个计划 + 一个短码）
         prepared = approval_prepare_plan(
-            args={
+            args=_signed_prepare_args({
                 "room_id": room_id,
                 "request_event_id": request_event,
                 "content_sha256": content_sha,
@@ -159,7 +205,7 @@ class TestMessageExecutionPlanFlow:
                 "routing_config_revision": decision.routing_config_revision,
                 "routing_ticket_digest": ticket.digest,
                 "ai_reason": "用户在 Element 房间请求重启 strategy 服务",
-            },
+            }),
             ctx=ctx,
             db=db,
         )
@@ -229,7 +275,7 @@ class TestMessageExecutionPlanFlow:
         assert decision.outcome == RoutingOutcome.RESOLVED
 
         prepared = approval_prepare_plan(
-            args={
+            args=_signed_prepare_args({
                 "room_id": room_id,
                 "request_event_id": request_event,
                 "content_sha256": content_sha,
@@ -241,7 +287,7 @@ class TestMessageExecutionPlanFlow:
                 "policy": {"continue_on_error": False, "max_retries": 0},
                 "routing_config_revision": decision.routing_config_revision,
                 "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
-            },
+            }),
             ctx=ctx,
             db=db,
         )
@@ -321,7 +367,7 @@ class TestMessageExecutionPlanFlow:
         approval_count_before = db.query(AiActionApproval).count()
 
         prepared = approval_prepare_plan(
-            args={
+            args=_signed_prepare_args({
                 "room_id": room_id,
                 "request_event_id": _event(suffix),
                 "content_sha256": _content_hash(suffix),
@@ -345,7 +391,7 @@ class TestMessageExecutionPlanFlow:
                 "policy": {"continue_on_error": False},
                 "routing_config_revision": f"rev-{_RUN_ID}-{suffix}",
                 "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
-            },
+            }),
             ctx=ctx,
             db=db,
         )
@@ -390,7 +436,7 @@ class TestMessageExecutionPlanFlow:
         suffix = "plan-upload-freeze"
         room_id = _room(suffix)
         prepared = approval_prepare_plan(
-            args={
+            args=_signed_prepare_args({
                 "room_id": room_id,
                 "request_event_id": _event(suffix),
                 "content_sha256": _content_hash(suffix),
@@ -412,7 +458,7 @@ class TestMessageExecutionPlanFlow:
                 "policy": {"continue_on_error": False},
                 "routing_config_revision": f"rev-{_RUN_ID}-{suffix}",
                 "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
-            },
+            }),
             ctx=_ctx(bound_room_ids=[room_id]),
             db=db,
         )
@@ -438,7 +484,7 @@ class TestMessageExecutionPlanFlow:
         room_id = _room(suffix)
         ctx = _ctx(bound_room_ids=[room_id])
 
-        args = {
+        args = _signed_prepare_args({
             "room_id": room_id,
             "request_event_id": _event(suffix),
             "content_sha256": _content_hash(f"msg-{suffix}"),
@@ -450,7 +496,7 @@ class TestMessageExecutionPlanFlow:
             "policy": {"continue_on_error": False, "max_retries": 0},
             "routing_config_revision": "rev-dupe",
             "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
-        }
+        })
 
         r1 = approval_prepare_plan(dict(args), ctx=ctx, db=db)
         r2 = approval_prepare_plan(dict(args), ctx=ctx, db=db)
@@ -470,7 +516,7 @@ class TestMessageExecutionPlanFlow:
         room_id = _room(suffix)
         ctx = _ctx(bound_room_ids=[room_id])
 
-        base = {
+        base = _signed_prepare_args({
             "room_id": room_id,
             "request_event_id": _event(suffix),
             "content_sha256": _content_hash(f"msg-{suffix}"),
@@ -482,7 +528,7 @@ class TestMessageExecutionPlanFlow:
             "policy": {"continue_on_error": False, "max_retries": 0},
             "routing_config_revision": "rev-env",
             "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
-        }
+        })
 
         r_test = approval_prepare_plan(dict(base), ctx=ctx, db=db)
         r_prod = approval_prepare_plan({**base, "environment": "prod"}, ctx=ctx, db=db)
@@ -499,7 +545,7 @@ class TestMessageExecutionPlanFlow:
         room_id = _room(suffix)
         ctx = _ctx(bound_room_ids=[room_id])
 
-        base = {
+        base = _signed_prepare_args({
             "room_id": room_id,
             "request_event_id": _event(suffix),
             "content_sha256": _content_hash(f"msg-{suffix}"),
@@ -510,7 +556,7 @@ class TestMessageExecutionPlanFlow:
             "policy": {"continue_on_error": False, "max_retries": 0},
             "routing_config_revision": "rev-steps",
             "routing_ticket_digest": f"ticket-{_RUN_ID}-{suffix}",
-        }
+        })
 
         extra_step = [
             * _multi_step_plan(),

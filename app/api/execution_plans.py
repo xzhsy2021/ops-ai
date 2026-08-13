@@ -51,6 +51,7 @@ class PlanSummary(BaseModel):
     approved_at: str | None = None
     execution_job_id: int | str | None = None
     failure_reason: str | None = None
+    message_context: dict[str, str] | None = None
 
 
 class PlanDetail(PlanSummary):
@@ -60,9 +61,32 @@ class PlanDetail(PlanSummary):
     ai_reason: str | None = None
     policy: dict[str, Any] = {}
     steps: list[PlanStepSummary] = []
+    channel: str | None = None
+    channel_account_id: str | None = None
+    conversation_id: str | None = None
+    request_message_id: str | None = None
+    request_sender_id: str | None = None
+    approval_message_id: str | None = None
 
 
 def _to_summary(p: ExecutionPlan) -> PlanSummary:
+    message_context = None
+    if (
+        p.channel
+        and p.channel_account_id
+        and p.conversation_id
+        and p.request_message_id
+        and p.request_sender_id
+        and p.content_sha256
+    ):
+        message_context = {
+            "channel": p.channel,
+            "channel_account_id": p.channel_account_id,
+            "conversation_id": p.conversation_id,
+            "message_id": p.request_message_id,
+            "sender_id": p.request_sender_id,
+            "content_sha256": p.content_sha256,
+        }
     return PlanSummary(
         plan_id=p.id,
         status=p.status,
@@ -83,6 +107,7 @@ def _to_summary(p: ExecutionPlan) -> PlanSummary:
         approved_at=p.approved_at.isoformat() if p.approved_at else None,
         execution_job_id=p.execution_job_id,
         failure_reason=p.failure_reason,
+        message_context=message_context,
     )
 
 
@@ -110,6 +135,12 @@ def _to_detail(p: ExecutionPlan) -> PlanDetail:
             )
             for st in p.steps
         ],
+        channel=p.channel,
+        channel_account_id=p.channel_account_id,
+        conversation_id=p.conversation_id,
+        request_message_id=p.request_message_id,
+        request_sender_id=p.request_sender_id,
+        approval_message_id=p.approval_message_id,
     )
 
 

@@ -1,4 +1,4 @@
-"""qclaw Element 审批 MCP 工具。
+"""QClaw 多渠道审批 MCP 工具。
 
 注册 ops.routing.* 和 ops.approval.* MCP 工具，供 qclaw 通过 MCP 调用。
 这些工具是 qclaw 集成的唯一 OPS 接口，不暴露 deploy:execute / package:write
@@ -6,11 +6,17 @@
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict
 from fastapi import HTTPException
 
 from app.services.tool_registry import registry
-from app.services.tool_token import enforce_room_binding, _normalize_approver_ids
+from app.services.message_context import MessageContext, message_context_schema, normalize_message_context
+from app.services.tool_token import (
+    enforce_conversation_binding,
+    enforce_room_binding,
+    normalize_approver_identities,
+)
 from app.services.qclaw_routing import (
     resolve_message_target,
     issue_ticket,
@@ -18,6 +24,7 @@ from app.services.qclaw_routing import (
     compute_routing_revision,
     _extract_routing,
     _extract_approvers,
+    normalize_routing_approvers,
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
@@ -31,30 +38,112 @@ from app.services.tool_adapters.file_transfer_tools import (
 from app.services.package_retention import get_package_retention_policy, inspect_package_file
 
 
-def _lookup_approvers(ctx, system_name: str, service_name: str | None = None) -> list[str]:
-    """查找授权审批人：优先使用调用 token 的 approver_matrix_ids 白名单。
+def _current_channel_identities(
+    identities,
+    *,
+    channel: str,
+    channel_account_id: str,
+) -> list[dict[str, str]]:
+    normalized = normalize_approver_identities(identities)
+    return [
+        identity
+        for identity in normalized
+        if identity["channel"] == channel
+        and identity["channel_account_id"] == channel_account_id
+    ]
 
-    若 token 级白名单非空，则它是最强约束（审批人白名单是 per-credential、
-    admin 可管理的数据，见 ToolToken.approver_matrix_ids），直接返回。
-    否则回退到系统/服务级 message_routing.approvers 配置；两者都未配置时
-    返回空列表（此时 consume 对授权人不做限制，向后兼容）。
-    """
-    token_approvers = _normalize_approver_ids(getattr(ctx, "approver_matrix_ids", None))
-    if token_approvers:
-        return token_approvers
+
+def _effective_approver_identities(
+    ctx,
+    configured,
+    *,
+    channel: str,
+    channel_account_id: str,
+) -> list[dict[str, str]]:
+    """Apply token-first approver policy and reject cross-channel fallthrough."""
+    try:
+        token_identities = normalize_approver_identities(
+            getattr(ctx, "approver_identities", None)
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid token approver policy: {exc}",
+        ) from exc
+    if token_identities:
+        matched = _current_channel_identities(
+            token_identities,
+            channel=channel,
+            channel_account_id=channel_account_id,
+        )
+        if not matched:
+            raise HTTPException(
+                status_code=403,
+                detail="No authorized approver is configured for this channel account",
+            )
+        return matched
+
+    try:
+        configured_identities = normalize_routing_approvers(configured)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid routing approver configuration: {exc}",
+        ) from exc
+    if not configured_identities:
+        return []
+    matched = _current_channel_identities(
+        configured_identities,
+        channel=channel,
+        channel_account_id=channel_account_id,
+    )
+    if not matched:
+        raise HTTPException(
+            status_code=403,
+            detail="No authorized approver is configured for this channel account",
+        )
+    return matched
+
+
+def _lookup_approvers(
+    ctx,
+    system_name: str,
+    service_name: str | None = None,
+    *,
+    channel: str,
+    channel_account_id: str,
+) -> list[str]:
+    """Resolve approvers for one channel account without cross-channel fallback."""
     if not system_name:
-        return []
-    systems = get_all_systems()
-    sys_cfg = systems.get(system_name)
-    if not sys_cfg:
-        return []
-    sys_routing = _extract_routing(sys_cfg)
-    if service_name:
-        for svc in sys_cfg.get("services", []) or []:
-            if svc.get("name") == service_name:
-                svc_routing = _extract_routing(svc)
-                return list(_extract_approvers(sys_routing, svc_routing))
-    return list(_extract_approvers(sys_routing))
+        configured = []
+    else:
+        systems = get_all_systems()
+        sys_cfg = systems.get(system_name)
+        configured = []
+        if sys_cfg:
+            try:
+                sys_routing = _extract_routing(sys_cfg)
+                if service_name:
+                    for svc in sys_cfg.get("services", []) or []:
+                        if svc.get("name") == service_name:
+                            configured = list(
+                                _extract_approvers(sys_routing, _extract_routing(svc))
+                            )
+                            break
+                if not configured:
+                    configured = list(_extract_approvers(sys_routing))
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Invalid routing approver configuration: {exc}",
+                ) from exc
+    identities = _effective_approver_identities(
+        ctx,
+        configured,
+        channel=channel,
+        channel_account_id=channel_account_id,
+    )
+    return [identity["sender_id"] for identity in identities]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -63,8 +152,8 @@ def _lookup_approvers(ctx, system_name: str, service_name: str | None = None) ->
 
 @registry.register(
     name="ops.routing.resolve_message_target",
-    title="解析 Element 消息路由目标",
-    description="将 Element 房间消息文本确定性路由到 OPS 系统/服务，并签发路由票据。qclaw 调用此工具确定消息对应的操作目标。",
+    title="解析 QClaw 消息路由目标",
+    description="将 QClaw 渠道消息确定性路由到 OPS 系统/服务，并签发绑定完整消息上下文的路由票据。",
     scopes=["ops:read"],
     risk="low",
     category="routing",
@@ -73,42 +162,90 @@ def _lookup_approvers(ctx, system_name: str, service_name: str | None = None) ->
         "properties": {
             "message_text": {
                 "type": "string",
-                "description": "Element 房间消息原文",
+                "description": "QClaw 渠道消息原文",
             },
+            "message_context": message_context_schema(),
             "room_id": {
                 "type": "string",
-                "description": "Matrix 房间 ID",
+                "description": "兼容字段：Matrix 房间 ID",
             },
             "event_id": {
                 "type": "string",
-                "description": "Matrix 事件 ID",
+                "description": "兼容字段：Matrix 事件 ID",
+            },
+            "request_event_id": {
+                "type": "string",
+                "description": "兼容字段：Matrix 请求事件 ID",
+            },
+            "sender_matrix_id": {
+                "type": "string",
+                "description": "兼容字段：Matrix 发起人 ID",
             },
             "content_sha256": {
                 "type": "string",
                 "description": "消息内容的 SHA-256，用于绑定票据",
             },
         },
-        "required": ["message_text", "room_id", "event_id", "content_sha256"],
+        "required": ["message_text"],
         "additionalProperties": False,
     },
 )
 def routing_resolve_message_target(args, ctx, db):
     message_text = args["message_text"]
-    room_id = args["room_id"]
-    event_id = args["event_id"]
-    content_sha256 = args["content_sha256"]
-
-    # Enforce Element room binding at the MCP layer: if the caller's token
-    # was issued with a non-empty bound_room_ids list, only rooms on the
-    # list are allowed. Empty / missing binding = no restriction.
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), room_id)
+    legacy_fields = {
+        "room_id",
+        "event_id",
+        "request_event_id",
+        "sender_matrix_id",
+        "content_sha256",
+    }
+    try:
+        if "message_context" in args:
+            if legacy_fields & set(args):
+                raise ValueError(
+                    "message_context cannot be combined with legacy Matrix fields"
+                )
+            message_context = normalize_message_context(args["message_context"])
+        else:
+            legacy_context = {
+                key: args[key]
+                for key in legacy_fields
+                if key in args
+            }
+            message_context = normalize_message_context(legacy_context)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # 获取所有系统配置
     systems_dict = get_all_systems()
-    systems = list(systems_dict.values())
+    systems = [
+        {**system, "name": system.get("name") or name}
+        for name, system in systems_dict.items()
+    ]
 
     # 解析路由
-    decision = resolve_message_target(message_text, systems)
+    try:
+        decision = resolve_message_target(message_text, systems)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid routing approver configuration: {exc}",
+        ) from exc
+
+    configured_identities = [dict(item) for item in decision.approvers]
+    effective_identities: list[dict[str, str]] = []
+    if decision.outcome == RoutingOutcome.RESOLVED:
+        effective_identities = _effective_approver_identities(
+            ctx,
+            configured_identities,
+            channel=message_context.channel,
+            channel_account_id=message_context.channel_account_id,
+        )
+    approver_sender_ids = [item["sender_id"] for item in effective_identities]
+    approver_actor_keys = [
+        f'{item["channel"]}:{item["channel_account_id"]}:{item["sender_id"]}'
+        for item in effective_identities
+    ]
 
     if decision.outcome != RoutingOutcome.RESOLVED:
         return {
@@ -117,7 +254,11 @@ def routing_resolve_message_target(args, ctx, db):
             "service_name": None,
             "matched_by": None,
             "candidates": list(decision.candidates),
-            "approvers": list(decision.approvers),
+            "message_context": message_context.to_dict(),
+            "configured_approver_identities": configured_identities,
+            "approver_identities": [],
+            "approver_actor_keys": [],
+            "approvers": [],
             "ticket": None,
             "ticket_digest": None,
             "routing_config_revision": decision.routing_config_revision,
@@ -125,9 +266,7 @@ def routing_resolve_message_target(args, ctx, db):
 
     # 签发路由票据
     ticket = issue_ticket(
-        room_id=room_id,
-        event_id=event_id,
-        content_sha256=content_sha256,
+        message_context=message_context,
         system_name=decision.system_name,
         service_name=decision.service_name,
         routing_config_revision=decision.routing_config_revision,
@@ -139,7 +278,11 @@ def routing_resolve_message_target(args, ctx, db):
         "service_name": decision.service_name,
         "matched_by": decision.matched_by,
         "candidates": list(decision.candidates),
-        "approvers": list(decision.approvers),
+        "message_context": message_context.to_dict(),
+        "configured_approver_identities": configured_identities,
+        "approver_identities": effective_identities,
+        "approver_actor_keys": approver_actor_keys,
+        "approvers": approver_sender_ids,
         "ticket": ticket.ticket,
         "ticket_digest": ticket.digest,
         "routing_config_revision": decision.routing_config_revision,
@@ -155,27 +298,95 @@ def _common_prepare_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "room_id": {"type": "string", "description": "Matrix 房间 ID"},
-            "request_event_id": {"type": "string", "description": "请求消息的 Matrix 事件 ID"},
-            "content_sha256": {"type": "string", "description": "消息内容 SHA-256"},
+            "message_context": message_context_schema(),
+            "routing_ticket": {"type": "string", "description": "完整签名路由票据"},
+            "room_id": {"type": "string", "description": "兼容字段：Matrix 房间 ID"},
+            "request_event_id": {"type": "string", "description": "兼容字段：Matrix 请求事件 ID"},
+            "event_id": {"type": "string", "description": "兼容字段：Matrix 事件 ID"},
+            "sender_matrix_id": {"type": "string", "description": "兼容字段：Matrix 发起人 ID"},
+            "content_sha256": {"type": "string", "description": "兼容字段：消息内容 SHA-256"},
             "system_name": {"type": "string", "description": "目标系统名"},
             "service_name": {"type": "string", "description": "目标服务名（可选）"},
             "environment": {"type": "string", "description": "环境（test/staging/prod）"},
-            "routing_config_revision": {"type": "string", "description": "路由配置 revision"},
-            "routing_ticket_digest": {"type": "string", "description": "路由票据摘要"},
             "ai_reason": {"type": "string", "description": "AI 建议此操作的理由"},
         },
         "required": [
-            "room_id",
-            "request_event_id",
-            "content_sha256",
+            "routing_ticket",
             "system_name",
             "environment",
-            "routing_config_revision",
-            "routing_ticket_digest",
         ],
         "additionalProperties": False,
     }
+
+
+def _routing_systems() -> list[dict]:
+    return [
+        {**system, "name": system.get("name") or name}
+        for name, system in get_all_systems().items()
+    ]
+
+
+def _validated_prepare_ticket(args, ctx):
+    """Validate a prepare request before any approval or plan is created."""
+    if "routing_config_revision" in args or "routing_ticket_digest" in args:
+        raise HTTPException(
+            status_code=400,
+            detail="routing revision and ticket digest are computed by OPS",
+        )
+
+    legacy_fields = {
+        "room_id",
+        "request_event_id",
+        "event_id",
+        "sender_matrix_id",
+        "content_sha256",
+    }
+    try:
+        if "message_context" in args:
+            if legacy_fields & set(args):
+                raise ValueError(
+                    "message_context cannot be combined with legacy Matrix fields"
+                )
+            context = MessageContext.from_dict(args["message_context"])
+        else:
+            context = normalize_message_context(
+                {key: args[key] for key in legacy_fields if key in args}
+            )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    routing_ticket = str(args.get("routing_ticket") or "").strip()
+    if not routing_ticket:
+        raise HTTPException(status_code=400, detail="routing_ticket is required")
+
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None),
+        message_context=context,
+    )
+    try:
+        revision = compute_routing_revision(_routing_systems())
+        valid = verify_ticket(
+            routing_ticket,
+            expected_message_context=context,
+            expected_system_name=args["system_name"],
+            expected_service_name=args.get("service_name"),
+            expected_revision=revision,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Current routing configuration is invalid: {exc}",
+        ) from exc
+    if not valid:
+        raise HTTPException(
+            status_code=403,
+            detail="Routing ticket is invalid, expired, stale, or bound to another message target",
+        )
+
+    ticket_digest = hashlib.sha256(routing_ticket.encode("utf-8")).hexdigest()
+    return context, revision, ticket_digest
 
 
 def _freeze_file_upload_parameters(raw_parameters: dict, db, *, require_package_name: bool = False):
@@ -279,17 +490,23 @@ def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
     },
 )
 def approval_prepare_service_control(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ActionApprovalService(db)
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
+        args, ctx
+    )
     control_action = args["control_action"]
     action_label = {"restart": "重启", "stop": "停止", "start": "启动", "update": "更新"}.get(control_action, control_action)
-    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
+    )
+    service = ActionApprovalService(db)
     approval, short_code = service.prepare(
         action_type="SERVICE_CONTROL",
         tool_name="ops.approval.prepare_service_control",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
+        message_context=message_context,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
@@ -298,11 +515,14 @@ def approval_prepare_service_control(args, ctx, db):
             "control_action": control_action,
             **args.get("action_parameters", {}),
         },
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
         risk_level="high",
         ai_reason=args.get("ai_reason", ""),
-        authorized_matrix_users=approvers,
+        authorized_identities=[
+            {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+            for sender_id in approvers
+        ],
     )
     return {
         "approval_id": approval.id,
@@ -358,7 +578,9 @@ def approval_prepare_service_control(args, ctx, db):
     },
 )
 def approval_prepare_file_upload(args, ctx, db):
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
+        args, ctx
+    )
 
     targets = [str(item or "").strip() for item in (args.get("targets") or [])]
     if not targets or any(not item for item in targets):
@@ -371,27 +593,34 @@ def approval_prepare_file_upload(args, ctx, db):
         db,
     )
 
-    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
+    )
     service = ActionApprovalService(db)
     approval, short_code = service.prepare(
         action_type="FILE_UPLOAD",
         tool_name="ops.approval.prepare_file_upload",
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
+        message_context=message_context,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
         targets=targets,
         action_parameters=action_parameters,
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
         risk_level="high",
         ai_reason=args.get("ai_reason", ""),
         package_name=filename,
         package_sha256=package_sha256,
         package_size_bytes=package_size_bytes,
-        authorized_matrix_users=approvers,
+        authorized_identities=[
+            {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+            for sender_id in approvers
+        ],
     )
     return {
         "approval_id": approval.id,
@@ -429,25 +658,38 @@ def approval_prepare_file_upload(args, ctx, db):
         "properties": {
             "approval_id": {"type": "string", "description": "审批工单 ID"},
             "short_code": {"type": "string", "description": "一次性审批短码"},
+            "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
             "approval_event_id": {"type": "string", "description": "审批消息的 Matrix 事件 ID"},
         },
-        "required": ["approval_id", "short_code", "approver_matrix_id", "room_id", "approval_event_id"],
+        "required": ["approval_id", "short_code"],
         "additionalProperties": False,
     },
 )
 def approval_execute(args, ctx, db):
     # execute is called from the same room that prepared the approval, so the
     # room_id is the natural anchor for the binding check.
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+    approval_context = normalize_message_context(
+        args.get("message_context") or {
+            "room_id": args.get("room_id"),
+            "request_event_id": args.get("approval_event_id"),
+            "sender_matrix_id": args.get("approver_matrix_id"),
+            "content_sha256": args.get("content_sha256") or "0" * 64,
+        }
+    )
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
+        message_context=approval_context,
+    )
     service = ActionApprovalService(db)
     approval = service.consume(
         approval_id=args["approval_id"],
         short_code=args["short_code"],
-        approver_matrix_id=args["approver_matrix_id"],
-        room_id=args["room_id"],
-        approval_event_id=args["approval_event_id"],
+        approver_matrix_id=approval_context.sender_id,
+        room_id=approval_context.conversation_id,
+        approval_event_id=approval_context.message_id,
+        approval_context=approval_context,
     )
     if not approval:
         return {
@@ -472,6 +714,14 @@ def approval_execute(args, ctx, db):
     return {
         "ok": approval.status == "SUCCEEDED",
         "approval_id": approval.id,
+        "message_context": {
+            "channel": approval.channel,
+            "channel_account_id": approval.channel_account_id,
+            "conversation_id": approval.conversation_id,
+            "message_id": approval.request_message_id,
+            "sender_id": approval.request_sender_id,
+            "content_sha256": approval.content_sha256,
+        },
         "action_type": approval.action_type,
         "status": approval.status,
         "approved_by": approval.approved_by,
@@ -504,22 +754,45 @@ def approval_execute(args, ctx, db):
             "status": {"type": "string", "description": "状态过滤"},
             "action_type": {"type": "string", "description": "操作类型过滤"},
             "limit": {"type": "integer", "description": "返回数量，默认 50"},
+            "message_context": message_context_schema(),
+            "room_id": {
+                "type": "string",
+                "description": "Legacy Matrix room ID",
+            },
         },
         "additionalProperties": False,
     },
 )
 def approval_list(args, ctx, db):
-    from sqlalchemy import and_
     from app.db.models import AiActionApproval
 
     query = db.query(AiActionApproval)
+    if "message_context" in args:
+        context = normalize_message_context(args["message_context"])
+        query = query.filter(
+            AiActionApproval.channel == context.channel,
+            AiActionApproval.channel_account_id == context.channel_account_id,
+            AiActionApproval.conversation_id == context.conversation_id,
+        )
+    elif "room_id" in args:
+        context = normalize_message_context({
+            "room_id": str(args.get("room_id") or "").strip(),
+            "request_event_id": "approval-list",
+            "sender_matrix_id": "approval-list",
+            "content_sha256": "0" * 64,
+        })
+        query = query.filter(
+            AiActionApproval.channel == context.channel,
+            AiActionApproval.channel_account_id == context.channel_account_id,
+            AiActionApproval.conversation_id == context.conversation_id,
+        )
+    elif getattr(ctx, "channel_bindings", None):
+        return {"ok": True, "total": 0, "items": []}
     if args.get("status"):
         query = query.filter(AiActionApproval.status == args["status"])
     if args.get("action_type"):
         query = query.filter(AiActionApproval.action_type == args["action_type"])
-    query = query.order_by(AiActionApproval.created_at.desc())
-    limit = int(args.get("limit", 50))
-    items = query.limit(limit).all()
+    items = query.order_by(AiActionApproval.created_at.desc()).limit(int(args.get("limit", 50))).all()
 
     return {
         "ok": True,
@@ -535,6 +808,14 @@ def approval_list(args, ctx, db):
                 "created_at": a.created_at.isoformat() if a.created_at else None,
                 "expires_at": a.expires_at.isoformat() if a.expires_at else None,
                 "approved_by": a.approved_by,
+                "message_context": {
+                    "channel": a.channel,
+                    "channel_account_id": a.channel_account_id,
+                    "conversation_id": a.conversation_id,
+                    "message_id": a.request_message_id,
+                    "sender_id": a.request_sender_id,
+                    "content_sha256": a.content_sha256,
+                },
             }
             for a in items
         ],
@@ -587,12 +868,7 @@ def _plan_steps_schema() -> dict:
     input_schema={
         "type": "object",
         "properties": {
-            "room_id": {"type": "string", "description": "Matrix 房间 ID"},
-            "request_event_id": {"type": "string", "description": "请求消息的 Matrix 事件 ID"},
-            "content_sha256": {"type": "string", "description": "消息内容 SHA-256"},
-            "system_name": {"type": "string", "description": "目标系统名"},
-            "service_name": {"type": "string", "description": "目标服务名（可选）"},
-            "environment": {"type": "string", "description": "环境（test/staging/prod）"},
+            **_common_prepare_schema()["properties"],
             "targets": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -603,46 +879,87 @@ def _plan_steps_schema() -> dict:
                 "type": "object",
                 "description": "执行策略（如 continue_on_error / max_retries）",
             },
-            "routing_config_revision": {"type": "string", "description": "路由配置 revision"},
-            "routing_ticket_digest": {"type": "string", "description": "路由票据摘要"},
-            "ai_reason": {"type": "string", "description": "AI 建议此计划执行的理由"},
             "risk_level": {"type": "string", "description": "风险等级（low/medium/high）"},
+            "temporary_grant_id": {
+                "type": "string",
+                "description": "临时自审批授权 ID（可选；存在时校验当前请求方为活跃受益人）",
+            },
+            "grant_self_approval": {
+                "type": "boolean",
+                "description": "请求方申请自审批路径（可选；存在活跃授权时自动附加）",
+            },
         },
-        "required": [
-            "room_id",
-            "request_event_id",
-            "content_sha256",
-            "system_name",
-            "environment",
-            "steps",
-            "routing_config_revision",
-            "routing_ticket_digest",
-        ],
+        "required": _common_prepare_schema()["required"] + ["steps"],
         "additionalProperties": False,
     },
 )
 def approval_prepare_plan(args, ctx, db):
-    """创建消息级执行计划并返回一次性审批短码。"""
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
-    service = ExecutionPlanService(db)
-    approvers = _lookup_approvers(ctx, args["system_name"], args.get("service_name"))
+    """创建消息级执行计划并返回一次性审批短码。
+
+    若存在活跃临时自审批授权且当前请求方为授权受益人，则把受益人加入
+    授权身份集合并记录 temporary_grant_id，使受益人可通过自审批路径消费计划。
+    原始审批人始终保留在授权身份中。
+    """
+    from app.services.temporary_approval import TemporaryApprovalService
+
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(
+        args, ctx
+    )
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
+    )
     steps = _freeze_file_upload_plan_steps(args["steps"], db)
+    service = ExecutionPlanService(db)
+
+    # 临时自审批授权：请求方为活跃授权受益人时自动附加自审批路径。
+    temporary_grant_id = None
+    authorized = [
+        {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
+        for sender_id in approvers
+    ]
+    grant_service = TemporaryApprovalService(db)
+    action_types = [step.get("action_type") for step in steps if isinstance(step, dict)]
+    if grant_service.is_self_approval_allowed(
+        actor_key=message_context.actor_key,
+        system_name=args["system_name"],
+        environment_name=args["environment"],
+        action_types=action_types,
+        message_context=message_context,
+    ):
+        active = grant_service.get_active_grant(
+            actor_key=message_context.actor_key,
+            system_name=args["system_name"],
+            environment_name=args["environment"],
+            message_context=message_context,
+        )
+        if active is not None:
+            temporary_grant_id = active.id
+            beneficiary_identity = {
+                "channel": message_context.channel,
+                "channel_account_id": message_context.channel_account_id,
+                "sender_id": message_context.sender_id,
+            }
+            if beneficiary_identity not in authorized:
+                authorized.append(beneficiary_identity)
 
     plan, short_code = service.prepare(
-        room_id=args["room_id"],
-        request_event_id=args["request_event_id"],
-        content_sha256=args["content_sha256"],
+        message_context=message_context,
         system_name=args["system_name"],
         service_name=args.get("service_name"),
         environment=args["environment"],
         targets=args.get("targets", []),
         steps=steps,
         policy=args.get("policy", {}),
-        routing_config_revision=args["routing_config_revision"],
-        routing_ticket_digest=args["routing_ticket_digest"],
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
         risk_level=args.get("risk_level", "high"),
         ai_reason=args.get("ai_reason", ""),
-        authorized_matrix_users=approvers,
+        authorized_identities=authorized,
+        temporary_grant_id=temporary_grant_id,
     )
 
     return {
@@ -656,6 +973,7 @@ def approval_prepare_plan(args, ctx, db):
         "environment": plan.environment,
         "targets": plan.targets,
         "step_count": len(plan.steps),
+        "temporary_grant_id": plan.temporary_grant_id,
         "steps": [
             {
                 "step_key": s.step_key,
@@ -683,24 +1001,37 @@ def approval_prepare_plan(args, ctx, db):
         "properties": {
             "plan_id": {"type": "string", "description": "执行计划 ID"},
             "short_code": {"type": "string", "description": "一次性审批短码"},
+            "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
             "approval_event_id": {"type": "string", "description": "审批消息的 Matrix 事件 ID"},
         },
-        "required": ["plan_id", "short_code", "approver_matrix_id", "room_id", "approval_event_id"],
+        "required": ["plan_id", "short_code"],
         "additionalProperties": False,
     },
 )
 def approval_execute_plan(args, ctx, db):
     """消费短码并执行已审批的计划。"""
-    enforce_room_binding(getattr(ctx, "bound_room_ids", None), args.get("room_id"))
+    approval_context = normalize_message_context(
+        args.get("message_context") or {
+            "room_id": args.get("room_id"),
+            "request_event_id": args.get("approval_event_id"),
+            "sender_matrix_id": args.get("approver_matrix_id"),
+            "content_sha256": args.get("content_sha256") or "0" * 64,
+        }
+    )
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
+        message_context=approval_context,
+    )
     service = ExecutionPlanService(db)
     plan = service.consume(
         plan_id=args["plan_id"],
         short_code=args["short_code"],
-        approver_matrix_id=args["approver_matrix_id"],
-        room_id=args["room_id"],
-        approval_event_id=args["approval_event_id"],
+        approver_matrix_id=approval_context.sender_id,
+        room_id=approval_context.conversation_id,
+        approval_event_id=approval_context.message_id,
+        approval_context=approval_context,
     )
     if not plan:
         return {
@@ -724,6 +1055,14 @@ def approval_execute_plan(args, ctx, db):
     return {
         "ok": plan.status == "SUCCEEDED",
         "plan_id": plan.id,
+        "message_context": {
+            "channel": plan.channel,
+            "channel_account_id": plan.channel_account_id,
+            "conversation_id": plan.conversation_id,
+            "message_id": plan.request_message_id,
+            "sender_id": plan.request_sender_id,
+            "content_sha256": plan.content_sha256,
+        },
         "plan_digest": plan.plan_digest,
         "status": plan.status,
         "approved_by": plan.approved_by,
@@ -746,3 +1085,163 @@ def approval_execute_plan(args, ctx, db):
             else f"执行计划状态: {plan.status}"
         ),
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# ops.approval.temporary_access — 临时自审批授权
+# ──────────────────────────────────────────────────────────────
+
+@registry.register(
+    name="ops.approval.temporary_access",
+    title="管理临时自审批授权",
+    description="为测试环境变更创建/确认/撤销限时自审批授权。操作身份只从 message_context.sender_id 推导；仅配置的原始审批人能确认/撤销；授权只允许固定受益人、固定测试系统/环境、固定动作集与授权生命周期。确认码 15 分钟有效且仅能消费一次。",
+    scopes=["ops:read"],
+    risk="low",
+    category="approval_prepare",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["request", "confirm", "revoke"],
+                "description": "操作类型：request 发起授权申请 / confirm 确认授权 / revoke 撤销授权",
+            },
+            "message_context": message_context_schema(),
+            "system_name": {"type": "string", "description": "目标系统名（request 必填）"},
+            "environment": {"type": "string", "description": "测试环境名（request 必填）"},
+            "beneficiary_identity": {"type": "string", "description": "受益人 actor key，如 matrix:default:@user:example.org（request 必填）"},
+            "allowed_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "允许的自审批动作集（request 必填）：FILE_UPLOAD / RELEASE / SERVICE_CONTROL / HEALTH_CHECK",
+            },
+            "reason": {"type": "string", "description": "授权理由（request 必填）"},
+            "duration_value": {"type": "integer", "description": "授权时长数值（request 可选，默认 1）"},
+            "duration_unit": {"type": "string", "enum": ["day", "week"], "description": "授权时长单位（request 可选，默认 day）"},
+            "grant_id": {"type": "string", "description": "授权 ID（confirm/revoke 必填）"},
+            "short_code": {"type": "string", "description": "一次性确认码（confirm 必填）"},
+            "revoke_reason": {"type": "string", "description": "撤销理由（revoke 可选）"},
+        },
+        "required": ["operation", "message_context"],
+        "additionalProperties": False,
+    },
+)
+def temporary_access(args, ctx, db):
+    """临时自审批授权管理工具：request / confirm / revoke。
+
+    操作身份只从 message_context.sender_id 推导；原始审批人从
+    _lookup_approvers（数据库/Token 策略）解析，绝不信任消息文本里的用户名。
+    """
+    from app.services.temporary_approval import TemporaryApprovalService
+
+    operation = str(args.get("operation") or "").strip()
+    if operation not in ("request", "confirm", "revoke"):
+        return {"ok": False, "error": "operation must be request, confirm or revoke"}
+
+    try:
+        message_context = normalize_message_context(args.get("message_context") or {})
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": f"invalid message_context: {exc}"}
+
+    enforce_conversation_binding(
+        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
+        message_context=message_context,
+    )
+
+    service = TemporaryApprovalService(db)
+
+    if operation == "request":
+        system_name = str(args.get("system_name") or "").strip()
+        environment = str(args.get("environment") or "").strip()
+        beneficiary = str(args.get("beneficiary_identity") or "").strip()
+        allowed_actions = args.get("allowed_actions") or []
+        reason = str(args.get("reason") or "").strip()
+        if not system_name or not environment:
+            return {"ok": False, "error": "system_name and environment are required for request"}
+        if not beneficiary:
+            return {"ok": False, "error": "beneficiary_identity is required for request"}
+        if not isinstance(allowed_actions, list) or not allowed_actions:
+            return {"ok": False, "error": "allowed_actions must not be empty"}
+        if not reason:
+            return {"ok": False, "error": "reason is required for request"}
+
+        try:
+            approvers = _lookup_approvers(
+                ctx,
+                system_name,
+                None,
+                channel=message_context.channel,
+                channel_account_id=message_context.channel_account_id,
+            )
+        except HTTPException as exc:
+            return {"ok": False, "error": str(exc.detail)}
+        if not approvers:
+            return {"ok": False, "error": "no authorized approver is configured for this channel account"}
+
+        try:
+            grant, short_code = service.request(
+                message_context=message_context,
+                beneficiary_actor_key=beneficiary,
+                system_name=system_name,
+                environment_name=environment,
+                allowed_actions=allowed_actions,
+                reason=reason,
+                authorized_identities=[
+                    {
+                        "channel": message_context.channel,
+                        "channel_account_id": message_context.channel_account_id,
+                        "sender_id": approver,
+                    }
+                    for approver in approvers
+                ],
+                duration_value=int(args.get("duration_value") or 1),
+                duration_unit=str(args.get("duration_unit") or "day"),
+            )
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+        payload = grant.to_dict()
+        if short_code:
+            payload["short_code"] = short_code
+        payload["ok"] = True
+        payload["grant_id"] = payload.get("id")
+        return payload
+
+    if operation in ("confirm", "revoke"):
+        grant_id = str(args.get("grant_id") or "").strip()
+        if not grant_id:
+            return {"ok": False, "error": "grant_id is required"}
+        actor_key = message_context.actor_key
+
+        if operation == "confirm":
+            short_code = str(args.get("short_code") or "").strip()
+            if not short_code:
+                return {"ok": False, "error": "short_code is required for confirm"}
+            confirmed = service.confirm(
+                grant_id,
+                short_code,
+                actor_key=actor_key,
+                message_context=message_context,
+            )
+            if confirmed is None:
+                return {"ok": False, "error": "confirmation failed: invalid code, expired, wrong actor or wrong conversation"}
+            payload = confirmed.to_dict()
+            payload["ok"] = True
+            payload["grant_id"] = payload.get("id")
+            return payload
+
+        reason = str(args.get("revoke_reason") or "").strip()
+        revoked = service.revoke(
+            grant_id,
+            actor_key=actor_key,
+            message_context=message_context,
+            reason=reason,
+        )
+        if revoked is None:
+            return {"ok": False, "error": "revoke failed: grant not found, not active, wrong actor or wrong conversation"}
+        payload = revoked.to_dict()
+        payload["ok"] = True
+        payload["grant_id"] = payload.get("id")
+        return payload
+
+    return {"ok": False, "error": f"unsupported operation: {operation}"}

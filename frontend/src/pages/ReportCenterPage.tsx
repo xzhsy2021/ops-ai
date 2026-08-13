@@ -58,7 +58,6 @@ function PageControls({
 
 const TYPE_LABELS: Record<string, string> = {
   diagnostics: '系统诊断',
-  ai_diagnostics: 'AI 诊断',
   operation_chain: '操作链路',
   operation_chains_index: '链路索引',
   deployment: '发布报告',
@@ -218,7 +217,7 @@ export default function ReportCenterPage() {
     <div className="page-container">
       <PageHeader
         title="报告中心"
-        description="统一管理系统诊断、AI 分析、发布报告与 MCP/AI 操作链路报告；报告只打包已有证据，便于下载、归档和审计回放。"
+        description="统一管理系统诊断、发布报告、巡检报告与操作链路报告；报告只打包已有证据，便于下载、归档和审计回放。"
         actions={<div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><FavoriteButton url={ROUTES.reports} label="报告中心" category="reports" /><Link className="btn btn-subtle" to={ROUTES.audit}>审计日志</Link><Link className="btn btn-subtle" to={ROUTES.tasks}>任务中心</Link><button className="btn primary" onClick={load} disabled={loading}>{loading ? '加载中...' : '刷新'}</button></div>}
       />
 

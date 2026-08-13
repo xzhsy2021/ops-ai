@@ -1,10 +1,10 @@
 # MCP Capability Matrix
 
-Updated: 2026-08-06
+Updated: 2026-08-13
 
 This matrix is the current OPS MCP/HTTP tool capability map for local small-team operations.
 
-> For risk disposition of high-risk / write tools, see [HIGH_RISK_CAPABILITY_ASSESSMENT.md](./HIGH_RISK_CAPABILITY_ASSESSMENT.md). For the message-level execution plan (`ops.approval.prepare_plan` / `ops.approval.execute_plan`) and its step types, see [2026-08-06-message-execution-plan-design.md](../plans/2026-08-06-message-execution-plan-design.md).
+> For risk disposition of high-risk / write tools, see [HIGH_RISK_CAPABILITY_ASSESSMENT.md](./HIGH_RISK_CAPABILITY_ASSESSMENT.md). For the message-level execution plan (`ops.approval.prepare_plan` / `ops.approval.execute_plan`) and its step types, see [2026-08-06-message-execution-plan-design.md](../plans/2026-08-06-message-execution-plan-design.md). For the channel-neutral qclaw approval integration (Matrix / WeChat / Telegram), temporary self-approval, and the normalized `message_context` contract, see [qclaw-channel-approval-integration.md](../qclaw-channel-approval-integration.md).
 
 Naming rule:
 
@@ -146,8 +146,12 @@ Registered approval tools (all gated by the one-time short code, not by token sc
 | `ops.approval.prepare_service_control` | `ops_approval_prepare_service_control` | plan | `ops:read` | low | Legacy single-action service-control approval (restart/stop/start/update) |
 | `ops.approval.execute` | `ops_approval_execute` | execute | `ops:read` | low | Legacy single-action approval consume (deploy/rollback/DML/package-cleanup) |
 | `ops.approval.list` | `ops_approval_list` | read | `ops:read` | low | List approvals with filters |
+| `ops.approval.temporary_access` | `ops_approval_temporary_access` | plan | `ops:read` | low | Request / confirm / revoke a time-boxed test-environment self-approval grant (FILE_UPLOAD / RELEASE / SERVICE_CONTROL / HEALTH_CHECK only); actor identity comes only from `message_context.sender_id`, confirmation by configured original approvers in the same conversation |
+| `ops.help.query` | `ops_help_query` | read | `ops:read` | low | Contextual help built from live registry, permission summaries, system/environment rows, approver policy, and active grants; never leaks tokens, credentials, private keys, or code hashes |
 
 Legacy single-action prepare paths for release / rollback / DML / package-cleanup are routed through `ops.approval.prepare_release` / `ops.approval.prepare_rollback` / `ops.approval.prepare_dml` / `ops.approval.prepare_package_cleanup` as approval-hint names in `app/services/tool_policy.py` (`APPROVAL_TOOL_MAP` / `APPROVAL_TOOL_NAME_MAP`); the actual registered entry point is `ops.approval.execute`, and the business logic is shared with the plan steps via `approval_executor.execute_*`.
+
+All routing / approval / package / help tools accept the normalized `message_context` object (channel, channel_account_id, conversation_id, message_id, sender_id, content_sha256). Legacy Matrix form fields (`room_id`, `request_event_id`, `sender_matrix_id`, `content_sha256`) remain accepted only at the API compatibility boundary and are normalized to `channel=matrix`, `channel_account_id=default`. The channel-attachment package intake at `POST /api/v2/tools/packages/upload` accepts a JSON `message_context` multipart field, enforces token conversation binding, verifies the declared `package_sha256`, and stores `source_context` / `source_message_key` on the package (same message + same hash reuses; same message + different hash returns 409). See [qclaw-channel-approval-integration.md](../qclaw-channel-approval-integration.md).
 
 ## Streaming Tool Results
 

@@ -40,6 +40,7 @@ http://localhost:8000
 - Inspection center with Path A inspection runs, issues, reports, item config, and three-tier DAILY/WEEKLY/MONTHLY schedules.
 - HTTP Tool API and MCP-compatible access.
 - Risk policy, confirmation text, taskization, and audit fallback for high-risk operations.
+- Channel-neutral qclaw approval integration (Matrix / WeChat / Telegram) with a normalized `message_context`, routing tickets, one-time execution-plan approvals, and temporary self-approval grants for test environments.
 
 ## AI / MCP Safety Baseline
 

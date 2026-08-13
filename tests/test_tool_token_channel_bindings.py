@@ -435,19 +435,46 @@ def test_legacy_matrix_approval_rejects_cross_channel_token_approvers(
         },
     )
     try:
+        # 合法路由票据：revision 由 OPS 根据当前配置计算
+        from app.services.qclaw_routing import (
+            compute_routing_revision,
+            issue_ticket,
+        )
+        from app.services.message_context import MessageContext
+
+        monkeypatch.setattr(
+            "app.services.qclaw_routing.QCLAW_APPROVAL_SIGNING_KEY",
+            "channel-bindings-test-key-0123456789abcdef",
+        )
+        systems = approval_tools._routing_systems()
+        revision = compute_routing_revision(systems)
+        legacy_context = MessageContext(
+            channel="matrix",
+            channel_account_id="default",
+            conversation_id="!ops:example.org",
+            message_id="$event",
+            sender_id="@requester:matrix.org",
+            content_sha256="b" * 64,
+        )
+        ticket = issue_ticket(
+            legacy_context,
+            "crypto-trader",
+            "strategy",
+            revision,
+        )
         with pytest.raises(HTTPException) as exc:
             approval_tools.approval_prepare_service_control(
                 {
                     "room_id": "!ops:example.org",
                     "request_event_id": "$event",
+                    "sender_matrix_id": "@requester:matrix.org",
                     "content_sha256": "b" * 64,
                     "system_name": "crypto-trader",
                     "service_name": "strategy",
                     "environment": "test",
                     "control_action": "restart",
                     "targets": ["server-1"],
-                    "routing_config_revision": "rev-1",
-                    "routing_ticket_digest": "ticket-1",
+                    "routing_ticket": ticket.ticket,
                 },
                 ctx,
                 db,

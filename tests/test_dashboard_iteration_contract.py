@@ -110,9 +110,9 @@ def test_workbench_clock_is_rendered_in_visible_hero_copy():
     assert "function DashboardClock" in dashboard_page
     assert "<DashboardClock now={now} />" in dashboard_page
     assert "<DashboardClock now={now} />" in dashboard_page
-    assert "dashboard-hero-side-fixed" in dashboard_page
+    assert "cc-command-hero" in dashboard_page
     assert "dashboard-clock-card" in dashboard_styles
-    assert "min-width: 268px" in dashboard_styles
+    assert "grid-template-columns: minmax(138px, auto) minmax(0, 1fr)" in dashboard_styles
 
 
 def test_runtime_snapshot_uses_cache_until_force_refresh(monkeypatch, sqlite_session):

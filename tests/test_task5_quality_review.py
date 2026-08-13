@@ -112,11 +112,28 @@ def test_all_prepare_tools_verify_ticket_and_derive_persisted_ticket_fields(monk
                 environment=kwargs["environment"],
                 targets=kwargs["targets"],
                 steps=[],
+                temporary_grant_id=None,
             ), "87654321"
 
     monkeypatch.setattr(approval_tools, "get_all_systems", _systems)
     monkeypatch.setattr(approval_tools, "ActionApprovalService", FakeActionApprovalService)
     monkeypatch.setattr(approval_tools, "ExecutionPlanService", FakeExecutionPlanService)
+
+    class FakeGrantService:
+        """Task 8 集成后 prepare 会查询临时授权；本测试只关心票据字段，用 fake 隔离。"""
+        def __init__(self, db):
+            pass
+
+        def is_self_approval_allowed(self, **kwargs):
+            return False
+
+        def get_active_grant(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "app.services.temporary_approval.TemporaryApprovalService",
+        FakeGrantService,
+    )
     monkeypatch.setattr(
         approval_tools,
         "_lookup_approvers",
@@ -162,9 +179,14 @@ def test_all_prepare_tools_verify_ticket_and_derive_persisted_ticket_fields(monk
     assert len(captured) == 3
     assert all(item["routing_config_revision"] == revision for item in captured)
     assert all(item["routing_ticket_digest"] == expected_digest for item in captured)
-    assert all(item["room_id"] == "conversation-1" for item in captured)
-    assert all(item["request_event_id"] == "message-1" for item in captured)
-    assert all(item["content_sha256"] == "a" * 64 for item in captured)
+    for item in captured:
+        mc = item["message_context"]
+        assert mc.channel == "wechat"
+        assert mc.channel_account_id == "primary"
+        assert mc.conversation_id == "conversation-1"
+        assert mc.message_id == "message-1"
+        assert mc.sender_id == "requester-1"
+        assert mc.content_sha256 == "a" * 64
     assert approver_calls == [
         {"channel": "wechat", "channel_account_id": "primary"},
         {"channel": "wechat", "channel_account_id": "primary"},

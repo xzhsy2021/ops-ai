@@ -174,8 +174,12 @@ def test_lookup_approvers_prefers_token_whitelist():
     assert result == ["@jack.han:matrix.org", "@alice:matrix.org"]
 
 
-def test_lookup_approvers_falls_back_when_no_token_whitelist():
+def test_lookup_approvers_falls_back_when_no_token_whitelist(monkeypatch):
+    from app.services.tool_adapters import approval_tools
     from app.services.tool_adapters.approval_tools import _lookup_approvers
+
+    # 隔离全局 DB 状态：无系统/服务 message_routing 配置时回退为空列表
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: {})
 
     ctx = _Ctx()  # no token-level whitelist
     # No system/service message_routing configured -> empty list (backward
@@ -196,8 +200,12 @@ def test_lookup_approvers_falls_back_when_no_token_whitelist():
     ) == []
 
 
-def test_lookup_approvers_empty_ctx():
+def test_lookup_approvers_empty_ctx(monkeypatch):
+    from app.services.tool_adapters import approval_tools
     from app.services.tool_adapters.approval_tools import _lookup_approvers
+
+    # 隔离全局 DB 状态：无系统配置时回退为空列表
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: {})
 
     # ctx without approver_matrix_ids attribute (older code paths)
     class _BareCtx:
@@ -254,7 +262,7 @@ def test_consume_enforces_token_whitelist_via_prepare(tmp_path):
             authorized_matrix_users=["@jack.han:matrix.org"],
         )
 
-        # Non-whitelisted approver -> rejected (None)
+        # Non-whitelisted approver -> rejected (None), 请求状态不被改变
         rejected = service.consume(
             approval_id=approval.id,
             short_code=short_code,
@@ -264,7 +272,8 @@ def test_consume_enforces_token_whitelist_via_prepare(tmp_path):
         )
         assert rejected is None
         db.refresh(approval)
-        assert approval.status == "REJECTED"
+        # Task 6 设计：未授权尝试不改变请求状态（fail-closed 但保持 PENDING_APPROVAL）
+        assert approval.status == "PENDING_APPROVAL"
 
         # A fresh approval consumed by a whitelisted approver -> EXECUTING
         approval2, short_code2 = service.prepare(
@@ -291,7 +300,7 @@ def test_consume_enforces_token_whitelist_via_prepare(tmp_path):
         )
         assert accepted is not None
         assert accepted.status == "EXECUTING"
-        assert accepted.approved_by == "@jack.han:matrix.org"
+        assert accepted.approved_by == "matrix:default:@jack.han:matrix.org"
     finally:
         db.close()
         engine.dispose()

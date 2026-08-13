@@ -17,6 +17,8 @@ from app.db.models import System, SystemEnvironment
 # 主题关键词 → 工具名匹配规则（子串匹配，大小写不敏感）
 _TOPIC_RULES: dict[str, list[str]] = {
     "临时审批": ["temporary", "approval", "grant"],
+    "临时授权": ["temporary", "grant", "approval"],
+    "授权": ["grant", "approval", "temporary"],
     "审批": ["approval"],
     "包上传": ["upload", "package"],
     "部署": ["deploy", "plan", "release", "rollback"],

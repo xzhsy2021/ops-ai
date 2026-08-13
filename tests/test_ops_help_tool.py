@@ -165,6 +165,41 @@ def test_help_topic_filter_temporary_approval(db):
     assert result.get("topic") == "临时审批"
 
 
+def test_help_topic_filter_temporary_grant(db):
+    """topic=临时授权 必须命中临时授权相关能力（ops.approval.temporary_access）。"""
+    from app.services.tool_adapters.help_tools import help_query
+
+    result = help_query(
+        args={
+            "message_context": _context(message="help-topic-grant").to_dict(),
+            "topic": "临时授权",
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True
+    names = [cap["name"] for cap in result["capabilities"]]
+    assert "ops.approval.temporary_access" in names, names
+    assert result.get("topic") == "临时授权"
+
+
+def test_help_topic_filter_grant(db):
+    """topic=授权 同样命中临时授权/审批能力。"""
+    from app.services.tool_adapters.help_tools import help_query
+
+    result = help_query(
+        args={
+            "message_context": _context(message="help-topic-grant-2").to_dict(),
+            "topic": "授权",
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True
+    names = [cap["name"] for cap in result["capabilities"]]
+    assert any("grant" in n or "approval" in n for n in names), names
+
+
 def test_help_topic_filter_deployment(db):
     """topic=部署 返回部署相关能力（deploy/plan/execution）。"""
     from app.services.tool_adapters.help_tools import help_query

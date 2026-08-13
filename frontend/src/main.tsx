@@ -9,14 +9,14 @@ import { initThemeEngine } from './theme/engine'
 
 
 try {
-  const savedTheme = localStorage.getItem('ops-theme') as 'light' | 'dark' | null
+  const savedTheme = localStorage.getItem('ops-theme') as 'crystal' | 'jade' | 'light' | null
   const savedPerf = localStorage.getItem('ops-performance-mode') as string | null
   initThemeEngine({
-    theme: savedTheme === 'light' ? 'light' : 'dark',
+    theme: savedTheme === 'light' || savedTheme === 'jade' || savedTheme === 'crystal' ? savedTheme : 'crystal',
     fx: savedPerf === 'low-resource' ? 'low' : 'balanced',
   })
 } catch {
-  initThemeEngine({ theme: 'dark' })
+  initThemeEngine({ theme: 'crystal' })
 }
 
 if (import.meta.env.DEV) {

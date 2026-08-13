@@ -138,7 +138,7 @@ export default function ReleasePlanPanel({ system, service, environment }: Relea
                 <strong style={{ fontSize: '13px' }}>质量门禁</strong>
                 <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
                   {gates.map((gate: any) => (
-                    <div key={gate.key} style={{ display: 'grid', gridTemplateColumns: '88px 1fr 1.6fr', gap: '8px', alignItems: 'center', fontSize: '12px' }}>
+                    <div key={gate.key} style={{ display: 'grid', gridTemplateColumns: '88px minmax(0, 1fr) minmax(0, 1.6fr)', gap: '8px', alignItems: 'center', fontSize: '12px' }}>
                       <span style={{ ...riskStyle(gate.status === 'blocked' ? 'critical' : gate.status === 'warning' ? 'high' : 'low'), borderRadius: '999px', padding: '2px 8px', textAlign: 'center', fontWeight: 700 }}>{gateLabel(gate.status)}</span>
                       <span>{gate.name}</span>
                       <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{gate.detail || '-'}</span>
@@ -151,7 +151,7 @@ export default function ReleasePlanPanel({ system, service, environment }: Relea
                 <strong style={{ fontSize: '13px' }}>MCP 执行链</strong>
                 <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
                   {mcpFlow.map((step: any) => (
-                    <div key={`${step.step}-${step.tool}`} style={{ display: 'grid', gridTemplateColumns: '36px 1fr 82px 82px', gap: '8px', fontSize: '12px', alignItems: 'center' }}>
+                    <div key={`${step.step}-${step.tool}`} style={{ display: 'grid', gridTemplateColumns: '36px minmax(0, 1fr) 82px 82px', gap: '8px', fontSize: '12px', alignItems: 'center' }}>
                       <span style={{ color: 'var(--text-muted)' }}>#{step.step}</span>
                       <code>{step.tool}</code>
                       <span>{step.mode}</span>

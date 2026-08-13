@@ -115,7 +115,7 @@ export default function CleanupJobDetail({
 
       <div className="card">
         <h4 style={{ margin: '0 0 12px 0' }}>任务信息</h4>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px 24px', fontSize: '13px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '8px 24px', fontSize: '13px' }}>
           {[
             ['环境', jobDetail.environment],
             ['连接', jobDetail.connection_name],
@@ -238,7 +238,7 @@ export default function CleanupJobDetail({
       {dryRunResult && (
         <div className="card">
           <h4 style={{ margin: '0 0 12px 0' }}>Dry Run 结果</h4>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '12px', marginBottom: '12px' }}>
             {[
               ['匹配行数', dryRunResult.matched_rows],
               ['参考阈值行数', dryRunResult.protected_delete_rows ?? dryRunResult.matched_rows],
@@ -266,7 +266,7 @@ export default function CleanupJobDetail({
             </div>
           )}
           {(dryRunResult.first_row_time || dryRunResult.batch_boundary_time || (dryRunResult.index_names || []).length > 0) && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 12, fontSize: 13 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: 12, marginBottom: 12, fontSize: 13 }}>
               <div><span style={{ color: 'var(--text-muted)' }}>最早待删数据：</span>{dryRunResult.first_row_time || '-'}</div>
               <div><span style={{ color: 'var(--text-muted)' }}>首批边界时间：</span>{dryRunResult.batch_boundary_time || '-'}</div>
               <div><span style={{ color: 'var(--text-muted)' }}>命中索引：</span>{(dryRunResult.index_names || []).join(', ') || '-'}</div>

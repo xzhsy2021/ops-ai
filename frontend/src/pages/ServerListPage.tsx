@@ -372,6 +372,16 @@ export default function ServerListPage() {
 
   const doDeleteServer = async (s: any): Promise<RiskActionResult> => {
     try {
+      // 1. 先从分组中解绑（避免 "referenced by server_group/xxx" 409 报错）
+      if (s.group) {
+        try {
+          await serverManagement.update(s.name, { group: '' })
+        } catch (ungroupErr: any) {
+          // 如果 update 接口不支持置空 group，则忽略继续删除（后端会兜底校验）
+          console.warn('unbind group failed, continue with delete:', ungroupErr)
+        }
+      }
+      // 2. 删除服务器
       await serverManagement.delete(s.name)
       flash(`已删除: ${s.name}`)
       setSelected((prev) => { const next = new Set(prev); next.delete(s.name); return next })
@@ -1112,12 +1122,12 @@ export default function ServerListPage() {
             )}
 
             <form onSubmit={handleSubmit} style={{ display: 'grid', gap: '14px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px' }}>
                 <FormField label="名称 *" value={form.name} onChange={(v) => updateField('name', v)} placeholder="server-name"
                   disabled={!!editing} />
                 <FormField label="主机地址 *" value={form.host} onChange={(v) => updateField('host', v)} placeholder="10.0.0.1 或 hostname" />
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px' }}>
                 <FormField label="端口" value={String(form.port)} onChange={(v) => updateField('port', Number(v) || 22)} type="number" />
                 <FormField label="用户名" value={form.username} onChange={(v) => updateField('username', v)} placeholder="root" />
               </div>
@@ -1306,7 +1316,7 @@ export default function ServerListPage() {
               <div className="cc-modal-callout cc-modal-callout--danger" style={{ marginBottom: 12 }}>{keyError}</div>
             )}
 
-            <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '260px minmax(0, 1fr)', gap: 16 }}>
               <div style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
                 <div style={{ padding: '10px 12px', background: 'var(--bg-surface-2)', color: 'var(--text-secondary)', fontSize: 12, fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>已保存密钥</div>
                 <div style={{ maxHeight: 360, overflowY: 'auto' }}>
@@ -1379,7 +1389,7 @@ export default function ServerListPage() {
             <form onSubmit={handleBatchSubmit} style={{ display: 'grid', gap: '14px' }}>
               <FormField label="用户名" value={batchForm.username}
                 onChange={(v) => updateBatchField('username', v)} placeholder="留空保持不变" />
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px' }}>
                 <FormField label="端口" value={batchForm.port}
                   onChange={(v) => updateBatchField('port', v)} type="number" placeholder="留空保持不变" />
                 <div>

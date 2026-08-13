@@ -639,6 +639,28 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
     if not save_server(server):
         logger.error(f"Failed to update server '{name}': config save returned False, user={request.state.username}")
         raise HTTPException(status_code=500, detail=f"Failed to persist server '{name}' to storage")
+
+    # 同步 server_groups.server_names：把该服务器从其他组的 server_names 中剔除；
+    # 若指定了新分组（非空），把它加入该组的 server_names。避免出现「组里残留已不存在的服务器」导致删除时 409。
+    if "group" in data:
+        try:
+            new_group = (data.get("group") or "").strip()
+            for g in db.query(ServerGroup).all():
+                names = list(g.server_names or [])
+                changed = False
+                if name in names and g.name != new_group:
+                    names = [x for x in names if x != name]
+                    changed = True
+                if new_group and g.name == new_group and name not in names:
+                    names.append(name)
+                    changed = True
+                if changed:
+                    g.server_names = names
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"sync server_groups.server_names for '{name}' failed: {e}")
+
     logger.info(f"Server '{name}' updated successfully by user={request.state.username}, host={host}:{port}, auth={auth_type}")
     ac = build_audit_context(server)
     audit("server.update", "server", name,

@@ -333,7 +333,7 @@ export default function DeployPage() {
 
       {activeTab === 'deploy' && (
         <>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 260px', gap: '16px', alignItems: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 260px', gap: '16px', alignItems: 'start' }}>
           <div>
             <PipelineStageRail
               steps={[

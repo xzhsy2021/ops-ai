@@ -92,12 +92,12 @@ export default function McpAuditPage() {
           <thead>
             <tr>
               <th style={{ width: 32 }}></th>
-              <th>时间</th>
-              <th>工具</th>
-              <th>状态</th>
-              <th>风险</th>
-              <th>来源</th>
-              <th>耗时</th>
+              <th style={{ width: 150 }}>时间</th>
+              <th style={{ minWidth: 220 }}>工具</th>
+              <th style={{ width: 80 }}>状态</th>
+              <th style={{ width: 80 }}>风险</th>
+              <th style={{ minWidth: 160 }}>来源</th>
+              <th style={{ width: 90 }}>耗时</th>
             </tr>
           </thead>
           <tbody>
@@ -109,11 +109,11 @@ export default function McpAuditPage() {
                     <td style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                       {expanded ? '▼' : '▶'}
                     </td>
-                    <td>{formatTime(x.created_at)}</td>
-                    <td>{x.tool_name}</td>
+                    <td><span className="ellipsis" style={{ maxWidth: 140 }} title={formatTime(x.created_at)}>{formatTime(x.created_at)}</span></td>
+                    <td><span className="ellipsis" style={{ maxWidth: 260 }} title={x.tool_name}>{x.tool_name}</span></td>
                     <td>{x.status}</td>
                     <td><ToolRiskTag risk={x.risk_level} /></td>
-                    <td>{x.client_name || x.username || x.token_owner || '-'}</td>
+                    <td><span className="ellipsis" style={{ maxWidth: 200 }} title={x.client_name || x.username || x.token_owner || '-'}>{x.client_name || x.username || x.token_owner || '-'}</span></td>
                     <td>{x.duration_ms != null ? `${x.duration_ms} ms` : '-'}</td>
                   </tr>
                   {expanded && (

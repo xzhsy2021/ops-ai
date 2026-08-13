@@ -57,7 +57,7 @@ export default function BackupPanel({
           const verification = verificationLabel(b)
           return (
             <div key={b.file} style={{
-              display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', alignItems: 'center',
+              display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '10px', alignItems: 'center',
               padding: '8px', background: 'var(--bg-page)', borderRadius: '6px', marginBottom: '6px',
             }}>
               <div style={{ minWidth: 0 }}>

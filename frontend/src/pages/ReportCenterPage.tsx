@@ -286,17 +286,23 @@ export default function ReportCenterPage() {
       {!items.length && !loading ? <EmptyState title="暂无报告" description="先生成一份系统诊断报告或操作链路报告。" /> : (
         <div className="card table-card">
           <table className="data-table">
-            <thead><tr><th style={{ width: 36 }}><input type="checkbox" checked={allReportsOnPageSelected} onChange={(e) => setSelectedReportIds(e.target.checked ? currentPageReportIds : [])} aria-label="选择当前页报告" /></th><th>时间</th><th>报告</th><th>目标</th><th>格式</th><th>大小</th><th>SHA256</th><th>操作</th></tr></thead>
+            <thead><tr><th style={{ width: 36 }}><input type="checkbox" checked={allReportsOnPageSelected} onChange={(e) => setSelectedReportIds(e.target.checked ? currentPageReportIds : [])} aria-label="选择当前页报告" /></th><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 200 }}>报告</th><th style={{ minWidth: 180 }}>目标</th><th style={{ width: 80 }}>格式</th><th style={{ width: 80 }}>大小</th><th style={{ width: 140 }}>SHA256</th><th>操作</th></tr></thead>
             <tbody>
               {items.map((item) => (
                 <tr key={item.id}>
                   <td><input type="checkbox" checked={selectedReportIds.includes(item.id)} onChange={(e) => toggleReportSelection(item.id, e.target.checked)} aria-label={`选择报告 ${item.title || item.id}`} /></td>
-                  <td>{formatTime(item.created_at)}</td>
-                  <td><div style={{ fontWeight: 700 }}>{item.title}</div><div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{TYPE_LABELS[item.report_type] || item.report_type} · {item.summary || '-'}</div></td>
-                  <td><div>{item.target_type || '-'}</div><div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{item.target_id || '-'}</div></td>
+                  <td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(item.created_at)}>{formatTime(item.created_at)}</span></td>
+                  <td>
+                    <div className="ellipsis" style={{ fontWeight: 700, maxWidth: 360 }} title={item.title}>{item.title}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{TYPE_LABELS[item.report_type] || item.report_type} · {item.summary || '-'}</div>
+                  </td>
+                  <td>
+                    <div className="ellipsis" style={{ maxWidth: 220 }} title={item.target_type || '-'}>{item.target_type || '-'}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: 12 }} className="ellipsis">{item.target_id || '-'}</div>
+                  </td>
                   <td><span className="badge">{item.format}</span></td>
                   <td>{formatBytes(item.size_bytes)}</td>
-                  <td><code style={{ fontSize: 11 }}>{String(item.sha256 || '').slice(0, 16)}...</code></td>
+                  <td><code style={{ fontSize: 11, wordBreak: 'break-all' }} title={item.sha256}>{String(item.sha256 || '').slice(0, 16)}...</code></td>
                   <td>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {item.format === 'html' && <a className="btn small" href={reports.downloadUrl(item.id)} target="_blank" rel="noreferrer">在线查看</a>}

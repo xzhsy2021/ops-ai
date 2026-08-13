@@ -22,7 +22,7 @@ export { GanttStrip } from '../components/workspace/GanttStrip'
 export type { GanttItem } from '../components/workspace/GanttStrip'
 
 // V10 business components (diagnosis / pipeline / action)
-export { DiagnosisCard } from '../components/v10/DiagnosisCard'
-export { ActionButton } from '../components/v10/ActionButton'
-export { PipelineStage, PipelineStageRail } from '../components/v10/PipelineStage'
+export { default as DiagnosisCard } from '../components/v10/DiagnosisCard'
+export { default as ActionButton } from '../components/v10/ActionButton'
+export { default as PipelineStage, PipelineStageRail } from '../components/v10/PipelineStage'
 export type { PipelineStatus } from '../components/v10/PipelineStage'

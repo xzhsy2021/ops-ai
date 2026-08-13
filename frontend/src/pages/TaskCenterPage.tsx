@@ -324,7 +324,7 @@ export default function TaskCenterPage() {
       {!items.length && !loading ? <EmptyState title="暂无任务" description="执行发布、SQL、清理或 MCP/工具任务后会在这里统一展示。" /> : (
         <div className="card table-card task-center-content" style={{ overflow: 'auto', padding: 0, maxHeight: 'calc(100vh - 280px)' }}>
           <table className="data-table">
-            <thead><tr><th><input type="checkbox" aria-label="选择当前页任务" checked={allPageTasksSelected} disabled={!selectableItems.length} onChange={(e) => togglePageTaskSelection(e.target.checked)} /></th><th>类型</th><th>标题</th><th>状态</th><th>风险</th><th>目标</th><th>操作人</th><th>时间</th><th>操作</th></tr></thead>
+            <thead><tr><th><input type="checkbox" aria-label="选择当前页任务" checked={allPageTasksSelected} disabled={!selectableItems.length} onChange={(e) => togglePageTaskSelection(e.target.checked)} /></th><th style={{ width: 80 }}>类型</th><th style={{ minWidth: 180 }}>标题</th><th style={{ width: 80 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ minWidth: 180 }}>目标</th><th style={{ width: 100 }}>操作人</th><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>操作</th></tr></thead>
             <tbody>
               {sortedItems.map((item) => {
                 const times = timeSummary(item)
@@ -333,7 +333,7 @@ export default function TaskCenterPage() {
                   <td><input type="checkbox" aria-label={`选择任务 ${item.title}`} checked={selectedTaskKeySet.has(taskKey(item))} disabled={isLiveStatus(item.status)} onChange={(e) => toggleTaskSelection(item, e.target.checked)} /></td>
                   <td>{KIND_LABEL[item.kind] || item.kind}</td>
                   <td>
-                    <div>{item.title}</div>
+                    <div className="ellipsis" style={{ maxWidth: 260 }} title={item.title}>{item.title}</div>
                     {getTaskFailureReason(item) && (
                       <div className="task-failure-reason" title={getTaskFailureReason(item)}>
                         {getTaskFailureReason(item).length > 60
@@ -350,7 +350,7 @@ export default function TaskCenterPage() {
                     if (rl === 'low') return <RiskBadge level="info" label="低风险" size="sm" />
                     return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>-</span>
                   })()}</td>
-                  <td>{item.target}</td>
+                  <td><span className="ellipsis" style={{ maxWidth: 240 }} title={item.target || '-'}>{item.target || '-'}</span></td>
                   <td>{item.operator}</td>
                   <td>
                     <div className="task-time-cell">

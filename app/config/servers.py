@@ -346,6 +346,25 @@ def delete_server(name: str, db=None) -> bool:
     db, owns = _open_session(db)
     try:
         refs = get_server_references(name, db=db)
+        # 兜底：如果只剩 server_group 类型引用，先把组里 server_names 中的残留清理掉再继续删
+        # （避免前端两步操作；历史脏数据常被该问题困扰）
+        _group_refs = [r for r in refs if r.get("type") == "server_group"]
+        _other_refs = [r for r in refs if r.get("type") != "server_group"]
+        if _group_refs and not _other_refs:
+            from app.db.models import ServerGroup
+            try:
+                for ref in _group_refs:
+                    g = db.query(ServerGroup).filter_by(name=ref.get("group")).first()
+                    if g:
+                        names = [x for x in (g.server_names or []) if x != name]
+                        if names != list(g.server_names or []):
+                            g.server_names = names
+                db.commit()
+                refs = get_server_references(name, db=db)
+            except Exception as e:
+                db.rollback()
+                logger.warning(f"delete_server: clean server_group refs for '{name}' failed: {e}")
+
         if refs:
             ref_labels = sorted({
                 "/".join(str(part) for part in (

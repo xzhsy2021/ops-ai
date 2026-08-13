@@ -178,15 +178,15 @@ export default function AuditLogPage() {
         <div style={{ display: 'grid', gridTemplateColumns: selectedChain ? 'minmax(360px, 0.95fr) minmax(420px, 1.05fr)' : '1fr', gap: 12 }}>
           <div className="table-card" style={{ overflow: 'auto', maxHeight: 360 }}>
             <table className="data-table">
-              <thead><tr><th>时间</th><th>链路</th><th>状态</th><th>风险</th><th>目标</th><th>操作</th></tr></thead>
+              <thead><tr><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>链路</th><th style={{ width: 80 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ minWidth: 180 }}>目标</th><th style={{ width: 80 }}>操作</th></tr></thead>
               <tbody>
                 {chains.map((chain) => (
                   <tr key={chain.chain_id}>
-                    <td>{formatTime(chain.created_at)}</td>
-                    <td><div style={{ fontWeight: 700 }}>{chain.title}</div><div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{chain.chain_id}</div></td>
+                    <td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(chain.created_at)}>{formatTime(chain.created_at)}</span></td>
+                    <td><div className="ellipsis" style={{ fontWeight: 700, maxWidth: 300 }} title={chain.title}>{chain.title}</div><div style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }} className="ellipsis">{chain.chain_id}</div></td>
                     <td>{chain.status || '-'}</td>
                     <td><span className={`badge ${['high', 'critical'].includes(chain.risk_level) ? 'danger' : chain.risk_level === 'medium' ? 'warning' : ''}`}>{chain.risk_level || 'low'}</span></td>
-                    <td>{chain.target || '-'}</td>
+                    <td><span className="ellipsis" style={{ maxWidth: 240 }} title={chain.target || '-'}>{chain.target || '-'}</span></td>
                     <td><button className="btn small" onClick={() => openOperationChain(chain.chain_id)}>回放</button></td>
                   </tr>
                 ))}

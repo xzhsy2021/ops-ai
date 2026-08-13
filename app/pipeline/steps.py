@@ -9,6 +9,50 @@ from .step import Step, StepContext
 logger = logging.getLogger(__name__)
 
 
+def _record_package_usage(ctx: StepContext, package_name: str, usage_type: str = "deploy") -> None:
+    """Best-effort bookkeeping so that the File Center shows a recent
+    `last_used_at` and bumped `used_count` for the package just published.
+
+    Each call uses an independent SQLAlchemy session to avoid colliding with
+    the deployment's own session (which lives on a different thread and is
+    in the middle of a long-running SSH task). Failures are logged but never
+    raised — recording usage is auxiliary and must not break a successful
+    deployment.
+    """
+    if not package_name:
+        return
+    try:
+        from app.db import SessionLocal
+        from app.services.package_retention import record_package_reference
+    except Exception:
+        logger.exception("package retention helpers unavailable, skip record")
+        return
+    server_name = ""
+    server_obj = ctx.server or {}
+    if isinstance(server_obj, dict):
+        server_name = server_obj.get("name") or server_obj.get("host") or ""
+    session = SessionLocal()
+    try:
+        record_package_reference(
+            session,
+            package_name=package_name,
+            deployment_id=ctx.deployment_id or "",
+            system=ctx.system or "",
+            service=ctx.service or "",
+            environment=ctx.environment or "",
+            server_name=server_name,
+            usage_type=usage_type,
+            commit=True,
+        )
+    except Exception:
+        logger.exception("record_package_reference failed for %s", package_name)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
 _VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -437,6 +481,7 @@ class ScriptedServiceUpdateStep(Step):
         else:
             ctx.log("warning", "无 SSH 连接，跳过脚本服务发布", "scripted_service_update")
         ctx.log("info", "脚本服务发布完成", "scripted_service_update")
+        _record_package_usage(ctx, file_name, usage_type="script_update")
 
 
 class WebScriptUpdateStep(Step):
@@ -469,6 +514,7 @@ class WebScriptUpdateStep(Step):
         else:
             ctx.log("warning", "无 SSH 连接，跳过 Web 发布", "web_script_update")
         ctx.log("info", "Web 发布完成", "web_script_update")
+        _record_package_usage(ctx, file_name, usage_type="web_update")
 
 
 class DockerComposeUpdateStep(Step):
@@ -531,6 +577,8 @@ class DockerComposeUpdateStep(Step):
         )
 
         ctx.log("info", "Docker Compose 发布完成", "docker_compose_update")
+        compose_label = compose_file or "docker-compose.yml"
+        _record_package_usage(ctx, f"docker-compose:{compose_label}", usage_type="docker_compose")
 
 
 class DovoBlueGreenUpdateStep(Step):
@@ -650,3 +698,4 @@ chmod +x ./server 2>/dev/null || true
         second_out = await _run_required(ctx, log_cmd, "第二次日志检查", timeout=log_check_timeout)
         _assert_log_patterns(second_out, log_must_contain, log_must_not_contain, where="第二次日志检查")
         ctx.log("info", f"Dovo {group_code or ''} 发布完成，已切到 {standby}", "dovo_bluegreen_update")
+        _record_package_usage(ctx, file_name, usage_type="dovo_bluegreen")

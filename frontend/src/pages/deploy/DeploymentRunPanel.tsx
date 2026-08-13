@@ -89,7 +89,7 @@ export default function DeploymentRunPanel({
     const reasons: Array<{ source: string; message: string }> = []
     // 从 report 提取
     if (report?.failure_analysis) {
-      reasons.push({ source: '分析', message: report.failure_analysis.message || report.summary_text || '' })
+      reasons.push({ source: '分析', message: String(report.failure_analysis.message || '') || report.summary_text || '' })
     }
     if (report?.summary_text && !reasons.length) {
       reasons.push({ source: '摘要', message: report.summary_text })
@@ -225,7 +225,7 @@ export default function DeploymentRunPanel({
             <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{failureReasons.length} 条失败记录</span>
           </div>
           {failureReasons.slice(0, 8).map((r, idx) => (
-            <div key={idx} style={{ fontSize: 12, display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8, alignItems: 'start' }}>
+            <div key={idx} style={{ fontSize: 12, display: 'grid', gridTemplateColumns: '140px minmax(0, 1fr)', gap: 8, alignItems: 'start' }}>
               <span style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>{r.source}</span>
               <span style={{ color: 'var(--danger)', wordBreak: 'break-word' }}>{r.message}</span>
             </div>
@@ -267,7 +267,7 @@ export default function DeploymentRunPanel({
           <h4 style={{ margin: '0 0 8px' }}>发布包分发</h4>
           <div style={{ display: 'grid', gap: 6 }}>
             {taskDetails.distributions.map((d: any) => (
-              <div key={d.id} style={{ display: 'grid', gridTemplateColumns: '1.2fr .8fr .6fr 2fr', gap: 8, fontSize: 12 }}>
+              <div key={d.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, .8fr) minmax(0, .6fr) minmax(0, 2fr)', gap: 8, fontSize: 12 }}>
                 <span style={{ fontFamily: 'monospace' }}>{d.server_name}</span>
                 <StatusBadge value={d.status} />
                 <span>{d.reused ? '复用' : '上传'}</span>
@@ -284,7 +284,7 @@ export default function DeploymentRunPanel({
           <div style={{ display: 'grid', gap: 6, maxHeight: 320, overflow: 'auto' }}>
             {taskDetails.step_tasks.map((st: any) => (
               <div key={st.id} style={{ display: 'grid', gap: 4 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr .7fr 2fr', gap: 8, fontSize: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, .7fr) minmax(0, 2fr)', gap: 8, fontSize: 12 }}>
                   <span style={{ fontFamily: 'monospace' }}>{st.server_name || '-'}</span>
                   <span>{st.step_name}</span>
                   <StatusBadge value={st.status} />

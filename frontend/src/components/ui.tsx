@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import { createPortal } from 'react-dom'
 import { useFavoriteStore } from '../stores/favoriteStore'
 import type { RiskActionResult } from './RiskActionGuard'
 
@@ -163,7 +164,8 @@ export function RiskConfirmDialog({
   const matched = confirmMode === 'one-click' ? reasonReady : value.trim() === confirmText && reasonReady
   const showResult = Boolean(result)
 
-  return (
+  // 关键：用 createPortal 把 dialog 渲染到 body，避免被父级（表格行/card）stacking context 影响导致子元素错位
+  const overlay = (
     <div className="risk-confirm-overlay" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}>
       <div className="risk-confirm-dialog" role="dialog" aria-modal="true" aria-label={title}>
         {!showResult ? (
@@ -215,6 +217,8 @@ export function RiskConfirmDialog({
       </div>
     </div>
   )
+
+  return createPortal(overlay, document.body)
 }
 
 function RiskConfirmResult({

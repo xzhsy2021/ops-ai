@@ -49,7 +49,7 @@ export default function DeployPackageStep(props: DeployPackageStepProps) {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16 }}>
         <div>
           <label style={{ display: 'block', marginBottom: 6, fontSize: 14, color: 'var(--text-secondary)' }}>Pipeline</label>
           <select value={props.pipelineId} onChange={(e) => props.setPipelineId(e.target.value)} style={props.selectStyle}>

@@ -52,7 +52,7 @@ function compactServerMeta(meta: any, fallbackName: string) {
 export default function DeployServerStep(props: DeployServerStepProps) {
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16 }}>
         <div>
           <label style={{ display: 'block', marginBottom: 6, fontSize: 14, color: 'var(--text-secondary)' }}>服务器组</label>
           <select value={props.serverGroup} onChange={(e) => {
@@ -149,7 +149,7 @@ export default function DeployServerStep(props: DeployServerStepProps) {
       )}
 
       {props.selectedServerNames.length > 1 && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16 }}>
           <div>
             <label style={{ display: 'block', marginBottom: 6, fontSize: 14, color: 'var(--text-secondary)' }}>并发度</label>
             <select value={props.parallelism} onChange={(e) => props.setParallelism(Number(e.target.value))} style={props.selectStyle}>

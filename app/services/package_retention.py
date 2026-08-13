@@ -56,6 +56,30 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _now_from_file_mtime(path: str) -> datetime | None:
+    """Read the file's mtime as a UTC-naive datetime so it is comparable with
+    `_now()` and stored DB columns (which are also naive UTC)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).replace(tzinfo=None)
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    """Serialize a naive-UTC datetime as ISO with an explicit `Z` suffix so
+    consumers (front-end, APIs, CLIs) can treat it as unambiguous UTC. This
+    avoids the classic JS bug where `new Date("2026-08-12T09:02:21")` is
+    parsed as local time and shown 8 hours off when the server is in UTC."""
+    if not value:
+        return None
+    iso = value.isoformat()
+    # If the stored value carries timezone info, normalize to UTC.
+    if value.tzinfo is not None:
+        iso = value.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+    return iso + "Z"
+
+
 def _as_int(v: Any, default: int) -> int:
     try:
         return max(0, int(v))
@@ -163,7 +187,7 @@ def _package_meta_payload(name: str, path: str, *, sha256: str | None = None) ->
         "sha256": sha256 or sha256_file(path),
         "service_hint": infer_service_hint(name),
         "version_hint": infer_version_hint(name),
-        "modified": datetime.fromtimestamp(st.st_mtime).isoformat(),
+        "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -177,16 +201,26 @@ def upsert_package_metadata(
     uploaded_by: str = "",
     sha256: str | None = None,
     commit: bool = True,
+    refresh_uploaded_at_from_file: bool = False,
 ) -> DeployPackage:
     name = safe_package_name(name)
     path = path or package_path(name)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail=f"Package file not found: {name}")
     meta = _package_meta_payload(name, path, sha256=sha256)
+    file_mtime = _now_from_file_mtime(path)
     row = db.query(DeployPackage).filter(DeployPackage.package_name == name).first()
     if not row:
-        row = DeployPackage(package_name=name, uploaded_at=_now())
+        row = DeployPackage(package_name=name, uploaded_at=file_mtime or _now())
         db.add(row)
+    else:
+        # When syncing from disk, keep `uploaded_at` aligned with the actual
+        # file mtime if the file has been refreshed (re-uploaded / overwritten).
+        # This avoids stale `uploaded_at` after a re-upload of the same name.
+        if refresh_uploaded_at_from_file and file_mtime and (
+            not row.uploaded_at or file_mtime > row.uploaded_at
+        ):
+            row.uploaded_at = file_mtime
     row.file_path = path
     row.size_bytes = int(meta["size_bytes"])
     row.sha256 = meta["sha256"]
@@ -238,7 +272,7 @@ def sync_package_metadata(db: Session) -> Dict[str, Any]:
         if not os.path.isfile(path):
             continue
         try:
-            row = upsert_package_metadata(db, name, path, commit=False)
+            row = upsert_package_metadata(db, name, path, commit=False, refresh_uploaded_at_from_file=True)
             if not row.system:
                 inferred = _infer_system_from_hint(row.service_hint or infer_service_hint(name))
                 if inferred:
@@ -503,6 +537,11 @@ def _protected_names_from_deployments(db: Session, policy: Dict[str, Any]) -> Di
 def package_to_dict(row: DeployPackage, *, include_retention: bool = True, protected: Dict[str, List[str]] | None = None) -> Dict[str, Any]:
     path = row.file_path or package_path(row.package_name)
     exists = os.path.isfile(path)
+    modified_naive = (
+        datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc).replace(tzinfo=None)
+        if exists
+        else None
+    )
     data = {
         "id": row.id,
         "name": row.package_name,
@@ -518,14 +557,14 @@ def package_to_dict(row: DeployPackage, *, include_retention: bool = True, prote
         "service_hint": row.service_hint or infer_service_hint(row.package_name),
         "version_hint": row.version_hint or infer_version_hint(row.package_name),
         "uploaded_by": row.uploaded_by or "",
-        "uploaded_at": row.uploaded_at.isoformat() if row.uploaded_at else None,
-        "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
+        "uploaded_at": _iso_utc(row.uploaded_at),
+        "last_used_at": _iso_utc(row.last_used_at),
         "used_count": int(row.used_count or 0),
         "protected": bool(row.protected),
         "deleted": bool(row.deleted),
-        "deleted_at": row.deleted_at.isoformat() if row.deleted_at else None,
+        "deleted_at": _iso_utc(row.deleted_at),
         "delete_reason": row.delete_reason or "",
-        "modified": datetime.fromtimestamp(os.path.getmtime(path)).isoformat() if exists else None,
+        "modified": _iso_utc(modified_naive),
     }
     if include_retention:
         reasons = []

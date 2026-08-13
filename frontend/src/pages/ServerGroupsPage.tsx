@@ -86,7 +86,7 @@ export default function ServerGroupsPage() {
       {(showCreate || editId) && isAdmin && (
         <div className="card">
           <h3>{editId ? '编辑服务器组' : '新建服务器组'}</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '12px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px', marginTop: '12px' }}>
             <input placeholder="组名 *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input placeholder="显示名" value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} />
             <input placeholder="服务器名(逗号分隔)" value={form.server_names} onChange={(e) => setForm({ ...form, server_names: e.target.value })} />

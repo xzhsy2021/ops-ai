@@ -166,7 +166,7 @@ export default function DeployForm(props: DeployFormProps) {
   return (
     <div className="card">
       <h2 style={{ marginBottom: '16px' }}>发布</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '16px' }}>
         <div>
           <label style={{ display: 'block', marginBottom: '6px', fontSize: '14px', color: 'var(--text-secondary)' }}>系统</label>
           <select value={props.system} onChange={(e) => { props.setSystem(e.target.value); props.setService(''); props.setEnvironment(''); props.setPipelineId('') }} style={props.selectStyle}>
@@ -377,7 +377,7 @@ export default function DeployForm(props: DeployFormProps) {
       </div>
 
       {props.selectedServerNames.length > 1 && (
-        <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px' }}>
           <div>
             <label style={{ display: 'block', marginBottom: '6px', fontSize: '14px', color: 'var(--text-secondary)' }}>并发度</label>
             <select value={props.parallelism} onChange={(e) => props.setParallelism(Number(e.target.value))} style={props.selectStyle}>

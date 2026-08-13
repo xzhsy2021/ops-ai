@@ -74,11 +74,15 @@ def db():
                 existing_approvers.append(item)
         routing["approvers"] = existing_approvers
         existing.message_routing = routing
-        if not session.query(SystemEnvironment).filter(
+        # test 环境必须存在且 category 为 test（真实库可能把已有环境标为 custom/prod）
+        test_env = session.query(SystemEnvironment).filter(
             SystemEnvironment.system_name == "crypto-trader",
             SystemEnvironment.name == "test",
-        ).first():
+        ).first()
+        if test_env is None:
             session.add(SystemEnvironment(system_name="crypto-trader", name="test", category="test"))
+        elif str(test_env.category or "").strip().lower() != "test":
+            test_env.category = "test"
     session.commit()
     yield session
     session.rollback()

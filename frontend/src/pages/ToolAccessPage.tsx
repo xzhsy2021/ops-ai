@@ -9,6 +9,7 @@ import { ToolPlaygroundPanel } from './tools/ToolPlaygroundPanel'
 import { ToolOverviewPanel } from './tools/ToolOverviewPanel'
 import { ToolRiskPolicyPanel } from './tools/ToolRiskPolicyPanel'
 import { ToolTokenPanel } from './tools/ToolTokenPanel'
+import { TemporaryApprovalPanel } from './tools/TemporaryApprovalPanel'
 import { McpAccessGuide } from './tools/McpAccessGuide'
 import { ToolDetailDrawer } from './tools/ToolDetailDrawer'
 import type { ToolInfo as _ToolInfo } from './tools/ToolCatalogPanel'
@@ -279,6 +280,8 @@ export default function ToolAccessPage() {
     allow_prod: t.allow_prod,
     bound_room_ids: Array.isArray(t.bound_room_ids) ? t.bound_room_ids : [],
     approver_matrix_ids: Array.isArray(t.approver_matrix_ids) ? t.approver_matrix_ids : [],
+    channel_bindings: Array.isArray(t.channel_bindings) ? t.channel_bindings : [],
+    approver_identities: Array.isArray(t.approver_identities) ? t.approver_identities : [],
     key_prefix: t.token_prefix,
     masked_value: t.token_prefix ? `${t.token_prefix}...` : undefined,
   })), [tokens])
@@ -669,6 +672,8 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                 expires_in_days: data.expires_in_days,
                 bound_room_ids: data.bound_room_ids || [],
                 approver_matrix_ids: data.approver_matrix_ids || [],
+                channel_bindings: data.channel_bindings || [],
+                approver_identities: data.approver_identities || [],
               })
               const d = getData(res)
               setCreatedToken(d.token || '')
@@ -680,6 +685,8 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               await capabilityTools.updateToken(tokenId, {
                 ...data,
                 bound_room_ids: data.bound_room_ids ?? [],
+                channel_bindings: data.channel_bindings ?? [],
+                approver_identities: data.approver_identities ?? [],
               })
               capabilityTools.clearCache()
               notify({ type: 'success', text: 'Token 权限已更新' })
@@ -703,6 +710,9 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               <strong>请立即复制新令牌：</strong><code>{createdToken}</code>
               <button className="btn btn-subtle" style={{ marginLeft: 8 }} onClick={() => void navigator.clipboard?.writeText(createdToken)}>复制</button>
             </div>
+          )}
+          {isAdmin && (
+            <TemporaryApprovalPanel canManage={isAdmin} />
           )}
         </section>
       )}

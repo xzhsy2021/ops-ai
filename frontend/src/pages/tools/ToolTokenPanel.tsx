@@ -16,6 +16,8 @@ type TokenInfo = {
   allow_prod?: boolean
   bound_room_ids?: string[]
   approver_matrix_ids?: string[]
+  channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
+  approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
   key_prefix?: string
   value?: string
   masked_value?: string
@@ -30,6 +32,8 @@ type TokenPayload = {
   expires_in_days?: number
   bound_room_ids?: string[]
   approver_matrix_ids?: string[]
+  channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
+  approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
 }
 
 type TokenUpdatePayload = {
@@ -42,6 +46,8 @@ type TokenUpdatePayload = {
   revoke?: boolean
   bound_room_ids?: string[]
   approver_matrix_ids?: string[]
+  channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
+  approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
 }
 
 type PolicyPreviewResult = {
@@ -211,6 +217,8 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [roomInput, setRoomInput] = useState('')
   const [approvers, setApprovers] = useState<string[]>([])
   const [approverInput, setApproverInput] = useState('')
+  const [channelBindings, setChannelBindings] = useState<string>('')
+  const [approverIdentities, setApproverIdentities] = useState<string>('')
   const [generating, setGenerating] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -226,6 +234,8 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [editRoomInput, setEditRoomInput] = useState('')
   const [editApprovers, setEditApprovers] = useState<string[]>([])
   const [editApproverInput, setEditApproverInput] = useState('')
+  const [editChannelBindings, setEditChannelBindings] = useState('')
+  const [editApproverIdentities, setEditApproverIdentities] = useState('')
   const [previewing, setPreviewing] = useState(false)
   const [policyPreview, setPolicyPreview] = useState<PolicyPreviewResult | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -342,6 +352,8 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     setEditBoundRooms(Array.isArray(token.bound_room_ids) ? [...token.bound_room_ids] : [])
     setEditApprovers(Array.isArray(token.approver_matrix_ids) ? [...token.approver_matrix_ids] : [])
     setEditApproverInput('')
+    setEditChannelBindings(JSON.stringify(token.channel_bindings || [], null, 2))
+    setEditApproverIdentities(JSON.stringify(token.approver_identities || [], null, 2))
   }
 
   const openCreate = () => {
@@ -356,8 +368,20 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     setRoomInput('')
     setApprovers([])
     setApproverInput('')
+    setChannelBindings('')
+    setApproverIdentities('')
     setPolicyPreview(null)
     setShowCreateModal(true)
+  }
+
+  const parseBindings = (text: string, fallback: any[] = []): any[] => {
+    if (!text.trim()) return fallback
+    try {
+      const parsed = JSON.parse(text)
+      return Array.isArray(parsed) ? parsed : fallback
+    } catch {
+      return fallback
+    }
   }
 
   const handleGenerate = async () => {
@@ -373,6 +397,8 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
         expires_in_days: expiresDays,
         bound_room_ids: boundRooms,
         approver_matrix_ids: approvers,
+        channel_bindings: parseBindings(channelBindings),
+        approver_identities: parseBindings(approverIdentities),
       })
       setName('')
       setDescription('')
@@ -380,6 +406,8 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
       setRoomInput('')
       setApprovers([])
       setApproverInput('')
+      setChannelBindings('')
+      setApproverIdentities('')
       setShowCreateModal(false)
     } finally {
       setGenerating(false)
@@ -399,6 +427,8 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
         expires_in_days: editExpiresDays,
         bound_room_ids: editBoundRooms,
         approver_matrix_ids: editApprovers,
+        channel_bindings: parseBindings(editChannelBindings),
+        approver_identities: parseBindings(editApproverIdentities),
       })
       setEditing(null)
     } finally {
@@ -615,6 +645,24 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
               {renderRoomChips(approvers, setApprovers, approverInput, setApproverInput, false, '如：@jack.han:hubtel.xyz')}
             </div>
 
+            <div className="field-item">
+              <label>通用通道绑定（JSON，可选）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+                {'格式：[{"channel": "wechat", "channel_account_id": "primary", "conversation_id": "room-1"}]。'}
+                留空则仅使用上面的 Matrix 房间绑定；填写后按通道/账号/会话强制绑定。
+              </div>
+              <textarea rows={3} value={channelBindings} onChange={(e) => setChannelBindings(e.target.value)} placeholder='[{"channel":"matrix","channel_account_id":"default","conversation_id":"!ops:matrix.org"}]' />
+            </div>
+
+            <div className="field-item">
+              <label>通用授权人身份（JSON，可选）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+                {'格式：[{"channel": "wechat", "channel_account_id": "primary", "sender_id": "@alice:example.org"}]。'}
+                填写后仅这些通道身份可审批；与上方的 Matrix 授权人列表互为兼容别名。
+              </div>
+              <textarea rows={3} value={approverIdentities} onChange={(e) => setApproverIdentities(e.target.value)} placeholder='[{"channel":"matrix","channel_account_id":"default","sender_id":"@alice:example.org"}]' />
+            </div>
+
             <div className="alert alert-info">
               <strong>权限预览</strong>
               <span style={{ marginLeft: 8 }}>检查当前草稿是否可调用 <code>ops.inspection.run_server</code>。</span>
@@ -704,6 +752,22 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
                 留空表示不限制审批人（回退到系统/服务级配置）；填写后只有列表中的用户能审批此 Token 发起的操作。
               </div>
               {renderRoomChips(editApprovers, setEditApprovers, editApproverInput, setEditApproverInput, false, '如：@jack.han:hubtel.xyz')}
+            </div>
+            <div className="field-item">
+              <label>通用通道绑定（JSON，可选）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+                {'格式：[{"channel": "wechat", "channel_account_id": "primary", "conversation_id": "room-1"}]。'}
+                修改后将立即在下次 MCP 调用生效；留空则仅使用上面的 Matrix 房间绑定。
+              </div>
+              <textarea rows={3} value={editChannelBindings} onChange={(e) => setEditChannelBindings(e.target.value)} placeholder='[{"channel":"matrix","channel_account_id":"default","conversation_id":"!ops:matrix.org"}]' />
+            </div>
+            <div className="field-item">
+              <label>通用授权人身份（JSON，可选）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 6 }}>
+                {'格式：[{"channel": "wechat", "channel_account_id": "primary", "sender_id": "@alice:example.org"}]。'}
+                与上方的 Matrix 授权人列表互为兼容别名。
+              </div>
+              <textarea rows={3} value={editApproverIdentities} onChange={(e) => setEditApproverIdentities(e.target.value)} placeholder='[{"channel":"matrix","channel_account_id":"default","sender_id":"@alice:example.org"}]' />
             </div>
             <div className="alert alert-warning">
               巡检执行需要 <code>ops:write</code> 与写操作开关；启用服务器读取管控时，服务器只读工具需要 <code>server:read</code>。

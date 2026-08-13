@@ -266,3 +266,35 @@ def test_list_detail_require_auth(db, client, monkeypatch):
     monkeypatch.setattr(ta_api, "require_auth", _unauthorized)
     resp = client.get("/api/v2/temporary-approvals")
     assert resp.status_code == 401
+
+
+def test_delete_removes_grant(db, client):
+    grant = _create_grant(db, status="ACTIVE")
+    resp = client.delete(f"/api/v2/temporary-approvals/{grant.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    item = body.get("data") if "data" in body else body
+    assert item.get("deleted") is True
+    resp = client.get(f"/api/v2/temporary-approvals/{grant.id}")
+    assert resp.status_code == 404
+
+
+def test_delete_unknown_returns_404(client):
+    resp = client.delete(f"/api/v2/temporary-approvals/{'e' * 32}")
+    assert resp.status_code == 404
+
+
+def test_delete_requires_admin(db, client, monkeypatch):
+    from app.api import temporary_approvals as ta_api
+
+    def _forbidden(request, db):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Admin permission required")
+
+    monkeypatch.setattr(ta_api, "require_admin", _forbidden)
+    grant = _create_grant(db, status="ACTIVE")
+    resp = client.delete(f"/api/v2/temporary-approvals/{grant.id}")
+    assert resp.status_code == 403
+    # 授权仍保留
+    resp = client.get(f"/api/v2/temporary-approvals/{grant.id}")
+    assert resp.status_code == 200

@@ -167,3 +167,30 @@ def revoke_grant(
         f"admin={username} fallback=1 reason={reason}",
     )
     return api_response(data=_view_dict(grant), message="临时授权已撤销")
+
+
+@router.delete("/{grant_id}", summary="删除临时自审批授权记录")
+def delete_grant(
+    grant_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """管理员彻底删除授权记录（高权限回退操作，审计记录）。
+
+    物理删除用于清理管理界面中的历史/误建授权。ExecutionPlan 仅以字符串
+    引用 grant id（无外键），删除后相关计划的临时路径按 fail-closed 拒绝，
+    不会改变原计划状态。
+    """
+    user = require_admin(request, db)
+    grant = _find_grant(db, grant_id)
+    username = str(user.get("username") or user.get("id") or "admin")
+    grant_id_value = grant.id
+    db.delete(grant)
+    db.commit()
+    audit(
+        "temporary_approval.delete",
+        "temporary_approval_grant",
+        grant_id_value,
+        f"admin={username} fallback=1",
+    )
+    return api_response(data={"id": grant_id_value, "deleted": True}, message="临时授权已删除")

@@ -513,6 +513,7 @@ export const temporaryApprovals = {
   detail: (id: string) => api.get(`/temporary-approvals/${encodeURIComponent(id)}`),
   confirm: (id: string, data: { confirmation_phrase: string }) => api.post(`/temporary-approvals/${encodeURIComponent(id)}/confirm`, data),
   revoke: (id: string, data: { reason?: string }) => api.post(`/temporary-approvals/${encodeURIComponent(id)}/revoke`, data),
+  delete: (id: string) => api.delete(`/temporary-approvals/${encodeURIComponent(id)}`),
 }
 
 export const reports = {

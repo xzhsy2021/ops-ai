@@ -84,7 +84,12 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
   canManage?: boolean
 }) {
   const addMessage = useNotificationStore((s) => s.addMessage)
-  const notify = (type: 'success' | 'error' | 'info', text: string) => addMessage(text, type)
+  // notify 必须 useCallback 稳定引用，否则 load 的依赖 [status, notify]
+  // 每次渲染都变 → useEffect([load]) 死循环触发 list 请求
+  const notify = useCallback(
+    (type: 'success' | 'error' | 'info', text: string) => addMessage(text, type),
+    [addMessage],
+  )
 
   const [grants, setGrants] = useState<GrantInfo[]>([])
   const [status, setStatus] = useState('')
@@ -93,6 +98,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
   const [confirmPhrase, setConfirmPhrase] = useState('')
   const [revokeTarget, setRevokeTarget] = useState<GrantInfo | null>(null)
   const [revokeReason, setRevokeReason] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<GrantInfo | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
   const load = useCallback(async () => {
@@ -140,6 +146,21 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
       notify('success', '临时授权已撤销')
       setRevokeTarget(null)
       setRevokeReason('')
+      await load()
+    } catch (e: any) {
+      notify('error', String(e?.response?.data?.message || e))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!deleteTarget?.id) return
+    setSubmitting(true)
+    try {
+      await temporaryApprovals.delete(deleteTarget.id)
+      notify('success', '临时授权记录已删除')
+      setDeleteTarget(null)
       await load()
     } catch (e: any) {
       notify('error', String(e?.response?.data?.message || e))
@@ -238,6 +259,9 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
                     {grant.status === 'ACTIVE' && canManage && (
                       <button className="btn btn-subtle" onClick={() => { setRevokeTarget(grant); setRevokeReason('') }}>撤销</button>
                     )}
+                    {canManage && (
+                      <button className="btn btn-subtle btn-danger" onClick={() => setDeleteTarget(grant)} title="彻底删除该授权记录，不可恢复">删除</button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -296,6 +320,29 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
             <button className="btn btn-subtle" onClick={() => setRevokeTarget(null)}>取消</button>
             <button className="btn btn-danger" disabled={submitting} onClick={handleRevoke}>
               {submitting ? '撤销中...' : '撤销授权'}
+            </button>
+          </div>
+        </GrantModal>
+      )}
+
+      {deleteTarget && (
+        <GrantModal label="删除临时授权" onClose={() => setDeleteTarget(null)}>
+          <div className="card-header">
+            <div>
+              <h2>删除临时授权记录</h2>
+              <span>彻底删除该授权记录，此操作不可恢复。</span>
+            </div>
+            <button className="btn btn-subtle" onClick={() => setDeleteTarget(null)}>关闭</button>
+          </div>
+          <div className="alert alert-warning">
+            将永久删除授权 <code>{shortId(deleteTarget.id)}</code>（受益人
+            <code>{deleteTarget.beneficiary_actor_key || '-'}</code>，状态
+            {deleteTarget.status || '-'}）。若授权仍在生效，请先撤销再删除。
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button className="btn btn-subtle" onClick={() => setDeleteTarget(null)}>取消</button>
+            <button className="btn btn-danger" disabled={submitting} onClick={handleDelete}>
+              {submitting ? '删除中...' : '确认删除'}
             </button>
           </div>
         </GrantModal>

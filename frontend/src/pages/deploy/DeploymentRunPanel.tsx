@@ -89,7 +89,7 @@ export default function DeploymentRunPanel({
     const reasons: Array<{ source: string; message: string }> = []
     // 从 report 提取
     if (report?.failure_analysis) {
-      reasons.push({ source: '分析', message: report.failure_analysis.message || report.summary_text || '' })
+      reasons.push({ source: '分析', message: String(report.failure_analysis.message || '') || report.summary_text || '' })
     }
     if (report?.summary_text && !reasons.length) {
       reasons.push({ source: '摘要', message: report.summary_text })

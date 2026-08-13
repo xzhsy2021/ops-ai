@@ -181,8 +181,6 @@ export default function OverviewTab({ name }: OverviewTabProps) {
         ) : isProcessKeyword ? (
           <KeywordProcessTable
             processes={processes}
-            actionBusy={actionBusy}
-            onAction={requestAction}
           />
         ) : (
           <PM2ProcessTable
@@ -320,10 +318,8 @@ function DockerProcessTable({ processes, actionBusy, onAction }: {
   )
 }
 
-function KeywordProcessTable({ processes, actionBusy, onAction }: {
+function KeywordProcessTable({ processes }: {
   processes: any[]
-  actionBusy: string
-  onAction: (process: string, action: 'start' | 'stop' | 'restart') => void
 }) {
   if (processes.length === 0) {
     return <div style={{ color: 'var(--text-muted)' }}>暂无匹配进程</div>

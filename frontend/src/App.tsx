@@ -17,7 +17,7 @@ import { KeyboardShortcutsPanel } from './components/KeyboardShortcutsPanel'
 import { usePreferenceStore } from './stores/preferenceStore'
 import { applyTheme, applyFxMode } from './theme/engine'
 import { ThemeToast } from './components/ui/ThemeToast'
-import { SettingsModal, type ThemeMode as SettingsTheme } from './components/ui/SettingsModal'
+import { SettingsModal } from './components/ui/SettingsModal'
 
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
@@ -60,7 +60,6 @@ function BrandMark({ size = 22 }: { size?: number }) {
 type ThemeMode = 'crystal' | 'jade' | 'light'
 
 const THEME_NAMES: Record<ThemeMode, string> = { crystal: '水晶', jade: '翡翠', light: '浅色' }
-const THEME_CYCLE: ThemeMode[] = ['crystal', 'jade', 'light']
 
 const THEME_STORAGE_KEY = 'ops-theme'
 const SHELL_STORAGE_KEY = 'ops-sidebar-collapsed'

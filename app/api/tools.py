@@ -141,6 +141,10 @@ class DeleteToolRecordsPayload(BaseModel):
     force: bool = False
 
 
+class BatchPurgeTokensPayload(BaseModel):
+    token_ids: List[str] = Field(..., min_length=1, max_length=200)
+
+
 def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -924,6 +928,42 @@ def purge_token(token_id: str, request: Request, db: Session = Depends(get_db)):
     )
     _bump_capability_version(db)
     return api_response(message="Token purged", data={"id": token_id, "name": name})
+
+
+@tools_router.post("/tokens/batch-purge")
+def batch_purge_tokens(payload: BatchPurgeTokensPayload, request: Request, db: Session = Depends(get_db)):
+    """Hard-delete multiple tool tokens in one call. Admin only.
+
+    与 purge_token 语义一致：直接从数据库删除记录；审计会保留每个 token
+    的名称 / 所有者 / scopes 用于追溯。不存在的 token_id 会被忽略。
+    """
+    user = require_admin(request, db)
+    token_ids = [str(t).strip() for t in payload.token_ids if str(t).strip()]
+    rows = (
+        db.query(ToolToken)
+        .filter(ToolToken.id.in_(token_ids))
+        .all()
+    )
+    purged = []
+    for token in rows:
+        name = token.name
+        owner = token.owner
+        scopes = list(token.scopes or [])
+        allow_write = bool(token.allow_write)
+        allow_prod = bool(token.allow_prod)
+        db.delete(token)
+        audit(
+            "tool.token.purge", "tool_token", name,
+            f"user={user.get('username')} owner={owner} scopes={','.join(scopes)} "
+            f"allow_write={allow_write} allow_prod={allow_prod} HARD_DELETE BATCH"
+        )
+        purged.append({"id": token.id, "name": name})
+    db.commit()
+    _bump_capability_version(db)
+    return api_response(
+        message=f"Purged {len(purged)} token(s)",
+        data={"purged": purged, "total": len(purged), "requested": len(token_ids)},
+    )
 
 
 @tools_router.get("/calls")

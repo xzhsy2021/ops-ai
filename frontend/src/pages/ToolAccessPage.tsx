@@ -700,6 +700,13 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                const token = tokens.find((t: any) => t.id === tokenId)
                setDeleteCandidate(token || { id: tokenId, name: tokenId })
              }}
+            onBatchDelete={async (tokenIds) => {
+              if (!tokenIds.length) return
+              await capabilityTools.batchPurgeTokens(tokenIds)
+              capabilityTools.clearCache()
+              notify({ type: 'success', text: `已删除 ${tokenIds.length} 个 Token` })
+              await refreshAll()
+            }}
             onPreviewPolicy={async (data) => {
               const res = await capabilityTools.policyPreview(data)
               return getData(res)

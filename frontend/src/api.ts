@@ -498,6 +498,7 @@ export const capabilityTools = {
   }) => api.patch(`/tools/tokens/${encodeURIComponent(id)}`, data),
   revokeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}`),
   purgeToken: (id: string) => api.delete(`/tools/tokens/${encodeURIComponent(id)}/purge`),
+  batchPurgeTokens: (tokenIds: string[]) => api.post('/tools/tokens/batch-purge', { token_ids: tokenIds }),
   calls: (params?: { limit?: number; offset?: number; tool?: string; status?: string }) => api.get('/tools/calls', { params }),
   plans: (params?: { limit?: number; offset?: number; plan_type?: string; status?: string }) => api.get('/tools/plans', { params }),
   deleteRecords: (data: { call_ids?: string[]; plan_ids?: string[]; force?: boolean }) => api.post('/tools/records/delete', data),

@@ -198,6 +198,7 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   onUpdate,
   onRevoke,
   onDelete,
+  onBatchDelete,
   onPreviewPolicy,
 }: {
   tokens: TokenInfo[]
@@ -208,6 +209,7 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   onUpdate: (tokenId: string, data: TokenUpdatePayload) => Promise<void>
   onRevoke: (tokenId: string) => void
   onDelete: (tokenId: string) => void
+  onBatchDelete?: (tokenIds: string[]) => void
   onPreviewPolicy: (data: Record<string, any>) => Promise<PolicyPreviewResult>
 }) {
   const templates = tokenTemplates?.length ? tokenTemplates : FALLBACK_TOKEN_TEMPLATES
@@ -222,6 +224,7 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [generating, setGenerating] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editing, setEditing] = useState<TokenInfo | null>(null)
   const [saving, setSaving] = useState(false)
   const [editName, setEditName] = useState('')
@@ -339,6 +342,26 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     }
   }
 
+  const toggleSelected = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id))
+  }
+
+  const toggleAllVisible = (checked: boolean) => {
+    const visibleIds = tokens.map((t) => t.id || t.name || '').filter(Boolean)
+    setSelectedIds((prev) => checked ? Array.from(new Set([...prev, ...visibleIds])) : prev.filter((id) => !visibleIds.includes(id)))
+  }
+
+  const handleBatchDelete = async () => {
+    if (!selectedIds.length || !onBatchDelete) return
+    if (!window.confirm(`确认永久删除选中的 ${selectedIds.length} 个 Token？此操作不可撤销。`)) return
+    try {
+      onBatchDelete(selectedIds)
+      setSelectedIds([])
+    } catch {
+      /* 父组件负责提示错误 */
+    }
+  }
+
   const previewCurrentPolicy = async () => {
     setPreviewing(true)
     try {
@@ -362,13 +385,30 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
           <h2>Tool Token</h2>
           <span>{tokens.length} 个令牌，{activeCount} 个可用</span>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ 新建 Token</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {canDelete && selectedIds.length > 0 && (
+            <button className="btn btn-subtle btn-danger" onClick={handleBatchDelete}>
+              批量删除（{selectedIds.length}）
+            </button>
+          )}
+          <button className="btn btn-primary" onClick={openCreate}>+ 新建 Token</button>
+        </div>
       </div>
 
       <div className="table-scroll">
         <table className="data-table data-table--compact">
           <thead>
             <tr>
+              {canDelete && (
+                <th style={{ width: 36 }}>
+                  <input
+                    type="checkbox"
+                    aria-label="全选"
+                    checked={tokens.length > 0 && selectedIds.length === tokens.filter((t) => t.id || t.name).length}
+                    onChange={(e) => toggleAllVisible(e.target.checked)}
+                  />
+                </th>
+              )}
               <th>名称</th>
               <th>状态</th>
               <th>权限</th>
@@ -379,10 +419,20 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
             </tr>
           </thead>
           <tbody>
-            {loading && tokens.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</td></tr>}
-            {!loading && tokens.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无 Token，点击右上角「新建 Token」创建</td></tr>}
+            {loading && tokens.length === 0 && <tr><td colSpan={canDelete ? 8 : 7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</td></tr>}
+            {!loading && tokens.length === 0 && <tr><td colSpan={canDelete ? 8 : 7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无 Token，点击右上角「新建 Token」创建</td></tr>}
             {tokens.map((token) => (
               <tr key={token.id || token.name}>
+                {canDelete && (
+                  <td>
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${token.name || token.id}`}
+                      checked={selectedIds.includes(token.id || token.name || '')}
+                      onChange={(e) => toggleSelected(token.id || token.name || '', e.target.checked)}
+                    />
+                  </td>
+                )}
                 <td>
                   <strong>{token.name || '-'}</strong>
                   {token.description && <small style={{ display: 'block', color: 'var(--text-muted)' }}>{token.description}</small>}

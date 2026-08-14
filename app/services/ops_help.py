@@ -30,6 +30,81 @@ _TOPIC_RULES: dict[str, list[str]] = {
     "风险": ["risk"],
 }
 
+# 主题 → 完整申请示例（帮助输出，不泄露任何密钥/确认码）
+# 每个示例包含：自然语言申请消息、对应的工具与参数、后续流程提示。
+_TOPIC_EXAMPLES: dict[str, list[dict[str, Any]]] = {
+    "临时授权": [
+        {
+            "message": "给@Leo 申请后端服务 RELEASE、SERVICE_CONTROL 权限，时长一周，用途：后端开发自测发版",
+            "tool": "ops.approval.temporary_access",
+            "operation": "request",
+            "arguments": {
+                "operation": "request",
+                "system_name": "crypto-trader",
+                "environment": "test",
+                "beneficiary_identity": "matrix:default:@leo:example.org",
+                "allowed_actions": ["RELEASE", "SERVICE_CONTROL"],
+                "reason": "后端开发自测发版",
+                "duration_value": 1,
+                "duration_unit": "week",
+            },
+            "note": "仅测试环境可用；动作限 FILE_UPLOAD/RELEASE/SERVICE_CONTROL/HEALTH_CHECK；受益人为固定 actor key。",
+        },
+        {
+            "message": "帮我在测试环境给 @Leo 开两天包上传和健康检查权限，理由是联调验证",
+            "tool": "ops.approval.temporary_access",
+            "operation": "request",
+            "arguments": {
+                "operation": "request",
+                "system_name": "crypto-trader",
+                "environment": "test",
+                "beneficiary_identity": "wechat:primary:leo",
+                "allowed_actions": ["FILE_UPLOAD", "HEALTH_CHECK"],
+                "reason": "联调验证",
+                "duration_value": 2,
+                "duration_unit": "day",
+            },
+            "note": "确认码 15 分钟有效、仅消费一次；重复作用域不叠加。",
+        },
+    ],
+    "临时审批": [
+        {
+            "message": "给@Leo 申请后端服务 RELEASE、SERVICE_CONTROL 权限，时长一周，用途：后端开发自测发版",
+            "tool": "ops.approval.temporary_access",
+            "operation": "request",
+            "arguments": {
+                "operation": "request",
+                "system_name": "crypto-trader",
+                "environment": "test",
+                "beneficiary_identity": "matrix:default:@leo:example.org",
+                "allowed_actions": ["RELEASE", "SERVICE_CONTROL"],
+                "reason": "后端开发自测发版",
+                "duration_value": 1,
+                "duration_unit": "week",
+            },
+            "note": "申请后由原始审批人在同一会话 confirm（提供一次性短码）即可生效。",
+        },
+    ],
+    "授权": [
+        {
+            "message": "给@Leo 申请后端服务 RELEASE、SERVICE_CONTROL 权限，时长一周，用途：后端开发自测发版",
+            "tool": "ops.approval.temporary_access",
+            "operation": "request",
+            "arguments": {
+                "operation": "request",
+                "system_name": "crypto-trader",
+                "environment": "test",
+                "beneficiary_identity": "matrix:default:@leo:example.org",
+                "allowed_actions": ["RELEASE", "SERVICE_CONTROL"],
+                "reason": "后端开发自测发版",
+                "duration_value": 1,
+                "duration_unit": "week",
+            },
+            "note": "临时授权只支持固定测试环境与白名单动作；生产/DML/回滚/包删除不可走该路径。",
+        },
+    ],
+}
+
 # 帮助输出中绝不允许出现的敏感子串（防御性，双保险）
 _FORBIDDEN_MARKERS = (
     "confirmation_code_hash",
@@ -146,6 +221,12 @@ def build_help(
         "include_all": bool(include_all),
         "capabilities": capabilities,
     }
+
+    # 主题 → 完整申请示例（自然语言消息 + 工具调用参数），供调用方直接套用
+    if topic:
+        examples = _TOPIC_EXAMPLES.get(topic.strip())
+        if examples:
+            result["examples"] = examples
 
     # 2. 系统/环境上下文
     system_found = False

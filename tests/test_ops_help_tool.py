@@ -1,4 +1,5 @@
 """Contract tests for the contextual OPS help tool (ops.help.query)."""
+import json
 import uuid
 
 import pytest
@@ -198,6 +199,39 @@ def test_help_topic_filter_grant(db):
     assert result["ok"] is True
     names = [cap["name"] for cap in result["capabilities"]]
     assert any("grant" in n or "approval" in n for n in names), names
+
+
+def test_help_temporary_grant_returns_application_example(db):
+    """topic=临时授权 的帮助输出包含完整的申请示例（自然语言消息 + 工具参数）。"""
+    from app.services.tool_adapters.help_tools import help_query
+
+    result = help_query(
+        args={
+            "message_context": _context(message="help-example-grant").to_dict(),
+            "topic": "临时授权",
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True
+    examples = result.get("examples")
+    assert isinstance(examples, list) and examples, "临时授权主题应返回申请示例"
+    example = examples[0]
+    # 自然语言申请消息
+    assert "申请" in example.get("message", ""), example.get("message")
+    assert example.get("tool") == "ops.approval.temporary_access"
+    assert example.get("operation") == "request"
+    args = example.get("arguments", {})
+    assert args.get("system_name") == "crypto-trader"
+    assert args.get("environment") == "test"
+    assert "RELEASE" in args.get("allowed_actions", [])
+    assert "SERVICE_CONTROL" in args.get("allowed_actions", [])
+    assert args.get("duration_unit") == "week"
+    assert "beneficiary_identity" in args
+    # 示例不得泄露任何敏感信息
+    payload = json.dumps(result, ensure_ascii=False)
+    for marker in ("confirmation_code_hash", "short_code", "token=", "-----BEGIN", "private_key"):
+        assert marker not in payload, marker
 
 
 def test_help_topic_filter_deployment(db):

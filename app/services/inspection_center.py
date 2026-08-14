@@ -49,6 +49,9 @@ SERVER_CATEGORIES = [
     {"code": "MEMORY", "name": "内存状况", "description": "内存使用率、Swap 使用率与 OOM 风险"},
     {"code": "SERVICE_STATUS", "name": "服务状态", "description": "systemd、nginx、数据库、Redis 等基础服务"},
     {"code": "BACKUP", "name": "备份任务", "description": "cron、备份文件与任务日志"},
+    {"code": "FAIL2BAN", "name": "暴力破解防护", "description": "Fail2ban 服务状态、jail 配置与封禁情况"},
+    {"code": "AUDITD", "name": "安全检查审计", "description": "auditd 审计服务、审计规则与关键文件覆盖"},
+    {"code": "KEY_FILE_SECURITY", "name": "关键文件安全", "description": "passwd/shadow/ssh/cron/.ssh 等关键文件权限与属主"},
 ]
 
 PROJECT_CATEGORIES = [
@@ -81,6 +84,9 @@ echo '---SHADOW_ERR---'
     "DISK": """# 磁盘空间巡检（只读）\ndf -hT\ndu -sh /var/log 2>/dev/null || true\ndu -sh /data /backup /opt 2>/dev/null || true\n# 判定要点：磁盘使用率超过阈值、日志目录异常膨胀、备份目录空间不足。""",
     "SERVICE_STATUS": """# 服务状态巡检（只读）\nsystemctl --failed 2>/dev/null || true\nsystemctl is-active nginx 2>/dev/null || true\nsystemctl is-active redis 2>/dev/null || true\nsystemctl is-active mysql mysqld mariadb postgresql 2>/dev/null || true\nps -ef | egrep 'nginx|redis|mysql|postgres|java|node|python|gunicorn|uvicorn' | grep -v grep || true\n# 判定要点：基础服务异常、项目进程缺失、异常重启或失败单元。""",
     "BACKUP": """# 备份任务巡检（只读）\ncrontab -l 2>/dev/null || true\nls -lah /backup /data/backups 2>/dev/null || true\nfind /backup /data/backups -maxdepth 2 -type f -mtime -2 -printf '%TY-%Tm-%Td %TH:%TM %s %p\\n' 2>/dev/null | tail -n 80 || true\n# 判定要点：当日备份缺失、0KB 文件、备份脚本失败、备份堆积、异地同步异常。""",
+    "FAIL2BAN": """# Fail2ban 暴力破解防护巡检（只读）\necho '---SERVICE---'\n(s=$(systemctl is-active fail2ban 2>/dev/null); echo \"${s:-UNKNOWN}\")\necho '---BIN---'\n(command -v fail2ban-client 2>/dev/null || echo 'FAIL2BAN_BIN_NOT_FOUND')\necho '---STATUS---'\n(fail2ban-client status 2>&1 || echo 'FAIL2BAN_DAEMON_DOWN')\necho '---JAIL_SSHD---'\n(fail2ban-client status sshd 2>&1 || echo 'NO_SSHD_JAIL')\necho '---CONFIG---'\n(cat /etc/fail2ban/jail.local 2>/dev/null || cat /etc/fail2ban/jail.conf 2>/dev/null || echo 'NO_FAIL2BAN_CONFIG')\necho '---BANNED---'\n(fail2ban-client status sshd 2>/dev/null | grep -iE 'banned|currently failed' || true)\n# 判定要点：fail2ban 二进制不存在（未安装）/已安装但服务未运行、无 sshd jail、maxretry/findtime/bantime 配置过松、封禁 IP 数量。""",
+    "AUDITD": """# 安全检查审计巡检（只读）\necho '---SERVICE---'\n(s=$(systemctl is-active auditd 2>/dev/null); echo \"${s:-UNKNOWN}\")\necho '---STATUS---'\n(auditctl -s 2>/dev/null || echo 'AUDITCTL_NOT_FOUND')\necho '---RULES---'\n(auditctl -l 2>/dev/null | head -150 || echo 'NO_RULES')\necho '---RULES_DIR---'\n(ls -la /etc/audit/rules.d/ 2>/dev/null || true)\n(cat /etc/audit/rules.d/*.rules 2>/dev/null | head -150 || true)\necho '---LOG---'\n(ls -lh /var/log/audit/audit.log 2>/dev/null || echo 'NO_AUDIT_LOG')\n# 判定要点：auditd 未安装/未启用、审计未开启、无审计规则、关键文件（passwd/shadow/ssh/cron/.ssh）未覆盖、危险命令审计缺失。""",
+    "KEY_FILE_SECURITY": """# 关键文件权限与完整性巡检（只读）\necho '---KEYFILES---'\nfor f in /etc/passwd /etc/shadow /etc/gshadow /etc/group /etc/ssh/sshd_config /etc/crontab /etc/cron.d /root/.ssh /etc/fail2ban/jail.local; do\n  if [ -e \"$f\" ]; then\n    stat -c '%n %U:%G %a %s' \"$f\" 2>/dev/null\n  else\n    echo \"$f MISSING\"\n  fi\ndone\necho '---SSHD_CONFIG---'\n(grep -viE '^\\s*#|^\\s*$' /etc/ssh/sshd_config 2>/dev/null | head -80 || echo 'NO_SSHD_CONFIG')\necho '---FAIL2BAN_CONF---'\n(grep -iE 'maxretry|findtime|bantime|ignoreip' /etc/fail2ban/jail.conf /etc/fail2ban/jail.local 2>/dev/null | head -30 || true)\n# 判定要点：shadow 可读、passwd/ssh 关键文件权限过宽或属主异常、.ssh/cron 全局可写、sshd 弱配置、关键文件缺失。""",
 }
 
 PROJECT_RULE_COMMANDS: Dict[str, str] = {
@@ -424,6 +430,9 @@ def _analyzer_for_category(category: str):
         "SERVICE_STATUS": _analyze_service,
         "BACKUP": _analyze_backup,
         "MEMORY": _analyze_memory,
+        "FAIL2BAN": _analyze_fail2ban,
+        "AUDITD": _analyze_auditd,
+        "KEY_FILE_SECURITY": _analyze_key_file_security,
         "FILE_SECURITY": _analyze_project_files,
         "CONFIG_SECURITY": _analyze_project_api,
         "API_SECURITY": _analyze_project_api,
@@ -573,7 +582,7 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
     The executor uses these specs one by one so item results are committed after
     every check and the front-end can poll the run detail as real-time progress.
 
-    内置 9 大类有 hardcoded command + analyze；用户通过 InspectionRule 自定义的
+    内置 12 大类有 hardcoded command + analyze；用户通过 InspectionRule 自定义的
     category 会通过 DB 中 InspectionItemConfig 关联的 InspectionRule.rule_content
     动态构建 spec，确保新增规则立即可在巡检项中选用并执行。
     """
@@ -661,9 +670,9 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
         specs.append({
             "category": "SERVICE_STATUS",
             "item_code": "SERVER_SERVICE_STATUS",
-            "item_name": "基础服务与 PM2 进程检查",
-            "execution": "systemctl --failed + watch_services systemctl is-active + PM2 (jlist/ping) 状态 + etcd 集群健康 + ps 关键字扫描（非 systemd 进程）",
-            "criteria": "判定标准：PM2 自身 ping 失败 → HIGH；PM2 进程 errored → HIGH；PM2 进程 stopped（含 watch_services 期望）→ MEDIUM；etcd 集群 unhealthy → HIGH；systemd 失败单元 ≥ 阈值 → HIGH，< 阈值 → MEDIUM；watch_services 中任一非 active → LOW（信息性）；caddy/非 systemd 关键字 ps 中缺失 → MEDIUM。",
+            "item_name": "基础服务、PM2 与 Docker 进程检查",
+            "execution": "systemctl --failed + watch_services systemctl is-active + PM2 (jlist/ping) 状态 + etcd 集群健康 + Docker 容器列表 + ps 关键字扫描（非 systemd 进程）",
+            "criteria": "判定标准：PM2 自身 ping 失败 → HIGH；PM2 进程 errored → HIGH（已由 Docker 托管的同名服务除外）；PM2 进程 stopped（含 watch_services 期望）→ MEDIUM；etcd 集群 unhealthy → HIGH；Docker 容器 Restarting → MEDIUM、Exited → LOW；systemd 失败单元 ≥ 阈值 → HIGH，< 阈值 → MEDIUM；watch_services 中任一非 active → LOW（信息性）；caddy/非 systemd 关键字 ps 中缺失且非 Docker 容器托管 → MEDIUM。",
             "command": (
                 "echo '---SYSTEMD_FAILED---'; "
                 "(systemctl --failed --no-pager 2>/dev/null || true); "
@@ -677,6 +686,8 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
                 "(pm2 ping 2>/dev/null && echo 'PM2_PING_OK' || echo 'PM2_PING_FAIL'); "
                 "echo '---ETCD_HEALTH---'; "
                 "(etcdctl endpoint health --cluster 2>/dev/null || etcdctl endpoint health 2>/dev/null || echo 'ETCD_NOT_FOUND'); "
+                "echo '---DOCKER_PS---'; "
+                "(docker ps -a --format '{{.Names}}|{{.Image}}|{{.Status}}' 2>/dev/null || echo 'DOCKER_NOT_FOUND'); "
                 "echo '---PROCESS_KEYWORDS---'; "
                 "(ps -eo pid,user,comm --no-headers 2>/dev/null | egrep -i 'nginx|caddy|mysql|postgres|redis|etcd|pm2' | head -50 || true)"
             ),
@@ -691,6 +702,36 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
             "criteria": "判定标准：无 cron/timer 且无文件触发 HIGH；无 cron 有文件触发 MEDIUM；有 cron 无文件触发 MEDIUM；0字节文件触发 MEDIUM；都有触发通过。",
             "command": "echo '---CRON---'; (crontab -l 2>/dev/null | grep -Ei 'backup|dump|tar|rsync|mysqldump' || true); echo '---CRON_D---'; (ls /etc/cron.d/ 2>/dev/null | head -30; grep -RhE 'backup|dump|tar|rsync|mysqldump' /etc/cron.d/ /etc/cron.daily/ /etc/cron.weekly/ /etc/cron.monthly/ 2>/dev/null | head -30 || true); echo '---TIMER---'; (systemctl list-timers --no-pager 2>/dev/null | head -20 || true); echo '---BACKUPS---'; (find /data/backups /backup /var/backups /data/db_backup /home/backup /srv/backup /var/lib/mysql/backup -maxdepth 3 -type f -mtime -40 -printf '%p %s %TY-%Tm-%TdT%TH:%TM\\n' 2>/dev/null | head -200 || true); echo '---NOW---'; (date -u +%s)",
             "analyze": _analyze_backup,
+        })
+    if "FAIL2BAN" in selected:
+        specs.append({
+            "category": "FAIL2BAN",
+            "item_code": "SERVER_FAIL2BAN_STATUS",
+            "item_name": "Fail2ban 暴力破解防护检查",
+            "execution": "检测 fail2ban 二进制是否存在、服务状态、fail2ban-client status/jail 状态、jail.local 配置（maxretry/findtime/bantime/ignoreip）与当前封禁 IP",
+            "criteria": "判定标准：fail2ban 二进制不存在 → HIGH（未安装）；已安装但服务未运行 → HIGH（防护未生效）；无 sshd jail → MEDIUM；maxretry>10 或 bantime 过短 → MEDIUM；已封禁 IP 数≥阈值 → LOW 提示；其余为通过。",
+            "command": "echo '---SERVICE---'; (systemctl is-active fail2ban 2>/dev/null || echo 'UNKNOWN'); echo '---BIN---'; (command -v fail2ban-client 2>/dev/null || echo 'FAIL2BAN_BIN_NOT_FOUND'); echo '---STATUS---'; (fail2ban-client status 2>&1 || echo 'FAIL2BAN_DAEMON_DOWN'); echo '---JAIL_SSHD---'; (fail2ban-client status sshd 2>&1 || echo 'NO_SSHD_JAIL'); echo '---CONFIG---'; (cat /etc/fail2ban/jail.local 2>/dev/null || cat /etc/fail2ban/jail.conf 2>/dev/null || echo 'NO_FAIL2BAN_CONFIG'); echo '---BANNED---'; (fail2ban-client status sshd 2>/dev/null | grep -iE 'banned|currently failed' || true)",
+            "analyze": _analyze_fail2ban,
+        })
+    if "AUDITD" in selected:
+        specs.append({
+            "category": "AUDITD",
+            "item_code": "SERVER_AUDITD_STATUS",
+            "item_name": "auditd 安全检查审计检查",
+            "execution": "检测 auditd 服务状态、auditctl -s 审计状态、auditctl -l 审计规则、rules.d 规则文件与审计日志",
+            "criteria": "判定标准：auditd 未安装/未启用或审计关闭 → HIGH；无审计规则 → HIGH；关键文件（passwd/shadow/ssh/cron/.ssh）未覆盖 → MEDIUM；危险命令审计缺失 → LOW；其余为通过。",
+            "command": "echo '---SERVICE---'; (systemctl is-active auditd 2>/dev/null || echo 'UNKNOWN'); echo '---STATUS---'; (auditctl -s 2>/dev/null || echo 'AUDITCTL_NOT_FOUND'); echo '---RULES---'; (auditctl -l 2>/dev/null | head -150 || echo 'NO_RULES'); echo '---RULES_DIR---'; (ls -la /etc/audit/rules.d/ 2>/dev/null || true); (cat /etc/audit/rules.d/*.rules 2>/dev/null | head -150 || true); echo '---LOG---'; (ls -lh /var/log/audit/audit.log 2>/dev/null || echo 'NO_AUDIT_LOG')",
+            "analyze": _analyze_auditd,
+        })
+    if "KEY_FILE_SECURITY" in selected:
+        specs.append({
+            "category": "KEY_FILE_SECURITY",
+            "item_code": "SERVER_KEY_FILE_STATUS",
+            "item_name": "关键文件权限与完整性检查",
+            "execution": "stat 采集 passwd/shadow/gshadow/group/sshd_config/crontab/cron.d/.ssh/fail2ban 配置的属主与权限；解析 sshd_config 与 fail2ban 阈值",
+            "criteria": "判定标准：shadow 全局可读 → HIGH；passwd/.ssh/cron 全局可写 → HIGH；关键文件属主异常 → MEDIUM；sshd 弱配置（PermitRootLogin yes 等）→ MEDIUM；关键文件缺失 → MEDIUM；其余为通过。",
+            "command": "echo '---KEYFILES---'; for f in /etc/passwd /etc/shadow /etc/gshadow /etc/group /etc/ssh/sshd_config /etc/crontab /etc/cron.d /root/.ssh /etc/fail2ban/jail.local; do if [ -e \"$f\" ]; then stat -c '%n %U:%G %a %s' \"$f\" 2>/dev/null; else echo \"$f MISSING\"; fi; done; echo '---SSHD_CONFIG---'; (grep -viE '^\\s*#|^\\s*$' /etc/ssh/sshd_config 2>/dev/null | head -80 || echo 'NO_SSHD_CONFIG'); echo '---FAIL2BAN_CONF---'; (grep -iE 'maxretry|findtime|bantime|ignoreip' /etc/fail2ban/jail.conf /etc/fail2ban/jail.local 2>/dev/null | head -30 || true)",
+            "analyze": _analyze_key_file_security,
         })
     return specs
 
@@ -901,6 +942,14 @@ DEFAULT_THRESHOLDS: Dict[str, Any] = {
             "supplier", "system", "trader", "transaction", "transaction-02",
         ],
         "etcd_unhealthy_level": "HIGH",     # etcd 集群不健康时的等级
+        # E5 新增：Docker 容器托管识别（PM2 服务迁移到 Docker 容器场景）
+        "docker_restarting_level": "MEDIUM",  # Docker 容器 Restarting（崩溃循环）时的等级
+        "docker_exited_level": "LOW",         # Docker 容器 Exited（非运行）时的等级
+        "docker_expected_containers": [       # 期望常驻运行的容器名（可选，用于提高 Exited 判定）
+            "exchange", "exchange-02", "monitor", "promtail",
+            "puller", "risk", "risk-02", "sender", "strategy", "strategy-02",
+            "supplier", "system", "trader", "transaction", "transaction-02",
+        ],
         "process_keywords": [                # ps 输出中需检测的关键字
             "nginx", "caddy", "mysql", "postgres", "redis", "etcd", "pm2",
         ],
@@ -1012,12 +1061,13 @@ def _coerce_thresholds(category: str, raw: Dict[str, Any]) -> Dict[str, Any]:
         if "use_meminfo" in raw:
             out["use_meminfo"] = _coerce_bool(raw.get("use_meminfo"), True)
     elif cat == "SERVICE_STATUS":
-        for k in ("watch_services", "core_services", "pm2_expected_processes", "process_keywords"):
+        for k in ("watch_services", "core_services", "pm2_expected_processes", "process_keywords", "docker_expected_containers"):
             if k in raw:
                 out[k] = _coerce_list(raw.get(k), out.get(k, []))
         if "failed_unit_medium_count" in raw:
             out["failed_unit_medium_count"] = _coerce_int(raw.get("failed_unit_medium_count"), 3)
-        for k in ("pm2_stopped_level", "pm2_errored_level", "etcd_unhealthy_level"):
+        for k in ("pm2_stopped_level", "pm2_errored_level", "etcd_unhealthy_level",
+                  "docker_restarting_level", "docker_exited_level"):
             if k in raw and isinstance(raw.get(k), str):
                 v = raw[k].strip().upper()
                 if v in {"HIGH", "MEDIUM", "LOW", "NONE"}:
@@ -2262,15 +2312,17 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
     - ---PM2_JLIST---: `pm2 jlist` JSON 数组 或 `pm2 l` 表格
     - ---PM2_PING---: PM2_PING_OK / PM2_PING_FAIL
     - ---ETCD_HEALTH---: etcd endpoint health JSON 行（含 "is healthy"/"is unhealthy"）
+    - ---DOCKER_PS---: `docker ps -a --format '{{.Names}}|{{.Image}}|{{.Status}}'`（识别 PM2 迁移到 Docker 容器的服务）
     - ---PROCESS_KEYWORDS---: ps -eo pid,user,comm 输出（caddy 等非 systemd 进程）
 
     判定优先级（取最高等级）：
     1. PM2 ping 失败 + 有 PM2 守护 → HIGH（PM2 自身故障）
-    2. PM2 进程 errored → HIGH
-    3. PM2 进程 stopped 且（name ∈ watch_services 或 expected_processes）→ HIGH；否则 MEDIUM
+    2. PM2 进程 errored（非 Docker 托管）→ HIGH
+    3. PM2 进程 stopped（非 Docker 托管）且（name ∈ watch_services 或 expected_processes）→ HIGH；否则 MEDIUM
     4. etcd 集群存在 unhealthy 端点 → HIGH
+    4b. Docker 容器 Restarting（崩溃循环）→ MEDIUM；Exited（期望容器）→ LOW
     5. systemd 失败单元 ≥ failed_unit_medium_count → HIGH，< → MEDIUM
-    6. caddy/非 systemd 关键字 ps 中缺失 → MEDIUM
+    6. caddy/非 systemd 关键字 ps 中缺失且非 Docker 托管 → MEDIUM
     7. watch_services 中任一非 active → LOW
     8. 全 OK → PASS
     """
@@ -2290,6 +2342,9 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
         "supplier", "system", "trader", "transaction", "transaction-02",
     ])
     etcd_unhealthy_level = str(cfg.get("etcd_unhealthy_level", "HIGH")).upper()
+    docker_restarting_level = str(cfg.get("docker_restarting_level", "MEDIUM")).upper()
+    docker_exited_level = str(cfg.get("docker_exited_level", "LOW")).upper()
+    docker_expected = set(cfg.get("docker_expected_containers") or [])
     process_keywords = list(cfg.get("process_keywords") or [
         "nginx", "caddy", "mysql", "postgres", "redis", "etcd", "pm2",
     ])
@@ -2490,6 +2545,32 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
             else:
                 etcd_unhealthy.append(ep)
 
+    # ===== 4b. 解析 DOCKER_PS（docker ps -a 容器列表，识别 PM2 迁移到 Docker 的场景） =====
+    docker_present = False
+    docker_running_names: set = set()
+    docker_restarting: List[str] = []
+    docker_exited: List[str] = []
+    for line in sections.get("DOCKER_PS", []):
+        s = line.strip()
+        if not s or s == "DOCKER_NOT_FOUND":
+            continue
+        docker_present = True
+        # 格式: Name|Image|Status
+        parts = [p.strip() for p in s.split("|")]
+        if len(parts) < 3:
+            continue
+        name, _image, status = parts[0], parts[1], parts[2]
+        status_l = status.lower()
+        if status_l.startswith("up"):
+            docker_running_names.add(name.lower())
+        elif status_l.startswith("restarting"):
+            docker_restarting.append(name)
+        else:
+            docker_exited.append(name)
+    docker_not_running = docker_restarting + docker_exited
+    # 已由 Docker 容器托管的服务名（用于排除 PM2 误报与 ps 缺失）
+    docker_managed = {n.lower() for n in docker_running_names}
+
     # ===== 5. 解析 PROCESS_KEYWORDS（ps -eo pid,user,comm） =====
     ps_seen_keywords: set = set()
     for line in sections.get("PROCESS_KEYWORDS", []):
@@ -2511,6 +2592,7 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
         kw for kw in watch_services
         if kw.lower() not in ps_seen_keywords
         and kw.lower() not in pm2_managed_names  # PM2 管理的不算缺失
+        and kw.lower() not in docker_managed     # Docker 容器托管的不算缺失（PM2 迁移场景）
         and not any(s.lower() == kw.lower() and systemd_active.get(s, "active") == "active" for s in watch_services)
     ]
     # 排除 unknown 状态（systemctl 没装）
@@ -2532,6 +2614,11 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
         "etcd_present": etcd_present,
         "etcd_healthy": etcd_healthy,
         "etcd_unhealthy": etcd_unhealthy,
+        "docker_present": docker_present,
+        "docker_running": sorted(docker_running_names),
+        "docker_restarting": docker_restarting[:10],
+        "docker_exited": docker_exited[:10],
+        "docker_not_running": docker_not_running[:10],
         "missing_keywords": missing_keywords,
         "watch_services": watch_services,
         # J4 新增：最近 N 小时内重启统计
@@ -2543,6 +2630,8 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
             "pm2_stopped_level": pm2_stopped_level,
             "pm2_errored_level": pm2_errored_level,
             "etcd_unhealthy_level": etcd_unhealthy_level,
+            "docker_restarting_level": docker_restarting_level,
+            "docker_exited_level": docker_exited_level,
             "pm2_expected_processes": sorted(pm2_expected),
             "recent_restart_hours": recent_restart_hours,
             "recent_restart_level": recent_restart_level,
@@ -2552,8 +2641,9 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
             f"PM2 进程 stopped（{pm2_stopped_level}，期望进程升 HIGH）；"
             f"PM2 最近 {recent_restart_hours}h 内重启 ≥1 次 → {recent_restart_level}；"
             f"etcd 集群 unhealthy → {etcd_unhealthy_level}；"
+            f"Docker 容器 Restarting → {docker_restarting_level}、Exited → {docker_exited_level}；"
             f"systemd 失败单元 ≥{failed_unit_medium_count} → HIGH；"
-            f"非 systemd 关键字 ps 中缺失 → MEDIUM"
+            f"非 systemd 关键字 ps 中缺失且非 Docker 托管 → MEDIUM"
         ),
         "summary": "",  # 后填
     }
@@ -2568,19 +2658,21 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
                            "执行 `pm2 kill && pm2 resurrect` 恢复 PM2 守护；检查 /root/.pm2 日志。",
                            {"pm2_ping_fail_facts": True}))
 
-    # 2) PM2 进程 errored
-    if pm2_errored:
-        names = ", ".join(p["name"] for p in pm2_errored[:5])
+    # 2) PM2 进程 errored（已迁移到 Docker 容器的同名服务除外）
+    pm2_errored_nondocker = [p for p in pm2_errored if p["name"].lower() not in docker_managed]
+    if pm2_errored_nondocker:
+        names = ", ".join(p["name"] for p in pm2_errored_nondocker[:5])
         candidates.append((pm2_errored_level if pm2_errored_level in {"HIGH", "MEDIUM", "LOW"} else "HIGH",
                            "RISK" if pm2_errored_level == "HIGH" else "WARNING",
-                           f"PM2 进程 errored（{len(pm2_errored)} 个）：{names}",
-                           f"执行 `pm2 logs {pm2_errored[0]['name']}` 查看错误；`pm2 restart <name>` 重启。",
-                           {"pm2_errored_count": len(pm2_errored)}))
+                           f"PM2 进程 errored（{len(pm2_errored_nondocker)} 个）：{names}",
+                           f"执行 `pm2 logs {pm2_errored_nondocker[0]['name']}` 查看错误；`pm2 restart <name>` 重启。",
+                           {"pm2_errored_count": len(pm2_errored_nondocker)}))
 
-    # 3) PM2 进程 stopped
-    if pm2_stopped:
+    # 3) PM2 进程 stopped（已迁移到 Docker 容器的同名服务除外）
+    pm2_stopped_nondocker = [p for p in pm2_stopped if p["name"].lower() not in docker_managed]
+    if pm2_stopped_nondocker:
         # 期望进程（来自 cfg 或默认列表）若在 stopped 中 → 升 HIGH
-        expected_stopped = [p for p in pm2_stopped if p["name"] in pm2_expected]
+        expected_stopped = [p for p in pm2_stopped_nondocker if p["name"] in pm2_expected]
         if expected_stopped:
             names = ", ".join(p["name"] for p in expected_stopped[:5])
             candidates.append(("HIGH", "RISK",
@@ -2588,12 +2680,12 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
                                f"`pm2 start {expected_stopped[0]['name']}` 或 `pm2 resurrect` 恢复；检查进程依赖。",
                                {"expected_stopped_count": len(expected_stopped)}))
         else:
-            names = ", ".join(p["name"] for p in pm2_stopped[:5])
+            names = ", ".join(p["name"] for p in pm2_stopped_nondocker[:5])
             candidates.append((pm2_stopped_level if pm2_stopped_level in {"HIGH", "MEDIUM", "LOW"} else "MEDIUM",
                                "WARNING",
-                               f"PM2 进程 stopped（{len(pm2_stopped)} 个）：{names}",
+                               f"PM2 进程 stopped（{len(pm2_stopped_nondocker)} 个）：{names}",
                                "确认进程是否有意停止；非预期 stopped 应 `pm2 start <name>` 恢复。",
-                               {"pm2_stopped_count": len(pm2_stopped)}))
+                               {"pm2_stopped_count": len(pm2_stopped_nondocker)}))
 
     # 3b) J4 修复：PM2 最近 N 小时内重启的进程
     if pm2_recent_restarts:
@@ -2614,6 +2706,25 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
                            "检查 etcd 进程状态、leader 选举、磁盘空间；`etcdctl member list` 查看成员。",
                            {"etcd_unhealthy_count": len(etcd_unhealthy)}))
 
+    # 4b) Docker 容器 Restarting（崩溃循环）
+    if docker_restarting:
+        names = ", ".join(docker_restarting[:5])
+        candidates.append((docker_restarting_level if docker_restarting_level in {"HIGH", "MEDIUM", "LOW"} else "MEDIUM",
+                           "RISK" if docker_restarting_level == "HIGH" else "WARNING",
+                           f"Docker 容器崩溃循环 Restarting（{len(docker_restarting)} 个）：{names}",
+                           "执行 `docker logs <name>`、`docker inspect <name>` 定位崩溃原因；修复后 `docker restart <name>` 或重启 compose 恢复。",
+                           {"docker_restarting_count": len(docker_restarting)}))
+
+    # 4c) Docker 容器 Exited（期望常驻容器未运行）
+    docker_exited_expected = [c for c in docker_exited if (c.lower() in docker_expected or not docker_expected)]
+    if docker_exited_expected:
+        names = ", ".join(docker_exited_expected[:5])
+        candidates.append((docker_exited_level if docker_exited_level in {"HIGH", "MEDIUM", "LOW"} else "LOW",
+                           "WARNING",
+                           f"Docker 容器未运行 Exited（{len(docker_exited_expected)} 个）：{names}",
+                           "确认容器是否有意停止；期望常驻的容器用 `docker start <name>` 或重启 compose 恢复。",
+                           {"docker_exited_count": len(docker_exited_expected)}))
+
     # 5) systemd 失败单元
     if failed_units:
         if len(failed_units) >= failed_unit_medium_count:
@@ -2627,11 +2738,11 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
                                "查看 journalctl -u <unit> 排查根因。",
                                {"failed_unit_count": len(failed_units)}))
 
-    # 6) 非 systemd 关键字 ps 中缺失（caddy/etcd 二进制部署）
+    # 6) 非 systemd 关键字 ps 中缺失（caddy/etcd 二进制部署，且非 Docker 容器托管）
     if missing_keywords:
         candidates.append(("MEDIUM", "WARNING",
                            f"关键进程 ps 中未发现：{', '.join(missing_keywords[:5])}",
-                           "确认进程是否用其他方式部署（容器、二进制），或已迁移到 PM2。",
+                           "确认进程是否用其他方式部署（容器、二进制、systemd），或已迁移到 PM2/Docker。",
                            {"missing_keywords": missing_keywords[:5]}))
 
     # 7) watch_services 中非 active（信息性）
@@ -2642,6 +2753,7 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
         if systemd_active.get(s) in ("inactive", "failed", "unknown")
         and s.lower() not in pm2_managed_names
         and s.lower() not in ps_seen_keywords
+        and s.lower() not in docker_managed  # Docker 容器托管的不算 inactive（PM2 迁移场景）
     ]
     if inactive_watches and not candidates:
         candidates.append(("LOW", "WARNING",
@@ -2684,6 +2796,8 @@ def _analyze_service(out: str, err: str, code: int, thresholds: Optional[Dict[st
         summary_parts.append(f"systemd 失败 {len(failed_units)}")
     if etcd_unhealthy:
         summary_parts.append(f"etcd unhealthy {len(etcd_unhealthy)}")
+    if docker_present:
+        summary_parts.append(f"Docker up={len(docker_running_names)} rest={len(docker_restarting)} exited={len(docker_exited)}")
     if missing_keywords:
         summary_parts.append(f"ps 缺 {','.join(missing_keywords[:3])}")
     facts["summary"] = "；".join(summary_parts) if summary_parts else f"watch={len(watch_services)}"
@@ -2909,6 +3023,412 @@ def _analyze_backup(out: str, err: str, code: int, thresholds: Optional[Dict[str
             f"备份任务正常，最近一次备份 {age_str}（粒度 {granularity}，阈值 {min_age_days} 天）。",
             "建议每周抽检备份文件可恢复性。",
             facts)
+
+
+def _analyze_fail2ban(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """安全检查：Fail2ban 暴力破解防护状态与配置。
+
+    参考服务器安全加固配置（Fail2ban 组件）：检测服务是否启用、ssh 相关
+    jail 是否活动、maxretry/findtime/bantime/ignoreip 阈值是否过松、当前
+    封禁 IP 数量。仅做只读解析，不修改 fail2ban 配置。
+    """
+    cfg = (thresholds or {}).get("FAIL2BAN", {}) or {}
+    max_retry_medium = int(cfg.get("max_retry_medium", 10) or 10)
+    min_bantime_minutes = int(cfg.get("min_bantime_minutes", 60) or 60)
+    banned_high = int(cfg.get("banned_high", 20) or 20)
+    text = out.lower()
+    sections: Dict[str, str] = {}
+    current = "service"
+    for line in out.splitlines():
+        if line.startswith("---") and line.endswith("---"):
+            key = line.strip("-").strip().lower()
+            sections[key] = ""
+            current = key
+        else:
+            sections.setdefault(current, "")
+            sections[current] += line + "\n"
+
+    service = sections.get("service", "").strip()
+    bin_check = sections.get("bin", "").strip()
+    status = sections.get("status", "").strip()
+    jail = sections.get("jail_sshd", "").strip()
+    config = sections.get("config", "").strip()
+    banned_out = sections.get("banned", "").strip()
+
+    facts = {
+        "raw_snippet": out[:500],
+        "service": service or "UNKNOWN",
+        # 二进制是否存在（command -v fail2ban-client）才判定"是否安装"
+        "installed": bool(bin_check) and bin_check.lower() != "fail2ban_bin_not_found"
+                     and "command not found" not in text and "no such file" not in text,
+        "fail2ban_found": "fail2ban_daemon_down" not in text,
+        "jails": [ln.strip() for ln in status.splitlines() if ln.strip().lower().startswith("- jail list")],
+        "sshd_jail_active": jail and "NO_SSHD_JAIL" not in jail and "not found" not in jail.lower(),
+        "banned_count": _parse_f2b_banned_count(banned_out),
+        "thresholds": {
+            "max_retry_medium": max_retry_medium,
+            "min_bantime_minutes": min_bantime_minutes,
+            "banned_high": banned_high,
+        },
+        "criteria": "fail2ban 二进制不存在 → HIGH（未安装）；已安装但 daemon 未运行 → HIGH；无 sshd jail → MEDIUM；maxretry>阈值或 bantime 过短 → MEDIUM；封禁 IP 数≥阈值 → LOW",
+        "summary": "",
+    }
+
+    # 1) 真正未安装：二进制不存在
+    if not facts["installed"]:
+        facts["summary"] = "未安装 fail2ban-client"
+        return ("HIGH", "RISK",
+                "未检测到 Fail2ban（暴力破解防护未安装）。",
+                "建议安装并启用 Fail2ban，配置 sshd jail 以自动封禁 SSH 暴力破解来源。参考：INSTALL_FAIL2BAN=yes。",
+                facts)
+
+    # 2) 已安装但服务/daemon 未运行：fail2ban-client 无法连接服务端，或 systemctl 非 active
+    daemon_down = "fail2ban_daemon_down" in text or "no connection to fail2ban" in text or "is the fail2ban daemon running" in text
+    service_up = service in {"active", "exited"} or (service and service not in {"", "unknown", "inactive", "dead", "stopped", "failed"})
+    if daemon_down or not service_up:
+        facts["summary"] = f"已安装 fail2ban 但服务未运行（service={service or 'unknown'}）"
+        return ("HIGH", "RISK",
+                f"Fail2ban 已安装但服务未启用或未运行（暴力破解防护未生效，状态：{service or 'unknown'}）。",
+                "启用并启动 fail2ban 服务并设置为开机自启：systemctl enable --now fail2ban。",
+                facts)
+
+    if not facts["sshd_jail_active"]:
+        facts["summary"] = "未发现活动的 sshd jail"
+        return ("MEDIUM", "WARNING",
+                "Fail2ban 已运行，但未发现活动的 sshd jail（SSH 暴力破解未受防护）。",
+                "在 jail.local 中启用 sshd jail：[sshd] enabled = true。",
+                facts)
+
+    # 解析配置阈值
+    maxretry = _get_f2b_config_int(config, "maxretry", default=None)
+    findtime = _get_f2b_config_str(config, "findtime")
+    bantime = _get_f2b_config_str(config, "bantime")
+    bantime_minutes = _parse_bantime_minutes(bantime)
+    if maxretry is not None and maxretry > max_retry_medium:
+        facts["summary"] = f"maxretry={maxretry} 超过阈值 {max_retry_medium}"
+        return ("MEDIUM", "WARNING",
+                f"Fail2ban maxretry={maxretry} 过松（阈值 {max_retry_medium}），暴力破解需更多失败次数才触发封禁。",
+                f"将 maxretry 收紧到 ≤{max_retry_medium}。",
+                facts)
+    if bantime_minutes is not None and bantime_minutes < min_bantime_minutes:
+        facts["summary"] = f"bantime={bantime} 短于阈值 {min_bantime_minutes} 分钟"
+        return ("MEDIUM", "WARNING",
+                f"Fail2ban bantime={bantime or '未知'} 过短（阈值 {min_bantime_minutes} 分钟），封禁时效不足。",
+                f"将 bantime 提高到 ≥{min_bantime_minutes} 分钟。",
+                facts)
+
+    banned_count = facts["banned_count"]
+    findings = []
+    if banned_count is not None and banned_count >= banned_high:
+        findings.append(f"当前被封禁 IP {banned_count} 个（≥{banned_high}），疑似遭受暴力破解。")
+        facts["summary"] = f"封禁 IP {banned_count} 个"
+        return ("LOW", "INFO", "；".join(findings),
+                "核查封禁 IP 来源，确认是否为恶意扫描；必要时扩展示弱口令/封禁范围。",
+                facts)
+
+    facts["summary"] = "Fail2ban 运行正常，sshd jail 活动，配置阈值合理"
+    return ("NONE", "PASS",
+            "Fail2ban 暴力破解防护运行正常，sshd jail 活动，阈值配置合理。",
+            "定期复核 jail 状态与封禁名单，保持阈值合理收紧。",
+            facts)
+
+
+def _analyze_auditd(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """安全检查：auditd 安全审计服务与审计规则覆盖。
+
+    参考服务器安全加固配置（auditd 组件）：检测 auditd 是否启用、审计是否
+    开启、是否有关键文件（passwd/shadow/ssh 配置/cron/.ssh）与危险命令审计
+    规则。仅做只读解析。
+    """
+    cfg = (thresholds or {}).get("AUDITD", {}) or {}
+    text = out.lower()
+    sections: Dict[str, str] = {}
+    current = "service"
+    for line in out.splitlines():
+        if line.startswith("---") and line.endswith("---"):
+            key = line.strip("-").strip().lower()
+            sections[key] = ""
+            current = key
+        else:
+            sections.setdefault(current, "")
+            sections[current] += line + "\n"
+
+    service = sections.get("service", "").strip()
+    status = sections.get("status", "").strip()
+    rules = sections.get("rules", "").strip()
+    rules_dir = sections.get("rules_dir", "").strip()
+
+    facts = {
+        "raw_snippet": out[:500],
+        "service": service or "UNKNOWN",
+        "auditd_found": "AUDITCTL_NOT_FOUND" not in text,
+        "enabled": "enabled 1" in status or "enabled  -1" in status or "enabled 1" in text,
+        "rule_count": len([ln for ln in rules.splitlines() if ln.strip() and not ln.strip().lower().startswith("no rules")]),
+        "key_files_covered": _audit_rules_cover_key_sources(rules + "\n" + rules_dir),
+        "criteria": "auditd 未安装/未启用或审计关闭 → HIGH；无审计规则 → HIGH；关键文件未覆盖 → MEDIUM；危险命令审计缺失 → LOW",
+        "summary": "",
+    }
+    if "AUDITCTL_NOT_FOUND" in text or "command not found" in text:
+        facts["summary"] = "未安装或无法调用 auditctl"
+        return ("HIGH", "RISK",
+                "未检测到 auditd 审计工具（安全审计未安装）。",
+                "建议安装并启用 auditd，配置关键文件与命令执行审计规则。参考：INSTALL_AUDITD=yes。",
+                facts)
+    if not service or service in {"", "unknown", "inactive", "dead", "stopped"}:
+        facts["summary"] = f"auditd 服务状态：{service or 'unknown'}"
+        return ("HIGH", "RISK",
+                f"auditd 审计服务未运行（状态：{service or 'unknown'}）。",
+                "启用 auditd 服务并设置为开机自启。",
+                facts)
+    if not facts["enabled"]:
+        facts["summary"] = "审计未开启"
+        return ("HIGH", "RISK",
+                "auditd 服务已安装但审计未开启（auditctl enabled 非 1）。",
+                "执行 auditctl -e 1 开启审计，并确认 rules.d 规则已加载。",
+                facts)
+    if facts["rule_count"] == 0:
+        facts["summary"] = "无审计规则"
+        return ("HIGH", "RISK",
+                "auditd 审计已开启但未配置任何审计规则。",
+                "在 /etc/audit/rules.d/security.rules 添加关键文件与命令执行审计规则。",
+                facts)
+    is_complete = facts["key_files_covered"]
+    if not is_complete["complete"]:
+        missing = "、".join(is_complete["missing"])
+        facts["summary"] = f"关键文件审计未覆盖：{missing}"
+        return ("MEDIUM", "WARNING",
+                f"auditd 已启用但关键文件审计未完全覆盖（缺失：{missing}）。",
+                "补充对 passwd/shadow/sshd_config/cron/.ssh 的 -w 审计规则。",
+                facts)
+    facts["summary"] = "auditd 运行正常，关键文件审计规则完整"
+    return ("NONE", "PASS",
+            "auditd 安全审计运行正常，审计规则已覆盖关键文件。",
+            "定期复核审计规则与日志轮转，确保证据链完整。",
+            facts)
+
+
+def _analyze_key_file_security(out: str, err: str, code: int, thresholds: Optional[Dict[str, Any]] = None):
+    """安全检查：关键文件权限、属主与完整性。
+
+    参考服务器安全加固配置（auditd 关键文件监控）中重点看守的文件：
+    passwd / shadow / gshadow / group / sshd_config / crontab / cron.d / .ssh。
+    检查权限过宽、属主异常、ssh 弱配置与文件缺失。仅做只读解析。
+    """
+    cfg = (thresholds or {}).get("KEY_FILE_SECURITY", {}) or {}
+    text = out.lower()
+    sections: Dict[str, str] = {}
+    current = "keyfiles"
+    for line in out.splitlines():
+        if line.startswith("---") and line.endswith("---"):
+            key = line.strip("-").strip().lower()
+            sections[key] = ""
+            current = key
+        else:
+            sections.setdefault(current, "")
+            sections[current] += line + "\n"
+
+    keyfile_text = sections.get("keyfiles", "")
+    sshd_text = sections.get("sshd_config", "")
+    f2b_conf = sections.get("fail2ban_conf", "")
+
+    # 解析 stat 行：%n %U:%G %a %s
+    files: Dict[str, Dict[str, str]] = {}
+    for line in keyfile_text.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            if line.strip().endswith("MISSING"):
+                files[line.split()[0]] = {"missing": "true"}
+            continue
+        path = parts[0]
+        files[path] = {
+            "owner": parts[1].split(":")[0],
+            "group": parts[1].split(":")[1] if ":" in parts[1] else "",
+            "mode": parts[2],
+            "size": parts[3],
+        }
+
+    facts = {
+        "raw_snippet": out[:500],
+        "files": dict(list(files.items())[:20]),
+        "world_writable": [],
+        "world_readable_shadow": False,
+        "non_root_owner": [],
+        "sshd_weak": [],
+        "missing": [p for p, m in files.items() if m.get("missing")],
+        "criteria": "shadow 全局可读 → HIGH；passwd/.ssh/cron 全局可写 → HIGH；属主异常/弱 sshd 配置/文件缺失 → MEDIUM",
+        "summary": "",
+    }
+
+    # shadow 可读判定（取"其他用户"权限位，即八进制最后一位）
+    shadow = files.get("/etc/shadow") or files.get("shadow")
+    if shadow and not shadow.get("missing"):
+        mode = shadow.get("mode", "")
+        owner = shadow.get("owner", "")
+        others = _perm_others(mode)
+        if others in {"4", "5", "6", "7"}:
+            facts["world_readable_shadow"] = True
+        if others in {"2", "3", "6", "7"}:
+            facts["world_writable"].append("/etc/shadow")
+        if owner != "root":
+            facts["non_root_owner"].append("/etc/shadow")
+
+    for path, meta in files.items():
+        if meta.get("missing"):
+            continue
+        mode = meta.get("mode", "")
+        owner = meta.get("owner", "")
+        others = _perm_others(mode)
+        if others in {"2", "3", "6", "7"}:
+            if path in {"/etc/passwd", "/etc/gshadow", "/etc/group", "/etc/crontab", "/root/.ssh", "/etc/cron.d"}:
+                facts["world_writable"].append(path)
+        if owner != "root" and path not in {"/root/.ssh"}:
+            facts["non_root_owner"].append(path)
+
+    # sshd 弱配置
+    if sshd_text and sshd_text != "no_sshd_config":
+        for line in sshd_text.splitlines():
+            sl = line.strip().lower()
+            if sl.startswith("permitrootlogin") and " no" not in sl and "prohibit" not in sl:
+                facts["sshd_weak"].append("PermitRootLogin yes")
+            if sl.startswith("passwordauthentication") and " no" not in sl:
+                facts["sshd_weak"].append("PasswordAuthentication yes")
+            if sl.startswith("permitemptypasswords") and " no" not in sl:
+                facts["sshd_weak"].append("PermitEmptyPasswords yes")
+
+    missing = [p for p in facts["missing"] if p not in {"/etc/fail2ban/jail.local"}]
+    if facts["world_readable_shadow"]:
+        facts["summary"] = "/etc/shadow 全局可读"
+        return ("HIGH", "RISK",
+                "/etc/shadow 权限过宽（其他用户可读），密码哈希存在泄露风险。",
+                "收紧权限：chmod 640 /etc/shadow（建议 600，属主 root:shadow）。",
+                facts)
+    if facts["world_writable"]:
+        ww = "、".join(facts["world_writable"])
+        facts["summary"] = f"全局可写关键文件：{ww}"
+        return ("HIGH", "RISK",
+                f"关键文件权限过宽（全局可写）：{ww}。",
+                "收紧写入权限：chmod 644 passwd/group、chmod 755 目录、chmod 600 .ssh 私钥。",
+                facts)
+    issues = []
+    if facts["non_root_owner"]:
+        issues.append(f"属主异常：{'、'.join(facts['non_root_owner'][:5])}")
+    if facts["sshd_weak"]:
+        issues.append(f"SSH 弱配置：{'、'.join(facts['sshd_weak'][:5])}")
+    if missing:
+        issues.append(f"关键文件缺失：{'、'.join(missing[:5])}")
+    if issues:
+        facts["summary"] = "、".join(issues)
+        return ("MEDIUM", "WARNING", "；".join(issues),
+                "修复属主为 root、收紧 sshd 弱配置（禁用 root 密码登录、关空密码）、确认关键文件存在。",
+                facts)
+    facts["summary"] = "关键文件权限与属主正常"
+    return ("NONE", "PASS",
+            "关键文件权限、属主与 SSH 配置未发现明显异常。",
+            "定期复核关键文件权限与 sshd 配置，保持最小化暴露。",
+            facts)
+
+
+def _perm_others(mode: str) -> str:
+    """取八进制权限字符串中"其他用户"权限位（最后一位），如 644 → '4'。"""
+    m = str(mode or "").strip()
+    if not m or not m[-1].isdigit():
+        return ""
+    return m[-1]
+
+
+def _parse_f2b_banned_count(banned_out: str) -> Optional[int]:
+    """从 fail2ban-client status <jail> 输出解析 Banned IP list 数量。"""
+    for line in banned_out.splitlines():
+        sl = line.strip()
+        if sl.lower().startswith("banned ip list:"):
+            rest = sl.split(":", 1)[1].strip()
+            if not rest or rest.lower() in {"0", "none", "empty"}:
+                return 0
+            return len([x for x in rest.split() if x])
+    return None
+
+
+def _get_f2b_config_int(config: str, key: str, default: Optional[int] = None) -> Optional[int]:
+    """从 fail2ban 配置文本提取整数型配置项。"""
+    for line in config.splitlines():
+        sl = line.strip()
+        if sl.lower().startswith(key + " ") or sl.lower().startswith(key + "="):
+            val = sl.split("=", 1)[-1].strip()
+            for tok in re.split(r"[,\s]+", val):
+                if tok.isdigit():
+                    return int(tok)
+    return default
+
+
+def _get_f2b_config_str(config: str, key: str) -> Optional[str]:
+    """从 fail2ban 配置文本提取字符串型配置项。"""
+    for line in config.splitlines():
+        sl = line.strip()
+        if sl.lower().startswith(key + " ") or sl.lower().startswith(key + "="):
+            val = sl.split("=", 1)[-1].strip()
+            if val:
+                return val.split()[0]
+    return None
+
+
+def _parse_bantime_minutes(bantime: Optional[str]) -> Optional[float]:
+    """将 fail2ban bantime 字符串解析为分钟数（支持 -1/1h/1d/300 秒）。"""
+    if bantime is None:
+        return None
+    bt = str(bantime).strip().lower()
+    if bt in {"-1", "forever", "2147483647"}:
+        return 24 * 60 * 365 * 10
+    try:
+        if bt.endswith("d"):
+            return float(bt[:-1]) * 24 * 60
+        if bt.endswith("h"):
+            return float(bt[:-1]) * 60
+        if bt.endswith("m"):
+            return float(bt[:-1])
+        if bt.endswith("s"):
+            return float(bt[:-1]) / 60.0
+        return float(bt) / 60.0
+    except ValueError:
+        return None
+
+
+# 参考安全加固配置中 auditd 重点看守的关键文件特征
+_AUDIT_KEY_SOURCES = {
+    "/etc/passwd": ("passwd", "-w"),
+    "/etc/shadow": ("shadow", "-w"),
+    "/etc/ssh/sshd_config": ("sshd_config", "-w"),
+    "/etc/crontab": ("crontab", "-w"),
+    "/root/.ssh": (".ssh", "-w"),
+}
+
+
+def _audit_rules_cover_key_sources(rules_text: str) -> Dict[str, Any]:
+    """检查审计规则文本是否覆盖关键文件与账号/命令审计。
+
+    返回 {"complete": bool, "covered": list, "missing": list}。
+    """
+    text = rules_text.lower()
+    missing = []
+    covered = []
+    for path, (_label, _kind) in _AUDIT_KEY_SOURCES.items():
+        if path in text:
+            covered.append(path)
+        else:
+            missing.append(path)
+    # 关键目录出现即视为覆盖（如 -w /etc/passwd）
+    if "/etc/passwd" in text:
+        if "/etc/passwd" in covered:
+            pass
+    # 账号变更/命令执行审计（-w /etc 或 -a always,exit -S execve 等）
+    has_account_audit = "account" in text or "usr" in text or "auth" in text
+    has_exec_audit = ("execve" in text or "exec" in text or "clone" in text or "fork" in text)
+    return {
+        "complete": not missing,
+        "covered": covered,
+        "missing": missing,
+        "account_audit": has_account_audit,
+        "exec_audit": has_exec_audit,
+    }
 
 
 # ============================================================
@@ -3230,7 +3750,7 @@ def make_custom_rule_analyzer(rule_config: Dict[str, Any], base_risk_level: str 
 def list_categories(db: Session, *, scope: str = "server") -> List[Dict[str, Any]]:
     """返回巡检项分类列表。
 
-    - 内置分类（9 大类）来自 SERVER_CATEGORIES / PROJECT_CATEGORIES
+    - 内置分类（12 大类）来自 SERVER_CATEGORIES / PROJECT_CATEGORIES
     - 用户通过 InspectionRule 自定义的新分类（InspectionItemConfig 中）
       也会合并进来，确保新规则在前端能勾选执行。
     """
@@ -5031,7 +5551,7 @@ def update_rule(db: Session, rule_code: str, payload: Dict[str, Any]) -> Dict[st
 def _sync_item_config_for_rule(db: Session, rule_row: InspectionRule) -> None:
     """根据 InspectionRule 自动创建/更新 InspectionItemConfig + InspectionItemRule。
 
-    - 内置 9 大类（LOGIN_SECURITY, DISK 等）不处理：由硬编码的 SERVER_CATEGORIES
+    - 内置分类（LOGIN_SECURITY, DISK 等）不处理：由硬编码的 SERVER_CATEGORIES
       提供，并已有内置 InspectionItemConfig 记录。
     - 对于 category 不在 SERVER_CATEGORIES / PROJECT_CATEGORIES 中的新规则：
       - 若 InspectionItemConfig 中尚未有该 item_code 的条目，创建一条

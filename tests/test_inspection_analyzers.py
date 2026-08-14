@@ -1644,6 +1644,135 @@ def test_j4_pass_summary_includes_restart_count():
     print(f"  PASS: J4 升级后 summary 包含 24h 重启统计（{f['pm2_total_recent_restarts']} 次）")
 
 
+# ============================================================
+# E5 - Docker 容器托管识别（PM2 迁移到 Docker 容器场景）
+# ============================================================
+
+_BASE_SERVICE_OUT = (
+    "---SYSTEMD_FAILED---\n0 loaded units listed.\n"
+    "---SYSTEMD_ACTIVE---\n"
+    "nginx: active\n"
+    "---PM2_JLIST---\nPM2_NOT_FOUND\n"
+    "---PM2_PING---\nPM2_PING_OK\n"
+    "---ETCD_HEALTH---\nhttp://localhost:2379 is healthy: successfully committed proposal\n"
+    "---DOCKER_PS---\n"
+    "exchange|exchange:latest|Up 2 hours\n"
+    "risk|risk:latest|Up 2 hours\n"
+    "---PROCESS_KEYWORDS---\n"
+)
+
+
+def test_e5_docker_running_service_not_missing():
+    """E5: 服务迁移到 Docker 容器后（PM2 已移除），不应被判定为缺失。"""
+    import json
+    # 期望进程 exchange/risk 已从 PM2 移除，改由 Docker 容器运行
+    out = (
+        "---SYSTEMD_FAILED---\n0 loaded units listed.\n"
+        "---SYSTEMD_ACTIVE---\n"
+        "---PM2_JLIST---\n" + json.dumps([
+            {"name": "etcd", "pm2_env": {"status": "online", "restart_time": 0}, "pid": 1},
+        ]) + "\n"
+        "---PM2_PING---\nPM2_PING_OK\n"
+        "---ETCD_HEALTH---\nhttp://localhost:2379 is healthy: successfully committed proposal\n"
+        "---DOCKER_PS---\n"
+        "exchange|exchange:latest|Up 2 hours\n"
+        "risk|risk:latest|Up 2 hours\n"
+        "---PROCESS_KEYWORDS---\n"
+    )
+    r, s, m, sg, f = svc._analyze_service(out, "", 0, {})
+    assert r == "NONE", f"E5: Docker 托管服务不应误报; got {r}, msg={m}"
+    assert f["docker_present"] is True
+    assert f["docker_running"] == ["exchange", "risk"]
+    assert f["pm2_errored"] == []
+    assert f["pm2_stopped"] == []
+    print("  PASS: E5 服务由 PM2 迁移到 Docker 容器后通过（不误报缺失）")
+
+
+def test_e5_docker_running_suppresses_pm2_stopped():
+    """E5: 迁移中——服务在 PM2 标记 stopped 但同名 Docker 容器在运行 → 不告警。"""
+    import json
+    out = (
+        "---SYSTEMD_FAILED---\n0 loaded units listed.\n"
+        "---SYSTEMD_ACTIVE---\n"
+        "---PM2_JLIST---\n" + json.dumps([
+            {"name": "exchange", "pm2_env": {"status": "stopped", "restart_time": 4}, "pid": 0},
+            {"name": "etcd", "pm2_env": {"status": "online", "restart_time": 0}, "pid": 1},
+        ]) + "\n"
+        "---PM2_PING---\nPM2_PING_OK\n"
+        "---ETCD_HEALTH---\nhttp://localhost:2379 is healthy: successfully committed proposal\n"
+        "---DOCKER_PS---\n"
+        "exchange|exchange:latest|Up 2 hours\n"
+        "---PROCESS_KEYWORDS---\n"
+    )
+    r, s, m, sg, f = svc._analyze_service(out, "", 0, {})
+    # exchange 已由 Docker 容器运行，PM2 中 stopped 不应触发告警 → 仅 etcd online → PASS
+    assert r == "NONE", f"E5: Docker 运行的同名 PM2 stopped 应被抑制; got {r}, msg={m}"
+    assert f["pm2_stopped"] == [{"name": "exchange", "pid": 0}]  # facts 保留原始
+    print("  PASS: E5 Docker 运行中的同名 PM2 stopped 被抑制为 PASS")
+
+
+def test_e5_docker_restarting_medium():
+    """E5: Docker 容器崩溃循环 Restarting → MEDIUM。"""
+    out = _BASE_SERVICE_OUT.replace(
+        "exchange|exchange:latest|Up 2 hours",
+        "exchange|exchange:latest|Restarting (1) 5 seconds ago",
+    )
+    r, s, m, sg, f = svc._analyze_service(out, "", 0, {})
+    assert r == "MEDIUM", f"E5: Restarting 容器应 MEDIUM; got {r}, msg={m}"
+    assert f["docker_restarting"] == ["exchange"]
+    assert "Restarting" in m
+    print("  PASS: E5 Docker Restarting 崩溃循环 → MEDIUM")
+
+
+def test_e5_docker_exited_expected_low():
+    """E5: 期望常驻的 Docker 容器 Exited → LOW。"""
+    out = _BASE_SERVICE_OUT.replace(
+        "exchange|exchange:latest|Up 2 hours",
+        "exchange|exchange:latest|Exited (0) 2 hours ago",
+    )
+    r, s, m, sg, f = svc._analyze_service(out, "", 0, {
+        "SERVICE_STATUS": {"docker_expected_containers": ["exchange"]},
+    })
+    assert r == "LOW", f"E5: 期望容器 Exited 应 LOW; got {r}, msg={m}"
+    assert f["docker_exited"] == ["exchange"]
+    assert "Exited" in m
+    print("  PASS: E5 期望 Docker 容器 Exited → LOW")
+
+
+def test_e5_docker_unexpected_exited_not_flagged():
+    """E5: 非期望的 Docker 容器 Exited（如辅助/一次性容器）应忽略，不告警。"""
+    out = _BASE_SERVICE_OUT.replace(
+        "exchange|exchange:latest|Up 2 hours",
+        "some-helper|busybox:latest|Exited (0) 2 hours ago",
+    )
+    r, s, m, sg, f = svc._analyze_service(out, "", 0, {
+        "SERVICE_STATUS": {"docker_expected_containers": ["exchange", "risk"]},
+    })
+    # some-helper 不在期望列表 → 不告警；exchange/risk 正常 Up → PASS
+    assert r == "NONE", f"E5: 非期望 Exited 容器应忽略; got {r}, msg={m}"
+    assert f["docker_exited"] == ["some-helper"]
+    print("  PASS: E5 非期望 Docker 容器 Exited 被忽略")
+
+
+def test_e5_docker_config_defaults_include_keys():
+    """E5: DEFAULT_THRESHOLDS.SERVICE_STATUS 必须含 Docker 相关字段。"""
+    cfg = svc.DEFAULT_THRESHOLDS["SERVICE_STATUS"]
+    for key in ("docker_restarting_level", "docker_exited_level", "docker_expected_containers"):
+        assert key in cfg, f"E5: SERVICE_STATUS missing {key}"
+    assert cfg["docker_restarting_level"] == "MEDIUM"
+    assert cfg["docker_exited_level"] == "LOW"
+    print("  PASS: E5 SERVICE_STATUS 含 3 个 Docker 字段（docker_*/docker_expected_containers）")
+
+
+def test_e5_docker_command_template_includes_docker_ps():
+    """E5: SERVER_SERVICE_STATUS 命令模板必须含 DOCKER_PS 段。"""
+    specs = svc._server_check_specs("", ["SERVICE_STATUS"])
+    cmd = next(s["command"] for s in specs if s["category"] == "SERVICE_STATUS")
+    assert "---DOCKER_PS---" in cmd
+    assert "docker ps -a" in cmd
+    print("  PASS: E5 服务状态命令模板包含 DOCKER_PS 段")
+
+
 def test_h3_accounts_empty_passwd_warns():
     """H3 根因：报告 0 个系统账号原版直接 PASS → 应升级 MEDIUM WARNING。"""
     r, s, m, sg, f = svc._analyze_accounts("", "", 0, {})

@@ -103,8 +103,10 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
   const [batchAction, setBatchAction] = useState<'' | 'revoke' | 'delete'>('')
   const [submitting, setSubmitting] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (silent = false) => {
+    // 静默刷新(silent=true)用于操作成功后:保留旧数据,新数据到达后直接替换,
+    // 避免表格闪"加载中"或短暂空白,与其他页面动作体验一致。
+    if (!silent) setLoading(true)
     try {
       const res = await temporaryApprovals.list({ status: status || undefined, limit: 100 })
       const data = (res as any).data
@@ -113,7 +115,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
     } catch (e: any) {
       notify('error', String(e))
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [status, notify])
 
@@ -132,7 +134,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
       notify('success', '临时授权已确认生效')
       setConfirmTarget(null)
       setConfirmPhrase('')
-      await load()
+      await load(true)
     } catch (e: any) {
       notify('error', String(e?.response?.data?.message || e))
     } finally {
@@ -148,7 +150,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
       notify('success', '临时授权已撤销')
       setRevokeTarget(null)
       setRevokeReason('')
-      await load()
+      await load(true)
     } catch (e: any) {
       notify('error', String(e?.response?.data?.message || e))
     } finally {
@@ -163,7 +165,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
       await temporaryApprovals.delete(deleteTarget.id)
       notify('success', '临时授权记录已删除')
       setDeleteTarget(null)
-      await load()
+      await load(true)
     } catch (e: any) {
       notify('error', String(e?.response?.data?.message || e))
     } finally {
@@ -188,7 +190,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
       await temporaryApprovals.batchRevoke(selectedIds, '批量撤销')
       notify('success', `已批量撤销 ${selectedIds.length} 条授权`)
       setSelectedIds([])
-      await load()
+      await load(true)
     } catch (e: any) {
       notify('error', String(e?.response?.data?.message || e))
     } finally {
@@ -206,7 +208,7 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
       await temporaryApprovals.batchDelete(selectedIds)
       notify('success', `已批量删除 ${selectedIds.length} 条授权记录`)
       setSelectedIds([])
-      await load()
+      await load(true)
     } catch (e: any) {
       notify('error', String(e?.response?.data?.message || e))
     } finally {

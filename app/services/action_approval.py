@@ -267,12 +267,40 @@ class ActionApprovalService:
         ):
             return None
         request_actor_key = _request_actor_key(approval)
+        authorized_keys = _identity_keys(approval.authorized_identities)
         if request_actor_key == context.actor_key:
-            return None
-        if not approval.authorized_identities:
+            # 自审批路径：请求方==消费方时。若审批绑定了临时授权（temporary_grant_id
+            # 非空），必须校验授权仍活跃——即使消费方在 authorized_keys 中（受益人
+            # 也会被加入 authorized_keys），否则过期授权下受益人会被误放行。未绑定
+            # 临时授权时，仅当消费方是配置的原始审批人（在 authorized_identities 中）
+            # 才放行，否则拒绝（防止非审批人申请人自批）。
+            if approval.temporary_grant_id:
+                from app.services.temporary_approval import TemporaryApprovalService
+                payload = approval.request_payload or {}
+                grant_service = TemporaryApprovalService(self.db)
+                if not grant_service.is_self_approval_allowed(
+                    actor_key=context.actor_key,
+                    system_name=payload.get("system_name") or "",
+                    environment_name=payload.get("environment") or "",
+                    action_types=[approval.action_type],
+                    message_context=context,
+                ):
+                    return None
+                if grant_service.get_active_grant(
+                    actor_key=context.actor_key,
+                    system_name=payload.get("system_name") or "",
+                    environment_name=payload.get("environment") or "",
+                    message_context=context,
+                ) is None:
+                    return None
+            elif context.actor_key in authorized_keys:
+                pass
+            else:
+                return None
+        elif not approval.authorized_identities:
             if not (approval.request_payload or {}).get("legacy_matrix_compat"):
                 return None
-        elif context.actor_key not in _identity_keys(approval.authorized_identities):
+        elif context.actor_key not in authorized_keys:
             return None
         stored_context = _stored_context(approval)
         if stored_context is None:

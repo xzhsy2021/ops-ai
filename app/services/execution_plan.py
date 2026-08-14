@@ -402,27 +402,33 @@ class ExecutionPlanService:
             f"{item.get('channel')}:{item.get('channel_account_id')}:{item.get('sender_id')}"
             for item in plan.authorized_identities or [] if isinstance(item, dict)
         }
-        # 自审批路径：请求方==消费方时，必须存在绑定的临时授权且仍活跃；
-        # 否则拒绝（防止申请人自批）。原始审批人不受此限制。
+        # 自审批路径：请求方==消费方时。若计划绑定了临时授权（temporary_grant_id
+        # 非空），必须校验授权仍活跃——即使消费方在 authorized_keys 中（受益人也会
+        # 被加入 authorized_keys），否则过期授权下受益人会被误放行。未绑定临时授权
+        # 时，仅当消费方是配置的原始审批人（在 authorized_keys 中）才放行，
+        # 否则拒绝（防止非审批人申请人自批）。
         if _request_actor_key(plan) == context.actor_key:
-            if not plan.temporary_grant_id:
-                return None
-            from app.services.temporary_approval import TemporaryApprovalService
-            grant_service = TemporaryApprovalService(self.db)
-            if not grant_service.is_self_approval_allowed(
-                actor_key=context.actor_key,
-                system_name=plan.system_name or "",
-                environment_name=plan.environment or "",
-                action_types=[step.action_type for step in plan.steps],
-                message_context=context,
-            ):
-                return None
-            if grant_service.get_active_grant(
-                actor_key=context.actor_key,
-                system_name=plan.system_name or "",
-                environment_name=plan.environment or "",
-                message_context=context,
-            ) is None:
+            if plan.temporary_grant_id:
+                from app.services.temporary_approval import TemporaryApprovalService
+                grant_service = TemporaryApprovalService(self.db)
+                if not grant_service.is_self_approval_allowed(
+                    actor_key=context.actor_key,
+                    system_name=plan.system_name or "",
+                    environment_name=plan.environment or "",
+                    action_types=[step.action_type for step in plan.steps],
+                    message_context=context,
+                ):
+                    return None
+                if grant_service.get_active_grant(
+                    actor_key=context.actor_key,
+                    system_name=plan.system_name or "",
+                    environment_name=plan.environment or "",
+                    message_context=context,
+                ) is None:
+                    return None
+            elif context.actor_key in authorized_keys:
+                pass
+            else:
                 return None
         elif not plan.authorized_identities:
             if not (plan.manifest or {}).get("legacy_matrix_compat"):

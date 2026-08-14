@@ -34,6 +34,10 @@ def db():
     run_schema_migrations(engine)
     session = SessionLocal()
     existing = session.query(System).filter(System.name == "crypto-trader").first()
+    # 测试需要 crypto-trader 系统的 matrix/default 审批人是 @owner:matrix.org。
+    # 若系统已存在（例如本机 data/ops.db 已有真实配置），备份原 routing 并覆盖，
+    # teardown 时恢复，保证测试不依赖本地数据库状态。
+    original_routing = None
     if existing is None:
         session.add(System(
             name="crypto-trader",
@@ -50,8 +54,22 @@ def db():
             SystemEnvironment(system_name="crypto-trader", name="test", category="test"),
             SystemEnvironment(system_name="crypto-trader", name="prod", category="prod"),
         ])
-        session.commit()
+    else:
+        original_routing = existing.message_routing
+        routing = dict(existing.message_routing or {})
+        routing["approvers"] = [{
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "sender_id": "@owner:matrix.org",
+        }]
+        existing.message_routing = routing
+    session.commit()
     yield session
+    if original_routing is not None:
+        row = session.query(System).filter(System.name == "crypto-trader").first()
+        if row is not None:
+            row.message_routing = original_routing
+            session.commit()
     session.rollback()
     session.close()
 

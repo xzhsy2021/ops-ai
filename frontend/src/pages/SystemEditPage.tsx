@@ -3,13 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { resource } from '../api'
 import { useNotificationStore } from '../store'
 import KeyValueEditor from '../components/KeyValueEditor'
+import { ApproverEditor } from '../components/BindingEditors'
 import {
-  approverKey,
-  approverLabel,
   normalizeApprovers,
   withStructuredApprovers,
 } from '../utils/approverIdentities.js'
-import type { ApproverChannel, ApproverIdentity } from '../utils/approverIdentities.js'
+import type { ApproverIdentity } from '../utils/approverIdentities.js'
 
 const STRATEGY_LABELS: Record<string, string> = {
   DIRECT: 'Direct 直推',
@@ -53,9 +52,6 @@ export default function SystemEditPage() {
   const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
   const [aliasInput, setAliasInput] = useState('')
   const [keywordInput, setKeywordInput] = useState('')
-  const [approverChannel, setApproverChannel] = useState<ApproverChannel>('matrix')
-  const [approverAccount, setApproverAccount] = useState('default')
-  const [approverSender, setApproverSender] = useState('')
   const [environments, setEnvironments] = useState<Array<{ name: string; display_name?: string; category?: string; variables: Record<string, any> }>>([])
   const [activeEnv, setActiveEnv] = useState('')
   const [envVars, setEnvVars] = useState<Record<string, any>>({})
@@ -146,25 +142,6 @@ export default function SystemEditPage() {
 
   const removeKeyword = (idx: number) => {
     setRouting({ ...routing, keywords: routing.keywords.filter((_, i) => i !== idx) })
-  }
-
-  const addApprover = () => {
-    const identity: ApproverIdentity = {
-      channel: approverChannel,
-      channel_account_id: approverAccount.trim() || 'default',
-      sender_id: approverSender.trim(),
-    }
-    if (!identity.sender_id) return
-    if (routing.approvers.some((item) => approverKey(item) === approverKey(identity))) {
-      notify('授权人已存在', 'error')
-      return
-    }
-    setRouting({ ...routing, approvers: [...routing.approvers, identity] })
-    setApproverSender('')
-  }
-
-  const removeApprover = (idx: number) => {
-    setRouting({ ...routing, approvers: routing.approvers.filter((_, i) => i !== idx) })
   }
 
   // 过滤后端注入的元数据键（environment/category/display_name 由环境配置本身维护）
@@ -488,64 +465,12 @@ export default function SystemEditPage() {
               </div>
               <div style={{ gridColumn: '1 / -1' }}>
                 <label>授权审批人</label>
-                <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '6px' }}>
-                  审批身份按消息渠道、渠道账号和发送者 ID 精确匹配。
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
-                  <select
-                    aria-label="审批人渠道"
-                    style={{ ...inputStyle, width: '130px' }}
-                    value={approverChannel}
-                    onChange={(e) => setApproverChannel(e.target.value as ApproverChannel)}
-                  >
-                    <option value="matrix">Matrix</option>
-                    <option value="wechat">微信</option>
-                    <option value="telegram">Telegram</option>
-                  </select>
-                  <input
-                    aria-label="渠道账号"
-                    style={{ ...inputStyle, width: '160px' }}
-                    value={approverAccount}
-                    onChange={(e) => setApproverAccount(e.target.value)}
-                    placeholder="default"
-                  />
-                  <input
-                    aria-label="审批人发送者 ID"
-                    style={{ ...inputStyle, flex: '1 1 240px' }}
-                    value={approverSender}
-                    onChange={(e) => setApproverSender(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addApprover() } }}
-                    placeholder={approverChannel === 'matrix' ? '@user:example.org' : '发送者 ID'}
-                  />
-                  <button className="btn" onClick={addApprover} type="button" title="添加审批人" aria-label="添加审批人">+</button>
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                  {routing.approvers.map((a, i) => (
-                    <span
-                      key={approverKey(a)}
-                      style={{
-                        display: 'inline-flex', alignItems: 'center', gap: '4px',
-                        padding: '2px 8px', borderRadius: '12px',
-                        background: 'var(--bg-hover)', fontSize: '12px',
-                        fontFamily: 'monospace',
-                      }}
-                      title={approverLabel(a)}
-                    >
-                      {approverLabel(a)}
-                      <button
-                        onClick={() => removeApprover(i)}
-                        type="button"
-                        style={{
-                          background: 'none', border: 'none', cursor: 'pointer',
-                          color: 'var(--text-muted)', padding: 0, fontSize: '14px',
-                        }}
-                      >×</button>
-                    </span>
-                  ))}
-                  {routing.approvers.length === 0 && (
-                    <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>未配置（任何用户均可审批）</span>
-                  )}
-                </div>
+                <ApproverEditor
+                  value={routing.approvers}
+                  onChange={(v) => setRouting({ ...routing, approvers: v })}
+                  hint="审批身份按消息渠道、渠道账号和发送者 ID 精确匹配；token 绑定优先于此处，服务级未配置时回退到系统级。"
+                  emptyText="未配置（同房间任意成员可审批）"
+                />
               </div>
             </div>
           )}

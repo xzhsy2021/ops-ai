@@ -56,6 +56,10 @@ export default function SystemEditPage() {
   const [approverChannel, setApproverChannel] = useState<ApproverChannel>('matrix')
   const [approverAccount, setApproverAccount] = useState('default')
   const [approverSender, setApproverSender] = useState('')
+  const [environments, setEnvironments] = useState<Array<{ name: string; display_name?: string; category?: string; variables: Record<string, any> }>>([])
+  const [activeEnv, setActiveEnv] = useState('')
+  const [envVars, setEnvVars] = useState<Record<string, any>>({})
+  const [envSaving, setEnvSaving] = useState(false)
 
   useEffect(() => {
     if (!name) return
@@ -84,6 +88,15 @@ export default function SystemEditPage() {
     }).finally(() => {
       setLoading(false)
     })
+
+    resource.environments(name).then((res: any) => {
+      const list = Array.isArray(res.data) ? res.data.filter((e: any) => e?.name) : []
+      setEnvironments(list)
+      if (list.length > 0) {
+        setActiveEnv(list[0].name)
+        setEnvVars(stripEnvMetaKeys(list[0].variables || {}))
+      }
+    }).catch(() => {})
   }, [name])
 
   // 启用路由时，若关键词为空，自动填充当前系统已配置的服务名
@@ -152,6 +165,41 @@ export default function SystemEditPage() {
 
   const removeApprover = (idx: number) => {
     setRouting({ ...routing, approvers: routing.approvers.filter((_, i) => i !== idx) })
+  }
+
+  // 过滤后端注入的元数据键（environment/category/display_name 由环境配置本身维护）
+  const stripEnvMetaKeys = (v: Record<string, any>) => {
+    const { environment, category, display_name, ...rest } = v || {}
+    return rest
+  }
+
+  const handleEnvChange = (envName: string) => {
+    const env = environments.find((e) => e.name === envName)
+    setActiveEnv(envName)
+    setEnvVars(stripEnvMetaKeys(env?.variables || {}))
+  }
+
+  const handleEnvSave = async () => {
+    if (!name || !activeEnv) return
+    const env = environments.find((e) => e.name === activeEnv)
+    setEnvSaving(true)
+    try {
+      await resource.systemEnvironments.update(name, activeEnv, {
+        name: activeEnv,
+        display_name: env?.display_name || '',
+        category: env?.category || 'custom',
+        variables: envVars,
+      })
+      notify(`环境 ${activeEnv} 变量已保存`, 'success')
+      setEnvironments((prev) => prev.map((e) =>
+        e.name === activeEnv ? { ...e, variables: { ...envVars, environment: activeEnv } } : e
+      ))
+    } catch (e: any) {
+      const msg = typeof e === 'string' ? e : (e?.message || '保存失败')
+      notify(msg, 'error')
+    } finally {
+      setEnvSaving(false)
+    }
   }
 
   const handleSubmit = async () => {
@@ -269,7 +317,10 @@ export default function SystemEditPage() {
             />
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
-            <label style={{ display: 'block', marginBottom: '8px' }}>系统变量</label>
+            <label style={{ display: 'block', marginBottom: '8px' }}>系统变量（所有环境共享）</label>
+            <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '8px' }}>
+              系统级变量对所有环境生效；同名键会被环境变量、服务模板变量逐级覆盖。继承顺序：系统变量 → 环境变量 → 服务模板变量。
+            </div>
             <KeyValueEditor
               value={form.variables}
               onChange={(v) => setForm({ ...form, variables: v })}
@@ -278,6 +329,42 @@ export default function SystemEditPage() {
               addButtonText="+ 添加变量"
               emptyText="暂无系统变量"
             />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={{ display: 'block', marginBottom: '8px' }}>环境变量（按环境独立）</label>
+            <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginBottom: '8px' }}>
+              各环境（如 prod / test）可配置独立变量，同名键会覆盖系统变量；被服务模板变量覆盖。
+            </div>
+            {environments.length > 0 ? (
+              <>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px' }}>
+                  <select
+                    style={{ ...inputStyle, maxWidth: '240px' }}
+                    value={activeEnv}
+                    onChange={(e) => handleEnvChange(e.target.value)}
+                  >
+                    {environments.map((e) => (
+                      <option key={e.name} value={e.name}>
+                        {e.display_name || e.name}{e.category ? ` (${e.category})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="btn" onClick={handleEnvSave} disabled={envSaving}>
+                    {envSaving ? '保存中...' : `保存 ${activeEnv} 环境变量`}
+                  </button>
+                </div>
+                <KeyValueEditor
+                  value={envVars}
+                  onChange={setEnvVars}
+                  keyPlaceholder="变量名"
+                  valuePlaceholder="变量值"
+                  addButtonText="+ 添加变量"
+                  emptyText="暂无环境变量"
+                />
+              </>
+            ) : (
+              <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>暂无环境，可先在发布页或环境管理接口创建环境。</div>
+            )}
           </div>
         </div>
 

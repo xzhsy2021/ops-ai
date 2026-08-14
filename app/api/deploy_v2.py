@@ -910,10 +910,14 @@ async def list_environments_v2(system: str = "", db: Session = Depends(get_db)):
 
 
 
-def _normalize_environment_payload(payload: SystemEnvironmentPayload, existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _normalize_environment_payload(payload: SystemEnvironmentPayload, existing: Optional[Dict[str, Any]] = None, replace_variables: bool = False) -> Dict[str, Any]:
     category = str(payload.category or "custom").strip() or "custom"
-    variables = dict(existing.get("variables", {}) if isinstance(existing, dict) else {})
-    variables.update(payload.variables or {})
+    if replace_variables:
+        # 显式传入了 variables 时整体替换，允许删除旧键（如前端环境变量编辑区的完整保存）。
+        variables = dict(payload.variables or {})
+    else:
+        variables = dict(existing.get("variables", {}) if isinstance(existing, dict) else {})
+        variables.update(payload.variables or {})
     variables["environment"] = _normalize_env_name(payload.name)
     variables["category"] = category
     if payload.display_name.strip():
@@ -982,7 +986,10 @@ async def update_system_environment_v2(system_name: str, env_name: str, payload:
         "servers": existing_row.servers or [],
         "variables": existing_row.variables or {},
     }
-    env_cfg = _normalize_environment_payload(payload, existing)
+    sent_fields = payload.model_dump(exclude_unset=True)
+    env_cfg = _normalize_environment_payload(
+        payload, existing, replace_variables="variables" in sent_fields
+    )
     existing_row.name = new_name
     existing_row.display_name = env_cfg["display_name"]
     existing_row.category = env_cfg["category"]

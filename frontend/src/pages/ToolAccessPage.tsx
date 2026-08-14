@@ -16,11 +16,12 @@ import type { ToolInfo as _ToolInfo } from './tools/ToolCatalogPanel'
 
 type ToolInfo = _ToolInfo
 
-type TabKey = 'overview' | 'tokens' | 'catalog' | 'playground' | 'audit'
+type TabKey = 'overview' | 'tokens' | 'temp-approvals' | 'catalog' | 'playground' | 'audit'
 
 const TAB_ITEMS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'overview', label: '概览与接入', hint: '能力开关、端点、Manifest' },
   { key: 'tokens', label: 'Tool Token', hint: '令牌、权限最小化' },
+  { key: 'temp-approvals', label: '临时审批授权', hint: '临时自审批授权管理' },
   { key: 'catalog', label: '工具目录', hint: '能力发现、Schema、风险' },
   { key: 'playground', label: '工具调试', hint: '手动调用 HTTP Tool' },
   { key: 'audit', label: '审计与计划', hint: '调用记录、操作计划' },
@@ -715,9 +716,12 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
               <button className="btn btn-subtle" style={{ marginLeft: 8 }} onClick={() => void navigator.clipboard?.writeText(createdToken)}>复制</button>
             </div>
           )}
-          {isAdmin && (
-            <TemporaryApprovalPanel canManage={isAdmin} />
-          )}
+        </section>
+      )}
+
+      {activeTab === 'temp-approvals' && (
+        <section className="tool-tab-panel">
+          <TemporaryApprovalPanel canManage={isAdmin} />
         </section>
       )}
 

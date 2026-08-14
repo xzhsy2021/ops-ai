@@ -35,8 +35,8 @@ def test_tool_token_editor_uses_generic_channel_bindings():
     panel = _read("frontend/src/pages/tools/ToolTokenPanel.tsx")
     api = _read("frontend/src/api.ts")
 
-    # 编辑/新建表单携带通用通道绑定与授权人身份
-    for marker in ("channel_bindings", "approver_identities"):
+    # 编辑/新建表单携带通用通道绑定（审批人统一由系统设置配置，token 级不再配置）
+    for marker in ("channel_bindings",):
         assert marker in panel, marker
         assert marker in api, marker
 
@@ -54,6 +54,5 @@ def test_temporary_approval_api_client_is_registered():
 
 def test_tool_token_payload_keeps_legacy_aliases_for_compat():
     panel = _read("frontend/src/pages/tools/ToolTokenPanel.tsx")
-    # 旧字段保留以便向后兼容，但不再是唯一来源
+    # 房间/会话绑定字段仍保留；token 级审批人绑定已从 UI 移除（统一由系统设置配置）
     assert "bound_room_ids" in panel
-    assert "approver_matrix_ids" in panel

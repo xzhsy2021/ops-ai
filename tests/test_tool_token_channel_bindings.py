@@ -403,9 +403,11 @@ def test_mcp_call_paths_normalize_legacy_matrix_room_context(tmp_path, stream):
 
 
 @pytest.mark.parametrize("channel", ["wechat", "telegram"])
-def test_legacy_matrix_approval_rejects_cross_channel_token_approvers(
+def test_legacy_matrix_approval_ignores_cross_channel_token_approvers(
     tmp_path, monkeypatch, channel
 ):
+    """系统 message_routing 为审批人唯一来源：跨渠道 token 审批人被忽略，
+    请求按系统配置的矩阵审批人授权，而非被拒绝。"""
     from app.services.tool_adapters import approval_tools
     from app.services.tool_context import ToolContext
 
@@ -462,25 +464,24 @@ def test_legacy_matrix_approval_rejects_cross_channel_token_approvers(
             "strategy",
             revision,
         )
-        with pytest.raises(HTTPException) as exc:
-            approval_tools.approval_prepare_service_control(
-                {
-                    "room_id": "!ops:example.org",
-                    "request_event_id": "$event",
-                    "sender_matrix_id": "@requester:matrix.org",
-                    "content_sha256": "b" * 64,
-                    "system_name": "crypto-trader",
-                    "service_name": "strategy",
-                    "environment": "test",
-                    "control_action": "restart",
-                    "targets": ["server-1"],
-                    "routing_ticket": ticket.ticket,
-                },
-                ctx,
-                db,
-            )
-        assert exc.value.status_code == 403
-        assert "authorized approver" in str(exc.value.detail).lower()
+        # 系统配置的矩阵审批人授权请求；跨渠道 token 审批人被忽略，不触发拒绝。
+        result = approval_tools.approval_prepare_service_control(
+            {
+                "room_id": "!ops:example.org",
+                "request_event_id": "$event",
+                "sender_matrix_id": "@requester:matrix.org",
+                "content_sha256": "b" * 64,
+                "system_name": "crypto-trader",
+                "service_name": "strategy",
+                "environment": "test",
+                "control_action": "restart",
+                "targets": ["server-1"],
+                "routing_ticket": ticket.ticket,
+            },
+            ctx,
+            db,
+        )
+        assert result["authorized_approvers"] == ["@fallback:example.org"]
     finally:
         db.close()
         engine.dispose()

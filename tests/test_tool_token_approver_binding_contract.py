@@ -1,11 +1,12 @@
-"""Contract tests for qclaw Element approver binding on Tool Tokens.
+"""Contract tests for qclaw Element approver resolution on Tool Tokens.
 
 Covers:
-- `_normalize_approver_ids` input normalization
-- `create_tool_token` / `token_to_dict` round-trip with approver_matrix_ids
-- API payloads accept / return approver_matrix_ids
-- `_lookup_approvers` prefers token-level whitelist over system/service config
-- Frontend renders the approver editor and table badge
+- `_normalize_approver_ids` input normalization (legacy token field)
+- `create_tool_token` / `token_to_dict` round-trip with legacy approver_matrix_ids
+- API payloads accept / return legacy approver_matrix_ids
+- `_lookup_approvers` prefers system/service message_routing over token-level config
+- `_lookup_approvers` falls back to token-level approvers when no system config exists
+- consume() enforces the resolved authorized approver whitelist
 """
 from __future__ import annotations
 
@@ -148,8 +149,51 @@ class _Ctx:
         self.approver_identities = approver_identities or []
 
 
-def test_lookup_approvers_prefers_token_whitelist():
+def test_lookup_approvers_prefers_system_config_over_token(monkeypatch):
+    """系统设置 message_routing 为审批人唯一来源，优先于 token 级。"""
+    from app.services.tool_adapters import approval_tools
     from app.services.tool_adapters.approval_tools import _lookup_approvers
+
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: {
+        "crypto-trader": {
+            "message_routing": {
+                "approvers": [
+                    {"channel": "matrix", "channel_account_id": "default", "sender_id": "@owner:matrix.org"},
+                ],
+            },
+            "services": [],
+        },
+    })
+
+    # token 级有不同的审批人，但系统配置优先，token 不覆盖系统。
+    ctx = _Ctx(approver_identities=[
+        {
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "sender_id": "@jack.han:matrix.org",
+        },
+        {
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "sender_id": "@alice:matrix.org",
+        },
+    ])
+    result = _lookup_approvers(
+        ctx,
+        "crypto-trader",
+        "crypto-exchange",
+        channel="matrix",
+        channel_account_id="default",
+    )
+    assert result == ["@owner:matrix.org"]
+
+
+def test_lookup_approvers_falls_back_to_token_when_no_system_config(monkeypatch):
+    """系统未配置审批人时，回退到 token 级 legacy 审批人。"""
+    from app.services.tool_adapters import approval_tools
+    from app.services.tool_adapters.approval_tools import _lookup_approvers
+
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: {})
 
     ctx = _Ctx(approver_identities=[
         {
@@ -163,18 +207,16 @@ def test_lookup_approvers_prefers_token_whitelist():
             "sender_id": "@alice:matrix.org",
         },
     ])
-    # Even though no system config exists, the token whitelist wins.
-    result = _lookup_approvers(
+    assert _lookup_approvers(
         ctx,
         "crypto-trader",
         "crypto-exchange",
         channel="matrix",
         channel_account_id="default",
-    )
-    assert result == ["@jack.han:matrix.org", "@alice:matrix.org"]
+    ) == ["@jack.han:matrix.org", "@alice:matrix.org"]
 
 
-def test_lookup_approvers_falls_back_when_no_token_whitelist(monkeypatch):
+def test_lookup_approvers_falls_back_when_no_system_or_token_approvers(monkeypatch):
     from app.services.tool_adapters import approval_tools
     from app.services.tool_adapters.approval_tools import _lookup_approvers
 
@@ -217,23 +259,6 @@ def test_lookup_approvers_empty_ctx(monkeypatch):
         channel="matrix",
         channel_account_id="default",
     ) == []
-
-
-def test_frontend_renders_approver_editor_and_table_badge():
-    panel = open("frontend/src/pages/tools/ToolTokenPanel.tsx", encoding="utf-8").read()
-    page = open("frontend/src/pages/ToolAccessPage.tsx", encoding="utf-8").read()
-
-    # State holders for both create and edit forms.
-    assert "approvers" in panel
-    assert "editApprovers" in panel
-    # Table column shows an approver badge when present.
-    assert "授权人: " in panel
-    # Edit dialog also wires the approver editor.
-    assert "editApproverInput" in panel
-    # onGenerate / onUpdate thread approver_matrix_ids through to the API.
-    assert "approver_matrix_ids" in panel
-    assert "approver_matrix_ids: data.approver_matrix_ids || []" in page
-    assert "approver_matrix_ids" in page
 
 
 def test_consume_enforces_token_whitelist_via_prepare(tmp_path):

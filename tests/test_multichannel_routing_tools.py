@@ -66,7 +66,7 @@ def _systems(approvers):
 
 
 @pytest.mark.parametrize("channel", ["matrix", "wechat", "telegram"])
-def test_registered_routing_tool_uses_generic_context_and_token_approvers(
+def test_registered_routing_tool_prefers_system_approvers_over_token(
     monkeypatch, channel
 ):
     context = _context(channel)
@@ -95,10 +95,11 @@ def test_registered_routing_tool_uses_generic_context_and_token_approvers(
 
     assert response["outcome"] == "RESOLVED"
     assert response["message_context"] == context.to_dict()
+    # 系统 message_routing 为审批人唯一来源，token 级不覆盖系统配置。
     assert response["configured_approver_identities"] == [configured_approver]
-    assert response["approver_identities"] == [token_approver]
-    assert response["approvers"] == ["token-approver"]
-    assert response["approver_actor_keys"] == [f"{channel}:primary:token-approver"]
+    assert response["approver_identities"] == [configured_approver]
+    assert response["approvers"] == ["configured-approver"]
+    assert response["approver_actor_keys"] == [f"{channel}:primary:configured-approver"]
 
 
 def test_routing_tool_legacy_matrix_input_normalizes_only_at_handler_boundary(monkeypatch):

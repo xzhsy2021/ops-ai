@@ -60,19 +60,23 @@ def _effective_approver_identities(
     channel: str,
     channel_account_id: str,
 ) -> list[dict[str, str]]:
-    """Apply token-first approver policy and reject cross-channel fallthrough."""
+    """系统设置(message_routing)为审批人唯一来源，token 级仅作 legacy 回退。
+
+    优先级：系统/服务级 message_routing.approvers 优先；仅当系统未配置时才
+    回退到 token 级 approver_identities（向后兼容旧 token）。token 级不再覆盖
+    系统级，因此系统配置的原始审批人不会被 token 排除，请求者==审批者的自批
+    不再被误拒。
+    """
     try:
-        token_identities = normalize_approver_identities(
-            getattr(ctx, "approver_identities", None)
-        )
+        configured_identities = normalize_routing_approvers(configured)
     except ValueError as exc:
         raise HTTPException(
             status_code=403,
-            detail=f"Invalid token approver policy: {exc}",
+            detail=f"Invalid routing approver configuration: {exc}",
         ) from exc
-    if token_identities:
+    if configured_identities:
         matched = _current_channel_identities(
-            token_identities,
+            configured_identities,
             channel=channel,
             channel_account_id=channel_account_id,
         )
@@ -84,16 +88,18 @@ def _effective_approver_identities(
         return matched
 
     try:
-        configured_identities = normalize_routing_approvers(configured)
+        token_identities = normalize_approver_identities(
+            getattr(ctx, "approver_identities", None)
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=403,
-            detail=f"Invalid routing approver configuration: {exc}",
+            detail=f"Invalid token approver policy: {exc}",
         ) from exc
-    if not configured_identities:
+    if not token_identities:
         return []
     matched = _current_channel_identities(
-        configured_identities,
+        token_identities,
         channel=channel,
         channel_account_id=channel_account_id,
     )

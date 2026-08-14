@@ -186,20 +186,18 @@ def test_create_token_payload_declares_bound_room_ids_field():
     assert default_create.bound_room_ids == []
 
 
-def test_frontend_renders_bound_room_ids_editor_and_table_badge():
+def test_frontend_renders_room_binding_editor_and_table_badge():
     panel = open("frontend/src/pages/tools/ToolTokenPanel.tsx", encoding="utf-8").read()
     page = open("frontend/src/pages/ToolAccessPage.tsx", encoding="utf-8").read()
 
-    # State holders for both create and edit forms.
-    assert "boundRooms" in panel
-    assert "editBoundRooms" in panel
-    assert "renderRoomChips" in panel
-    # Table column shows a binding badge when present.
+    # 房间/会话绑定使用 RoomEditor 统一编辑组件（create + edit 双表单）。
+    assert "RoomEditor" in panel
+    assert "bindings" in panel
+    assert "editBindings" in panel
+    # 表格内展示房间绑定徽标。
     assert "房间: " in panel
-    # Edit dialog also wires the chip editor.
-    assert "editBoundRooms" in panel and "editRoomInput" in panel
-    # onGenerate / onUpdate thread bound_room_ids through to the API.
-    assert "bound_room_ids" in panel
+    # onGenerate / onUpdate 透传 channel_bindings 到 API。
+    assert "channel_bindings" in panel
     assert "bound_room_ids: data.bound_room_ids || []" in page
     assert "bound_room_ids: data.bound_room_ids ?? []" in page
 

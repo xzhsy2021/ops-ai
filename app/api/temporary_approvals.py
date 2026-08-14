@@ -63,6 +63,15 @@ class RevokePayload(BaseModel):
     reason: str = ""
 
 
+class BatchRevokePayload(BaseModel):
+    grant_ids: list[str]
+    reason: str = ""
+
+
+class BatchDeletePayload(BaseModel):
+    grant_ids: list[str]
+
+
 @router.get("", summary="查询临时自审批授权列表")
 def list_grants(
     request: Request,
@@ -194,3 +203,81 @@ def delete_grant(
         f"admin={username} fallback=1",
     )
     return api_response(data={"id": grant_id_value, "deleted": True}, message="临时授权已删除")
+
+
+@router.post("/batch-revoke", summary="批量撤销临时自审批授权")
+def batch_revoke_grants(
+    payload: BatchRevokePayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """管理员批量回退撤销：仅对 ACTIVE 状态的授权生效，其余忽略。"""
+    user = require_admin(request, db)
+    grant_ids = [str(g).strip() for g in payload.grant_ids if str(g).strip()]
+    if not grant_ids:
+        raise HTTPException(status_code=422, detail="grant_ids 不能为空")
+    now = _now()
+    username = str(user.get("username") or user.get("id") or "admin")
+    reason = str(payload.reason or "").strip() or "revoked"
+    rows = (
+        db.query(TemporaryApprovalGrant)
+        .filter(TemporaryApprovalGrant.id.in_(grant_ids))
+        .all()
+    )
+    revoked = []
+    for grant in rows:
+        if grant.status != "ACTIVE":
+            continue
+        grant.status = "REVOKED"
+        grant.revoked_by_actor_key = f"web:local:{username}"
+        grant.revoked_at = now
+        grant.revoke_reason = reason
+        grant.active_scope_key = None
+        grant.updated_at = now
+        revoked.append(grant.id)
+        audit(
+            "temporary_approval.revoke",
+            "temporary_approval_grant",
+            grant.id,
+            f"admin={username} fallback=1 reason={reason} BATCH",
+        )
+    db.commit()
+    return api_response(
+        message=f"已撤销 {len(revoked)} 条授权",
+        data={"revoked": revoked, "total": len(revoked), "requested": len(grant_ids)},
+    )
+
+
+@router.post("/batch-delete", summary="批量删除临时自审批授权记录")
+def batch_delete_grants(
+    payload: BatchDeletePayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """管理员批量彻底删除授权记录（高权限回退操作，逐条审计）。"""
+    user = require_admin(request, db)
+    grant_ids = [str(g).strip() for g in payload.grant_ids if str(g).strip()]
+    if not grant_ids:
+        raise HTTPException(status_code=422, detail="grant_ids 不能为空")
+    username = str(user.get("username") or user.get("id") or "admin")
+    rows = (
+        db.query(TemporaryApprovalGrant)
+        .filter(TemporaryApprovalGrant.id.in_(grant_ids))
+        .all()
+    )
+    deleted = []
+    for grant in rows:
+        grant_id_value = grant.id
+        db.delete(grant)
+        deleted.append(grant_id_value)
+        audit(
+            "temporary_approval.delete",
+            "temporary_approval_grant",
+            grant_id_value,
+            f"admin={username} fallback=1 BATCH",
+        )
+    db.commit()
+    return api_response(
+        message=f"已删除 {len(deleted)} 条授权记录",
+        data={"deleted": deleted, "total": len(deleted), "requested": len(grant_ids)},
+    )

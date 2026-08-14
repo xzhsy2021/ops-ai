@@ -671,9 +671,7 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                 allow_prod: data.allow_prod,
                 expires_in_days: data.expires_in_days,
                 bound_room_ids: data.bound_room_ids || [],
-                approver_matrix_ids: data.approver_matrix_ids || [],
                 channel_bindings: data.channel_bindings || [],
-                approver_identities: data.approver_identities || [],
               })
               const d = getData(res)
               setCreatedToken(d.token || '')
@@ -686,7 +684,6 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                 ...data,
                 bound_room_ids: data.bound_room_ids ?? [],
                 channel_bindings: data.channel_bindings ?? [],
-                approver_identities: data.approver_identities ?? [],
               })
               capabilityTools.clearCache()
               notify({ type: 'success', text: 'Token 权限已更新' })

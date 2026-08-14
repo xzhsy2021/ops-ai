@@ -99,6 +99,8 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
   const [revokeTarget, setRevokeTarget] = useState<GrantInfo | null>(null)
   const [revokeReason, setRevokeReason] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<GrantInfo | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [batchAction, setBatchAction] = useState<'' | 'revoke' | 'delete'>('')
   const [submitting, setSubmitting] = useState(false)
 
   const load = useCallback(async () => {
@@ -169,6 +171,50 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
     }
   }
 
+  const toggleSelected = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id))
+  }
+
+  const toggleAllVisible = (checked: boolean) => {
+    const visibleIds = grants.map((g) => g.id || '').filter(Boolean)
+    setSelectedIds((prev) => checked ? Array.from(new Set([...prev, ...visibleIds])) : prev.filter((id) => !visibleIds.includes(id)))
+  }
+
+  const handleBatchRevoke = async () => {
+    if (!selectedIds.length) return
+    setBatchAction('revoke')
+    setSubmitting(true)
+    try {
+      await temporaryApprovals.batchRevoke(selectedIds, '批量撤销')
+      notify('success', `已批量撤销 ${selectedIds.length} 条授权`)
+      setSelectedIds([])
+      await load()
+    } catch (e: any) {
+      notify('error', String(e?.response?.data?.message || e))
+    } finally {
+      setBatchAction('')
+      setSubmitting(false)
+    }
+  }
+
+  const handleBatchDelete = async () => {
+    if (!selectedIds.length) return
+    if (!window.confirm(`确认永久删除选中的 ${selectedIds.length} 条授权记录？此操作不可恢复。`)) return
+    setBatchAction('delete')
+    setSubmitting(true)
+    try {
+      await temporaryApprovals.batchDelete(selectedIds)
+      notify('success', `已批量删除 ${selectedIds.length} 条授权记录`)
+      setSelectedIds([])
+      await load()
+    } catch (e: any) {
+      notify('error', String(e?.response?.data?.message || e))
+    } finally {
+      setBatchAction('')
+      setSubmitting(false)
+    }
+  }
+
   const identityText = (grant: GrantInfo): string => {
     const approved = grant.approved_by_actor_key || grant.requested_by_actor_key
     const channel = grant.channel || '-'
@@ -182,6 +228,21 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
           <h2>临时自审批授权</h2>
           <span>{grants.length} 条记录，{activeCount} 条生效中</span>
         </div>
+        {canManage && selectedIds.length > 0 && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              className="btn btn-subtle"
+              disabled={submitting}
+              onClick={handleBatchRevoke}
+              title="仅对生效中(ACTIVE)的授权生效"
+            >
+              {batchAction === 'revoke' ? '撤销中...' : `批量撤销（${selectedIds.length}）`}
+            </button>
+            <button className="btn btn-subtle btn-danger" disabled={submitting} onClick={handleBatchDelete}>
+              {batchAction === 'delete' ? '删除中...' : `批量删除（${selectedIds.length}）`}
+            </button>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -200,6 +261,16 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
         <table className="data-table data-table--compact">
           <thead>
             <tr>
+              {canManage && (
+                <th style={{ width: 36 }}>
+                  <input
+                    type="checkbox"
+                    aria-label="全选"
+                    checked={grants.length > 0 && selectedIds.length === grants.filter((g) => g.id).length}
+                    onChange={(e) => toggleAllVisible(e.target.checked)}
+                  />
+                </th>
+              )}
               <th>受益人</th>
               <th>通道/会话</th>
               <th>系统/环境</th>
@@ -213,13 +284,23 @@ export const TemporaryApprovalPanel = memo(function TemporaryApprovalPanel({
           </thead>
           <tbody>
             {loading && grants.length === 0 && (
-              <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</td></tr>
+              <tr><td colSpan={canManage ? 10 : 9} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</td></tr>
             )}
             {!loading && grants.length === 0 && (
-              <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无临时授权记录</td></tr>
+              <tr><td colSpan={canManage ? 10 : 9} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无临时授权记录</td></tr>
             )}
             {grants.map((grant) => (
               <tr key={grant.id}>
+                {canManage && (
+                  <td>
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${grant.beneficiary_actor_key || grant.id}`}
+                      checked={selectedIds.includes(grant.id || '')}
+                      onChange={(e) => toggleSelected(grant.id || '', e.target.checked)}
+                    />
+                  </td>
+                )}
                 <td>
                   <strong>{grant.beneficiary_actor_key || '-'}</strong>
                   {grant.id && <small style={{ display: 'block', color: 'var(--text-muted)' }}>{shortId(grant.id)}</small>}

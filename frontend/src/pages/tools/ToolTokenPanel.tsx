@@ -1,10 +1,8 @@
 import { memo, type ReactNode, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CopyButton } from '../../components/ui'
-import { ApproverEditor, RoomEditor } from '../../components/BindingEditors'
+import { RoomEditor } from '../../components/BindingEditors'
 import type { ConversationBinding } from '../../components/BindingEditors'
-import type { ApproverIdentity } from '../../utils/approverIdentities.js'
-import { normalizeApprovers } from '../../utils/approverIdentities.js'
 
 type TokenInfo = {
   id?: string
@@ -19,9 +17,7 @@ type TokenInfo = {
   allow_write?: boolean
   allow_prod?: boolean
   bound_room_ids?: string[]
-  approver_matrix_ids?: string[]
   channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
-  approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
   key_prefix?: string
   value?: string
   masked_value?: string
@@ -35,9 +31,7 @@ type TokenPayload = {
   allow_prod?: boolean
   expires_in_days?: number
   bound_room_ids?: string[]
-  approver_matrix_ids?: string[]
   channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
-  approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
 }
 
 type TokenUpdatePayload = {
@@ -49,9 +43,7 @@ type TokenUpdatePayload = {
   expires_in_days?: number
   revoke?: boolean
   bound_room_ids?: string[]
-  approver_matrix_ids?: string[]
   channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
-  approver_identities?: { channel: string; channel_account_id?: string; sender_id?: string }[]
 }
 
 type PolicyPreviewResult = {
@@ -220,7 +212,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [allowProd, setAllowProd] = useState(false)
   const [expiresDays, setExpiresDays] = useState(90)
   const [bindings, setBindings] = useState<ConversationBinding[]>([])
-  const [approvers, setApprovers] = useState<ApproverIdentity[]>([])
   const [generating, setGenerating] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -234,7 +225,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [editAllowProd, setEditAllowProd] = useState(false)
   const [editExpiresDays, setEditExpiresDays] = useState(90)
   const [editBindings, setEditBindings] = useState<ConversationBinding[]>([])
-  const [editApprovers, setEditApprovers] = useState<ApproverIdentity[]>([])
   const [previewing, setPreviewing] = useState(false)
   const [policyPreview, setPolicyPreview] = useState<PolicyPreviewResult | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -263,7 +253,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     setEditAllowProd(Boolean(token.allow_prod))
     setEditExpiresDays(90)
     setEditBindings(Array.isArray(token.channel_bindings) ? [...token.channel_bindings] : [])
-    setEditApprovers(normalizeApprovers(token.approver_identities))
   }
 
   const openCreate = () => {
@@ -275,7 +264,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     setAllowProd(false)
     setExpiresDays(90)
     setBindings([])
-    setApprovers([])
     setPolicyPreview(null)
     setShowCreateModal(true)
   }
@@ -292,12 +280,10 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
         allow_prod: allowProd,
         expires_in_days: expiresDays,
         channel_bindings: bindings,
-        approver_identities: approvers,
       })
       setName('')
       setDescription('')
       setBindings([])
-      setApprovers([])
       setShowCreateModal(false)
     } finally {
       setGenerating(false)
@@ -316,7 +302,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
         allow_prod: editAllowProd,
         expires_in_days: editExpiresDays,
         channel_bindings: editBindings,
-        approver_identities: editApprovers,
       })
       setEditing(null)
     } finally {
@@ -455,15 +440,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
                         房间: {(token.bound_room_ids || []).length}
                       </span>
                     )}
-                    {(token.approver_matrix_ids || []).length > 0 && (
-                      <span
-                        className="tag"
-                        title={(token.approver_matrix_ids || []).join('\n')}
-                        style={{ background: 'var(--bg-hover)', fontFamily: 'monospace' }}
-                      >
-                        授权人: {(token.approver_matrix_ids || []).length}
-                      </span>
-                    )}
                     {(token.scopes || []).slice(0, 6).map((s) => <span className="scope-chip" key={s} title={s}>{formatScopeLabel(s)}</span>)}
                     {(token.scopes || []).length > 6 && <span style={{ color: 'var(--text-muted)' }}>+{(token.scopes || []).length - 6}</span>}
                   </div>
@@ -571,15 +547,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
               />
             </div>
 
-            <div className="field-item">
-              <label>绑定授权人（按渠道身份，qclaw 限定）</label>
-              <ApproverEditor
-                value={approvers}
-                onChange={setApprovers}
-                hint="留空表示不限制审批人（回退到系统/服务级 message_routing.approvers；两者均未配置时同房间任意成员可审批）。填写后，只有列表中的身份能消费此 Token 发起的审批短码。"
-              />
-            </div>
-
             <div className="alert alert-info">
               <strong>权限预览</strong>
               <span style={{ marginLeft: 8 }}>检查当前草稿是否可调用 <code>ops.inspection.run_server</code>。</span>
@@ -662,14 +629,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
                 value={editBindings}
                 onChange={setEditBindings}
                 hint="修改后将立即在下次 MCP 调用生效。留空表示不限制房间。"
-              />
-            </div>
-            <div className="field-item">
-              <label>绑定授权人（按渠道身份，qclaw 限定）</label>
-              <ApproverEditor
-                value={editApprovers}
-                onChange={setEditApprovers}
-                hint="留空表示不限制审批人（回退到系统/服务级配置）；填写后只有列表中的身份能审批此 Token 发起的操作。"
               />
             </div>
             <div className="alert alert-warning">

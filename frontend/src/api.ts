@@ -515,6 +515,8 @@ export const temporaryApprovals = {
   confirm: (id: string, data: { confirmation_phrase: string }) => api.post(`/temporary-approvals/${encodeURIComponent(id)}/confirm`, data),
   revoke: (id: string, data: { reason?: string }) => api.post(`/temporary-approvals/${encodeURIComponent(id)}/revoke`, data),
   delete: (id: string) => api.delete(`/temporary-approvals/${encodeURIComponent(id)}`),
+  batchRevoke: (grantIds: string[], reason?: string) => api.post('/temporary-approvals/batch-revoke', { grant_ids: grantIds, reason: reason || '' }),
+  batchDelete: (grantIds: string[]) => api.post('/temporary-approvals/batch-delete', { grant_ids: grantIds }),
 }
 
 export const reports = {

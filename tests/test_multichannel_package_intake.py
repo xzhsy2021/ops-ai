@@ -39,6 +39,40 @@ def db():
     session.close()
 
 
+# 系统级 message_routing.rooms：允许各通道 room-1 与 legacy 矩阵房间，
+# 但排除 room-2（供 cross-conversation 拒绝用例）。token 级绑定不再参与作用域。
+_ALLOWED_ROOMS = [
+    {"channel": "matrix", "channel_account_id": "primary", "conversation_id": "room-1"},
+    {"channel": "wechat", "channel_account_id": "primary", "conversation_id": "room-1"},
+    {"channel": "telegram", "channel_account_id": "primary", "conversation_id": "room-1"},
+    {"channel": "matrix", "channel_account_id": "default", "conversation_id": "!ops:example.org"},
+]
+
+
+@pytest.fixture(autouse=True)
+def _system_rooms(monkeypatch):
+    from app.services.tool_adapters import approval_tools
+
+    monkeypatch.setattr(
+        approval_tools,
+        "get_all_systems",
+        lambda: {
+            "crypto-trader": {
+                "name": "crypto-trader",
+                "message_routing": {
+                    "enabled": True,
+                    "aliases": ["量化"],
+                    "keywords": [],
+                    "priority": 10,
+                    "approvers": ["@ops:example.org"],
+                    "rooms": list(_ALLOWED_ROOMS),
+                },
+                "services": [],
+            }
+        },
+    )
+
+
 class _Upload:
     def __init__(self, filename: str, content: bytes):
         self.filename = filename

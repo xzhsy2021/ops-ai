@@ -43,6 +43,48 @@ def _strong_signing_key(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _system_config(monkeypatch):
+    """Phase 2：审批人/房间统一到系统级 message_routing。
+
+    注入干净的三通道配置（不设 rooms，避免共享测试库真实 rooms 拦截测试会话），
+    并让临时授权服务的审批人解析与此同源，保证确定性。
+    """
+    from app.services.tool_adapters import approval_tools
+    from app.services.temporary_approval import TemporaryApprovalService
+
+    config = {
+        "crypto-trader": {
+            "name": "crypto-trader",
+            "message_routing": {
+                "enabled": True,
+                "aliases": ["量化"],
+                "keywords": [],
+                "priority": 10,
+                "approvers": [
+                    {"channel": "matrix", "channel_account_id": "default", "sender_id": "@owner:matrix.org"},
+                    {"channel": "wechat", "channel_account_id": "primary", "sender_id": "owner-wechat"},
+                    {"channel": "telegram", "channel_account_id": "primary", "sender_id": "owner-telegram"},
+                ],
+            },
+            "services": [],
+        }
+    }
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: config)
+
+    def _configured(self, system, context):
+        routing = config.get(system.name, {}).get("message_routing", {})
+        return [
+            item for item in routing.get("approvers", [])
+            if item["channel"] == context.channel
+            and item["channel_account_id"] == context.channel_account_id
+        ]
+
+    monkeypatch.setattr(
+        TemporaryApprovalService, "_configured_approvers", _configured,
+    )
+
+
 @pytest.fixture(scope="module")
 def db():
     Base.metadata.create_all(engine)

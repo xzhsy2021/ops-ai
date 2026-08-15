@@ -2,10 +2,10 @@
 
 Covers:
 - `_normalize_approver_ids` input normalization (legacy token field)
-- `create_tool_token` / `token_to_dict` round-trip with legacy approver_matrix_ids
-- API payloads accept / return legacy approver_matrix_ids
-- `_lookup_approvers` prefers system/service message_routing over token-level config
-- `_lookup_approvers` falls back to token-level approvers when no system config exists
+- `create_tool_token` no longer stores approver bindings (Phase 2)
+- API payloads no longer accept approver_matrix_ids / approver_identities
+- `_lookup_approvers` uses system/service message_routing as the sole source
+- `_lookup_approvers` returns empty when no system config (no token fallback)
 - consume() enforces the resolved authorized approver whitelist
 """
 from __future__ import annotations
@@ -44,6 +44,7 @@ def test_normalize_approver_ids_strips_blanks_and_dedupes():
 
 
 def test_create_and_round_trip_approver_matrix_ids(tmp_path):
+    """token 不再存储审批人绑定；create 后四个绑定列均为空，dict 不再导出。"""
     from app.services.tool_token import create_tool_token, token_to_dict
 
     engine, Session = _sqlite_session(tmp_path)
@@ -57,28 +58,18 @@ def test_create_and_round_trip_approver_matrix_ids(tmp_path):
             scopes=["ops:read"],
             allow_write=False,
             expires_in_days=30,
-            bound_room_ids=["!ops:matrix.org"],
-            approver_matrix_ids=["@jack.han:matrix.org", "@ops-bot:matrix.org"],
         )
 
         record = created["record"]
-        # Runtime policy is persisted only in the generic column.
-        assert record.approver_identities == [
-            {
-                "channel": "matrix",
-                "channel_account_id": "default",
-                "sender_id": "@jack.han:matrix.org",
-            },
-            {
-                "channel": "matrix",
-                "channel_account_id": "default",
-                "sender_id": "@ops-bot:matrix.org",
-            },
-        ]
+        assert record.approver_identities == []
         assert record.approver_matrix_ids == []
-        # Returned via token_to_dict for the API.
+        assert record.channel_bindings == []
+        assert record.bound_room_ids == []
         as_dict = token_to_dict(record)
-        assert as_dict["approver_matrix_ids"] == ["@jack.han:matrix.org", "@ops-bot:matrix.org"]
+        assert "approver_matrix_ids" not in as_dict
+        assert "approver_identities" not in as_dict
+        assert "channel_bindings" not in as_dict
+        assert "bound_room_ids" not in as_dict
     finally:
         db.close()
         engine.dispose()
@@ -96,8 +87,11 @@ def test_create_token_without_approvers_defaults_to_empty_list(tmp_path):
             owner="admin",
             scopes=["ops:read"],
         )
-        as_dict = token_to_dict(created["record"])
-        assert as_dict["approver_matrix_ids"] == []
+        record = created["record"]
+        assert record.approver_identities == []
+        assert record.approver_matrix_ids == []
+        as_dict = token_to_dict(record)
+        assert "approver_matrix_ids" not in as_dict
     finally:
         db.close()
         engine.dispose()
@@ -119,29 +113,27 @@ def test_token_to_dict_normalizes_garbage_in_db():
         expires_at = None
         last_used_at = None
         revoked_at = None
-        bound_room_ids = None
-        approver_matrix_ids = None
 
     data = token_to_dict(_Stub())
-    assert data["approver_matrix_ids"] == []
+    assert "approver_matrix_ids" not in data
+    assert "approver_identities" not in data
 
 
 def test_create_token_payload_declares_approver_matrix_ids_field():
     from app.api.tools import CreateToolTokenPayload, UpdateToolTokenPayload
 
-    create = CreateToolTokenPayload(name="x", approver_matrix_ids=["@a:matrix.org"])
-    assert create.approver_matrix_ids == ["@a:matrix.org"]
+    # 审批人绑定已统一到系统级，Token 载荷不再接收 approver_matrix_ids。
+    create = CreateToolTokenPayload(name="x")
+    assert not hasattr(create, "approver_matrix_ids")
+    assert not hasattr(create, "approver_identities")
+    assert not hasattr(create, "channel_bindings")
+    assert not hasattr(create, "bound_room_ids")
 
-    update = UpdateToolTokenPayload(approver_matrix_ids=["@b:matrix.org"])
-    assert update.approver_matrix_ids == ["@b:matrix.org"]
-
-    # Update with None means "do not change" (kept None).
-    update2 = UpdateToolTokenPayload()
-    assert update2.approver_matrix_ids is None
-
-    # Default in create is empty list (= no token-level restriction).
-    default_create = CreateToolTokenPayload(name="y")
-    assert default_create.approver_matrix_ids == []
+    update = UpdateToolTokenPayload()
+    assert not hasattr(update, "approver_matrix_ids")
+    assert not hasattr(update, "approver_identities")
+    assert not hasattr(update, "channel_bindings")
+    assert not hasattr(update, "bound_room_ids")
 
 
 class _Ctx:
@@ -188,8 +180,8 @@ def test_lookup_approvers_prefers_system_config_over_token(monkeypatch):
     assert result == ["@owner:matrix.org"]
 
 
-def test_lookup_approvers_falls_back_to_token_when_no_system_config(monkeypatch):
-    """系统未配置审批人时，回退到 token 级 legacy 审批人。"""
+def test_lookup_approvers_no_system_config_returns_empty(monkeypatch):
+    """已彻底移除 token 级 legacy 回退：系统未配置审批人时返回空列表。"""
     from app.services.tool_adapters import approval_tools
     from app.services.tool_adapters.approval_tools import _lookup_approvers
 
@@ -207,13 +199,14 @@ def test_lookup_approvers_falls_back_to_token_when_no_system_config(monkeypatch)
             "sender_id": "@alice:matrix.org",
         },
     ])
+    # token 级 approver_identities 不再生效，系统未配置审批人 -> 空列表。
     assert _lookup_approvers(
         ctx,
         "crypto-trader",
         "crypto-exchange",
         channel="matrix",
         channel_account_id="default",
-    ) == ["@jack.han:matrix.org", "@alice:matrix.org"]
+    ) == []
 
 
 def test_lookup_approvers_falls_back_when_no_system_or_token_approvers(monkeypatch):

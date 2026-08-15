@@ -23,6 +23,37 @@ def _strong_signing_key(monkeypatch):
     )
 
 
+# Phase 2：房间/审批人统一到系统级 message_routing。允许的会话由系统配置决定，
+# 不再依赖 token 级绑定，也不受共享测试库中真实开发数据（真实 rooms）影响。
+_ALLOWED_ROOMS = [
+    {"channel": "matrix", "channel_account_id": "default", "conversation_id": "!ops:example.org"},
+    {"channel": "matrix", "channel_account_id": "default", "conversation_id": "!room:example.org"},
+]
+
+
+@pytest.fixture(autouse=True)
+def _system_config(monkeypatch):
+    from app.services.tool_adapters import approval_tools
+
+    config = {
+        "crypto-trader": {
+            "name": "crypto-trader",
+            "message_routing": {
+                "enabled": True,
+                "aliases": ["量化"],
+                "keywords": [],
+                "priority": 10,
+                "approvers": [
+                    {"channel": "matrix", "channel_account_id": "default", "sender_id": "@approver:example.org"},
+                ],
+                "rooms": list(_ALLOWED_ROOMS),
+            },
+            "services": [],
+        }
+    }
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: config)
+
+
 class _Upload:
     def __init__(self, filename: str, content: bytes):
         self.filename = filename
@@ -171,8 +202,11 @@ def test_approval_intake_reuses_same_message_and_package_content(monkeypatch, tm
 def test_approval_intake_rejects_unbound_read_token(monkeypatch):
     from app.api import tools as tools_api
 
+    # Phase 2：token 级房间绑定已移除，作用域由系统级 message_routing.rooms 决定。
+    # 提供合法 sender，但消息房间不在系统允许会话内 → 403。
     ctx = SimpleNamespace(
         auth_type="tool_token",
+        token_owner="qclaw",
         channel_bindings=[],
         has_scope=lambda scope: scope == "ops:read",
     )
@@ -187,7 +221,7 @@ def test_approval_intake_rejects_unbound_read_token(monkeypatch):
             service="crypto-frontend",
             overwrite=False,
             approval_intake=True,
-            room_id="!ops:example.org",
+            room_id="!forbidden:example.org",
             request_event_id="$event",
             content_sha256="c" * 64,
             package_sha256=hashlib.sha256(b"package").hexdigest(),
@@ -195,6 +229,7 @@ def test_approval_intake_rejects_unbound_read_token(monkeypatch):
         ))
 
     assert exc.value.status_code == 403
+    assert "message_routing.rooms" in exc.value.detail
 
 
 def test_file_upload_approval_dispatches_to_each_target(monkeypatch):

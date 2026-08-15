@@ -17,6 +17,32 @@ _RUN_ID = uuid.uuid4().hex[:8]
 register_builtin_tools()
 
 
+def _payment_system(rooms=None):
+    """System-level config: message_routing 为审批人唯一来源（Phase 2）。"""
+    cfg = {
+        "name": "payment",
+        "message_routing": {
+            "enabled": True,
+            "aliases": ["支付"],
+            "keywords": [],
+            "priority": 10,
+            "approvers": ["@alice:matrix.org"],
+        },
+        "services": [],
+    }
+    if rooms is not None:
+        cfg["message_routing"]["rooms"] = rooms
+    return {"payment": cfg}
+
+
+@pytest.fixture(autouse=True)
+def _payment_system_config(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools.get_all_systems",
+        lambda: _payment_system(),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _strong_signing_key(monkeypatch):
     monkeypatch.setattr(
@@ -167,15 +193,27 @@ def test_prepare_plan_creates_plan_and_enforces_room_binding(db):
     assert plan.authorized_matrix_users == ["@alice:matrix.org"]
 
 
-def test_prepare_plan_rejects_unbound_room(db):
-    """未绑定房间调用 prepare_plan 被拒绝。"""
+def test_prepare_plan_rejects_room_outside_system_binding(monkeypatch, db):
+    """系统级房间作用域：消息房间不在 message_routing.rooms 内被拒绝。"""
+    from fastapi import HTTPException
     from app.services.tool_adapters.approval_tools import approval_prepare_plan
 
-    suffix = "prepare-room-block"
-    ctx = _ctx(bound_room_ids=["!allowed:matrix.org"])
-
-    with pytest.raises(Exception):
-        approval_prepare_plan(_prepare_args(suffix), ctx=ctx, db=db)
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools.get_all_systems",
+        lambda: _payment_system(
+            rooms=[
+                {
+                    "channel": "matrix",
+                    "channel_account_id": "default",
+                    "conversation_id": "!allowed:matrix.org",
+                }
+            ]
+        ),
+    )
+    with pytest.raises(HTTPException) as exc:
+        approval_prepare_plan(_prepare_args("prepare-room-block"), ctx=_ctx(), db=db)
+    assert exc.value.status_code == 403
+    assert "message_routing.rooms" in exc.value.detail
 
 
 def test_prepare_plan_idempotent_for_duplicate_manifest(db):

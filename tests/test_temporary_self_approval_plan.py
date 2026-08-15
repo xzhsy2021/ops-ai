@@ -30,6 +30,42 @@ def _strong_signing_key(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _system_config(monkeypatch):
+    """Phase 2：审批人/房间统一到系统级 message_routing，不受共享测试库真实数据影响。"""
+    from app.services.tool_adapters import approval_tools
+    from app.services.temporary_approval import TemporaryApprovalService
+
+    config = {
+        "crypto-trader": {
+            "name": "crypto-trader",
+            "message_routing": {
+                "enabled": True,
+                "aliases": ["量化"],
+                "keywords": [],
+                "priority": 10,
+                "approvers": [
+                    {"channel": "matrix", "channel_account_id": "default", "sender_id": "@owner:matrix.org"},
+                ],
+            },
+            "services": [],
+        }
+    }
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: config)
+
+    def _configured(self, system, context):
+        routing = config.get(system.name, {}).get("message_routing", {})
+        return [
+            item for item in routing.get("approvers", [])
+            if item["channel"] == context.channel
+            and item["channel_account_id"] == context.channel_account_id
+        ]
+
+    monkeypatch.setattr(
+        TemporaryApprovalService, "_configured_approvers", _configured,
+    )
+
+
 @pytest.fixture(scope="module")
 def db():
     Base.metadata.create_all(engine)

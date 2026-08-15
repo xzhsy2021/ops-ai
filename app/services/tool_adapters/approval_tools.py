@@ -12,11 +12,7 @@ from fastapi import HTTPException
 
 from app.services.tool_registry import registry
 from app.services.message_context import MessageContext, message_context_schema, normalize_message_context
-from app.services.tool_token import (
-    enforce_conversation_binding,
-    enforce_room_binding,
-    normalize_approver_identities,
-)
+from app.services.tool_token import normalize_approver_identities
 from app.services.qclaw_routing import (
     resolve_message_target,
     issue_ticket,
@@ -61,12 +57,10 @@ def _effective_approver_identities(
     channel: str,
     channel_account_id: str,
 ) -> list[dict[str, str]]:
-    """系统设置(message_routing)为审批人唯一来源，token 级仅作 legacy 回退。
+    """系统设置(message_routing.approvers)为审批人唯一来源。
 
-    优先级：系统/服务级 message_routing.approvers 优先；仅当系统未配置时才
-    回退到 token 级 approver_identities（向后兼容旧 token）。token 级不再覆盖
-    系统级，因此系统配置的原始审批人不会被 token 排除，请求者==审批者的自批
-    不再被误拒。
+    已彻底移除 token 级 approver_identities 回退。系统配置的原始审批人才可
+    审批/自批，请求者==审批者的自批不再被 token 排除。
     """
     try:
         configured_identities = normalize_routing_approvers(configured)
@@ -75,32 +69,10 @@ def _effective_approver_identities(
             status_code=403,
             detail=f"Invalid routing approver configuration: {exc}",
         ) from exc
-    if configured_identities:
-        matched = _current_channel_identities(
-            configured_identities,
-            channel=channel,
-            channel_account_id=channel_account_id,
-        )
-        if not matched:
-            raise HTTPException(
-                status_code=403,
-                detail="No authorized approver is configured for this channel account",
-            )
-        return matched
-
-    try:
-        token_identities = normalize_approver_identities(
-            getattr(ctx, "approver_identities", None)
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Invalid token approver policy: {exc}",
-        ) from exc
-    if not token_identities:
+    if not configured_identities:
         return []
     matched = _current_channel_identities(
-        token_identities,
+        configured_identities,
         channel=channel,
         channel_account_id=channel_account_id,
     )
@@ -400,10 +372,6 @@ def _validated_prepare_ticket(args, ctx):
     if not routing_ticket:
         raise HTTPException(status_code=400, detail="routing_ticket is required")
 
-    enforce_conversation_binding(
-        getattr(ctx, "channel_bindings", None),
-        message_context=context,
-    )
     try:
         revision = compute_routing_revision(_routing_systems())
         valid = verify_ticket(
@@ -721,10 +689,6 @@ def approval_execute(args, ctx, db):
             "content_sha256": args.get("content_sha256") or "0" * 64,
         }
     )
-    enforce_conversation_binding(
-        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
-        message_context=approval_context,
-    )
     service = ActionApprovalService(db)
     approval = service.consume(
         approval_id=args["approval_id"],
@@ -829,8 +793,6 @@ def approval_list(args, ctx, db):
             AiActionApproval.channel_account_id == context.channel_account_id,
             AiActionApproval.conversation_id == context.conversation_id,
         )
-    elif getattr(ctx, "channel_bindings", None):
-        return {"ok": True, "total": 0, "items": []}
     if args.get("status"):
         query = query.filter(AiActionApproval.status == args["status"])
     if args.get("action_type"):
@@ -1063,10 +1025,6 @@ def approval_execute_plan(args, ctx, db):
             "content_sha256": args.get("content_sha256") or "0" * 64,
         }
     )
-    enforce_conversation_binding(
-        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
-        message_context=approval_context,
-    )
     service = ExecutionPlanService(db)
     plan = service.consume(
         plan_id=args["plan_id"],
@@ -1185,11 +1143,6 @@ def temporary_access(args, ctx, db):
         message_context = normalize_message_context(args.get("message_context") or {})
     except (TypeError, ValueError) as exc:
         return {"ok": False, "error": f"invalid message_context: {exc}"}
-
-    enforce_conversation_binding(
-        getattr(ctx, "channel_bindings", None) or getattr(ctx, "bound_room_ids", None),
-        message_context=message_context,
-    )
 
     service = TemporaryApprovalService(db)
 

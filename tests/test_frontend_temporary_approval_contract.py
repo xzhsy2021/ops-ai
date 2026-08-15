@@ -35,13 +35,14 @@ def test_tool_token_editor_uses_generic_channel_bindings():
     panel = _read("frontend/src/pages/tools/ToolTokenPanel.tsx")
     api = _read("frontend/src/api.ts")
 
-    # 编辑/新建表单携带通用通道绑定（审批人统一由系统设置配置，token 级不再配置）
-    for marker in ("channel_bindings",):
-        assert marker in panel, marker
-        assert marker in api, marker
+    # Phase 2：token 级房间/审批人绑定已从 UI 彻底移除，统一由系统设置
+    # （message_routing）配置授权房间/会话，面板不再配置任何 token 级绑定字段。
+    for marker in ("channel_bindings", "bound_room_ids", "approver_identities", "approver_matrix_ids"):
+        assert marker not in panel, f"ToolTokenPanel 不应再配置 token 级绑定字段: {marker}"
 
-    # 列表渲染支持通用绑定字段（不依赖 Matrix-only 字段）
-    assert "channel_bindings" in panel
+    # 面板应引导用户到系统设置配置授权房间/会话
+    assert "已迁移至系统设置" in panel
+    assert "系统设置" in panel
 
 
 def test_temporary_approval_api_client_is_registered():
@@ -54,5 +55,8 @@ def test_temporary_approval_api_client_is_registered():
 
 def test_tool_token_payload_keeps_legacy_aliases_for_compat():
     panel = _read("frontend/src/pages/tools/ToolTokenPanel.tsx")
-    # 房间/会话绑定字段仍保留；token 级审批人绑定已从 UI 移除（统一由系统设置配置）
-    assert "bound_room_ids" in panel
+    api = _read("frontend/src/api.ts")
+    # Phase 2：token 级房间/会话绑定已从 UI 移除（统一由系统设置配置）。
+    assert "bound_room_ids" not in panel
+    # API 载荷仍保留 legacy 别名，保证旧客户端/序列化向后兼容（后端忽略多余字段）。
+    assert "bound_room_ids" in api

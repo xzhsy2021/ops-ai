@@ -12,7 +12,6 @@ from app.db.models import ToolToken
 from app.services.message_context import (
     normalize_conversation_binding,
     normalize_identity,
-    normalize_message_context,
 )
 
 TOKEN_PREFIX = "ops_tool_"
@@ -321,22 +320,12 @@ def create_tool_token(
     allow_write: Optional[bool] = None,
     allow_prod: bool = False,
     expires_in_days: Optional[int] = 90,
-    channel_bindings: Any = _UNSET,
-    approver_identities: Any = _UNSET,
-    bound_room_ids: Any = _UNSET,
-    approver_matrix_ids: Any = _UNSET,
 ) -> Dict[str, Any]:
+    """创建 Tool Token。房间/审批人绑定已统一到系统级 message_routing，
+    不再在 token 上存储 channel_bindings / approver_identities 等绑定字段。"""
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
     resolved_scopes = list(scopes) if scopes else list(DEFAULT_AI_TOKEN_SCOPES)
     resolved_allow_write = _resolve_write_flag(resolved_scopes, allow_write)
-    resolved_bindings = resolve_channel_bindings(
-        generic=channel_bindings,
-        legacy=bound_room_ids,
-    )
-    resolved_approvers = resolve_approver_identities(
-        generic=approver_identities,
-        legacy=approver_matrix_ids,
-    )
     token = ToolToken(
         name=name.strip() or "tool-token",
         token_hash=hash_token(raw),
@@ -347,8 +336,8 @@ def create_tool_token(
         allow_write=resolved_allow_write,
         allow_prod=bool(allow_prod),
         expires_at=_resolve_expires_at(expires_in_days),
-        channel_bindings=resolved_bindings,
-        approver_identities=resolved_approvers,
+        channel_bindings=[],
+        approver_identities=[],
         bound_room_ids=[],
         approver_matrix_ids=[],
     )
@@ -377,107 +366,6 @@ def validate_tool_token(db: Session, raw_token: str) -> ToolToken:
     return record
 
 
-def enforce_conversation_binding(
-    channel_bindings: Any,
-    message_context: Any = None,
-    *,
-    channel: Any = None,
-    channel_account_id: Any = None,
-    conversation_id: Any = None,
-) -> None:
-    try:
-        bindings = normalize_channel_bindings(channel_bindings)
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail=f"Invalid token channel bindings: {exc}") from exc
-    if not bindings:
-        return
-    try:
-        if message_context is not None:
-            if any(value is not None for value in (channel, channel_account_id, conversation_id)):
-                raise ValueError("message_context cannot be combined with conversation fields")
-            context = normalize_message_context(message_context)
-            candidate = normalize_conversation_binding(
-                {
-                    "channel": context.channel,
-                    "channel_account_id": context.channel_account_id,
-                    "conversation_id": context.conversation_id,
-                }
-            )
-        else:
-            candidate = normalize_conversation_binding(
-                {
-                    "channel": channel,
-                    "channel_account_id": channel_account_id,
-                    "conversation_id": conversation_id,
-                }
-            )
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Tool token has conversation binding configured but request context is invalid: {exc}",
-        ) from exc
-    if candidate not in bindings:
-        raise HTTPException(
-            status_code=403,
-            detail="Tool token is not allowed in this channel conversation",
-        )
-
-
-def enforce_room_binding(bound_room_ids: Any, room_id: str | None) -> None:
-    """Matrix/default compatibility wrapper for existing qclaw callers."""
-    try:
-        bindings = resolve_channel_bindings(legacy=bound_room_ids)
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail=f"Invalid token room bindings: {exc}") from exc
-    if bindings and not room_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Tool token has room binding configured but request has no room_id",
-        )
-    try:
-        enforce_conversation_binding(
-            bindings,
-            channel="matrix",
-            channel_account_id="default",
-            conversation_id=room_id,
-        )
-    except HTTPException as exc:
-        if exc.status_code == 403 and room_id:
-            rooms = matrix_room_ids_from_bindings(bindings)
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"Tool token not allowed in room {room_id!r}; "
-                    f"allowed rooms: {','.join(rooms)}"
-                ),
-            ) from exc
-        raise
-
-
-def matching_approver_sender_ids(
-    approver_identities: Any,
-    *,
-    channel: Any,
-    channel_account_id: Any,
-) -> Optional[List[str]]:
-    identities = normalize_approver_identities(approver_identities)
-    if not identities:
-        return None
-    probe = normalize_identity(
-        {
-            "channel": channel,
-            "channel_account_id": channel_account_id,
-            "sender_id": "probe",
-        }
-    )
-    return [
-        identity["sender_id"]
-        for identity in identities
-        if identity["channel"] == probe["channel"]
-        and identity["channel_account_id"] == probe["channel_account_id"]
-    ]
-
-
 def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any]:
     now = _utcnow()
     if token.revoked_at:
@@ -486,12 +374,6 @@ def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any
         status = "expired"
     else:
         status = "active"
-    channel_bindings = normalize_channel_bindings(
-        getattr(token, "channel_bindings", None)
-    )
-    approver_identities = normalize_approver_identities(
-        getattr(token, "approver_identities", None)
-    )
     data = {
         "id": token.id,
         "name": token.name,
@@ -506,10 +388,6 @@ def token_to_dict(token: ToolToken, include_hash: bool = False) -> Dict[str, Any
         "expires_at": token.expires_at.isoformat() if token.expires_at else None,
         "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
         "revoked_at": token.revoked_at.isoformat() if token.revoked_at else None,
-        "channel_bindings": channel_bindings,
-        "approver_identities": approver_identities,
-        "bound_room_ids": matrix_room_ids_from_bindings(channel_bindings),
-        "approver_matrix_ids": matrix_approver_ids_from_identities(approver_identities),
     }
     if include_hash:
         data["token_hash"] = token.token_hash

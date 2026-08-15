@@ -638,31 +638,9 @@ class ToolRegistry:
         arguments: Dict[str, Any],
         ctx,
     ) -> Dict[str, Any]:
-        normalized = validate_schema(arguments or {}, tool.input_schema)
-        category = str(getattr(tool, "category", "") or "")
-        if not (
-            category == "routing"
-            or category.startswith("approval")
-            or category.startswith("qclaw")
-        ):
-            return normalized
-
-        from app.services.tool_token import enforce_conversation_binding
-
-        bindings = getattr(ctx, "channel_bindings", None)
-        if "message_context" in normalized:
-            enforce_conversation_binding(
-                bindings,
-                message_context=normalized.get("message_context"),
-            )
-        else:
-            enforce_conversation_binding(
-                bindings,
-                channel="matrix",
-                channel_account_id="default",
-                conversation_id=normalized.get("room_id"),
-            )
-        return normalized
+        # 房间/审批人作用域已统一到系统级 message_routing（rooms/approvers），
+        # 由各审批工具在知晓 system_name 后强制，不再在此做 token 级绑定校验。
+        return validate_schema(arguments or {}, tool.input_schema)
 
     def call(self, db, tool_name: str, arguments: Dict[str, Any], ctx, stream_callback=None) -> Dict[str, Any]:
         started = time.monotonic()

@@ -92,7 +92,8 @@ def test_legacy_aliases_normalize_and_conflicts_are_rejected():
         )
 
 
-def test_create_round_trips_generic_fields_and_derives_legacy_aliases(tmp_path):
+def test_create_tool_token_no_longer_stores_bindings(tmp_path):
+    """Phase 2：create 不再接收/存储任何房间或审批人绑定。"""
     from app.services.tool_token import create_tool_token, token_to_dict
 
     engine = _engine(tmp_path)
@@ -103,63 +104,23 @@ def test_create_round_trips_generic_fields_and_derives_legacy_aliases(tmp_path):
             name="multichannel",
             owner="admin",
             scopes=["ops:read"],
-            channel_bindings=[
-                MATRIX_ROOM,
-                {
-                    "channel": "wechat",
-                    "channel_account_id": "corp-a",
-                    "conversation_id": "group-7",
-                },
-            ],
-            approver_identities=[
-                MATRIX_APPROVER,
-                {
-                    "channel": "telegram",
-                    "channel_account_id": "bot-a",
-                    "sender_id": "42",
-                },
-            ],
         )
-
         record = created["record"]
+        assert record.channel_bindings == []
+        assert record.approver_identities == []
+        assert record.bound_room_ids == []
+        assert record.approver_matrix_ids == []
         data = token_to_dict(record)
-        assert record.channel_bindings == data["channel_bindings"]
-        assert record.approver_identities == data["approver_identities"]
-        assert data["bound_room_ids"] == ["!ops:example.org"]
-        assert data["approver_matrix_ids"] == ["@alice:example.org"]
-        assert record.bound_room_ids == []
-        assert record.approver_matrix_ids == []
+        assert "channel_bindings" not in data
+        assert "approver_identities" not in data
+        assert "bound_room_ids" not in data
+        assert "approver_matrix_ids" not in data
     finally:
         db.close()
         engine.dispose()
 
 
-def test_create_accepts_legacy_aliases_but_persists_only_generic_policy(tmp_path):
-    from app.services.tool_token import create_tool_token, token_to_dict
-
-    engine = _engine(tmp_path)
-    db = _session(engine)
-    try:
-        record = create_tool_token(
-            db,
-            name="matrix-compatible",
-            owner="admin",
-            scopes=["ops:read"],
-            bound_room_ids=["!ops:example.org"],
-            approver_matrix_ids=["@alice:example.org"],
-        )["record"]
-
-        assert record.channel_bindings == [MATRIX_ROOM]
-        assert record.approver_identities == [MATRIX_APPROVER]
-        assert record.bound_room_ids == []
-        assert record.approver_matrix_ids == []
-        assert token_to_dict(record)["bound_room_ids"] == ["!ops:example.org"]
-    finally:
-        db.close()
-        engine.dispose()
-
-
-def test_token_to_dict_never_uses_legacy_database_columns_as_policy_source():
+def test_token_to_dict_no_longer_exports_binding_columns():
     from app.services.tool_token import token_to_dict
 
     token = SimpleNamespace(
@@ -175,69 +136,21 @@ def test_token_to_dict_never_uses_legacy_database_columns_as_policy_source():
         expires_at=None,
         last_used_at=None,
         revoked_at=None,
-        channel_bindings=[],
-        approver_identities=[],
-        bound_room_ids=["!stale:example.org"],
-        approver_matrix_ids=["@stale:example.org"],
     )
 
     data = token_to_dict(token)
-    assert data["channel_bindings"] == []
-    assert data["approver_identities"] == []
-    assert data["bound_room_ids"] == []
-    assert data["approver_matrix_ids"] == []
+    assert "channel_bindings" not in data
+    assert "approver_identities" not in data
+    assert "bound_room_ids" not in data
+    assert "approver_matrix_ids" not in data
 
 
-def test_enforce_conversation_binding_requires_a_complete_matching_context():
-    from app.services.message_context import MessageContext
-    from app.services.tool_token import enforce_conversation_binding
+def test_token_level_enforcement_helpers_removed():
+    import app.services.tool_token as tt
 
-    context = MessageContext(
-        channel="matrix",
-        channel_account_id="default",
-        conversation_id="!ops:example.org",
-        message_id="$event",
-        sender_id="@caller:example.org",
-        content_sha256="a" * 64,
-    )
-    enforce_conversation_binding([MATRIX_ROOM], message_context=context)
-    enforce_conversation_binding(
-        [MATRIX_ROOM],
-        channel="matrix",
-        channel_account_id="default",
-        conversation_id="!ops:example.org",
-    )
-    enforce_conversation_binding([], message_context=None)
-
-    for kwargs in (
-        {},
-        {"message_context": {"channel": "matrix"}},
-        {
-            "channel": "wechat",
-            "channel_account_id": "default",
-            "conversation_id": "!ops:example.org",
-        },
-    ):
-        with pytest.raises(HTTPException) as exc:
-            enforce_conversation_binding([MATRIX_ROOM], **kwargs)
-        assert exc.value.status_code == 403
-
-
-def test_approver_matching_distinguishes_unrestricted_from_no_channel_match():
-    from app.services.tool_token import matching_approver_sender_ids
-
-    assert (
-        matching_approver_sender_ids(
-            [], channel="wechat", channel_account_id="corp-a"
-        )
-        is None
-    )
-    assert matching_approver_sender_ids(
-        [MATRIX_APPROVER], channel="wechat", channel_account_id="corp-a"
-    ) == []
-    assert matching_approver_sender_ids(
-        [MATRIX_APPROVER], channel="matrix", channel_account_id="default"
-    ) == ["@alice:example.org"]
+    assert not hasattr(tt, "enforce_conversation_binding")
+    assert not hasattr(tt, "enforce_room_binding")
+    assert not hasattr(tt, "matching_approver_sender_ids")
 
 
 def test_tool_context_ignores_legacy_policy_inputs_and_derives_aliases():
@@ -274,21 +187,26 @@ def _message_context(*, conversation_id="group-7"):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_mcp_call_paths_enforce_generic_message_context(tmp_path, stream):
+def test_mcp_call_no_longer_enforces_token_level_binding(tmp_path, stream):
+    """Phase 2：registry 不再做 token 级房间校验；不同 message_context /
+    room_id 的调用不再因 token 绑定被 403，仅由各工具在系统级强制。"""
     from app.services.mcp_capability_service import mcp_call_tool, mcp_call_tool_stream
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import registry
 
-    engine = _engine(tmp_path, f"mcp-generic-guard-{stream}.db")
+    engine = _engine(tmp_path, f"mcp-no-gate-{stream}.db")
     db = _session(engine)
-    tool_name = f"ops.contract.generic_guard_{stream}"
+    tool_name = f"ops.contract.no_gate_{stream}"
 
     @registry.register(
         name=tool_name,
-        description="generic channel guard integration",
+        description="token-level gate removed integration",
         input_schema={
             "type": "object",
-            "properties": {"message_context": {"type": "object"}},
+            "properties": {
+                "message_context": {"type": "object"},
+                "room_id": {"type": "string"},
+            },
             "additionalProperties": False,
         },
         scopes=["ops:read"],
@@ -300,6 +218,7 @@ def test_mcp_call_paths_enforce_generic_message_context(tmp_path, stream):
             stream_callback({"event": "guarded"})
         return {"accepted": True}
 
+    # token 仍可声明 channel_bindings，但不再被用于拦截。
     ctx = ToolContext(
         username="tester",
         auth_type="session",
@@ -315,87 +234,17 @@ def test_mcp_call_paths_enforce_generic_message_context(tmp_path, stream):
     )
     invoke = mcp_call_tool_stream if stream else mcp_call_tool
     try:
-        result = invoke(
-            db,
-            ctx,
-            {
-                "name": tool_name.replace(".", "_"),
-                "arguments": {"message_context": _message_context()},
-            },
-        )
-        assert result["isError"] is False
-
         for arguments in (
-            {},
-            {"message_context": {"channel": "wechat"}},
+            {"message_context": _message_context()},
             {"message_context": _message_context(conversation_id="group-8")},
+            {"room_id": "!other:example.org"},
         ):
-            with pytest.raises(HTTPException) as exc:
-                invoke(
-                    db,
-                    ctx,
-                    {"name": tool_name.replace(".", "_"), "arguments": arguments},
-                )
-            assert exc.value.status_code == 403
-    finally:
-        registry._tools.pop(tool_name, None)
-        db.close()
-        engine.dispose()
-
-
-@pytest.mark.parametrize("stream", [False, True])
-def test_mcp_call_paths_normalize_legacy_matrix_room_context(tmp_path, stream):
-    from app.services.mcp_capability_service import mcp_call_tool, mcp_call_tool_stream
-    from app.services.tool_context import ToolContext
-    from app.services.tool_registry import registry
-
-    engine = _engine(tmp_path, f"mcp-matrix-guard-{stream}.db")
-    db = _session(engine)
-    tool_name = f"ops.contract.matrix_guard_{stream}"
-
-    @registry.register(
-        name=tool_name,
-        description="legacy Matrix channel guard integration",
-        input_schema={
-            "type": "object",
-            "properties": {"room_id": {"type": "string"}},
-            "additionalProperties": False,
-        },
-        scopes=["ops:read"],
-        category="approval_prepare",
-        streamable=True,
-    )
-    def _guarded(args, ctx, db, stream_callback=None):
-        return {"accepted": True}
-
-    ctx = ToolContext(
-        username="tester",
-        auth_type="session",
-        is_admin=True,
-        scopes=["*"],
-        channel_bindings=[MATRIX_ROOM],
-    )
-    invoke = mcp_call_tool_stream if stream else mcp_call_tool
-    try:
-        result = invoke(
-            db,
-            ctx,
-            {
-                "name": tool_name.replace(".", "_"),
-                "arguments": {"room_id": "!ops:example.org"},
-            },
-        )
-        assert result["isError"] is False
-        with pytest.raises(HTTPException) as exc:
-            invoke(
+            result = invoke(
                 db,
                 ctx,
-                {
-                    "name": tool_name.replace(".", "_"),
-                    "arguments": {"room_id": "!other:example.org"},
-                },
+                {"name": tool_name.replace(".", "_"), "arguments": arguments},
             )
-        assert exc.value.status_code == 403
+            assert result["isError"] is False
     finally:
         registry._tools.pop(tool_name, None)
         db.close()
@@ -487,9 +336,11 @@ def test_legacy_matrix_approval_ignores_cross_channel_token_approvers(
         engine.dispose()
 
 
-def test_central_registry_guard_covers_direct_rest_stream_and_stdio_dispatch(
+def test_central_registry_no_longer_gates_on_token_bindings(
     tmp_path, monkeypatch
 ):
+    """Phase 2：token 级绑定不再拦截任何调度路径（direct / stream / REST /
+    stdio）。不同 message_context / room_id 的调用均能正常分发到工具。"""
     import asyncio
 
     from app.api import tools as tools_api
@@ -549,52 +400,61 @@ def test_central_registry_guard_covers_direct_rest_stream_and_stdio_dispatch(
         }
 
     try:
-        with pytest.raises(HTTPException) as direct_exc:
-            registry.call(db, tool_name, {}, _ctx("wechat", "corp-a", "group-7"))
-        assert direct_exc.value.status_code == 403
+        # direct dispatch：token 声明不同会话，仍正常分发（不再被 403）。
+        result = registry.call(
+            db, tool_name, {}, _ctx("wechat", "corp-a", "group-7")
+        )["result"]
+        assert result == {"accepted": True}
 
-        with pytest.raises(HTTPException) as direct_stream_exc:
-            registry.call(
-                db,
-                tool_name,
-                _generic_args("telegram", "bot-a", "chat-8"),
-                _ctx("telegram", "bot-a", "chat-7"),
-                stream_callback=lambda chunk: None,
-            )
-        assert direct_stream_exc.value.status_code == 403
+        direct_stream_result = registry.call(
+            db,
+            tool_name,
+            _generic_args("telegram", "bot-a", "chat-8"),
+            _ctx("telegram", "bot-a", "chat-7"),
+            stream_callback=lambda chunk: None,
+        )["result"]
+        assert direct_stream_result == {"accepted": True}
 
-        active_ctx = [_ctx("matrix", "secondary", "!ops:example.org")]
+        rand_ctx = _ctx("matrix", "secondary", "!ops:example.org")
         monkeypatch.setattr(
             tools_api,
             "get_tool_context",
-            lambda request, session: active_ctx[0],
+            lambda request, session: rand_ctx,
         )
-        with pytest.raises(HTTPException) as rest_exc:
-            tools_api.call_tool(
+        rest_result = tools_api.call_tool(
+            tools_api.ToolCallPayload(
+                tool=tool_name,
+                arguments={"room_id": "!any:example.org"},
+            ),
+            SimpleNamespace(),
+            db,
+        )
+        assert rest_result["data"]["result"] == {"accepted": True}
+
+        rest_stream_result = asyncio.run(
+            tools_api.call_tool_stream(
                 tools_api.ToolCallPayload(
                     tool=tool_name,
-                    arguments={"room_id": "!ops:example.org"},
+                    arguments={"message_context": {"channel": "wechat"}},
                 ),
                 SimpleNamespace(),
                 db,
             )
-        assert rest_exc.value.status_code == 403
+        )
+        # streamable 工具返回 StreamingResponse：消费流并校验 done 事件结果。
+        from fastapi.responses import StreamingResponse
 
-        active_ctx[0] = _ctx("wechat", "corp-a", "group-7")
-        with pytest.raises(HTTPException) as rest_stream_exc:
-            asyncio.run(
-                tools_api.call_tool_stream(
-                    tools_api.ToolCallPayload(
-                        tool=tool_name,
-                        arguments={"message_context": {"channel": "wechat"}},
-                    ),
-                    SimpleNamespace(),
-                    db,
-                )
-            )
-        assert rest_stream_exc.value.status_code == 403
+        assert isinstance(rest_stream_result, StreamingResponse)
 
-        active_ctx[0] = _ctx("telegram", "bot-a", "chat-7")
+        async def _collect():
+            chunks = ""
+            async for chunk in rest_stream_result.body_iterator:
+                chunks += chunk
+            return chunks
+
+        stream_body = asyncio.run(_collect())
+        assert '"accepted": true' in stream_body
+        assert "event: done" in stream_body
 
         def _stdio_request(method, path, payload):
             assert method == "POST"
@@ -606,15 +466,15 @@ def test_central_registry_guard_covers_direct_rest_stream_and_stdio_dispatch(
             )
 
         monkeypatch.setattr(stdio_server, "_request", _stdio_request)
-        with pytest.raises(HTTPException) as stdio_exc:
-            stdio_server._call_tool_for_mcp(
-                {
-                    "name": tool_name.replace(".", "_"),
-                    "arguments": _generic_args("telegram", "bot-a", "chat-8"),
-                }
-            )
-        assert stdio_exc.value.status_code == 403
-        assert handled == []
+        stdio_result = stdio_server._call_tool_for_mcp(
+            {
+                "name": tool_name.replace(".", "_"),
+                "arguments": _generic_args("telegram", "bot-a", "chat-8"),
+            }
+        )
+        assert stdio_result["isError"] is False
+        assert '"accepted": true' in stdio_result["content"][0]["text"]
+        assert len(handled) == 5
     finally:
         registry._tools.pop(tool_name, None)
         db.close()
@@ -723,9 +583,11 @@ def test_bound_approval_list_filters_matrix_room_and_hides_non_matrix_rows(tmp_p
         engine.dispose()
 
 
-def test_tool_token_create_and_update_audit_generic_binding_policy(
+def test_tool_token_create_and_update_audit_ignores_binding_fields(
     tmp_path, monkeypatch
 ):
+    """Phase 2：create/update 审计不再包含任何房间/审批人绑定信息；
+    传入的绑定字段被 pydantic 忽略，不会进入审计或落库。"""
     from app.api import tools as tools_api
 
     engine = _engine(tmp_path, "tool-token-generic-audit.db")
@@ -753,20 +615,6 @@ def test_tool_token_create_and_update_audit_generic_binding_policy(
             "sender_id": "42",
         }
     ]
-    update_bindings = [
-        {
-            "channel": "telegram",
-            "channel_account_id": "bot-a",
-            "conversation_id": "chat-9",
-        }
-    ]
-    update_approvers = [
-        {
-            "channel": "wechat",
-            "channel_account_id": "corp-a",
-            "sender_id": "owner-1",
-        }
-    ]
     try:
         response = tools_api.create_token(
             tools_api.CreateToolTokenPayload(
@@ -781,10 +629,7 @@ def test_tool_token_create_and_update_audit_generic_binding_policy(
         token_id = response["data"]["record"]["id"]
         tools_api.update_token(
             token_id,
-            tools_api.UpdateToolTokenPayload(
-                channel_bindings=update_bindings,
-                approver_identities=update_approvers,
-            ),
+            tools_api.UpdateToolTokenPayload(name="multichannel-audit-renamed"),
             SimpleNamespace(),
             db,
         )
@@ -792,28 +637,24 @@ def test_tool_token_create_and_update_audit_generic_binding_policy(
         details = {call[0]: call[3] for call in audit_calls}
         create_detail = details["tool.token.create"]
         update_detail = details["tool.token.update"]
-        assert (
-            "channel_bindings="
-            + json.dumps(create_bindings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        ) in create_detail
-        assert (
-            "approver_identities="
-            + json.dumps(create_approvers, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        ) in create_detail
-        assert (
-            "channel_bindings="
-            + json.dumps(update_bindings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        ) in update_detail
-        assert (
-            "approver_identities="
-            + json.dumps(update_approvers, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        ) in update_detail
+        # 审计明细不再包含绑定字段。
+        assert "channel_bindings" not in create_detail
+        assert "approver_identities" not in create_detail
+        assert "bound_room_ids" not in create_detail
+        assert "approver_matrix_ids" not in create_detail
+        assert "channel_bindings" not in update_detail
+        assert "approver_identities" not in update_detail
+        # 仍保留核心字段用于追溯。
+        assert "scopes=ops:read" in create_detail
+        assert "allow_write=False" in create_detail
+        assert "allow_prod=False" in create_detail
     finally:
         db.close()
         engine.dispose()
 
 
-def test_token_and_preview_contexts_read_only_generic_columns(tmp_path, monkeypatch):
+def test_token_and_preview_contexts_ignore_legacy_binding_columns(tmp_path, monkeypatch):
+    """Phase 2：即使 DB 中残留旧绑定列数据，运行时/预览上下文也不再携带它们。"""
     from app.api.tools import ToolPolicyPreviewPayload, _ctx_from_token, _preview_context_from_payload
     from app.db.models import ToolToken
     from app.services.tool_token import hash_token
@@ -857,37 +698,57 @@ def test_token_and_preview_contexts_read_only_generic_columns(tmp_path, monkeypa
             db,
             {"username": "admin", "is_admin": True},
         )
-        assert runtime.channel_bindings == token.channel_bindings
-        assert runtime.approver_identities == token.approver_identities
+        # 绑定列不再进入上下文——token 级绑定已彻底移除。
+        assert runtime.channel_bindings == []
+        assert runtime.approver_identities == []
         assert runtime.bound_room_ids == []
-        assert preview.channel_bindings == token.channel_bindings
-        assert preview.approver_identities == token.approver_identities
-        assert subject["channel_bindings"] == token.channel_bindings
-        assert subject["approver_identities"] == token.approver_identities
+        assert runtime.approver_matrix_ids == []
+        assert preview.channel_bindings == []
+        assert preview.approver_identities == []
+        assert preview.bound_room_ids == []
+        assert preview.approver_matrix_ids == []
+        # 预览主体不再导出绑定字段。
+        assert "channel_bindings" not in subject
+        assert "approver_identities" not in subject
+        assert "bound_room_ids" not in subject
+        assert "approver_matrix_ids" not in subject
     finally:
         db.close()
         engine.dispose()
 
 
-def test_api_payloads_accept_generic_and_legacy_fields_and_track_omission():
+def test_api_payloads_remove_binding_fields_and_ignore_extra():
+    """Phase 2：create/update payload 不再声明任何绑定字段；传入的额外
+    绑定字段被 pydantic 忽略（不放行也不报错）。"""
     from app.api.tools import CreateToolTokenPayload, UpdateToolTokenPayload
 
-    create = CreateToolTokenPayload(
+    create = CreateToolTokenPayload(name="generic")
+    update = UpdateToolTokenPayload(name="renamed")
+
+    # 绑定字段已从 payload 中移除。
+    assert not hasattr(create, "channel_bindings")
+    assert not hasattr(create, "approver_identities")
+    assert not hasattr(create, "bound_room_ids")
+    assert not hasattr(create, "approver_matrix_ids")
+    assert not hasattr(update, "channel_bindings")
+    assert not hasattr(update, "approver_identities")
+    assert not hasattr(update, "bound_room_ids")
+    assert not hasattr(update, "approver_matrix_ids")
+
+    # 额外传入的绑定字段被静默忽略，不报错。
+    create_extra = CreateToolTokenPayload(
         name="generic",
         channel_bindings=[MATRIX_ROOM],
         approver_identities=[MATRIX_APPROVER],
+        bound_room_ids=["!x:example.org"],
+        approver_matrix_ids=["@x:example.org"],
     )
-    assert create.channel_bindings == [MATRIX_ROOM]
-    assert create.approver_identities == [MATRIX_APPROVER]
-
-    update = UpdateToolTokenPayload(channel_bindings=[], approver_identities=[])
-    assert update.channel_bindings == []
-    assert update.approver_identities == []
-    assert update.bound_room_ids is None
-    assert update.approver_matrix_ids is None
+    assert create_extra.name == "generic"
 
 
-def test_update_explicit_empty_clears_generic_bindings(tmp_path, monkeypatch):
+def test_update_does_not_touch_legacy_binding_columns(tmp_path, monkeypatch):
+    """Phase 2：update 不再修改绑定列；存量 token 的绑定残留由迁移脚本
+    clear_token_bindings 清空，而非通过接口。"""
     import app.api.tools as tools_api
     from app.api.tools import UpdateToolTokenPayload
     from app.db.models import ToolToken
@@ -917,13 +778,14 @@ def test_update_explicit_empty_clears_generic_bindings(tmp_path, monkeypatch):
 
         tools_api.update_token(
             token.id,
-            UpdateToolTokenPayload(channel_bindings=[], approver_identities=[]),
+            UpdateToolTokenPayload(name="renamed"),
             SimpleNamespace(),
             db,
         )
         db.refresh(token)
-        assert token.channel_bindings == []
-        assert token.approver_identities == []
+        # 名称更新生效，但绑定列保持原样（接口不再管理它们）。
+        assert token.name == "renamed"
+        assert token.channel_bindings == [MATRIX_ROOM]
     finally:
         db.close()
         engine.dispose()

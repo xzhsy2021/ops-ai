@@ -20,12 +20,7 @@ from app.services.message_context import normalize_message_context
 from app.services.tool_context import ToolContext
 from app.services.tool_token import (
     create_tool_token,
-    enforce_conversation_binding,
-    normalize_approver_identities,
-    normalize_channel_bindings,
     recommended_tool_token_templates,
-    resolve_approver_identities,
-    resolve_channel_bindings,
     token_to_dict,
     validate_tool_token,
 )
@@ -89,16 +84,8 @@ class CreateToolTokenPayload(BaseModel):
     allow_write: Optional[bool] = None
     allow_prod: bool = False
     expires_in_days: int = 90
-    # qclaw Element room binding. Empty list (= default) = no binding,
-    # token can be used from any room. Non-empty list = token is restricted
-    # to the listed Matrix room IDs (e.g. ["!ops:matrix.org"]).
-    bound_room_ids: List[str] = Field(default_factory=list)
-    # qclaw Element approver whitelist. Empty list (= default) = no
-    # token-level restriction. Non-empty list = only these Matrix user IDs
-    # may consume approval short codes created through this token.
-    approver_matrix_ids: List[str] = Field(default_factory=list)
-    channel_bindings: List[Dict[str, str]] = Field(default_factory=list)
-    approver_identities: List[Dict[str, str]] = Field(default_factory=list)
+    # 房间/审批人绑定已统一到系统级「系统设置 → message_routing」，Token 不再
+    # 单独配置 channel_bindings / approver_identities / bound_room_ids 等字段。
 
 
 
@@ -111,14 +98,7 @@ class UpdateToolTokenPayload(BaseModel):
     allow_prod: Optional[bool] = None
     expires_in_days: Optional[int] = None
     revoke: Optional[bool] = None
-    # Pass an empty list to clear the room binding; pass None to leave it
-    # unchanged. Frontend always sends the current list on edit.
-    bound_room_ids: Optional[List[str]] = None
-    # Pass an empty list to clear the approver whitelist; pass None to leave
-    # it unchanged. Frontend always sends the current list on edit.
-    approver_matrix_ids: Optional[List[str]] = None
-    channel_bindings: Optional[List[Dict[str, str]]] = None
-    approver_identities: Optional[List[Dict[str, str]]] = None
+    # 房间/审批人绑定已统一到系统级配置，Token 更新不再接收绑定字段。
 
 
 class ToolPolicyPreviewPayload(BaseModel):
@@ -186,12 +166,6 @@ def _ctx_from_user(request: Request, user: Dict[str, Any]) -> ToolContext:
 
 def _ctx_from_token(request: Request, db: Session, raw_token: str) -> ToolContext:
     token = validate_tool_token(db, raw_token)
-    channel_bindings = normalize_channel_bindings(
-        getattr(token, "channel_bindings", None)
-    )
-    approver_identities = normalize_approver_identities(
-        getattr(token, "approver_identities", None)
-    )
     return ToolContext(
         username=token.owner,
         role="operator" if token.allow_write else "readonly",
@@ -204,8 +178,6 @@ def _ctx_from_token(request: Request, db: Session, raw_token: str) -> ToolContex
         scopes=token.scopes or [],
         allow_write=bool(token.allow_write),
         allow_prod=bool(token.allow_prod),
-        channel_bindings=channel_bindings,
-        approver_identities=approver_identities,
         client_name=token.name,
         ip_address=request.client.host if request.client else "",
         user_agent=request.headers.get("user-agent", ""),
@@ -230,8 +202,6 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             scopes=token.scopes or [],
             allow_write=bool(token.allow_write),
             allow_prod=bool(token.allow_prod),
-            channel_bindings=serialized["channel_bindings"],
-            approver_identities=serialized["approver_identities"],
             client_name=token.name,
             ip_address=request.client.host if request.client else "",
             user_agent=request.headers.get("user-agent", "") if request else "",
@@ -244,10 +214,6 @@ def _preview_context_from_payload(payload: ToolPolicyPreviewPayload, request: Re
             "scopes": token.scopes or [],
             "allow_write": bool(token.allow_write),
             "allow_prod": bool(token.allow_prod),
-            "channel_bindings": serialized["channel_bindings"],
-            "approver_identities": serialized["approver_identities"],
-            "bound_room_ids": serialized["bound_room_ids"],
-            "approver_matrix_ids": serialized["approver_matrix_ids"],
         }
 
     templates = {item["key"]: item for item in recommended_tool_token_templates()}
@@ -492,13 +458,8 @@ async def upload_package_by_tool_token(
     source_context = None
     source_message_key = None
     if approval_intake:
-        channel_bindings = normalize_channel_bindings(
-            getattr(ctx, "channel_bindings", None)
-        )
         if getattr(ctx, "auth_type", "") != "tool_token" or not ctx.has_scope("ops:read"):
             raise HTTPException(status_code=403, detail="Approval package intake requires an ops:read Tool Token")
-        if not channel_bindings:
-            raise HTTPException(status_code=403, detail="Approval package intake requires a room-bound Tool Token")
         # 规范化消息上下文：优先通用 JSON message_context 字段，兼容旧 Matrix 表单字段。
         if isinstance(message_context, str) and str(message_context).strip():
             try:
@@ -517,7 +478,9 @@ async def upload_package_by_tool_token(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid message_context: {exc}") from exc
 
-        enforce_conversation_binding(channel_bindings, message_context=context)
+        # 房间作用域已统一到系统级 message_routing.rooms，不再依赖 token 级绑定。
+        from app.services.tool_adapters.approval_tools import _enforce_system_room
+        _enforce_system_room(context, system)
 
         expected_package_sha256 = str(package_sha256 or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256):
@@ -750,20 +713,6 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
         effective_write = bool(allow_write) or any(s in dangerous or s.endswith(":*") for s in scopes) or any(s == "ops:write" for s in scopes)
         if effective_write or allow_prod or any(s in dangerous or s.endswith(":*") for s in scopes):
             raise HTTPException(status_code=403, detail="Only admin can create write/prod tool tokens")
-    fields_set = (
-        payload.model_fields_set
-        if hasattr(payload, "model_fields_set")
-        else payload.__fields_set__
-    )
-    binding_kwargs: Dict[str, Any] = {}
-    if "channel_bindings" in fields_set:
-        binding_kwargs["channel_bindings"] = payload.channel_bindings
-    if "bound_room_ids" in fields_set:
-        binding_kwargs["bound_room_ids"] = payload.bound_room_ids
-    if "approver_identities" in fields_set:
-        binding_kwargs["approver_identities"] = payload.approver_identities
-    if "approver_matrix_ids" in fields_set:
-        binding_kwargs["approver_matrix_ids"] = payload.approver_matrix_ids
     try:
         created = create_tool_token(
             db,
@@ -774,7 +723,6 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
             allow_write=allow_write,
             allow_prod=allow_prod,
             expires_in_days=payload.expires_in_days,
-            **binding_kwargs,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -785,12 +733,7 @@ def create_token(payload: CreateToolTokenPayload, request: Request, db: Session 
         payload.name,
         (
             f"user={user.get('username')} scopes={','.join(scopes)} "
-            f"bound_rooms={','.join(serialized['bound_room_ids'])} "
-            f"approvers={','.join(serialized['approver_matrix_ids'])} "
-            "channel_bindings="
-            f"{json.dumps(serialized['channel_bindings'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))} "
-            "approver_identities="
-            f"{json.dumps(serialized['approver_identities'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+            f"allow_write={serialized['allow_write']} allow_prod={serialized['allow_prod']}"
         ),
     )
     _bump_capability_version(db)
@@ -840,31 +783,6 @@ def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Reques
             token.expires_at = _utcnow() + timedelta(days=min(max(days, 1), 3650))
     if payload.revoke is not None:
         token.revoked_at = _utcnow() if payload.revoke else None
-    fields_set = (
-        payload.model_fields_set
-        if hasattr(payload, "model_fields_set")
-        else payload.__fields_set__
-    )
-    if {"channel_bindings", "bound_room_ids"} & fields_set:
-        kwargs: Dict[str, Any] = {}
-        if "channel_bindings" in fields_set:
-            kwargs["generic"] = payload.channel_bindings
-        if "bound_room_ids" in fields_set:
-            kwargs["legacy"] = payload.bound_room_ids
-        try:
-            token.channel_bindings = resolve_channel_bindings(**kwargs)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if {"approver_identities", "approver_matrix_ids"} & fields_set:
-        kwargs = {}
-        if "approver_identities" in fields_set:
-            kwargs["generic"] = payload.approver_identities
-        if "approver_matrix_ids" in fields_set:
-            kwargs["legacy"] = payload.approver_matrix_ids
-        try:
-            token.approver_identities = resolve_approver_identities(**kwargs)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     db.commit()
     db.refresh(token)
@@ -875,13 +793,7 @@ def update_token(token_id: str, payload: UpdateToolTokenPayload, request: Reques
         token.name,
         (
             f"user={user.get('username')} scopes={','.join(token.scopes or [])} "
-            f"allow_write={token.allow_write} allow_prod={token.allow_prod} "
-            f"bound_rooms={','.join(serialized['bound_room_ids'])} "
-            f"approvers={','.join(serialized['approver_matrix_ids'])} "
-            "channel_bindings="
-            f"{json.dumps(serialized['channel_bindings'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))} "
-            "approver_identities="
-            f"{json.dumps(serialized['approver_identities'], ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+            f"allow_write={token.allow_write} allow_prod={token.allow_prod}"
         ),
     )
     _bump_capability_version(db)

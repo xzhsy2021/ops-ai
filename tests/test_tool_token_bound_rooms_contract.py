@@ -1,11 +1,15 @@
-"""Contract tests for qclaw Element room binding on Tool Tokens.
+"""Contract tests for qclaw room binding on Tool Tokens (Phase 2).
+
+Phase 2 已彻底移除 token 级房间绑定：Token 不再存储 bound_room_ids /
+channel_bindings，房间作用域统一到系统级 message_routing.rooms。
 
 Covers:
-- `_normalize_bound_room_ids` input normalization
-- `enforce_room_binding` (the MCP-layer gate)
-- `create_tool_token` / `token_to_dict` round-trip with bound_room_ids
-- API payload accepts / returns bound_room_ids
-- Frontend renders the binding editor and the table column
+- `_normalize_bound_room_ids` input normalization (still a utility)
+- token-level enforcement (`enforce_room_binding` / `enforce_conversation_binding`) removed
+- `create_tool_token` / `token_to_dict` no longer store / export bindings
+- API payload no longer accepts bound_room_ids
+- Frontend rendered binding editor is gone
+- System-level `_enforce_system_room` replaces the token-level gate
 """
 from __future__ import annotations
 
@@ -46,47 +50,17 @@ def test_normalize_bound_room_ids_strips_blanks_and_dedupes():
     assert _normalize_bound_room_ids(12345) == []
 
 
-def test_enforce_room_binding_passes_when_unbound():
-    from app.services.tool_token import enforce_room_binding
+def test_token_level_room_enforcement_removed():
+    """Phase 2：enforce_room_binding / enforce_conversation_binding 已从
+    tool_token 移除，token 级房间校验不再存在。"""
+    import app.services.tool_token as tt
 
-    # No binding configured -> any room_id is allowed (including None).
-    enforce_room_binding(None, None)
-    enforce_room_binding([], "!any:matrix.org")
-    enforce_room_binding("", "!any:matrix.org")
-
-
-def test_enforce_room_binding_accepts_listed_room():
-    from app.services.tool_token import enforce_room_binding
-
-    enforce_room_binding(["!ops:matrix.org", "!dev:matrix.org"], "!ops:matrix.org")
-
-
-def test_enforce_room_binding_rejects_other_room():
-    import pytest
-    from fastapi import HTTPException
-
-    from app.services.tool_token import enforce_room_binding
-
-    with pytest.raises(HTTPException) as exc:
-        enforce_room_binding(["!ops:matrix.org"], "!rogue:matrix.org")
-    assert exc.value.status_code == 403
-    assert "!rogue:matrix.org" in exc.value.detail
-    assert "!ops:matrix.org" in exc.value.detail
-
-
-def test_enforce_room_binding_rejects_missing_room_when_bound():
-    import pytest
-    from fastapi import HTTPException
-
-    from app.services.tool_token import enforce_room_binding
-
-    with pytest.raises(HTTPException) as exc:
-        enforce_room_binding(["!ops:matrix.org"], None)
-    assert exc.value.status_code == 403
-    assert "no room_id" in exc.value.detail
+    assert not hasattr(tt, "enforce_room_binding")
+    assert not hasattr(tt, "enforce_conversation_binding")
 
 
 def test_create_and_round_trip_bound_room_ids(tmp_path):
+    """token 不再存储房间绑定；create 后四个绑定列均为空，dict 不再导出。"""
     from app.services.tool_token import create_tool_token, token_to_dict
 
     engine, Session = _sqlite_session(tmp_path)
@@ -100,34 +74,23 @@ def test_create_and_round_trip_bound_room_ids(tmp_path):
             scopes=["ops:read"],
             allow_write=False,
             expires_in_days=30,
-            bound_room_ids=["!ops:matrix.org", "!ops-backup:matrix.org"],
         )
 
         record = created["record"]
-        # Runtime policy is persisted only in the generic column.
-        assert record.channel_bindings == [
-            {
-                "channel": "matrix",
-                "channel_account_id": "default",
-                "conversation_id": "!ops:matrix.org",
-            },
-            {
-                "channel": "matrix",
-                "channel_account_id": "default",
-                "conversation_id": "!ops-backup:matrix.org",
-            },
-        ]
+        assert record.channel_bindings == []
         assert record.bound_room_ids == []
-        # Returned via token_to_dict for the API.
+        assert record.approver_identities == []
+        assert record.approver_matrix_ids == []
         as_dict = token_to_dict(record)
-        assert as_dict["bound_room_ids"] == ["!ops:matrix.org", "!ops-backup:matrix.org"]
+        assert "bound_room_ids" not in as_dict
+        assert "channel_bindings" not in as_dict
     finally:
         db.close()
         engine.dispose()
 
 
 def test_create_token_without_binding_defaults_to_empty_list(tmp_path):
-    from app.services.tool_token import create_tool_token, token_to_dict
+    from app.services.tool_token import create_tool_token
 
     engine, Session = _sqlite_session(tmp_path)
     db = Session()
@@ -138,8 +101,8 @@ def test_create_token_without_binding_defaults_to_empty_list(tmp_path):
             owner="admin",
             scopes=["ops:read"],
         )
-        as_dict = token_to_dict(created["record"])
-        assert as_dict["bound_room_ids"] == []
+        assert created["record"].channel_bindings == []
+        assert created["record"].bound_room_ids == []
     finally:
         db.close()
         engine.dispose()
@@ -161,29 +124,23 @@ def test_token_to_dict_normalizes_garbage_in_db():
         expires_at = None
         last_used_at = None
         revoked_at = None
-        # Garbage / None / non-list shapes should not crash the dict builder.
-        bound_room_ids = None
 
     data = token_to_dict(_Stub())
-    assert data["bound_room_ids"] == []
+    assert "bound_room_ids" not in data
+    assert "channel_bindings" not in data
 
 
 def test_create_token_payload_declares_bound_room_ids_field():
     from app.api.tools import CreateToolTokenPayload, UpdateToolTokenPayload
 
-    create = CreateToolTokenPayload(name="x", bound_room_ids=["!a"])
-    assert create.bound_room_ids == ["!a"]
+    # 房间绑定已统一到系统级，Token 载荷不再接收 bound_room_ids。
+    create = CreateToolTokenPayload(name="x")
+    assert not hasattr(create, "bound_room_ids")
+    assert not hasattr(create, "channel_bindings")
 
-    update = UpdateToolTokenPayload(bound_room_ids=["!b"])
-    assert update.bound_room_ids == ["!b"]
-
-    # Update with None means "do not change" (kept None).
-    update2 = UpdateToolTokenPayload()
-    assert update2.bound_room_ids is None
-
-    # Default in create is empty list (= no binding).
-    default_create = CreateToolTokenPayload(name="y")
-    assert default_create.bound_room_ids == []
+    update = UpdateToolTokenPayload()
+    assert not hasattr(update, "bound_room_ids")
+    assert not hasattr(update, "channel_bindings")
 
 
 def test_frontend_removed_room_binding_editor_from_token_panel():
@@ -203,29 +160,20 @@ def test_frontend_removed_room_binding_editor_from_token_panel():
     assert "bound_room_ids: data.bound_room_ids ?? []" not in page
 
 
-def test_enforce_room_binding_runs_at_top_of_qclaw_mcp_tools():
-    """Defense-in-depth check: every qclaw routing/approval tool that
-    touches a conversation calls enforce_conversation_binding before
-    doing real work. This test inspects the source to prevent accidental
-    removal of the gate.
-
-    `ops.approval.get` / `list` / `expire_stale` are intentionally NOT in
-    this list because they are read-only / maintenance tools that do not
-    take a conversation argument and do not modify approval state.
+def test_system_room_enforcement_replaces_token_level_gate():
+    """Phase 2：token 级房间校验已移除，改为系统级 message_routing.rooms
+    作用域。审批准备/临时授权/审批执行等工具在知晓 system_name 后调用
+    _enforce_system_room 强制。
     """
     src = open("app/services/tool_adapters/approval_tools.py", encoding="utf-8").read()
+    registry_src = open("app/services/tool_registry.py", encoding="utf-8").read()
 
-    # Function-level guard sites. reject is included because it mutates
-    # approval state (PENDING -> REJECTED); the binding check still runs
-    # (no-op when unbound).
-    expected_sites = [
-        "def routing_resolve_message_target",
-        "def approval_prepare_service_control",
-        "def approval_execute",
-    ]
-    for fn in expected_sites:
-        assert fn in src, f"missing qclaw tool: {fn}"
-    # enforce_conversation_binding is imported and referenced.
-    assert "enforce_conversation_binding" in src
-    # At least one call site per tool.
-    assert src.count("enforce_conversation_binding(") >= len(expected_sites)
+    # token 级 enforce_conversation_binding 已彻底移除。
+    assert "enforce_conversation_binding" not in src
+    assert "channel_bindings" not in src
+    # 系统级房间作用域函数存在并被调用。
+    assert "_enforce_system_room" in src
+    assert "def _enforce_system_room" in src
+    # registry 不再做 token 级绑定校验。
+    assert "enforce_conversation_binding" not in registry_src
+    assert "channel_bindings" not in registry_src

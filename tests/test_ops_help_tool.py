@@ -357,10 +357,33 @@ def test_help_never_lists_ai_analysis_tools(db):
 
 # ── 活跃临时授权可见性 ──
 
-def test_help_shows_active_temporary_grants(db):
+def test_help_shows_active_temporary_grants(db, monkeypatch):
     """指定系统时展示活跃临时授权（不含确认码）。"""
+    from app.services.tool_adapters import approval_tools
     from app.services.tool_adapters.approval_tools import temporary_access
     from app.services.tool_adapters.help_tools import help_query
+
+    # Phase 2：作用域由系统级 message_routing 决定；注入干净配置（不设 rooms），
+    # 避免共享测试库真实 rooms 拦截临时授权申请。
+    monkeypatch.setattr(
+        approval_tools,
+        "get_all_systems",
+        lambda: {
+            "crypto-trader": {
+                "name": "crypto-trader",
+                "message_routing": {
+                    "enabled": True,
+                    "aliases": ["量化"],
+                    "keywords": [],
+                    "priority": 10,
+                    "approvers": [
+                        {"channel": "matrix", "channel_account_id": "default", "sender_id": "@owner:matrix.org"},
+                    ],
+                },
+                "services": [],
+            }
+        },
+    )
 
     context = _context(message="help-grant")
     requested = temporary_access(

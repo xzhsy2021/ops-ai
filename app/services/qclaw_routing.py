@@ -15,7 +15,11 @@ from enum import Enum
 from typing import Any, Mapping
 
 from app.core.config import QCLAW_APPROVAL_SIGNING_KEY, QCLAW_APPROVAL_TTL_SECONDS
-from app.services.message_context import MessageContext, normalize_identity
+from app.services.message_context import (
+    MessageContext,
+    normalize_conversation_binding,
+    normalize_identity,
+)
 
 
 class RoutingOutcome(str, Enum):
@@ -92,6 +96,12 @@ def normalize_routing_approvers(value: Any) -> list[dict[str, str]]:
             identity = normalize_identity(item)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"approvers[{index}]: {exc}") from exc
+        # Matrix 房间 ID 以 '!' 开头，不是用户身份；防止将房间误配为审批人。
+        if identity["channel"] == "matrix" and identity["sender_id"].startswith("!"):
+            raise ValueError(
+                f"approvers[{index}]: matrix sender_id must be a user (@...), "
+                f"got room ID {identity['sender_id']!r}; rooms must go in message_routing.rooms"
+            )
         key = (
             identity["channel"],
             identity["channel_account_id"],
@@ -103,6 +113,30 @@ def normalize_routing_approvers(value: Any) -> list[dict[str, str]]:
     return result
 
 
+def normalize_routing_rooms(value: Any) -> list[dict[str, str]]:
+    """Normalize structured conversation bindings for message_routing.rooms."""
+    if value is None:
+        raise ValueError("rooms must be a list")
+    if not isinstance(value, list):
+        raise ValueError("rooms must be a list")
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, item in enumerate(value):
+        try:
+            binding = normalize_conversation_binding(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"rooms[{index}]: {exc}") from exc
+        key = (
+            binding["channel"],
+            binding["channel_account_id"],
+            binding["conversation_id"],
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(binding)
+    return result
+
+
 def normalize_message_routing_config(value: Any) -> dict[str, Any]:
     """Validate and normalize one complete persisted message-routing object."""
     if value is None:
@@ -110,7 +144,7 @@ def normalize_message_routing_config(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("message_routing must be an object")
 
-    allowed_keys = {"enabled", "aliases", "keywords", "priority", "approvers"}
+    allowed_keys = {"enabled", "aliases", "keywords", "priority", "approvers", "rooms"}
     unsupported = sorted(set(value) - allowed_keys)
     if unsupported:
         raise ValueError(f"unsupported message_routing keys: {', '.join(unsupported)}")
@@ -151,6 +185,9 @@ def normalize_message_routing_config(value: Any) -> dict[str, Any]:
 
     if "approvers" in value:
         normalized["approvers"] = normalize_routing_approvers(value["approvers"])
+
+    if "rooms" in value:
+        normalized["rooms"] = normalize_routing_rooms(value["rooms"])
     return normalized
 
 
@@ -159,6 +196,14 @@ def _approver_sort_key(identity: dict[str, str]) -> tuple[str, str, str]:
         identity["channel"],
         identity["channel_account_id"],
         identity["sender_id"],
+    )
+
+
+def _room_sort_key(binding: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        binding["channel"],
+        binding["channel_account_id"],
+        binding["conversation_id"],
     )
 
 
@@ -177,6 +222,10 @@ def normalize_routing_config(systems: list[dict]) -> str:
             "approvers": sorted(
                 normalize_routing_approvers(routing.get("approvers", [])),
                 key=_approver_sort_key,
+            ),
+            "rooms": sorted(
+                normalize_routing_rooms(routing.get("rooms", [])),
+                key=_room_sort_key,
             ),
         }
         services = []
@@ -231,6 +280,16 @@ def _extract_approvers(
         if service_approvers:
             return tuple(service_approvers)
     return tuple(system_approvers)
+
+
+def _extract_rooms(routing: dict) -> tuple[dict[str, str], ...]:
+    """从系统级路由配置提取授权房间（会话）绑定。
+
+    服务级不单独配置房间，继承系统级 rooms。配置在边界统一规范化。
+    """
+    if not isinstance(routing, dict):
+        raise ValueError("system message_routing must be an object")
+    return tuple(normalize_routing_rooms(routing.get("rooms", [])))
 
 
 def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDecision:

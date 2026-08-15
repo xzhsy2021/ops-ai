@@ -3,7 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { resource } from '../api'
 import { useNotificationStore } from '../store'
 import KeyValueEditor from '../components/KeyValueEditor'
-import { ApproverEditor } from '../components/BindingEditors'
+import { ApproverEditor, RoomEditor } from '../components/BindingEditors'
+import type { ConversationBinding } from '../components/BindingEditors'
 import {
   normalizeApprovers,
   withStructuredApprovers,
@@ -22,6 +23,7 @@ interface MessageRouting {
   keywords: string[]
   priority: number
   approvers: ApproverIdentity[]
+  rooms: ConversationBinding[]
 }
 
 const DEFAULT_ROUTING: MessageRouting = {
@@ -30,6 +32,7 @@ const DEFAULT_ROUTING: MessageRouting = {
   keywords: [],
   priority: 0,
   approvers: [],
+  rooms: [],
 }
 
 export default function SystemEditPage() {
@@ -78,6 +81,7 @@ export default function SystemEditPage() {
         keywords: Array.isArray(r.keywords) ? r.keywords : [],
         priority: typeof r.priority === 'number' ? r.priority : 0,
         approvers: normalizeApprovers(r.approvers),
+        rooms: normalizeRooms(r.rooms),
       })
     }).catch(() => {
       notify('无法加载系统配置', 'error')
@@ -148,6 +152,30 @@ export default function SystemEditPage() {
   const stripEnvMetaKeys = (v: Record<string, any>) => {
     const { environment, category, display_name, ...rest } = v || {}
     return rest
+  }
+
+  // 规范化系统级 message_routing.rooms（渠道会话绑定），无效项忽略
+  const normalizeRooms = (value: unknown): ConversationBinding[] => {
+    if (!Array.isArray(value)) return []
+    const result: ConversationBinding[] = []
+    const seen = new Set<string>()
+    value.forEach((item) => {
+      if (!item || typeof item !== 'object') return
+      const candidate = item as Record<string, unknown>
+      const channel = typeof candidate.channel === 'string' ? candidate.channel.trim() : ''
+      const account = typeof candidate.channel_account_id === 'string'
+        ? candidate.channel_account_id.trim()
+        : ''
+      const conversation = typeof candidate.conversation_id === 'string'
+        ? candidate.conversation_id.trim()
+        : ''
+      if (!channel || !conversation) return
+      const key = `${channel}\u0000${account || 'default'}\u0000${conversation}`
+      if (seen.has(key)) return
+      seen.add(key)
+      result.push({ channel, channel_account_id: account || 'default', conversation_id: conversation })
+    })
+    return result
   }
 
   const handleEnvChange = (envName: string) => {
@@ -468,8 +496,17 @@ export default function SystemEditPage() {
                 <ApproverEditor
                   value={routing.approvers}
                   onChange={(v) => setRouting({ ...routing, approvers: v })}
-                  hint="审批身份按消息渠道、渠道账号和发送者 ID 精确匹配；token 绑定优先于此处，服务级未配置时回退到系统级。"
+                  hint="审批身份按消息渠道、渠道账号和发送者 ID 精确匹配；系统级配置为唯一权威来源，token 级仅作旧数据回退。"
                   emptyText="未配置（同房间任意成员可审批）"
+                />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label>授权房间/会话</label>
+                <RoomEditor
+                  value={routing.rooms}
+                  onChange={(v) => setRouting({ ...routing, rooms: v })}
+                  hint="指定允许发起审批的渠道会话；留空表示不限制会话（仍受审批人绑定约束）。"
+                  emptyText="未配置（不限制会话）"
                 />
               </div>
             </div>

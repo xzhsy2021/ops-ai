@@ -24,6 +24,7 @@ from app.services.qclaw_routing import (
     compute_routing_revision,
     _extract_routing,
     _extract_approvers,
+    _extract_rooms,
     normalize_routing_approvers,
     RoutingOutcome,
 )
@@ -150,6 +151,39 @@ def _lookup_approvers(
         channel_account_id=channel_account_id,
     )
     return [identity["sender_id"] for identity in identities]
+
+
+def _resolve_system_rooms(system_name: str) -> list[dict[str, str]]:
+    """解析系统级 message_routing.rooms（授权会话绑定）。"""
+    if not system_name:
+        return []
+    sys_cfg = get_all_systems().get(system_name)
+    if not sys_cfg:
+        return []
+    try:
+        return list(_extract_rooms(_extract_routing(sys_cfg)))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid routing room configuration: {exc}",
+        ) from exc
+
+
+def _enforce_system_room(message_context: MessageContext, system_name: str) -> None:
+    """系统级房间作用域：若 message_routing.rooms 指定了会话，则仅这些会话可用。"""
+    rooms = _resolve_system_rooms(system_name)
+    if not rooms:
+        return
+    candidate = {
+        "channel": message_context.channel,
+        "channel_account_id": message_context.channel_account_id,
+        "conversation_id": message_context.conversation_id,
+    }
+    if candidate not in rooms:
+        raise HTTPException(
+            status_code=403,
+            detail="System is not usable in this channel conversation (message_routing.rooms)",
+        )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -289,6 +323,7 @@ def routing_resolve_message_target(args, ctx, db):
         "approver_identities": effective_identities,
         "approver_actor_keys": approver_actor_keys,
         "approvers": approver_sender_ids,
+        "allowed_rooms": _resolve_system_rooms(decision.system_name),
         "ticket": ticket.ticket,
         "ticket_digest": ticket.digest,
         "routing_config_revision": decision.routing_config_revision,
@@ -390,6 +425,8 @@ def _validated_prepare_ticket(args, ctx):
             status_code=403,
             detail="Routing ticket is invalid, expired, stale, or bound to another message target",
         )
+
+    _enforce_system_room(context, args["system_name"])
 
     ticket_digest = hashlib.sha256(routing_ticket.encode("utf-8")).hexdigest()
     return context, revision, ticket_digest
@@ -1170,6 +1207,11 @@ def temporary_access(args, ctx, db):
             return {"ok": False, "error": "allowed_actions must not be empty"}
         if not reason:
             return {"ok": False, "error": "reason is required for request"}
+
+        try:
+            _enforce_system_room(message_context, system_name)
+        except HTTPException as exc:
+            return {"ok": False, "error": str(exc.detail)}
 
         try:
             approvers = _lookup_approvers(

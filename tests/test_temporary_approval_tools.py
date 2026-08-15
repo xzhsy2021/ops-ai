@@ -32,26 +32,38 @@ def db():
     Base.metadata.create_all(engine)
     run_schema_migrations(engine)
     session = SessionLocal()
-    # Seed a test system with a configured original approver.
+    # Seed a test system with a configured original approver. 显式覆盖路由配置，
+    # 避免依赖共享 DB 中可能配置的 rooms（房间作用域会拒绝测试用随机会话）。
+    # 测试结束后恢复原始配置，避免污染共享开发库。
     existing = session.query(System).filter(System.name == "crypto-trader").first()
+    routing = {
+        "approvers": [{
+            "channel": "matrix",
+            "channel_account_id": "default",
+            "sender_id": "@owner:matrix.org",
+        }],
+    }
+    original_routing = dict(existing.message_routing) if existing is not None else None
     if existing is None:
         session.add(System(
             name="crypto-trader",
             display_name="Crypto Trader",
-            message_routing={
-                "approvers": [{
-                    "channel": "matrix",
-                    "channel_account_id": "default",
-                    "sender_id": "@owner:matrix.org",
-                }],
-            },
+            message_routing=routing,
         ))
         session.add_all([
             SystemEnvironment(system_name="crypto-trader", name="test", category="test"),
             SystemEnvironment(system_name="crypto-trader", name="prod", category="prod"),
         ])
-        session.commit()
+    else:
+        existing.message_routing = dict(routing)
+        session.add(existing)
+    session.commit()
     yield session
+    if original_routing is not None:
+        existing = session.query(System).filter(System.name == "crypto-trader").first()
+        existing.message_routing = original_routing
+        session.add(existing)
+        session.commit()
     session.rollback()
     session.close()
 

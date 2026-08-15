@@ -186,20 +186,21 @@ def test_create_token_payload_declares_bound_room_ids_field():
     assert default_create.bound_room_ids == []
 
 
-def test_frontend_renders_room_binding_editor_and_table_badge():
+def test_frontend_removed_room_binding_editor_from_token_panel():
     panel = open("frontend/src/pages/tools/ToolTokenPanel.tsx", encoding="utf-8").read()
     page = open("frontend/src/pages/ToolAccessPage.tsx", encoding="utf-8").read()
 
-    # 房间/会话绑定使用 RoomEditor 统一编辑组件（create + edit 双表单）。
-    assert "RoomEditor" in panel
-    assert "bindings" in panel
-    assert "editBindings" in panel
-    # 表格内展示房间绑定徽标。
-    assert "房间: " in panel
-    # onGenerate / onUpdate 透传 channel_bindings 到 API。
-    assert "channel_bindings" in panel
-    assert "bound_room_ids: data.bound_room_ids || []" in page
-    assert "bound_room_ids: data.bound_room_ids ?? []" in page
+    # 房间绑定已统一到系统设置，Token 面板不再渲染 RoomEditor / 房间徽标。
+    assert "RoomEditor" not in panel
+    assert "bindings" not in panel
+    assert "editBindings" not in panel
+    assert "房间: " not in panel
+    # 面板以提示引导用户到系统设置统一配置房间。
+    assert "已迁移至系统设置" in panel
+    # create/update 不再透传 token 级房间绑定到 API。
+    assert "channel_bindings" not in panel
+    assert "bound_room_ids: data.bound_room_ids || []" not in page
+    assert "bound_room_ids: data.bound_room_ids ?? []" not in page
 
 
 def test_enforce_room_binding_runs_at_top_of_qclaw_mcp_tools():

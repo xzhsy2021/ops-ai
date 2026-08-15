@@ -671,8 +671,6 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                 allow_write: data.allow_write,
                 allow_prod: data.allow_prod,
                 expires_in_days: data.expires_in_days,
-                bound_room_ids: data.bound_room_ids || [],
-                channel_bindings: data.channel_bindings || [],
               })
               const d = getData(res)
               setCreatedToken(d.token || '')
@@ -683,8 +681,6 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
             onUpdate={async (tokenId, data) => {
               await capabilityTools.updateToken(tokenId, {
                 ...data,
-                bound_room_ids: data.bound_room_ids ?? [],
-                channel_bindings: data.channel_bindings ?? [],
               })
               capabilityTools.clearCache()
               notify({ type: 'success', text: 'Token 权限已更新' })

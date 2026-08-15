@@ -1,8 +1,6 @@
 import { memo, type ReactNode, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CopyButton } from '../../components/ui'
-import { RoomEditor } from '../../components/BindingEditors'
-import type { ConversationBinding } from '../../components/BindingEditors'
 
 type TokenInfo = {
   id?: string
@@ -16,8 +14,6 @@ type TokenInfo = {
   scopes?: string[]
   allow_write?: boolean
   allow_prod?: boolean
-  bound_room_ids?: string[]
-  channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
   key_prefix?: string
   value?: string
   masked_value?: string
@@ -30,8 +26,6 @@ type TokenPayload = {
   allow_write?: boolean
   allow_prod?: boolean
   expires_in_days?: number
-  bound_room_ids?: string[]
-  channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
 }
 
 type TokenUpdatePayload = {
@@ -42,8 +36,6 @@ type TokenUpdatePayload = {
   allow_prod?: boolean
   expires_in_days?: number
   revoke?: boolean
-  bound_room_ids?: string[]
-  channel_bindings?: { channel: string; channel_account_id?: string; conversation_id?: string }[]
 }
 
 type PolicyPreviewResult = {
@@ -211,7 +203,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [allowWrite, setAllowWrite] = useState(false)
   const [allowProd, setAllowProd] = useState(false)
   const [expiresDays, setExpiresDays] = useState(90)
-  const [bindings, setBindings] = useState<ConversationBinding[]>([])
   const [generating, setGenerating] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -224,7 +215,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
   const [editAllowWrite, setEditAllowWrite] = useState(false)
   const [editAllowProd, setEditAllowProd] = useState(false)
   const [editExpiresDays, setEditExpiresDays] = useState(90)
-  const [editBindings, setEditBindings] = useState<ConversationBinding[]>([])
   const [previewing, setPreviewing] = useState(false)
   const [policyPreview, setPolicyPreview] = useState<PolicyPreviewResult | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -252,7 +242,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     setEditAllowWrite(Boolean(token.allow_write))
     setEditAllowProd(Boolean(token.allow_prod))
     setEditExpiresDays(90)
-    setEditBindings(Array.isArray(token.channel_bindings) ? [...token.channel_bindings] : [])
   }
 
   const openCreate = () => {
@@ -263,7 +252,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
     setAllowWrite(false)
     setAllowProd(false)
     setExpiresDays(90)
-    setBindings([])
     setPolicyPreview(null)
     setShowCreateModal(true)
   }
@@ -279,11 +267,9 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
         allow_write: allowWrite,
         allow_prod: allowProd,
         expires_in_days: expiresDays,
-        channel_bindings: bindings,
       })
       setName('')
       setDescription('')
-      setBindings([])
       setShowCreateModal(false)
     } finally {
       setGenerating(false)
@@ -301,7 +287,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
         allow_write: editAllowWrite,
         allow_prod: editAllowProd,
         expires_in_days: editExpiresDays,
-        channel_bindings: editBindings,
       })
       setEditing(null)
     } finally {
@@ -431,15 +416,6 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
                     {token.allow_write && <span className="tag tag-warning">允许写</span>}
                     {token.allow_prod && <span className="tag tag-danger">生产操作</span>}
-                    {(token.bound_room_ids || []).length > 0 && (
-                      <span
-                        className="tag"
-                        title={(token.bound_room_ids || []).join('\n')}
-                        style={{ background: 'var(--bg-hover)', fontFamily: 'monospace' }}
-                      >
-                        房间: {(token.bound_room_ids || []).length}
-                      </span>
-                    )}
                     {(token.scopes || []).slice(0, 6).map((s) => <span className="scope-chip" key={s} title={s}>{formatScopeLabel(s)}</span>)}
                     {(token.scopes || []).length > 6 && <span style={{ color: 'var(--text-muted)' }}>+{(token.scopes || []).length - 6}</span>}
                   </div>
@@ -539,12 +515,10 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
             </div>
 
             <div className="field-item">
-              <label>绑定房间/会话（qclaw 限定）</label>
-              <RoomEditor
-                value={bindings}
-                onChange={setBindings}
-                hint="留空表示不限制；填写后，此 Token 仅能在指定渠道/账号/会话被 qclaw 用于路由/审批调用。推荐每个 Token 只绑定一个房间。"
-              />
+              <label>绑定房间/会话（已迁移至系统设置）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+                房间绑定已统一到「系统设置 → 授权房间/会话」，Token 不再单独配置房间。
+              </div>
             </div>
 
             <div className="alert alert-info">
@@ -624,12 +598,10 @@ export const ToolTokenPanel = memo(function ToolTokenPanel({
               </label>
             </div>
             <div className="field-item">
-              <label>绑定房间/会话（qclaw 限定）</label>
-              <RoomEditor
-                value={editBindings}
-                onChange={setEditBindings}
-                hint="修改后将立即在下次 MCP 调用生效。留空表示不限制房间。"
-              />
+              <label>绑定房间/会话（已迁移至系统设置）</label>
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+                房间绑定已统一到「系统设置 → 授权房间/会话」，Token 不再单独配置房间。
+              </div>
             </div>
             <div className="alert alert-warning">
               巡检执行需要 <code>ops:write</code> 与写操作开关；启用服务器读取管控时，服务器只读工具需要 <code>server:read</code>。

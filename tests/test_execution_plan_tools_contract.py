@@ -193,6 +193,44 @@ def test_prepare_plan_creates_plan_and_enforces_room_binding(db):
     assert plan.authorized_matrix_users == ["@alice:matrix.org"]
 
 
+def test_prepare_plan_survives_config_revision_change(monkeypatch, db):
+    """解耦：签发票据后路由配置（revision）变化，prepare 仍成功。
+
+    此前 routing_config_revision 是票据硬校验条件，任何系统路由字段变更都会让在途
+    票据整体失效。解耦后房间作用域与审批人仍按当前配置重新校验，仅 revision 不再
+    作为拒绝条件。
+    """
+    from app.services.tool_adapters.approval_tools import approval_prepare_plan
+
+    suffix = "prepare-revchange"
+    # 1) 在 autouse 配置（config1）下签发 ticket，revision = config1
+    args = _prepare_args(suffix)
+    rev1 = compute_routing_revision(
+        [
+            {**s, "name": s.get("name") or name}
+            for name, s in _payment_system().items()
+        ]
+    )
+
+    # 2) 签发后改动路由配置 → revision 变化
+    changed = _payment_system()
+    changed["payment"]["message_routing"]["keywords"] = ["改动后关键词"]
+    rev2 = compute_routing_revision(
+        [{**s, "name": s.get("name") or name} for name, s in changed.items()]
+    )
+    assert rev1 != rev2
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools.get_all_systems", lambda: changed
+    )
+
+    ctx = _ctx(bound_room_ids=[_room(suffix)], approver_matrix_ids=["@alice:matrix.org"])
+
+    # 3) prepare 仍成功：revision 变化不再拒绝在途票据
+    result = approval_prepare_plan(args, ctx=ctx, db=db)
+    assert result["plan_id"]
+    assert result["status"] == "PENDING_APPROVAL"
+
+
 def test_prepare_plan_rejects_room_outside_system_binding(monkeypatch, db):
     """系统级房间作用域：消息房间不在 message_routing.rooms 内被拒绝。"""
     from fastapi import HTTPException

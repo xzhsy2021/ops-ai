@@ -318,6 +318,55 @@ def test_disabled_service_routing_changes_revision_and_invalidates_ticket(
     )
 
 
+def test_verify_ticket_skips_revision_binding_by_default():
+    """解耦：verify_ticket 默认不再绑定全局路由配置快照。
+
+    配置变更（revision 变化）后票据仍可验证通过；仅当显式传入 expected_revision
+    时才保留严格比对。prepare 端授权已改用当前配置重新校验房间作用域与审批人。
+    """
+    from copy import deepcopy
+
+    systems = [{
+        "name": "crypto-trader",
+        "message_routing": {"enabled": True, "aliases": ["量化"], "keywords": ["部署"]},
+        "services": [],
+    }]
+    decision = resolve_message_target("部署", systems)
+    assert decision.outcome == RoutingOutcome.RESOLVED
+    assert decision.system_name == "crypto-trader"
+
+    revision = compute_routing_revision(systems)
+    context = _message_context()
+    ticket = issue_ticket(
+        message_context=context,
+        system_name="crypto-trader",
+        service_name=None,
+        routing_config_revision=revision,
+    )
+
+    # 配置变更 → revision 变化
+    changed = deepcopy(systems)
+    changed[0]["message_routing"]["aliases"] = ["量化交易"]
+    changed_revision = compute_routing_revision(changed)
+    assert changed_revision != revision
+
+    # 默认模式：跳过 revision，旧票仍有效
+    assert verify_ticket(
+        ticket.ticket,
+        expected_message_context=context,
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+    )
+    # 显式要求旧 revision 的严格模式：此时才拒绝
+    assert not verify_ticket(
+        ticket.ticket,
+        expected_message_context=context,
+        expected_system_name="crypto-trader",
+        expected_service_name=None,
+        expected_revision=changed_revision,
+    )
+
+
 def test_routing_revision_is_independent_of_system_and_service_order():
     systems = [
         {

@@ -374,12 +374,14 @@ def _validated_prepare_ticket(args, ctx):
 
     try:
         revision = compute_routing_revision(_routing_systems())
+        # revision 仅作信息返回（routing_config_revision），不再作为票据有效性的
+        # 硬校验条件：它是全局配置快照，任何系统路由字段变更都会使其改变，硬比对
+        # 会让在途票据在配置变动时集体失效。房间作用域与审批人仍按当前配置重新校验。
         valid = verify_ticket(
             routing_ticket,
             expected_message_context=context,
             expected_system_name=args["system_name"],
             expected_service_name=args.get("service_name"),
-            expected_revision=revision,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -391,7 +393,7 @@ def _validated_prepare_ticket(args, ctx):
     if not valid:
         raise HTTPException(
             status_code=403,
-            detail="Routing ticket is invalid, expired, stale, or bound to another message target",
+            detail="Routing ticket is invalid, expired, or bound to another message target",
         )
 
     _enforce_system_room(context, args["system_name"])

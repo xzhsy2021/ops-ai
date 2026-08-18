@@ -523,9 +523,16 @@ def verify_ticket(
     expected_message_context: MessageContext | Mapping[str, Any],
     expected_system_name: str,
     expected_service_name: str | None,
-    expected_revision: str,
+    expected_revision: str | None = None,
 ) -> bool:
-    """验证路由票据：签名、过期时间、所有绑定字段。"""
+    """验证路由票据：签名、过期时间、绑定字段。
+
+    expected_revision 为 None 时跳过对 payload.routing_config_revision 的比对。
+    票据校验通过消息内容、目标系统/服务与签名保证有效性；revision 是全局路由配置
+    快照，任何系统的路由字段变更都会使其变化，硬比对会让在途票据在配置变动时集体
+    失效。prepare 端已用「当前配置」重新校验房间作用域与审批人，因此跳过 revision
+    比对不削弱授权边界，反而让授权遵循最新配置。
+    """
     try:
         context = _strict_message_context(expected_message_context)
     except (TypeError, ValueError):
@@ -564,13 +571,18 @@ def verify_ticket(
     if datetime.now(timezone.utc) > expires_at:
         return False
 
-    # 验证绑定字段
+    # 验证绑定字段（message/system/service 始终硬校验）
     checks = [
         ("message_context", payload.get("message_context") == context.to_dict()),
         ("system_name", payload.get("system_name") == expected_system_name),
         ("service_name", payload.get("service_name") == expected_service_name),
-        ("revision", payload.get("routing_config_revision") == expected_revision),
     ]
+    # revision 为全局配置快照：仅当调用方显式要求时才比对（严格模式），默认跳过，
+    # 避免路由配置改动导致在途票据整体失效。
+    if expected_revision is not None:
+        checks.append(
+            ("revision", payload.get("routing_config_revision") == expected_revision)
+        )
     for name, ok in checks:
         if not ok:
             return False

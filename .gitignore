@@ -79,3 +79,13 @@ reports/**/*.md
 reports/**/*.json
 reports/codex-inspection/
 scripts/hardening_crypto.sh
+
+# TRAE HTML 分享缓存
+/.trae-html-share-packages/
+# 运行时数据目录(业务库/密钥/上传/备份) —— 整目录不入仓
+/data/
+# 含 Telegram token 与生产节点 IP/密钥名, 禁止入仓
+/scripts/deploy_security_monitor.sh
+# 本次 MCP 审计的临时脚本(诊断探针/描述 dump)
+mcp-capability-discovery-audit/_*.py
+mcp-capability-discovery-audit/_shared/

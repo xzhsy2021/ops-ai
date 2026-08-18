@@ -384,7 +384,7 @@ def test_mcp_default_profile_is_slim_but_admin_full_keeps_all_tools(tmp_path):
         engine.dispose()
 
 
-def test_mcp_tools_list_defaults_to_daily_ops_and_can_expand_profile(tmp_path):
+def test_mcp_tools_list_defaults_to_ai_full_and_can_contract_to_daily_ops(tmp_path):
     from app.services.mcp_capability_service import mcp_tools_list
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import register_builtin_tools
@@ -395,21 +395,26 @@ def test_mcp_tools_list_defaults_to_daily_ops_and_can_expand_profile(tmp_path):
     try:
         register_builtin_tools()
 
-        daily = mcp_tools_list(db, ctx, {"limit": 200})
-        admin = mcp_tools_list(db, ctx, {"limit": 200, "profile": "admin_full"})
+        full = mcp_tools_list(db, ctx, {"limit": 200})
+        contracted = mcp_tools_list(db, ctx, {"limit": 200, "profile": "daily_ops"})
 
-        daily_names = {
+        full_names = {
             (tool.get("annotations") or {}).get("ops.originalToolName") or tool.get("name")
-            for tool in daily["tools"]
+            for tool in full["tools"]
         }
-        admin_names = {
+        contracted_names = {
             (tool.get("annotations") or {}).get("ops.originalToolName") or tool.get("name")
-            for tool in admin["tools"]
+            for tool in contracted["tools"]
         }
 
-        assert "ops.inspection.run_servers_batch" in daily_names
-        assert "ops.execute_deploy_plan" not in daily_names
-        assert len(admin_names) > len(daily_names)
+        # Default is the full ai_full exposure so OpenClaw/HTTP MCP discover the
+        # whole capability surface; daily_ops is an explicit contract-down subset.
+        assert "ops.inspection.run_servers_batch" in full_names
+        assert "ops.execute_deploy_plan" in full_names
+        assert "ops.exec_remote" in full_names
+        assert len(full_names) > len(contracted_names)
+        assert "ops.execute_deploy_plan" not in contracted_names
+        assert "ops.exec_remote" not in contracted_names
     finally:
         db.close()
         engine.dispose()

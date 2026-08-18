@@ -35,6 +35,8 @@ from app.services.tool_registry import (
     bump_capability_version as _bump_capability_version,
 )
 from app.services.mcp_capability_service import (
+    TOOLS_LIST_TTL,
+    _tools_payload_etag,
     mcp_call_tool,
     mcp_call_tool_stream,
     mcp_prompt_get as service_mcp_prompt_get,
@@ -1129,7 +1131,17 @@ async def mcp_streamable_http_endpoint(request: Request, db: Session = Depends(g
     response = _handle_mcp_http_message(payload, request, db)
     if response is None:
         return FastAPIResponse(status_code=202)
-    return JSONResponse(content=response, media_type="application/json")
+    resp = JSONResponse(content=response, media_type="application/json")
+    # tools/list: expose a stable content ETag + short max-age so caching proxies
+    # and discovery-oriented clients can do conditional checks, while the service
+    # TTL (OPS_MCP_TOOLS_LIST_TTL) bounds staleness so new tools surface quickly.
+    if payload.get("method") == "tools/list":
+        tool_result = (response.get("result") or {}) if isinstance(response, dict) else {}
+        etag = _tools_payload_etag(tool_result)
+        if etag:
+            resp.headers["ETag"] = '"%s"' % etag
+        resp.headers["Cache-Control"] = "private, max-age=%d, must-revalidate" % max(0, int(TOOLS_LIST_TTL))
+    return resp
 
 
 @mcp_router.post("/", include_in_schema=False)

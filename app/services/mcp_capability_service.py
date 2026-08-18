@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -14,6 +18,46 @@ ASCII_DESCRIPTIONS = os.getenv("OPS_MCP_ASCII_DESCRIPTIONS", "1").lower() not in
 # for Chinese LLM agents. Set OPS_MCP_CHINESE_KEYWORDS=0 to fully strip non-ASCII.
 CHINESE_KEYWORDS = os.getenv("OPS_MCP_CHINESE_KEYWORDS", "1").lower() not in {"0", "false", "no", "off"}
 MCP_ALIAS_TO_TOOL: Dict[str, str] = {}
+
+# HTTP MCP tools/list is expensive (register + describe every tool + schema).
+# Cache the resolved payload briefly so high-frequency discovery calls don't
+# recompute, while the short TTL guarantees newly registered tools surface
+# quickly (no permanent staleness). Set OPS_MCP_TOOLS_LIST_TTL=0 to disable.
+def _ttl_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+TOOLS_LIST_TTL = _ttl_env("OPS_MCP_TOOLS_LIST_TTL", 5.0)
+_tools_list_cache: Dict[str, Any] = {}
+_tools_list_cache_lock = threading.Lock()
+
+
+def _tools_list_cache_entry(ts: float, etag: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {"ts": ts, "etag": etag, "payload": payload}
+
+
+def _tools_payload_etag(payload: Dict[str, Any]) -> str:
+    try:
+        return hashlib.sha256(
+            json.dumps(payload["tools"], sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return ""
+
+
+def _tools_list_profile(mcp_tools_list_params: Dict[str, Any]) -> tuple:
+    return (
+        str(mcp_tools_list_params.get("profile") or "ai_full"),
+        str(mcp_tools_list_params.get("category") or ""),
+        int(mcp_tools_list_params.get("limit") or 100),
+        int(mcp_tools_list_params.get("cursor") or 0),
+        hashlib.sha256(
+            json.dumps(list(MCP_TOOL_DESCRIPTION_OVERRIDES.items()), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    )
 
 
 # Single source of truth for MCP tool descriptions.
@@ -311,8 +355,22 @@ def mcp_tool_payload(tool: Dict[str, Any], description_overrides: Dict[str, str]
 def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_overrides: Dict[str, str] | None = None) -> Dict[str, Any]:
     from app.services.tool_registry import register_builtin_tools, registry
 
-    register_builtin_tools()
     params = params or {}
+    cache_key = _tools_list_profile(params)
+    if description_overrides:
+        cache_key = cache_key + (hashlib.sha256(
+            json.dumps(list(description_overrides.items()), sort_keys=True).encode("utf-8")
+        ).hexdigest(),)
+    cached = None
+    if TOOLS_LIST_TTL > 0:
+        with _tools_list_cache_lock:
+            entry = _tools_list_cache.get(cache_key)
+            if entry and (time.monotonic() - entry["ts"]) < TOOLS_LIST_TTL:
+                cached = entry["payload"]
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    register_builtin_tools()
     try:
         limit = int(params.get("limit") or 100)
     except Exception:
@@ -340,6 +398,11 @@ def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_ov
     next_cursor = (listed.get("pagination") or {}).get("next_cursor")
     if next_cursor is not None:
         result["nextCursor"] = str(next_cursor)
+    if TOOLS_LIST_TTL > 0:
+        with _tools_list_cache_lock:
+            _tools_list_cache[cache_key] = _tools_list_cache_entry(
+                time.monotonic(), _tools_payload_etag(result), copy.deepcopy(result)
+            )
     return result
 
 

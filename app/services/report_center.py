@@ -61,6 +61,13 @@ REPORT_TYPES = {
         "formats": ["csv", "json", "xlsx", "md", "sql_query"],
         "can_generate": False,
     },
+    "security_daily": {
+        "title": "每日安全巡检日报",
+        "target_type": "server",
+        "description": "服务器每日安全巡检日报：登录记录、登录失败、账户变更、fail2ban 封禁、系统负载。由安全日报采集器生成。",
+        "formats": ["json", "md"],
+        "can_generate": False,
+    },
 }
 
 
@@ -1081,6 +1088,10 @@ def _format_summary(report_type: str, summary: Dict[str, Any]) -> str:
         return f"{summary.get('report_title') or '巡检报告'}：记录 {summary.get('run_count') or 1} 条，评分 {summary.get('score') or summary.get('avg_score') or 0}，高危 {summary.get('high_count') or 0}，中危 {summary.get('medium_count') or 0}，低危 {summary.get('low_count') or 0}，未闭环 {summary.get('open_issue_count') or 0}。"
     if report_type == "db_query_export":
         return f"数据库查询导出，格式 {summary.get('format') or '-'}，行数 {summary.get('row_count') or 0}。"
+    if report_type == "security_daily":
+        return (f"{summary.get('report_date') or ''} 安全日报：服务器 {summary.get('server_count') or 0} 台，"
+                f"高危 {summary.get('high_count') or 0}，中危 {summary.get('medium_count') or 0}，"
+                f"登录失败 {summary.get('login_failures_total') or 0}，封禁IP {summary.get('banned_ips_total') or 0}。")
     return "报告已生成。"
 
 

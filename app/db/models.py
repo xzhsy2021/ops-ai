@@ -1189,6 +1189,48 @@ class InspectionRule(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class SecurityDailyReport(Base):
+    """服务器每日安全巡检日报（从 /var/log/security-daily/<date>.md 采集）。"""
+    __tablename__ = "security_daily_reports"
+    __table_args__ = (
+        UniqueConstraint("server_name", "report_date", name="uq_security_daily_server_date"),
+    )
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    server_name = Column(String(128), nullable=False, index=True)
+    report_date = Column(String(16), nullable=False, index=True)
+    report_path = Column(String(1024), nullable=True)
+    raw_md = Column(Text, nullable=True)
+    items = Column(JSON, default=list)
+    summary = Column(JSON, default=dict)
+    max_risk = Column(String(16), default="LOW", index=True)
+    artifact_id = Column(String(32), nullable=True, index=True)
+    status = Column(String(24), default="ok", index=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class SecurityRisk(Base):
+    """安全风险台账：由每日巡检日报/巡检等模块产生的风险项，可被 ops.risk.list 查询。"""
+    __tablename__ = "security_risks"
+
+    id = Column(String(32), primary_key=True, default=_uuid)
+    collection_id = Column(String(32), nullable=True, index=True)
+    server_id = Column(String(255), nullable=False, index=True)
+    report_date = Column(String(16), nullable=False, index=True)
+    source = Column(String(24), default="security_daily", index=True)
+    kind = Column(String(32), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    risk_level = Column(String(24), default="LOW", index=True)
+    status = Column(String(24), default="OPEN", index=True)
+    evidence = Column(JSON, default=dict)
+    suggestion = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class InspectionItemConfig(Base):
     """巡检项目配置 - 可选/可编辑/可调整的巡检项。"""
     __tablename__ = "inspection_item_configs"

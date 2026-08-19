@@ -63,6 +63,27 @@ def test_evaluate_risk_thresholds():
     assert med[0] == "HIGH"
 
 
+def test_parse_banned_ips_ignores_non_ip_dotted_tokens():
+    """封禁 IP 提取只认合法 IPv4/IPv6，避免把日志/时间串误判为 IP。"""
+    from app.services.security_daily import parse_daily_markdown
+
+    md = """### 4. 当前被 fail2ban 封禁的 IP
+   `- Banned IP list:   1.2.3.4 2001:db8::1 5.6.7.8
+```
+"""
+    by_kind = {i["kind"]: i for i in parse_daily_markdown(md)}
+    ips = by_kind["fail2ban_bans"]["ips"]
+    assert ips == ["1.2.3.4", "2001:db8::1", "5.6.7.8"]
+
+
+def test_parse_onsite_format_inline_failure_count():
+    """现场生成格式：「### 2. 今日登录失败次数: N」同行为标题+计数要能解析。"""
+    from app.services.security_daily import parse_daily_markdown
+
+    by_kind = {i["kind"]: i for i in parse_daily_markdown(_sample_md(failures=7))}
+    assert by_kind["login_failures"]["count"] == 7
+
+
 def test_collect_persist_and_summarize_roundtrip(tmp_path, monkeypatch):
     from app.db.models import SecurityDailyReport, SecurityRisk
 

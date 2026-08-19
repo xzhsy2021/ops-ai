@@ -236,6 +236,7 @@ class SSHClient:
     def exec(self, command: str, timeout: int = 300, on_output=None) -> Tuple[int, str, str]:
         if self._client is None:
             self.connect()
+        start = time.monotonic()
 
         logger.info(f"Executing on {self.host}: {mask_secret(command)}")
         try:
@@ -253,53 +254,38 @@ class SSHClient:
             stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
 
         if on_output:
-            channel = stdout.channel
-            channel.settimeout(0.5)
-            out_lines = []
-            err_lines = []
-            while True:
-                if channel.recv_ready():
-                    data = channel.recv(4096).decode("utf-8", errors="replace")
-                    out_lines.append(data)
+            # 与 else 分支一致：先等命令退出，再用 ChannelFile 读到 EOF。
+            # 不要用 channel.recv_ready() 轮询（短命令存在瞬时 False 竞态，会丢输出）。
+            try:
+                stdout.channel.settimeout(timeout)
+                exit_code = stdout.channel.recv_exit_status()
+                out_data = stdout.read().decode("utf-8", errors="replace")
+                err_data = stderr.read().decode("utf-8", errors="replace")
+            except TimeoutError:
+                raise TimeoutError(
+                    f"exec timed out after {timeout}s: {mask_secret(command)}")
+            if on_output is not None:
+                for i in range(0, len(out_data), 4096):
                     try:
-                        on_output("stdout", data)
+                        on_output("stdout", out_data[i:i + 4096])
                     except Exception:
                         logger.warning("on_output(stdout) failed in exec_command", exc_info=True)
-                if channel.recv_stderr_ready():
-                    data = channel.recv_stderr(4096).decode("utf-8", errors="replace")
-                    err_lines.append(data)
+                for i in range(0, len(err_data), 4096):
                     try:
-                        on_output("stderr", data)
+                        on_output("stderr", err_data[i:i + 4096])
                     except Exception:
                         logger.warning("on_output(stderr) failed in exec_command", exc_info=True)
-                if channel.exit_status_ready():
-                    while channel.recv_ready():
-                        data = channel.recv(4096).decode("utf-8", errors="replace")
-                        out_lines.append(data)
-                        try:
-                            on_output("stdout", data)
-                        except Exception:
-                            logger.warning("on_output(stdout) failed in final read", exc_info=True)
-                    while channel.recv_stderr_ready():
-                        data = channel.recv_stderr(4096).decode("utf-8", errors="replace")
-                        err_lines.append(data)
-                        try:
-                            on_output("stderr", data)
-                        except Exception:
-                            logger.warning("on_output(stderr) failed in final read", exc_info=True)
-                    break
-                try:
-                    channel.send_ignore()
-                except Exception:
-                    break
-
-            exit_code = channel.recv_exit_status()
-            out = "".join(out_lines).strip()
-            err = "".join(err_lines).strip()
+            out = out_data.strip()
+            err = err_data.strip()
         else:
-            exit_code = stdout.channel.recv_exit_status()
-            out = stdout.read().decode("utf-8", errors="replace").strip()
-            err = stderr.read().decode("utf-8", errors="replace").strip()
+            stdout.channel.settimeout(timeout)
+            try:
+                exit_code = stdout.channel.recv_exit_status()
+                out = stdout.read().decode("utf-8", errors="replace").strip()
+                err = stderr.read().decode("utf-8", errors="replace").strip()
+            except TimeoutError:
+                raise TimeoutError(
+                    f"exec timed out after {timeout}s: {mask_secret(command)}")
 
         if exit_code != 0:
             logger.warning(f"Command failed (exit={exit_code}): {mask_secret(command)}\nstderr: {err}")

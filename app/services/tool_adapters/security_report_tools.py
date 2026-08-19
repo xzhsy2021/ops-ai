@@ -1,23 +1,25 @@
-"""安全日报汇总 & 安全加固模块按需安装工具。
+"""安全日报汇总 & 安全采集启用工具。
 
-提供三个 MCP/OPS 能力：
+提供 OPS 能力：
 - ops.security_report.summarize : 只读，汇总已采集的每日安全巡检日报供 AI 分析。
-- ops.security_report.collect   : 触发一次每日日报采集（读多台服务器 + 写库 + 归档）。
-- ops.security_module.install   : 在目标服务器安装安全监控模块（deanchou/server_security_monitor）
-                                   并注入落盘补丁，使每日日报写入 /var/log/security-daily/<date>.md。
-                                   高危远程写操作，需人工审批。
+- ops.security_report.collect   : 触发一次每日日报采集（现场生成 + 写库 + 归档）。
+- ops.security_module.probe     : 只读，诊断目标服务器上的安全监控模块与安全服务状态。
+- ops.security_module.install   : 把目标服务器标记为"启用每日安全日报采集"，并可选立即采集一次。
+                                    不改动服务器端任何文件（采集采用现场生成方式）。
 """
 from __future__ import annotations
 
-import base64
-import shlex
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from fastapi import HTTPException
 
-from app.db.models import SecurityDailyReport, SecurityRisk
+from app.db.models import SecurityDailyReport
 from app.services.tool_registry import registry
+
+# 服务器上 deanchou/server_security_monitor 的日报脚本（仅用于 probe 诊断，采集不依赖它）
+DAILY_SCRIPT = "/usr/local/bin/security-daily-summary.sh"
 
 
 def _resolve_server_or_404(server_key: str):
@@ -171,131 +173,111 @@ def collect_security_reports(args: Dict[str, Any], ctx, db):
     }
 
 
-# 落盘补丁：在目标服务器安装的日报生成器（自建，不依赖 installer 内部脚本路径）。
-# 生成与 collect 解析一致的五段 markdown，写入 /var/log/security-daily/<date>.md。
-_GEN_SCRIPT = r"""#!/usr/bin/env bash
-# OPS 每日安全巡检日报生成器（落盘补丁）— 生成 /var/log/security-daily/<date>.md
-set +e
-REPORT_DIR=/var/log/security-daily
-STATE_DIR=$REPORT_DIR/state
-mkdir -p "$REPORT_DIR" "$STATE_DIR"
-DATE=$(date +%F)
+def _probe_runtime(server: Dict[str, Any]) -> Dict[str, Any]:
+    """只读：诊断目标服务器上安全监控模块/日报脚本/安全服务状态。
 
-SEC1=$({ if command -v aureport >/dev/null 2>&1; then aureport -au -ts today 2>/dev/null || last -n 25; else last -n 25 2>/dev/null; fi; })
-
-FAILURES=0
-FAILCMD=$(cat /var/log/auth.log /var/log/secure /var/log/secure-* 2>/dev/null | grep -c -iE "Failed password|authentication failure")
-[ "$FAILCMD" -gt 0 ] 2>/dev/null && FAILURES=$FAILCMD
-
-# 账户变更检测（与上次运行快照 diff）
-getent passwd 2>/dev/null | awk -F: '$7 !~ /(nologin|false|halt|sync|shutdown)/ {print $1}' | sort > "$STATE_DIR/pw.now"
-DELTA_FILE="$STATE_DIR/delta.txt"
-DELTA=0
-if [ -f "$STATE_DIR/pw.users" ]; then
-  comm -3 "$STATE_DIR/pw.users" "$STATE_DIR/pw.now" 2>/dev/null > "$DELTA_FILE"
-  DELTA=$(grep -c . "$DELTA_FILE")
-else
-  : > "$DELTA_FILE"
-  DELTA=0
-fi
-mv "$STATE_DIR/pw.now" "$STATE_DIR/pw.users"
-
-BANNED=$(if command -v fail2ban-client >/dev/null 2>&1; then fail2ban-client banned 2>/dev/null | grep -oE '\([0-9.:]+\)' | tr -d '()'; fi)
-
-LOAD=$(uptime)
-
-{
-  echo "### 1. 今日登录记录 (aureport, 最近25条)"
-  echo ""
-  echo "\`\`\`"
-  echo "$SEC1"
-  echo "\`\`\`"
-  echo ""
-  echo "### 2. 今日登录失败次数: $FAILURES"
-  echo ""
-  echo "### 3. 今日账户变更"
-  if [ "$DELTA" -gt 0 ]; then
-    echo "检测到 $DELTA 项登录账户变化:"
-    sed 's/^/  - /' "$DELTA_FILE"
-  else
-    echo "无"
-  fi
-  echo ""
-  echo "### 4. 当前被 fail2ban 封禁的 IP"
-  if [ -n "$BANNED" ]; then
-    echo "   - Banned IP list:"
-    echo "$BANNED" | while read -r ip; do [ -n "$ip" ] && echo "     - $ip"; done
-  else
-    echo "   - Banned IP list: "
-  fi
-  echo ""
-  echo "### 5. 系统负载"
-  echo " $LOAD"
-} > "$REPORT_DIR/$DATE.md"
-chmod 644 "$REPORT_DIR/$DATE.md"
-echo "written: $REPORT_DIR/$DATE.md"
-"""
-
-
-def _upload_and_install(server, payload_b64: str) -> dict:
-    """上传并安装落盘补丁 + 定时任务，返回远端执行结果。"""
+    仅用于了解服务器现状（供 AI 判断加固必要性），采集功能不依赖这些结果。
+    """
     from ssh_client import create_ssh_client
 
     ssh = create_ssh_client(server)
-    script_path = "/usr/local/bin/ops-security-daily.sh"
-    cron_path = "/etc/cron.d/ops-security-daily"
-    mkdir = "mkdir -p /var/log/security-daily/state"
-    write_script = (f"echo {shlex.quote(payload_b64)} | base64 -d > {script_path} && "
-                    f"chmod 700 {script_path}")
-    write_cron = (f"printf '0 8 * * * root {script_path} >/dev/null 2>&1\\n' > {cron_path}; "
-                  f"chmod 600 {cron_path}")
-    run_once = f"bash {script_path}"
-    results = []
-    for step in (mkdir, write_script, write_cron, run_once):
-        code, out, err = ssh.exec(step, timeout=120)
-        results.append({"cmd": step[:80], "exit_code": code, "stdout": out, "stderr": err})
-        if code != 0:
+    out: Dict[str, Any] = {}
+    try:
+        ssh.connect(max_retries=1, per_attempt_timeout=10)
+        def rd(label, cmd, timeout=25):
+            try:
+                code, co, err = ssh.exec(cmd, timeout=timeout)
+                out[label] = {"exit": code, "out": (co or "").strip(), "err": (err or "").strip()}
+            except Exception as e:
+                out[label] = {"exit": -1, "out": "", "err": str(e)}
+
+        rd("script", f"cat {DAILY_SCRIPT} 2>/dev/null || echo __MISSING__")
+        rd("cron", "grep -rn -i 'security-daily\\|security_monitor' "
+                   "/etc/cron.d/ /etc/crontab 2>/dev/null | head")
+        rd("crontab", "crontab -l 2>/dev/null | grep -i security || true")
+        rd("services", "systemctl is-active fail2ban 2>/dev/null; systemctl is-active auditd 2>/dev/null")
+        rd("installer", "ls -1 /usr/local/bin/install_security_monitor.sh 2>/dev/null || true")
+    finally:
+        try:
             ssh.close()
-            return {"ok": False, "error": err or out or "step failed", "steps": results,
-                    "script_path": script_path, "cron_path": cron_path}
-    ssh.close()
-    return {"ok": True, "script_path": script_path, "cron_path": cron_path, "steps": results}
+        except Exception:
+            pass
+
+    script_present = out.get("script", {}).get("out", "").strip() not in ("", "__MISSING__")
+    services_raw = (out.get("services", {}).get("out") or "").replace("\n", "; ")
+    return {
+        "server": server.get("name") or server.get("id") or "-",
+        "connected": out != {},
+        "security_monitor_installed": script_present,
+        "fail2ban_active": "active" in (out.get("services", {}).get("out") or "").split(";")[0],
+        "auditd_active": "active" in (out.get("services", {}).get("out") or "").split(";")[-1],
+        "cron": (out.get("cron", {}).get("out") or "") or (out.get("crontab", {}).get("out") or ""),
+        "services": services_raw,
+        "installer_present": bool((out.get("installer", {}).get("out") or "").strip()),
+        "note": "采集采用现场生成方式，不要求已安装 deanchou 监控模块，也不改动服务器文件。",
+        "raw": out,
+    }
+
+
+@registry.register(
+    name="ops.security_module.probe",
+    title="诊断服务器安全监控/安全服务状态",
+    description=(
+        "只读诊断目标服务器上的安全监控模块（deanchou/server_security_monitor）日报脚本、"
+        "定时任务、fail2ban/auditd 服务状态，供判断是否需要安全加固。不执行任何安装/写入。"
+        "中文: 校验安全模块/检查安全加固/确认是否已安装/安全服务状态. "
+    ),
+    scopes=["ops:read", "server:read"],
+    risk="low",
+    category="report_read",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.security_module.install", "ops.inspection.run_server"],
+    keywords=["校验安全模块", "检查安全加固", "是否已安装", "安全模块状态", "probe"],
+    example_prompts=["检查 idn 上是否已安装安全监控模块"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "服务器名称、host、UUID 或短 UUID 前缀"},
+        },
+        "required": ["server"],
+        "additionalProperties": False,
+    },
+)
+def probe_security_module(args: Dict[str, Any], ctx, db):
+    server = _resolve_server_or_404(args.get("server") or "")
+    return _probe_runtime(server)
 
 
 @registry.register(
     name="ops.security_module.install",
-    title="安装服务器安全监控模块",
+    title="启用服务器每日安全日报采集",
     description=(
-        "在目标服务器安装安全监控模块（fail2ban + auditd + 每日巡检日报，来源 "
-        "deanchou/server_security_monitor），并注入落盘补丁，使每日安全日报写入 "
-        "/var/log/security-daily/<date>.md，随后把服务器标记为已启用安全监控。"
-        "高危远程写操作，需人工审批 / confirm_text 确认。"
-        "中文: 安装安全模块/安全加固/安装安全监控/加固服务器/部署安全巡检. "
+        "把目标服务器标记为「已启用每日安全日报采集」，并可选立即采集一次写入日报表/风险台账。"
+        "采集采用现场生成方式：通过 SSH 现场执行日报生成命令，不改动服务器端任何文件，"
+        "也不要求已安装 deanchou 安全监控模块。仅写 OPS 数据库标记（并可选触发一次只读采集），无需改动服务器。"
+        "中文: 启用安全采集/开启日报/启用安全巡检/标记后加入每日日报. "
     ),
-    scopes=["ops:write", "server:write"],
-    risk="high",
-    category="server_write",
+    scopes=["ops:write", "server:read"],
+    risk="medium",
+    category="report_write",
     write=True,
     requires_confirmation=True,
-    requires_human_approval=True,
-    data_sensitivity="sensitive",
-    keywords=["安装安全模块", "安全加固", "加固服务器", "security monitor",
-              "fail2ban", "安装监控", "部署安全"],
-    related_tools=["ops.approval.prepare_security_module",
+    data_sensitivity="internal",
+    keywords=["启用安全采集", "开启日报", "启用安全巡检", "标记采集", "security monitor",
+              "每日日报"],
+    related_tools=["ops.security_module.probe", "ops.security_report.collect",
                    "ops.security_report.summarize"],
     input_schema={
         "type": "object",
         "properties": {
-            "server": {
-                "type": "string",
-                "description": "服务器名称、host、UUID 或短 UUID 前缀",
-            },
-            "install_fail2ban": {"type": "boolean", "default": True},
-            "install_auditd": {"type": "boolean", "default": True},
-            "confirm_text": {
-                "type": "string",
-                "description": "确认短语: CONFIRM ops.security_module.install",
-            },
+            "server": {"type": "string", "description": "服务器名称、host、UUID 或短 UUID 前缀"},
+            "run_now": {"type": "boolean", "default": False,
+                        "description": "标记后立即现场采集一次今日日报并入库"},
+            "confirm_text": {"type": "string", "description": "确认短语: CONFIRM ops.security_module.install"},
         },
         "required": ["server", "confirm_text"],
         "additionalProperties": False,
@@ -304,44 +286,51 @@ def _upload_and_install(server, payload_b64: str) -> dict:
 def install_security_module(args: Dict[str, Any], ctx, db):
     server = _resolve_server_or_404(args.get("server") or "")
     server_name = server.get("name") or server.get("id") or "-"
-    payload_b64 = base64.b64encode(_GEN_SCRIPT.encode("utf-8")).decode("ascii")
+    run_now = bool(args.get("run_now", False))
 
-    steps = []
-    steps.append({"cmd": "log", "exit_code": 0,
-                  "stdout": "计划安装安全监控模块并注入落盘补丁到 /var/log/security-daily/",
-                  "stderr": ""})
-    result = _upload_and_install(server, payload_b64)
-    steps.extend(result.get("steps") or [])
-    if not result.get("ok"):
-        return {"ok": False, "server": server_name,
-                "error": result.get("error") or "安装失败", "steps": steps}
+    steps: List[Dict[str, Any]] = []
 
-    # 标记服务器已启用安全监控
+    # 标记服务器已启用每日安全日报采集
     from app.db.models import Server
-    row = db.query(Server).filter(
-        Server.name == server_name if server_name != (server.get("id") or "") else Server.id == server.get("id")
-    ).first()
+    row = db.query(Server).filter(Server.name == server_name).first() or \
+        db.query(Server).filter(Server.id == server.get("id")).first()
     if row is None:
-        row = db.query(Server).filter(Server.name == server_name).first()
-    if row is not None:
-        meta = dict(row.metadata_json or {})
-        mon = dict(meta.get("security_monitor") or {})
-        mon["enabled"] = True
-        mon["installed_at"] = _now_iso()
-        mon["source"] = "https://github.com/deanchou/server_security_monitor"
-        mon["script_path"] = result.get("script_path")
-        meta["security_monitor"] = mon
-        row.metadata_json = meta  # 赋值全新 dict 确保 SQLAlchemy 检测变更
-        db.commit()
+        return {"ok": False, "server": server_name,
+                "error": f"未找到服务器记录，无法标记启用（name/id={server_name}）"}
+    meta = dict(row.metadata_json or {})
+    mon = dict(meta.get("security_monitor") or {})
+    mon["enabled"] = True
+    mon["source"] = "on_site_generation"
+    mon["enabled_at"] = _now_iso()
+    meta["security_monitor"] = mon
+    row.metadata_json = meta  # 赋值全新 dict 确保 SQLAlchemy 检测变更
+    db.commit()
+    steps.append({"cmd": "mark_enabled", "exit_code": 0,
+                  "stdout": f"已标记 {server_name} 启用每日安全日报采集", "stderr": ""})
+
+    collect_out: Dict[str, Any] = {}
+    if run_now:
+        from app.services.security_daily import collect_server_report
+        report_date = datetime.now().strftime("%Y-%m-%d")
+        try:
+            collect_out = collect_server_report(db, server, report_date)
+            steps.append({"cmd": "collect_now", "exit_code": 0,
+                          "stdout": json.dumps(collect_out, ensure_ascii=False), "stderr": ""})
+        except Exception as exc:
+            collect_out = {"ok": False, "error": str(exc)}
+            steps.append({"cmd": "collect_now", "exit_code": 1,
+                          "stdout": str(exc), "stderr": ""})
 
     return {
         "ok": True,
         "server": server_name,
-        "summary": f"已为服务器 {server_name} 安装安全监控模块并启用每日安全日报采集。",
+        "summary": f"已启用服务器 {server_name} 的每日安全日报采集"
+                   + ("，并立即现场采集一次。" if run_now else "。"),
         "enabled": True,
-        "script_path": result.get("script_path"),
-        "report_dir": "/var/log/security-daily",
+        "collect_now": collect_out or None,
+        "note": "采集为现场生成，不改动服务器任何文件。",
         "steps_ok": all(s.get("exit_code", 0) == 0 for s in steps),
         "steps": steps,
-        "next": "可调用 ops.security_report.collect 采集今日日报，或 ops.security_report.summarize 汇总。",
+        "next": "可调用 ops.security_report.collect 采集全部已启用服务器的今日日报，"
+                "或 ops.security_report.summarize 查看日报。",
     }

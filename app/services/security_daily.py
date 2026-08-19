@@ -1,16 +1,14 @@
 """每日安全巡检日报采集与分析。
 
-数据源：服务器上安装的安全监控模块（deanchou/server_security_monitor）生成的
-每日巡检 markdown，默认落盘到 /var/log/security-daily/<date>.md。本服务通过 SSH
-读取 → 解析 → 风险判定 → 落库（SecurityDailyReport）→ 高危项写入风险台账
-（SecurityRisk，可被 ops.risk.list 查询）→ 归档到报告中心（report_center）。
+数据源：在目标服务器上现场执行安全巡检命令（复刻 deanchou/server_security_monitor 的
+日报脚本，去掉发送告警 Bot 一步），得到当日巡检 markdown。本服务通过 SSH 现场生成
+→ 解析 → 风险判定 → 落库（SecurityDailyReport）→ 高危项写入风险台账（SecurityRisk，
+可被 ops.risk.list 查询）→ 归档到报告中心（report_center）。全程不改动服务器文件。
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
-import shlex
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -21,9 +19,6 @@ from app.config.servers import get_all_servers
 from app.db.models import SecurityDailyReport, SecurityRisk
 
 logger = logging.getLogger(__name__)
-
-# 安全监控模块日报落盘目录（跨部署一致）
-REPORT_DIR = "/var/log/security-daily"
 
 # 默认风险阈值
 DEFAULT_THRESHOLDS = {
@@ -36,6 +31,26 @@ DEFAULT_THRESHOLDS = {
 
 # security_monitor 标记字段在服务器 metadata_json 中的位置
 SECURITY_MONITOR_KEY = "security_monitor"
+
+# 采集时在目标服务器"现场生成"的每日巡检日报脚本（复刻 deanchou/server_security_monitor 的
+# security-daily-summary.sh，但去掉发送告警 Bot 的一步，仅输出 markdown 到 stdout）。
+# 注意：这里用 Python 字符串保留 $(...) 与引号，交由远端 shell 执行，本地不展开。
+GENERATE_REPORT_CMD = r"""export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+echo "## 每日安全巡检报告 $(date '+%F %T')"
+echo
+echo "### 1. 今日登录记录 (aureport, 最近25条)"
+timeout 8 aureport -l -i -ts today 2>/dev/null | tail -25 || echo "无记录"
+echo
+echo "### 2. 今日登录失败次数: $(timeout 8 aureport -l -i --failed -ts today 2>/dev/null | grep -cE '^[0-9]+\.' )"
+echo
+echo "### 3. 今日账户变更"
+timeout 8 ausearch -ts today -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK 2>/dev/null | tail -20 || echo "无记录"
+echo
+echo "### 4. 当前被 fail2ban 封禁的 IP"
+timeout 5 fail2ban-client status sshd 2>/dev/null | sed -n '/Banned IP list/,+1p' || echo "无封禁"
+echo
+echo "### 5. 系统负载"
+uptime"""
 
 
 def _utcnow() -> datetime:
@@ -51,40 +66,47 @@ def _iso(value: Any) -> Optional[str]:
 
 
 def security_module_servers(db: Optional[Session] = None) -> List[Dict[str, Any]]:
-    """筛选已标记启用安全监控模块且在线的服务器。"""
+    """采集候选服务器：优先返回已标记启用安全监控且在线的服务器；
+    否则退回所有在线/活跃服务器（现场生成日报，不依赖落盘补丁）。"""
     servers = get_all_servers(db=db)
-    result = []
-    for s in servers:
-        meta = s.get("metadata_json") or {}
-        mon = meta.get(SECURITY_MONITOR_KEY) or {}
-        if not mon.get("enabled"):
-            continue
-        if s.get("status") not in ("online", "active"):
-            # 非在线仍保留但标记，采集时单独报错
-            pass
-        result.append(s)
-    return result
+    online = [s for s in servers if s.get("status") in ("online", "active")]
+    enabled = [s for s in online if (((s.get("metadata_json") or {}).get(SECURITY_MONITOR_KEY) or {}).get("enabled"))]
+    return enabled or online
 
 
 def read_daily_markdown(server_cfg: Dict[str, Any], report_date: str,
-                        timeout: int = 30) -> Dict[str, Any]:
-    """通过 SSH 读取指定日期的日报 markdown。"""
+                        timeout: int = 60) -> Dict[str, Any]:
+    """通过 SSH 在目标服务器现场生成日报 markdown（复刻报表脚本，不发送告警）。
+    返回 md 与能力探测（aureport 是否可用）。"""
     from ssh_client import create_ssh_client
 
-    path = f"{REPORT_DIR}/{report_date}.md"
     ssh = create_ssh_client(server_cfg)
     try:
-        ssh.connect(timeout=timeout)
-        code, out, err = ssh.exec(f"cat {shlex.quote(path)}",
-                                  timeout=timeout or 30)
-        missing = code != 0 or "No such file" in (out or "")
+        ssh.connect(max_retries=2, per_attempt_timeout=15)
+        cap_cmd, cap_out, _ = ssh.exec("command -v aureport || true", timeout=timeout)
+        capable = bool((cap_out or "").strip())
+        # 传 on_output 走 ssh_client.exec 的空闲超时安全分支，避免 recv_exit_status 永久阻塞；
+        # 命令挂起/传输异常时捕获并返回中断，防止占用后端工作线程导致服务无响应。
+        try:
+            code, out, err = ssh.exec(GENERATE_REPORT_CMD, timeout=timeout,
+                                      on_output=lambda _stream, _data: None)
+        except Exception as exc:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            return {"ok": False, "capable": capable, "path": "generated",
+                    "md": "", "missing": False,
+                    "error": f"现场生成中断: {type(exc).__name__}: {exc}", "code": -1}
+        if code != 0 and not (out or "").strip():
+            return {"ok": False, "capable": capable, "path": "generated",
+                    "md": "", "missing": False, "error": (err or "生成失败").strip(),
+                    "code": code}
         return {
-            "ok": code == 0 and not missing,
-            "path": path,
+            "ok": True, "capable": capable,
+            "path": "generated::" + report_date,
             "md": (out or "").strip(),
-            "missing": missing,
-            "error": (err or "").strip(),
-            "code": code,
+            "missing": False, "error": (err or "").strip(), "code": code,
         }
     finally:
         try:
@@ -174,11 +196,20 @@ def parse_daily_markdown(md: str) -> List[Dict[str, Any]]:
 
     # 4. fail2ban 封禁 IP
     body = plain(sections.get("4", ""))
-    banned_ips: List[str] = []
-    for token in re.findall(r"[\w:]+(?:\.[\w:]+)+", body):
-        if "." in token or ":" in token:
-            banned_ips.append(token)
-    banned_ips = list(dict.fromkeys(banned_ips))  # 去重保序
+    # 只提取合法 IP（IPv4/IPv6），避免把 "fail2ban.actions" 之类点分串误判为 IP
+    ipv4 = r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"
+    ipv6 = (r"\b(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
+            r"|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}"
+            r"|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}"
+            r"|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}"
+            r"|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}"
+            r"|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}"
+            r"|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}"
+            r"|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)"
+            r"|(?:[0-9a-fA-F]{1,4}:){1,7}:)\b"  # 以 :: 结尾的短 IP v6 放最后，避免吃掉后续组
+            )
+    banned_ips = list(dict.fromkeys(
+        re.findall(rf"{ipv4}|{ipv6}", body)))  # 去重保序
     items.append({
         "kind": "fail2ban_bans",
         "title": f"fail2ban 封禁 IP（{len(banned_ips)} 个）",

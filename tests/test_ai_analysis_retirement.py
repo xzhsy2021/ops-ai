@@ -208,10 +208,10 @@ def test_smoke_check_does_not_probe_retired_ai_diagnostics_route():
     assert "/api/v2/system/ai-diagnostics" not in source
 
 
-def test_generate_report_stdio_description_lists_only_supported_report_types():
-    from app.mcp.server import ENGLISH_TOOL_DESCRIPTIONS
+def test_generate_report_description_lists_only_supported_report_types():
+    from app.services.mcp_capability_service import MCP_TOOL_DESCRIPTION_OVERRIDES
 
-    description = ENGLISH_TOOL_DESCRIPTIONS["ops.generate_report"].lower()
+    description = MCP_TOOL_DESCRIPTION_OVERRIDES["ops.generate_report"].lower()
 
     assert "ai analysis" not in description
     for report_type in {"diagnostics", "operation chain", "deployment", "inspection"}:

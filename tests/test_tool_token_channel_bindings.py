@@ -339,12 +339,11 @@ def test_legacy_matrix_approval_ignores_cross_channel_token_approvers(
 def test_central_registry_no_longer_gates_on_token_bindings(
     tmp_path, monkeypatch
 ):
-    """Phase 2：token 级绑定不再拦截任何调度路径（direct / stream / REST /
-    stdio）。不同 message_context / room_id 的调用均能正常分发到工具。"""
+    """Phase 2：token 级绑定不再拦截任何调度路径（direct / stream / REST）。
+    不同 message_context / room_id 的调用均能正常分发到工具。"""
     import asyncio
 
     from app.api import tools as tools_api
-    from app.mcp import server as stdio_server
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import registry
 
@@ -456,25 +455,7 @@ def test_central_registry_no_longer_gates_on_token_bindings(
         assert '"accepted": true' in stream_body
         assert "event: done" in stream_body
 
-        def _stdio_request(method, path, payload):
-            assert method == "POST"
-            assert path == "/api/v2/tools/call"
-            return tools_api.call_tool(
-                tools_api.ToolCallPayload(**payload),
-                SimpleNamespace(),
-                db,
-            )
-
-        monkeypatch.setattr(stdio_server, "_request", _stdio_request)
-        stdio_result = stdio_server._call_tool_for_mcp(
-            {
-                "name": tool_name.replace(".", "_"),
-                "arguments": _generic_args("telegram", "bot-a", "chat-8"),
-            }
-        )
-        assert stdio_result["isError"] is False
-        assert '"accepted": true' in stdio_result["content"][0]["text"]
-        assert len(handled) == 5
+        assert len(handled) == 4
     finally:
         registry._tools.pop(tool_name, None)
         db.close()

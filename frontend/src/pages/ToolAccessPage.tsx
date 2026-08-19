@@ -491,8 +491,6 @@ export default function ToolAccessPage() {
             onSelectServer={setSelectedMcpAccess}
             servers={[
               { name: 'HTTP', transport: 'http', url: `${apiBaseUrl}/api/v2/tools/call`, description: 'HTTP Tool API：适合普通 HTTP 客户端，使用 tool + arguments 调用 OPS 工具。' },
-              { name: 'MCP stdio', transport: 'stdio', command: 'python', args: ['scripts/mcp_server_entry.py'], env: `OPS_BASE_URL=${apiBaseUrl}
-OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Desktop / Cursor 等本地 MCP 客户端。' },
               { name: 'MCP HTTP', transport: 'streamable-http', url: `${apiBaseUrl}/api/v2/mcp`, description: 'MCP Streamable HTTP：适合支持远程 MCP HTTP 的客户端。' },
               { name: 'JSON-RPC', transport: 'json-rpc', url: `${apiBaseUrl}/api/v2/mcp`, description: '标准 JSON-RPC 2.0：initialize / tools/list / tools/call。' },
             ]}
@@ -645,7 +643,6 @@ OPS_TOOL_TOKEN=<填入 Tool Token>`, description: 'MCP stdio：适合 Claude Des
                     tools_endpoint: manifest.tools_endpoint,
                     capabilities_endpoint: manifest.capabilities_endpoint,
                     call_endpoint: manifest.call_endpoint,
-                    mcp_stdio: 'Windows: venv\\Scripts\\python.exe scripts\\mcp_server_entry.py; macOS/Linux: scripts/mcp-server.sh',
                     api_base_url: apiBaseUrl,
                   } : undefined,
                 }} />

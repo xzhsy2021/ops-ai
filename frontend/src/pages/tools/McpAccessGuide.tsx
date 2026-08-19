@@ -33,7 +33,6 @@ function prettyJson(value: any) {
 
 function getTransportLabel(server?: McpServerConfig) {
   const key = getServerKey(server)
-  if (key.includes('stdio')) return 'stdio'
   if (key.includes('json')) return 'json-rpc over http'
   if (key.includes('tool') || key.includes('direct')) return 'http tool api'
   if (key.includes('mcp') || key.includes('stream')) return 'streamable http'
@@ -44,7 +43,6 @@ function getConnectionUrl(server: McpServerConfig | undefined, baseUrl?: string)
   if (!server) return ''
   const key = getServerKey(server)
   if (server.url) return server.url
-  if (key.includes('stdio')) return `${baseUrl || 'http://127.0.0.1:8000'} via stdio bridge`
   if (key.includes('tool') || key.includes('direct')) return `${baseUrl || 'http://127.0.0.1:8000'}/api/v2/tools/call`
   return `${baseUrl || 'http://127.0.0.1:8000'}/api/v2/mcp`
 }
@@ -55,37 +53,6 @@ function buildExamples(server: McpServerConfig | undefined, baseUrl?: string): G
   const key = getServerKey(server)
   const mcpUrl = `${apiBase}/api/v2/mcp`
   const toolsCallUrl = `${apiBase}/api/v2/tools/call`
-
-  if (key.includes('stdio')) {
-    return [
-      {
-        title: 'Claude / Cursor stdio 配置',
-        language: 'json',
-        content: prettyJson({
-          mcpServers: {
-            'ops-ai': {
-              command: 'python',
-              args: ['scripts/mcp_server_entry.py'],
-              env: {
-                OPS_BASE_URL: apiBase,
-                OPS_TOOL_TOKEN: '<填入 Tool Token>',
-              },
-            },
-          },
-        }),
-      },
-      {
-        title: 'Windows 启动命令',
-        language: 'powershell',
-        content: `$env:OPS_BASE_URL="${apiBase}"\n$env:OPS_TOOL_TOKEN="<填入 Tool Token>"\npy.exe scripts/mcp_server_entry.py`,
-      },
-      {
-        title: 'macOS / Linux 启动命令',
-        language: 'bash',
-        content: `OPS_BASE_URL="${apiBase}" OPS_TOOL_TOKEN="<填入 Tool Token>" python scripts/mcp_server_entry.py`,
-      },
-    ]
-  }
 
   if (key.includes('json')) {
     return [

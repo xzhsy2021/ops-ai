@@ -268,7 +268,7 @@ def run_precheck(args, ctx, db):
 @registry.register(
     name="ops.prepare_release_from_local_package",
     title="Prepare release from local package",
-    description="检查/上传本地发布包，创建发布计划并运行预检，返回确认信息；不会执行发布。stdio MCP local_path 会从用户本机流式上传到文件中心。",
+    description="检查/上传本地发布包，创建发布计划并运行预检，返回确认信息；不会执行发布。local_path 必须是 OPS 后端本机可读路径，远程客户端可用 content_base64 或先通过 OPS 页面上传。",
     scopes=["package:write", "deploy:plan", "deploy:precheck"],
     risk="high",
     category="package_write",
@@ -277,7 +277,7 @@ def run_precheck(args, ctx, db):
     input_schema={
         "type": "object",
         "properties": {
-            "local_path": {"type": "string", "description": "stdio MCP 本地路径；HTTP 场景仅适用于 OPS 后端本机路径"},
+            "local_path": {"type": "string", "description": "OPS 后端本机路径；远程客户端请用 content_base64 或先上传到文件中心"},
             "filename": {"type": "string"},
             "content_base64": {"type": "string"},
             "package_name": {"type": "string", "description": "已在文件中心存在的包名；提供后可跳过上传"},

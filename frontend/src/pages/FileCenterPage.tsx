@@ -444,7 +444,7 @@ export default function FileCenterPage() {
             </div>
             <div className="cc-modal-body" style={{ display: 'grid', gap: 12 }}>
               <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.7 }}>
-                支持页面上传，也支持 stdio MCP 先调用 <code>ops_inspect_local_package</code> 检查本地路径，再调用 <code>ops_upload_package</code> 流式上传到文件中心。
+                支持页面上传，也支持 MCP 先调用 <code>ops_inspect_local_package</code> 检查本地路径，再调用 <code>ops_upload_package</code> 流式上传到文件中心。
               </p>
               <label>系统标识
                 <input placeholder="crypto-trader" value={uploadSystem} onChange={(e) => setUploadSystem(e.target.value)} />

@@ -17,7 +17,6 @@ REQUIRED_FILES = [
     "app/services/tool_adapters/server_tools.py",
     "app/services/tool_adapters/capability_tools.py",
     "app/services/package_retention.py",
-    "app/mcp/server.py",
     "frontend/src/pages/ToolAccessPage.tsx",
 ]
 

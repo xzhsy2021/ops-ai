@@ -66,7 +66,14 @@ Use:
 
 ## MCP Discovery
 
-The stdio bridge started by `scripts/mcp-server.bat` or `scripts/mcp-server.sh` declares:
+MCP clients connect over Streamable HTTP JSON-RPC:
+
+```http
+POST /api/v2/mcp
+Authorization: Bearer <OPS_TOOL_TOKEN>
+```
+
+The server declares:
 
 ```json
 {
@@ -89,14 +96,9 @@ prompts/list
 
 `tools/list` supports `cursor` pagination and returns `nextCursor`.
 
-For stdio clients, `resources/list` and `prompts/list` are served from the local
-capability service and stay available while the OPS backend is offline.
-If `tools/list` cannot reach the backend, it returns `offline=true`, an `error`
-message, and the local fallback tools `ops_connection_status`,
-`ops_inspect_local_package`, and `ops_prepare_release_from_local_package`.
-The backwards-compatible stdio `manifest` method follows the same offline
-pattern and includes local resources, prompts, and fallback tools instead of
-returning a JSON-RPC error.
+`resources/list` and `prompts/list` are served by the HTTP MCP endpoint
+(`POST /api/v2/mcp`) through the shared capability service, so the static
+catalogs stay consistent across all clients.
 
 MCP tool names are MCP-safe aliases. Replace dots with underscores:
 

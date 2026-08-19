@@ -1,42 +1,10 @@
 # AI Tool MCP Examples
 
-Updated: 2026-06-08
+Updated: 2026-08-19
 
 This runbook provides client snippets for connecting to OPS through MCP.
-
-## Stdio MCP
-
-```json
-{
-  "mcpServers": {
-    "ops": {
-      "command": "cmd",
-      "args": ["/c", "<OPS_PROJECT_DIR>\\scripts\\mcp-server.bat"],
-      "env": {
-        "OPS_BASE_URL": "http://127.0.0.1:8000",
-        "OPS_TOOL_TOKEN": "<OPS_TOOL_TOKEN>"
-      }
-    }
-  }
-}
-```
-
-Linux/macOS:
-
-```json
-{
-  "mcpServers": {
-    "ops": {
-      "command": "bash",
-      "args": ["<OPS_PROJECT_DIR>/scripts/mcp-server.sh"],
-      "env": {
-        "OPS_BASE_URL": "http://127.0.0.1:8000",
-        "OPS_TOOL_TOKEN": "<OPS_TOOL_TOKEN>"
-      }
-    }
-  }
-}
-```
+OPS exposes a single HTTP-only MCP surface (`POST /api/v2/mcp`); the legacy
+stdio bridge has been removed.
 
 ## Remote HTTP MCP
 

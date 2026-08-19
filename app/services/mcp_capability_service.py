@@ -61,7 +61,7 @@ def _tools_list_profile(mcp_tools_list_params: Dict[str, Any]) -> tuple:
 
 
 # Single source of truth for MCP tool descriptions.
-# Shared by HTTP MCP (POST /api/v2/mcp tools/list, /api/v2/tools) and the stdio bridge.
+# Used by HTTP MCP (POST /api/v2/mcp tools/list, /api/v2/tools).
 MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.inspection.preview_servers_batch': 'Preview server batch inspection targets before execution. Resolves server_ids, groups, group, or all_servers; returns skipped targets, batch_size/concurrency plan, and the exact Chinese confirmation phrase.',
     'ops.inspection.run_servers_batch': "Run audited server inspections for multiple servers after preview confirmation. High risk; requires the exact confirm_text returned by ops.inspection.preview_servers_batch, for example confirm phrase '确认巡检 <fingerprint>'.",
@@ -89,9 +89,9 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.list_servers': "List server assets that match filters such as group, name, or keyword. Use when user asks 'list servers' or 'what servers are configured'. 中文: 查看服务器列表/已配置的服务器/有哪些服务器.",
     'ops.list_packages': 'List local release packages managed by OPS File Center. 中文: 查看发布包列表/有哪些发布包.',
     'ops.get_package_checksum': 'Get package checksum and metadata for a local release package. 中文: 查看发布包校验/包验证.',
-    'ops.upload_package': 'Upload a local deploy package into OPS File Center. stdio MCP can read local_path; Remote HTTP MCP should use normal file upload first. 中文: 上传发布包/上传部署包.',
+    'ops.upload_package': 'Upload a local deploy package into OPS File Center. HTTP clients pass content_base64, or local_path when the package is on the OPS backend host. 中文: 上传发布包/上传部署包.',
     'ops.upload_file': 'Upload a validated package from the controlled OPS upload/staging directory to an allowed server path over SFTP. High risk; requires human approval. 中文: 通过 SFTP 上传部署包到目标服务器.',
-    'ops.inspect_local_package': 'Inspect a local deploy package path before uploading it into OPS File Center. stdio MCP reads local_path on this computer. 中文: 检查本地发布包/查看本地包信息.',
+    'ops.inspect_local_package': 'Inspect a local deploy package path before uploading it into OPS File Center. local_path must be readable by the OPS backend host; remote clients can use the OPS page upload. 中文: 检查本地发布包/查看本地包信息.',
     'ops.prepare_release_from_local_package': 'Inspect and upload a local package, then create a release plan and run precheck. This never executes deployment. 中文: 从本地包准备发布/打包发布.',
     'ops.get_package_retention_preview': 'Preview package cleanup candidates without deleting files. Protects running, failed, rollback, and latest successful packages. 中文: 预览包清理/查看可清理的发布包.',
     'ops.cleanup_packages': 'Clean local deploy packages according to retention policy. High risk; requires write permission and confirmation. Defaults to dry run. 中文: 清理发布包/清理旧包.',

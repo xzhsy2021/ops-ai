@@ -11,15 +11,15 @@
 - `ops.cleanup_packages` 是高风险写操作，默认不开放，默认 dry-run。
 - 清理只处理 OPS 本地文件中心包；不自动清理远程服务器包。
 
-## 2. stdio MCP 上传本地包
+## 2. 上传本地包（HTTP-only）
 
-stdio MCP 进程运行在用户本机，因此可以读取本地路径：
+OPS 只提供 HTTP 接入面，不提供 stdio 桥。发布包统一通过 OPS 文件中心或
+HTTP 工具上传：
 
 ```json
 {
-  "tool": "ops_upload_package",
+  "tool": "ops.upload_package",
   "arguments": {
-    "local_path": "D:\\packages\\system-20263108153148.tar.gz",
     "system": "crypto-trader",
     "service": "crypto-system",
     "overwrite": false
@@ -30,7 +30,7 @@ stdio MCP 进程运行在用户本机，因此可以读取本地路径：
 内部流程：
 
 ```text
-MCP stdio bridge 读取 local_path
+HTTP 客户端（浏览器页面 / ops.upload_package）
 → multipart 上传到 /api/v2/tools/packages/upload
 → OPS 写入 File Center
 → 计算 SHA256
@@ -38,9 +38,8 @@ MCP stdio bridge 读取 local_path
 → 返回 package_name / sha256 / size / service_hint / version_hint
 ```
 
-Remote HTTP MCP 不能读取用户电脑上的 `D:\...` 路径。如果使用 Remote HTTP MCP，请先通过 OPS 页面上传，或使用 HTTP/base64 工具上传小文件。
-
-对于房间消息触发的批量计划，不要单独调用通用 `ops.upload_package` 或创建独立上传审批。将本机路径放入 `ops.approval.prepare_plan` 的 `FILE_UPLOAD` 步骤；stdio 桥接层会通过房间绑定的审批接收入口暂存文件，并将包清单冻结到同一个计划。qclaw Token 仍只需要 `ops:read`，不需要 `package:write`。
+`ops.inspect_local_package` 只检查 OPS 服务端本地路径并计算 SHA256；远程 HTTP
+客户端无法读取用户电脑上的 `D:\...` 路径，请通过 OPS 页面上传本地包。
 
 ## 3. 发布链路
 

@@ -71,14 +71,14 @@ def list_packages(args, ctx, db):
 @registry.register(
     name="ops.inspect_local_package",
     title="Inspect local deploy package",
-    description="检查本地发布包路径、文件名、大小、扩展名、SHA256 和可上传性。stdio MCP 可读取用户本机 local_path；HTTP 工具仅能读取 OPS 后端本机路径。",
+    description="检查本地发布包路径、文件名、大小、扩展名、SHA256 和可上传性。local_path 必须是 OPS 后端本机可读路径。",
     scopes=["ops:read"],
     risk="low",
     category="package_read",
     input_schema={
         "type": "object",
         "properties": {
-            "local_path": {"type": "string", "description": "本地包路径，stdio MCP 场景下是用户机器路径"},
+            "local_path": {"type": "string", "description": "本地包路径（OPS 后端本机路径）"},
             "filename": {"type": "string", "description": "可选，覆盖上传到文件中心的文件名"},
             "calculate_sha256": {"type": "boolean", "description": "是否计算 SHA256，默认 true"},
         },
@@ -167,7 +167,7 @@ def get_package_retention_preview(args, ctx, db):
             "system": {"type": "string"},
             "service": {"type": "string"},
             "filename": {"type": "string"},
-            "local_path": {"type": "string", "description": "Path available to the local stdio MCP bridge"},
+            "local_path": {"type": "string", "description": "Path readable by the OPS backend host"},
             "content_base64": {"type": "string"},
             "overwrite": {"type": "boolean", "default": False},
             "dry_run": {"type": "boolean", "default": False},
@@ -202,7 +202,7 @@ def upload_package(args, ctx, db):
     if local_path:
         controlled_path = _controlled_local_package_path(local_path)
         if not controlled_path.is_file():
-            raise HTTPException(status_code=400, detail="local_path is not readable by OPS backend. Use stdio MCP bridge or content_base64.")
+            raise HTTPException(status_code=400, detail="local_path is not readable by OPS backend. Use content_base64 or upload via the OPS page.")
         if args.get("dry_run"):
             policy = get_package_retention_policy(db)
             return inspect_package_file(
@@ -226,4 +226,4 @@ def upload_package(args, ctx, db):
             {"tool": "ops_create_deploy_plan", "description": "Create a deployment plan with this package"},
         ]
         return meta
-    raise HTTPException(status_code=400, detail="Provide local_path for stdio MCP or content_base64 for HTTP tools")
+    raise HTTPException(status_code=400, detail="Provide local_path (OPS backend host) or content_base64 for HTTP tools")

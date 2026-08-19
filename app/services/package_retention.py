@@ -309,10 +309,10 @@ def inspect_package_file(
 ) -> Dict[str, Any]:
     """Inspect a package file without importing it into the File Center.
 
-    This is used by the stdio MCP bridge before uploading local files and by
-    the HTTP tool when the backend can read the given path. It intentionally
-    returns validation warnings instead of raising for policy issues so clients
-    can show a useful preflight result before a high-risk upload.
+    This is used by the HTTP tool when the backend can read the given path. It
+    intentionally returns validation warnings instead of raising for policy
+    issues so clients can show a useful preflight result before a high-risk
+    upload.
     """
     path = os.path.abspath(os.path.expanduser(str(local_path or "")))
     if not path or not os.path.isfile(path):

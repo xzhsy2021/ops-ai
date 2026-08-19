@@ -989,7 +989,7 @@ def cancel_tool_plan(plan_id: str, request: Request, db: Session = Depends(get_d
 # expect the configured MCP URL itself to accept JSON-RPC POST messages, e.g.
 # POST /api/v2/mcp with method=initialize, tools/list, tools/call, etc.  The
 # older OPS implementation exposed helper REST endpoints under /api/v2/mcp/*
-# only, which works for our stdio bridge but not for direct Remote HTTP MCP.
+# only, which did not work for direct Remote HTTP MCP clients.
 
 
 def _mcp_jsonrpc_result(mid: Any, result: Dict[str, Any]) -> Dict[str, Any]:

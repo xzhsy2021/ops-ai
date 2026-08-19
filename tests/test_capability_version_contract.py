@@ -94,43 +94,6 @@ class TestCapabilityConditionalGet:
                 raise AssertionError("Expected HTTPException 304")
 
 
-class TestMcpStdioEtagSupport:
-    def test_request_sends_if_none_match(self):
-        from app.mcp.server import _request
-        with patch("app.mcp.server.urllib.request.urlopen") as mock_urlopen:
-            mock_resp = MagicMock()
-            mock_resp.read.return_value = b'{"data": {}}'
-            mock_resp.headers = {"ETag": '"abc123"'}
-            mock_urlopen.return_value.__enter__ = lambda s: mock_resp
-            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-            result = _request("GET", "/test", etag='"abc123"')
-            req_obj = mock_urlopen.call_args[0][0]
-            header_names = [k.lower() for k, v in req_obj.header_items()]
-            assert "if-none-match" in header_names
-
-    def test_request_handles_304_not_modified(self):
-        from app.mcp.server import _request
-        import urllib.error
-        with patch("app.mcp.server.urllib.request.urlopen") as mock_urlopen:
-            exc = urllib.error.HTTPError("http://test", 304, "Not Modified", {}, None)
-            mock_urlopen.side_effect = exc
-            result = _request("GET", "/test", etag='"abc123"')
-            assert result.get("_not_modified") is True
-            assert result.get("_etag") == '"abc123"'
-
-    def test_tools_for_mcp_uses_etag_cache(self):
-        from app.mcp.server import _tools_for_mcp, _cached_capability_etag
-        with patch("app.mcp.server._request") as mock_req:
-            mock_req.return_value = {
-                "data": {"tools": [], "pagination": {}},
-                "_etag": '"new-etag"',
-            }
-            result = _tools_for_mcp()
-            mock_req.assert_called_once()
-            call_kwargs = mock_req.call_args
-            assert call_kwargs[1].get("etag") is None or True
-
-
 class TestTokenWriteBumpsVersion:
     def test_create_token_calls_bump(self):
         from app.api.tools import create_token

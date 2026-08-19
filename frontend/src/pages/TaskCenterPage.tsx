@@ -16,6 +16,7 @@ type TaskItem = {
   started_at?: string
   finished_at?: string
   duration_ms?: number
+  progress?: number
   detail?: Record<string, any>
 }
 
@@ -197,6 +198,15 @@ export default function TaskCenterPage() {
     }
   }
 
+  const refreshSelected = useCallback(async () => {
+    if (!selected?.kind || !selected?.id) return
+    try {
+      const res: any = await taskCenter.detail(selected.kind, selected.id)
+      const payload = res?.data ?? res
+      setSelected(payload)
+    } catch { /* 保留上次详情 */ }
+  }, [selected?.kind, selected?.id])
+
   function toggleTaskSelection(item: TaskItem, checked: boolean) {
     const key = taskKey(item)
     setSelectedTaskKeys((prev) => {
@@ -268,6 +278,18 @@ export default function TaskCenterPage() {
     return () => stopPolling()
   }, [hasLiveItems, startPolling, stopPolling])
 
+  const selectedLive = !!(selected && !selected.error && isLiveStatus(selected.status))
+  const { start: startSelectedPolling, stop: stopSelectedPolling } = useSmartPolling(refreshSelected, {
+    activeMs: 3000,
+    hiddenMs: 15000,
+    idleMs: 15000,
+  })
+  useEffect(() => {
+    if (selectedLive) startSelectedPolling({ activeMs: 3000, hiddenMs: 15000 })
+    else stopSelectedPolling()
+    return () => stopSelectedPolling()
+  }, [selectedLive, startSelectedPolling, stopSelectedPolling, refreshSelected])
+
   return (
     <div className="page-container">
       <PageHeader
@@ -324,7 +346,7 @@ export default function TaskCenterPage() {
       {!items.length && !loading ? <EmptyState title="暂无任务" description="执行发布、SQL、清理或 MCP/工具任务后会在这里统一展示。" /> : (
         <div className="card table-card task-center-content" style={{ overflow: 'auto', padding: 0, maxHeight: 'calc(100vh - 280px)' }}>
           <table className="data-table">
-            <thead><tr><th><input type="checkbox" aria-label="选择当前页任务" checked={allPageTasksSelected} disabled={!selectableItems.length} onChange={(e) => togglePageTaskSelection(e.target.checked)} /></th><th style={{ width: 80 }}>类型</th><th style={{ minWidth: 180 }}>标题</th><th style={{ width: 80 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ minWidth: 180 }}>目标</th><th style={{ width: 100 }}>操作人</th><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>操作</th></tr></thead>
+            <thead><tr><th><input type="checkbox" aria-label="选择当前页任务" checked={allPageTasksSelected} disabled={!selectableItems.length} onChange={(e) => togglePageTaskSelection(e.target.checked)} /></th><th style={{ width: 80 }}>类型</th><th style={{ minWidth: 180 }}>标题</th><th style={{ width: 80 }}>状态</th><th style={{ width: 110 }}>进度</th><th style={{ width: 80 }}>风险</th><th style={{ minWidth: 180 }}>目标</th><th style={{ width: 100 }}>操作人</th><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>操作</th></tr></thead>
             <tbody>
               {sortedItems.map((item) => {
                 const times = timeSummary(item)
@@ -343,6 +365,14 @@ export default function TaskCenterPage() {
                     )}
                   </td>
                   <td><StatusBadge value={item.status} /></td>
+                  <td>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{ flex: 1, minWidth: 48, height: 6, borderRadius: 3, background: 'var(--border-strong, rgba(128,128,128,0.25))', overflow: 'hidden' }}>
+                        <div style={{ width: `${Math.min(100, Math.max(0, item.progress ?? 0))}%`, height: '100%', background: 'var(--brand, #2563eb)', transition: 'width 0.5s ease' }} />
+                      </div>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)', width: 36, textAlign: 'right' }}>{item.progress ?? 0}%</span>
+                    </div>
+                  </td>
                   <td>{(() => {
                     const rl = getTaskRiskLevel(item)
                     if (rl === 'high') return <RiskBadge level="alert" label="高风险" size="sm" />
@@ -418,10 +448,20 @@ export default function TaskCenterPage() {
                     <div className="stat-card"><div className="stat-label">操作人</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.operator || '-'}</div></div>
                     <div className="stat-card"><div className="stat-label">目标</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.target || '-'}</div></div>
                   </div>
+                  {selected.progress !== undefined && (
+                    <div style={{ marginBottom: 12 }}>
+                      <div className="stat-label" style={{ marginBottom: 4 }}>实时进度</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--border-strong, rgba(128,128,128,0.25))', overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.min(100, Math.max(0, selected.progress ?? 0))}%`, height: '100%', background: 'var(--brand, #2563eb)', transition: 'width 0.5s ease' }} />
+                        </div>
+                        <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{selected.progress ?? 0}%</span>
+                      </div>
+                    </div>
+                  )}
                   {selected.kind === 'tool' && (
                     <div className="grid-4" style={{ marginBottom: 12 }}>
                       <div className="stat-card"><div className="stat-label">工具</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.source_tool || '-'}</div></div>
-                      <div className="stat-card"><div className="stat-label">进度</div><div className="stat-value">{selected.progress ?? 0}%</div></div>
                       <div className="stat-card"><div className="stat-label">风险</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.risk_level || '-'}</div></div>
                       <div className="stat-card"><div className="stat-label">审计</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.audit_id || '-'}</div></div>
                     </div>

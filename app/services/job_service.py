@@ -65,6 +65,7 @@ def _safe_ctx_payload(ctx: ToolContext) -> Dict[str, Any]:
         "client_name": payload.get("client_name", ""),
         "ip_address": payload.get("ip_address", ""),
         "user_agent": payload.get("user_agent", ""),
+        "job_id": payload.get("job_id", ""),
     }
 
 
@@ -227,6 +228,7 @@ def _execute_tool_job(job_id: str) -> None:
         tool_name = str(request.get("tool") or job.source_tool or "")
         args = dict(request.get("arguments") or {})
         ctx = _ctx_from_payload(request.get("context") or {})
+        ctx.job_id = job_id
 
         from app.services.tool_policy import enforce_tool_policy
         from app.services.tool_registry import register_builtin_tools, registry

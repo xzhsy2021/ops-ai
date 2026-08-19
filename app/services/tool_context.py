@@ -33,6 +33,8 @@ class ToolContext:
     client_name: str = ""
     ip_address: str = ""
     user_agent: str = ""
+    # 关联的统一任务中心 job id（后台 job 执行时注入，供 handler 回写进度）。
+    job_id: str = ""
 
     def __post_init__(self) -> None:
         from app.services.tool_token import (
@@ -82,4 +84,5 @@ class ToolContext:
             "client_name": self.client_name,
             "ip_address": self.ip_address,
             "user_agent": self.user_agent,
+            "job_id": self.job_id,
         }

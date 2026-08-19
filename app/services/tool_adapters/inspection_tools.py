@@ -621,6 +621,7 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
         skip_disabled=bool(preview.get("skip_disabled", True)),
         all_servers=False,
         groups=groups or None,
+        job_id=getattr(ctx, "job_id", "") or "",
     ))
     result["preview"] = preview
     return result

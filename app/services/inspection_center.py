@@ -4526,8 +4526,14 @@ def run_servers_batch_inspection(
     skip_disabled: bool = True,
     all_servers: bool = False,
     groups: Optional[List[str]] = None,
+    job_id: str = "",
 ) -> Dict[str, Any]:
-    """Run read-only server inspection for multiple servers with bounded concurrency."""
+    """Run read-only server inspection for multiple servers with bounded concurrency.
+
+    When ``job_id`` is provided, the unified task center job progress is updated
+    after every completed server so users see live progress instead of a fixed
+    35% stall while the batch runs synchronously.
+    """
     resolved = resolve_servers_for_inspection(
         server_ids,
         all_servers=all_servers,
@@ -4555,6 +4561,46 @@ def run_servers_batch_inspection(
 
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
+    total_count = len(unique_ids)
+    done_count = 0
+
+    def _report_batch_progress() -> None:
+        if not job_id:
+            return
+        try:
+            from app.db.base import SessionLocal as _ProgressSessionLocal
+            from app.db.models import OperationJob
+
+            progress_db = _ProgressSessionLocal()
+            try:
+                row = progress_db.query(OperationJob).filter(OperationJob.id == job_id).first()
+                if row is None or row.status != "running":
+                    return
+                # The generic tool worker reserves 0-35% for queueing and policy
+                # checks, and 90-100% for handler return/finalization. Keep the
+                # inspection progress inside the handler's 35-90% window.
+                inner_percent = done_count / total_count * 100
+                percent = 35 + int(round(inner_percent * 55 / 100))
+                percent = max(35, min(90, percent))
+                percent = max(int(row.progress or 0), percent)
+                row.progress = percent
+                row.result_json = {
+                    "progress": {
+                        "total_servers": total_count,
+                        "completed_servers": done_count,
+                        "succeeded_servers": len(results),
+                        "failed_servers": len(errors),
+                        "current_phase": "inspection",
+                    }
+                }
+                row.updated_at = _now()
+                progress_db.commit()
+            finally:
+                progress_db.close()
+        except Exception:
+            # Progress reporting is best-effort and must never fail the batch.
+            pass
+
     for chunk in _chunked(unique_ids, effective_batch_size):
         with ThreadPoolExecutor(max_workers=min(effective_concurrency, len(chunk) or 1)) as pool:
             futures = {
@@ -4576,6 +4622,8 @@ def run_servers_batch_inspection(
                     results.append(future.result())
                 except Exception as exc:
                     errors.append({"server_id": sid, "error": str(exc)})
+                done_count += 1
+                _report_batch_progress()
 
     skipped_count = len(resolved.get("skipped", []))
     return {

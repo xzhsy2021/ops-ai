@@ -842,7 +842,7 @@ export default function InspectionCenterPage() {
             selectedTargetCount={selectedServerIds.length + selectedGroups.length}
             running={running}
             onFilterChange={setServerFilter}
-            onSelectOnlineServers={() => { setSelectedServerIds(activeServerIds); setMessage(`???????/????? ${activeServerIds.length} ????/?? ${disabledServerCount} ???????`) }}
+            onSelectOnlineServers={() => { setSelectedServerIds(activeServerIds); setMessage(`已选择全部在线/启用服务器 ${activeServerIds.length} 台，停用/离线 ${disabledServerCount} 台会自动跳过。`) }}
             onClearSelection={() => { setSelectedServerIds([]); setSelectedGroups([]) }}
             onExpandAll={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, true])))}
             onCollapseAll={() => setExpandedGroups(Object.fromEntries(Object.keys(groupedServers).map((g) => [g, false])))}

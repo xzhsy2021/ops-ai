@@ -23,18 +23,18 @@ export function ServerAdvancedSettings({
 }: ServerAdvancedSettingsProps) {
   return (
     <details className="inspection-advanced">
-      <summary>???? ? ?? / ?? / ????</summary>
+      <summary>高级设置 · 并发 / 超时 / 阈值配置</summary>
       <div className="inspection-advanced-body">
-        <label>??? (1-8)
+        <label>并发数 (1-8)
           <input type="number" min={1} max={8} value={batchConcurrency} onChange={(e) => onBatchConcurrencyChange(Math.max(1, Math.min(8, Number(e.target.value || 1))))} />
         </label>
-        <label>???? (1-20)
+        <label>分批大小 (1-20)
           <input type="number" min={1} max={20} value={batchSize} onChange={(e) => onBatchSizeChange(Math.max(1, Math.min(20, Number(e.target.value || 1))))} />
         </label>
-        <label>????? (?)
+        <label>单命令超时 (秒)
           <input type="number" min={5} max={120} value={commandTimeoutSeconds} onChange={(e) => onCommandTimeoutSecondsChange(Math.max(5, Math.min(120, Number(e.target.value || 20))))} />
         </label>
-        <label>??????? (?)
+        <label>单服务器总超时 (秒)
           <input type="number" min={30} max={1800} value={runTimeoutSeconds} onChange={(e) => onRunTimeoutSecondsChange(Math.max(30, Math.min(1800, Number(e.target.value || 180))))} />
         </label>
       </div>

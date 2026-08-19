@@ -9,7 +9,7 @@ export type ServerCategoryChipsProps = {
 export function ServerCategoryChips({ items, itemConfigs, selected, onChange, onConfigEdit }: ServerCategoryChipsProps) {
   return (
     <div className="inspection-category-chips">
-      <span className="chip-label">?????</span>
+      <span className="chip-label">巡检类别：</span>
       {items.map((item: any) => {
         const cfg = itemConfigs.find((c: any) => c.item_code === item.code)
         const enabled = cfg ? cfg.enabled !== false : true
@@ -20,17 +20,17 @@ export function ServerCategoryChips({ items, itemConfigs, selected, onChange, on
           <span
             key={item.code}
             className={chipClass}
-            title={enabled ? item.description : '???'}
+            title={enabled ? item.description : '已禁用'}
             onClick={() => enabled && onChange(nextSelection)}
             role="button"
             tabIndex={enabled ? 0 : -1}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); enabled && onChange(nextSelection) } }}
           >
             {item.name}
-            {cfg && <small>{cfg.rules?.length || 0} ??</small>}
+            {cfg && <small>{cfg.rules?.length || 0} 规则</small>}
             {onConfigEdit && cfg && (
               <span className="chip-actions">
-                <button onClick={(e) => { e.stopPropagation(); onConfigEdit(cfg) }}>??</button>
+                <button onClick={(e) => { e.stopPropagation(); onConfigEdit(cfg) }}>配置</button>
               </span>
             )}
           </span>
@@ -39,9 +39,9 @@ export function ServerCategoryChips({ items, itemConfigs, selected, onChange, on
       {items.length > 0 && (
         <>
           <div className="toolbar-divider" />
-          <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => onChange(items.map((x: any) => x.code))}>??</button>
-          <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => onChange([])}>??</button>
-          <span className="toolbar-summary" style={{ marginLeft: 'auto' }}><strong>{selected.length}</strong> / {items.length} ??</span>
+          <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => onChange(items.map((x: any) => x.code))}>全选</button>
+          <button className="btn btn-subtle" style={{ padding: '3px 10px', fontSize: 11 }} onClick={() => onChange([])}>清空</button>
+          <span className="toolbar-summary" style={{ marginLeft: 'auto' }}><strong>{selected.length}</strong> / {items.length} 已选</span>
         </>
       )}
     </div>

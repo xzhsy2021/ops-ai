@@ -737,6 +737,15 @@ async def update_system_service_v2(system_name: str, service_name: str, payload:
         if repo.get_by_name(new_name, system_name):
             raise HTTPException(status_code=409, detail=f"Service already exists: {new_name}")
         existing.name = new_name
+        # 同步迁移环境级服务覆盖引用（service_overrides 以服务名为 key）
+        from app.db.models import SystemEnvironment
+        for env_row in db.query(SystemEnvironment).filter(
+            SystemEnvironment.system_name == system_name,
+        ).all():
+            overrides = dict(env_row.service_overrides or {})
+            if service_name in overrides and new_name not in overrides:
+                overrides[new_name] = overrides.pop(service_name)
+                env_row.service_overrides = overrides
     existing.display_name = updated_payload.get("display_name") or new_name
     existing.template = updated_payload.get("template") or existing.template
     existing.repo = updated_payload.get("repo") or existing.repo

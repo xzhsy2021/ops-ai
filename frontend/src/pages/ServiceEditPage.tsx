@@ -152,13 +152,12 @@ export default function ServiceEditPage() {
             <input
               style={inputStyle}
               value={form.name}
-              disabled={!!serviceName}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder="crypto-frontend"
             />
             {!!serviceName && (
               <div style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '4px' }}>
-                服务名创建后不可修改
+                修改名称会同步更新环境级服务覆盖配置；若新名称已被占用将被拒绝
               </div>
             )}
           </div>
@@ -271,7 +270,37 @@ export default function ServiceEditPage() {
             </div>
             {(form.servers || []).length > 0 && (
               <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                已选: {(form.servers || []).join(', ')}
+                已选服务器：
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
+                  {form.servers.map((srv) => {
+                    const missing = !allServers.includes(srv)
+                    return (
+                      <span
+                        key={srv}
+                        title={missing ? '该服务器不在资产中，点击 × 移除' : '点击 × 移除'}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '6px',
+                          padding: '2px 8px', borderRadius: '4px',
+                          background: missing ? 'var(--danger-surface)' : 'var(--action-bg)',
+                          border: missing ? '1px solid var(--danger-border)' : '1px solid transparent',
+                          color: missing ? 'var(--danger)' : 'var(--text-primary)',
+                        }}
+                      >
+                        {srv}
+                        {missing && <span style={{ fontSize: '11px' }}>（资产中不存在）</span>}
+                        <button
+                          type="button"
+                          onClick={() => toggleServer(srv)}
+                          aria-label={`移除 ${srv}`}
+                          style={{
+                            cursor: 'pointer', border: 'none', background: 'transparent',
+                            color: 'inherit', fontSize: '12px', padding: 0, lineHeight: 1,
+                          }}
+                        >×</button>
+                      </span>
+                    )
+                  })}
+                </div>
               </div>
             )}
           </div>

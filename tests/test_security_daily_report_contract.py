@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
@@ -155,6 +156,7 @@ def test_security_daily_report_tools_registered(tmp_path):
         assert len(tool["recommended_use_cases"]) >= 3
         assert len(tool["example_prompts"]) >= 3
         assert "登录失败" in tool["keywords"]
+        assert tool["force_taskize"] is True
     finally:
         db.close()
         engine.dispose()
@@ -178,4 +180,90 @@ def test_inspection_page_has_security_daily_entry():
 
     assert '@router.post("/security-daily/collect")' in inspection_api
     assert '@router.get("/security-daily/reports")' in inspection_api
-    assert "collect_all(db, report_date=payload.report_date or None" in inspection_api
+    assert "enqueue_tool_job" in inspection_api
+    assert "ops.inspection.run_security_daily" in inspection_api
+
+
+def test_security_daily_mcp_call_is_taskized(tmp_path, monkeypatch):
+    """MCP/AI 调用 run_security_daily 时走统一任务中心，立即返回 job_id，不阻塞请求线程。"""
+    import app.services.job_service as js
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    try:
+        captured = {}
+
+        def _fake_enqueue(db_arg, *, tool_def, arguments, ctx, policy_result, auto_start=True):
+            captured["tool"] = tool_def.name
+            captured["args"] = arguments
+            return {"id": "job-mcp-1", "status": "queued", "progress": 0}
+
+        monkeypatch.setattr(js, "enqueue_tool_job", _fake_enqueue)
+        register_builtin_tools()
+        ctx = ToolContext(username="qclaw-ai", auth_type="tool_token", token_owner="qclaw",
+                          is_admin=False, scopes=["ops:read", "ops:write"], allow_write=True)
+        result = registry.call(
+            db,
+            "ops.inspection.run_security_daily",
+            {"confirm_text": "CONFIRM ops.inspection.run_security_daily"},
+            ctx,
+        )
+        assert result.get("job_id") == "job-mcp-1"
+        assert captured["tool"] == "ops.inspection.run_security_daily"
+        assert "confirm_text" in captured["args"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_security_daily_job_executes_in_background(tmp_path, monkeypatch):
+    """提交的任务由后台线程执行安全日报采集，进度写入任务中心，不阻塞调用方。"""
+    import app.services.job_service as js
+    import app.services.security_daily as sd
+    from app.db.models import OperationJob
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    def _fake_collect_all(db_arg, report_date=None, *, persist_risks=True, **kw):
+        return {
+            "report_date": report_date or "2026-08-19",
+            "servers": [{"name": "web01"}],
+            "results": [{"server": "web01", "ok": True, "status": "ok", "max_risk": "LOW"}],
+            "summary": {"server_count": 1, "ok_count": 1, "failed_count": 0, "high_count": 0},
+            "archive": {},
+        }
+
+    monkeypatch.setattr(sd, "collect_all", _fake_collect_all)
+    engine, Session = _sqlite_session(tmp_path)
+    db = Session()
+    try:
+        monkeypatch.setattr(js, "SessionLocal", Session)
+        register_builtin_tools()
+        tool = registry.get("ops.inspection.run_security_daily")
+        ctx = ToolContext(username="tester", auth_type="session", is_admin=True,
+                          scopes=["*"], allow_write=True)
+        job = js.enqueue_tool_job(
+            db,
+            tool_def=tool,
+            arguments={"confirm_text": "CONFIRM ops.inspection.run_security_daily"},
+            ctx=ctx,
+            policy_result={},
+        )
+        job_id = job["id"]
+        status = ""
+        row = None
+        for _ in range(100):
+            db.expire_all()
+            row = db.query(OperationJob).filter(OperationJob.id == job_id).first()
+            status = row.status if row else ""
+            if status in ("success", "failed"):
+                break
+            time.sleep(0.05)
+        assert status == "success"
+        result = (row.result_json or {}).get("result") or {}
+        assert (result.get("summary") or {}).get("ok_count") == 1
+    finally:
+        db.close()
+        engine.dispose()

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { inspection, reports } from '../api'
+import { inspection, reports, taskCenter } from '../api'
 import { ROUTES } from '../routes'
 import { EmptyState, FavoriteButton, RiskBadge, RiskConfirmDialog, StatusBadge } from '../components/ui'
 import { DEFAULT_PAGE_SIZE, PaginationControls } from './inspection/PaginationControls'
@@ -100,6 +100,7 @@ export default function InspectionCenterPage() {
   const [secDailyReports, setSecDailyReports] = useState<any[]>([])
   const [secDailyReportsTotal, setSecDailyReportsTotal] = useState(0)
   const [secDailyLoading, setSecDailyLoading] = useState(false)
+  const [secDailyJob, setSecDailyJob] = useState<any>(null)
 
   async function loadBase() {
     setLoading(true)
@@ -688,15 +689,45 @@ export default function InspectionCenterPage() {
     setSecDailyLoading(true); setError(''); setMessage('')
     try {
       const res: any = await inspection.securityDailyCollect({})
-      setSecDailyResult(res.data)
-      const s = res.data?.summary || {}
-      const failed = s.failed_count || 0
-      const high = s.high_count || 0
-      setMessage(`安全日报采集完成：共 ${s.server_count || 0} 台服务器，成功 ${s.ok_count || 0}，失败 ${failed}，高危 ${high}。`)
-      await reloadSecurityDailyReports()
+      const job = res.data?.job || {}
+      setSecDailyResult(null)
+      setSecDailyJob({ id: job?.id, status: job?.status || 'queued', progress: Number(job?.progress || 0), result: null })
+      setMessage('安全日报巡检已提交后台任务，正在后台逐台采集，可查看实时进度。')
     } catch (e: any) { setError(e?.message || String(e)) }
     finally { setSecDailyLoading(false) }
   }
+
+  useEffect(() => {
+    const jobId = secDailyJob?.id
+    if (!jobId) return
+    let disposed = false
+    const poll = async () => {
+      try {
+        const res: any = await taskCenter.detail('tool', jobId)
+        const j = res?.data || res
+        if (disposed || !j?.id) return
+        const st = String(j.status || 'running')
+        if (st === 'success') {
+          const raw = j?.result?.result || j?.result || null
+          setSecDailyJob((prev: any) => ({ ...prev, status: st, progress: 100, result: raw }))
+          setSecDailyResult(raw)
+          const s = (raw && raw.summary) || {}
+          setMessage(`安全日报采集完成：共 ${s.server_count || 0} 台服务器，成功 ${s.ok_count || 0}，失败 ${s.failed_count || 0}，高危 ${s.high_count || 0}。`)
+          await reloadSecurityDailyReports()
+          return
+        }
+        if (st === 'failed') {
+          setSecDailyJob((prev: any) => ({ ...prev, status: st, progress: 100, error: j?.error_message }))
+          setError(`安全日报巡检失败：${j?.error_message || '未知错误'}`)
+          return
+        }
+        setSecDailyJob((prev: any) => ({ ...prev, status: st, progress: Number(j?.progress || prev?.progress || 0) }))
+      } catch { /* transient; keep polling */ }
+    }
+    poll()
+    const t = window.setInterval(poll, 3000)
+    return () => { disposed = true; window.clearInterval(t) }
+  }, [secDailyJob?.id])
 
   useEffect(() => { loadBase() }, [])
   useEffect(() => { reloadIssues().catch(() => undefined) }, [issueFilter, issueOffset, issuePageSize])
@@ -1358,7 +1389,16 @@ export default function InspectionCenterPage() {
               <h2 style={{ margin: 0 }}>安全日报巡检</h2>
               <p className="muted" style={{ margin: '4px 0 0' }}>单独采集已启用安全监控模块的服务器每日安全日报（aureport 登录记录/失败次数/账户变更/fail2ban 封禁/系统负载），写入风险台账并归档到报告中心。</p>
             </div>
-            <button className="btn primary" onClick={runSecurityDaily} disabled={secDailyLoading}>{secDailyLoading ? '采集中...' : '采集安全日报'}</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {secDailyJob?.id && (
+                <div className="mini-card" style={{ margin: 0, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <StatusBadge value={secDailyJob.status} />
+                  <span style={{ fontSize: 12 }} className="muted">{secDailyJob.status === 'success' ? '已完成' : secDailyJob.status === 'failed' ? '失败' : `执行中 ${secDailyJob.progress || 0}%`}</span>
+                  {secDailyJob.id && <a style={{ fontSize: 12 }} href={`/tasks?kind=tool&job=${secDailyJob.id}`} target="_blank" rel="noreferrer">任务中心查看</a>}
+                </div>
+              )}
+              <button className="btn primary" onClick={runSecurityDaily} disabled={secDailyLoading}>{secDailyLoading ? '提交中...' : '采集安全日报'}</button>
+            </div>
           </div>
 
           {secDailyResult?.summary && (

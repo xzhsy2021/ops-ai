@@ -796,12 +796,42 @@ def security_daily_reports(request: Request, report_date: str = "", server_name:
 
 @router.post("/security-daily/collect")
 def security_daily_collect(payload: SecurityDailyCollectPayload, request: Request, db: Session = Depends(get_db)):
-    """单独触发一次安全日报巡检：采集已启用安全监控模块的服务器日报、写入风险台账并归档。"""
-    user = require_auth(request, db)
-    from app.services.security_daily import collect_all
+    """单独触发一次安全日报巡检：提交后台任务采集日报、写入风险台账并归档，立即返回任务 ID。
 
-    result = collect_all(db, report_date=payload.report_date or None, persist_risks=payload.persist_risks)
-    summary = result.get("summary") or {}
-    audit("inspection.security_daily.collect", "inspection", result.get("report_date", ""),
-          f"user={user.get('username')} servers={summary.get('server_count')} high={summary.get('high_count')} failed={summary.get('failed_count')}")
-    return api_response(data=result, message="安全日报采集完成")
+    采集为多台服务器现场 SSH 执行的耗时操作，改为统一任务中心后台执行，
+    避免阻塞请求线程；进度与结果可在任务中心查看。
+    """
+    user = require_auth(request, db)
+    from app.services.job_service import enqueue_tool_job
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    register_builtin_tools()
+    tool = registry.get("ops.inspection.run_security_daily")
+    ctx = ToolContext(
+        username=user.get("username") or "",
+        user_id=user.get("id") or "",
+        role="operator" if user.get("is_admin") else "user",
+        is_admin=bool(user.get("is_admin")),
+        can_deploy=bool(user.get("can_deploy")),
+        auth_type="session",
+        scopes=["*"],
+        allow_write=True,
+        allow_prod=bool(user.get("is_admin")),
+        client_name="ops-web-session",
+        ip_address=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", "") if request else "",
+    )
+    args = {
+        "report_date": payload.report_date or None,
+        "persist_risks": payload.persist_risks,
+        "confirm_text": "CONFIRM ops.inspection.run_security_daily",
+    }
+    job = enqueue_tool_job(db, tool_def=tool, arguments=args, ctx=ctx, policy_result={})
+    audit("inspection.security_daily.collect", "inspection", job.get("id", ""),
+          f"user={user.get('username')} job={job.get('id')}")
+    return api_response(
+        data={"job_id": job.get("id"), "job": job, "status": job.get("status"),
+              "task_center_url": f"/tasks?kind=tool&job={job.get('id')}"},
+        message="安全日报巡检已提交后台任务，可在任务中心查看进度",
+    )

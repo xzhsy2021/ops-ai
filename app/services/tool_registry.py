@@ -42,6 +42,7 @@ class ToolDefinition:
     recommended_use_cases: List[str] | None = None
     example_prompts: List[str] | None = None
     related_tools: List[str] | None = None
+    force_taskize: bool = False
 
     def to_public_dict(
         self,
@@ -69,6 +70,7 @@ class ToolDefinition:
             "recommended_use_cases": self.recommended_use_cases or [],
             "example_prompts": self.example_prompts or [],
             "related_tools": self.related_tools or [],
+            "force_taskize": self.force_taskize,
         }
         try:
             from app.services.tool_policy import ai_tool_level
@@ -365,6 +367,7 @@ class ToolRegistry:
         recommended_use_cases: List[str] | None = None,
         example_prompts: List[str] | None = None,
         related_tools: List[str] | None = None,
+        force_taskize: bool = False,
     ):
         def deco(fn: ToolHandler):
             self._tools[name] = ToolDefinition(
@@ -391,6 +394,7 @@ class ToolRegistry:
                 recommended_use_cases=recommended_use_cases,
                 example_prompts=example_prompts,
                 related_tools=related_tools,
+                force_taskize=force_taskize,
             )
             return fn
         return deco

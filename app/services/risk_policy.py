@@ -226,6 +226,7 @@ def evaluate_risk_policy(tool_def, args: Optional[Dict[str, Any]] = None, *, ctx
     risk = normalize_risk(getattr(tool_def, "risk", "low"), write=write)
     category = str(getattr(tool_def, "category", "read") or "read")
     requires_confirmation = bool(getattr(tool_def, "requires_confirmation", False))
+    force_taskize = bool(getattr(tool_def, "force_taskize", False))
     reasons: List[str] = []
 
     require_confirmation_globally = bool(settings.get("require_confirmation", True))
@@ -253,7 +254,10 @@ def evaluate_risk_policy(tool_def, args: Optional[Dict[str, Any]] = None, *, ctx
     if dry_run:
         reasons.append("dry_run=true，仅预览不执行破坏性操作")
 
-    must_create_job = bool(settings.get("taskize_high_risk_tools", True) and write and not dry_run and is_at_least(risk, JOB_REQUIRED_FROM))
+    must_create_job = bool(
+        force_taskize
+        or (settings.get("taskize_high_risk_tools", True) and write and not dry_run and is_at_least(risk, JOB_REQUIRED_FROM))
+    )
     can_auto_execute = bool(not confirmation_required and (not write or risk in {"read", "low"} or dry_run))
 
     next_actions: List[Dict[str, Any]] = []

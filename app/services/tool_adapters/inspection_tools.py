@@ -643,6 +643,7 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
     risk="medium",
     category="inspection_execute",
     write=True,
+    force_taskize=True,
     requires_confirmation=True,
     ai_callable=True,
     ai_auto_callable=False,

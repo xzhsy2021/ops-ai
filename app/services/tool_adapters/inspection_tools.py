@@ -627,6 +627,68 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
     return result
 
 
+@registry.register(
+    name="ops.inspection.run_security_daily",
+    title="执行安全日报巡检",
+    description=(
+        "单独触发一次每日安全日报巡检：现场采集所有已启用安全监控模块服务器的安全日报"
+        "（aureport 登录记录/失败次数/账户变更/fail2ban 封禁/系统负载），评估风险并写入风险台账，"
+        "聚合归档为每日安全巡检日报。返回各服务器逐台结果与汇总。"
+        "中文: 安全日报巡检/每日安全巡检/采集安全日报/安全日报. "
+    ),
+    scopes=["ops:read", "ops:write"],
+    risk="medium",
+    category="inspection_execute",
+    write=True,
+    requires_confirmation=True,
+    ai_callable=True,
+    ai_auto_callable=False,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.security_report.summarize", "ops.security_report.collect",
+                   "ops.inspection.run_server", "ops.inspection.list_runs"],
+    keywords=["安全日报巡检", "每日安全巡检", "采集安全日报", "安全日报", "security daily"],
+    example_prompts=["执行一次安全日报巡检并列出高危服务器"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "report_date": {"type": "string", "description": "采集指定日期 YYYY-MM-DD，缺省=今天"},
+            "persist_risks": {"type": "boolean", "default": True,
+                              "description": "是否将高风险项写入风险台账"},
+            "confirm_text": {"type": "string",
+                             "description": "确认短语：CONFIRM ops.inspection.run_security_daily"},
+        },
+        "additionalProperties": False,
+    },
+)
+def run_security_daily(args: Dict[str, Any], ctx, db):
+    from app.services.security_daily import collect_all
+
+    args = args or {}
+    report_date = args.get("report_date") or None
+    persist_risks = bool(args.get("persist_risks", True))
+    result = collect_all(db, report_date=report_date, persist_risks=persist_risks)
+    summary = result.get("summary") or {}
+    return {
+        "ok": True,
+        "report_date": result.get("report_date"),
+        "server_count": summary.get("server_count", 0),
+        "ok_count": summary.get("ok_count", 0),
+        "failed_count": summary.get("failed_count", 0),
+        "high_count": summary.get("high_count", 0),
+        "medium_count": summary.get("medium_count", 0),
+        "login_failures_total": summary.get("login_failures_total", 0),
+        "banned_ips_total": summary.get("banned_ips_total", 0),
+        "summary": summary,
+        "results": result.get("results") or [],
+        "archive": result.get("archive") or {},
+        "next_actions": [
+            {"tool": "ops.security_report.summarize", "arguments": {"report_date": result.get("report_date")},
+             "description": "汇总安全日报风险项供 AI 分析。"},
+        ],
+    }
+
+
 # ============ 巡检记录 / 风险问题 清理（解决孤儿 RUNNING 记录 & 风险问题清理） ============
 
 

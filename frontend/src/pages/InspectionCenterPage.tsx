@@ -18,7 +18,7 @@ import { ServerCategoryChips } from './inspection/ServerCategoryChips'
 import { ServerAdvancedSettings } from './inspection/ServerAdvancedSettings'
 import DiagnosisCard from '../components/v10/DiagnosisCard'
 
-type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules'
+type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules' | 'security'
 
 export default function InspectionCenterPage() {
   const [tab, setTab] = useState<TabKey>('overview')
@@ -90,6 +90,10 @@ export default function InspectionCenterPage() {
     originalCode: '',
     form: {},
   })
+  const [secDailyResult, setSecDailyResult] = useState<any>(null)
+  const [secDailyReports, setSecDailyReports] = useState<any[]>([])
+  const [secDailyReportsTotal, setSecDailyReportsTotal] = useState(0)
+  const [secDailyLoading, setSecDailyLoading] = useState(false)
 
   async function loadBase() {
     setLoading(true)
@@ -666,6 +670,28 @@ export default function InspectionCenterPage() {
     } catch (e: any) { setError(e?.message || String(e)) }
   }
 
+  async function reloadSecurityDailyReports() {
+    try {
+      const res: any = await inspection.securityDailyReports({ limit: 200, offset: 0 })
+      setSecDailyReports(res.data?.items || [])
+      setSecDailyReportsTotal(Number(res.data?.total || 0))
+    } catch (e: any) { setError(e?.message || String(e)) }
+  }
+
+  async function runSecurityDaily() {
+    setSecDailyLoading(true); setError(''); setMessage('')
+    try {
+      const res: any = await inspection.securityDailyCollect({})
+      setSecDailyResult(res.data)
+      const s = res.data?.summary || {}
+      const failed = s.failed_count || 0
+      const high = s.high_count || 0
+      setMessage(`安全日报采集完成：共 ${s.server_count || 0} 台服务器，成功 ${s.ok_count || 0}，失败 ${failed}，高危 ${high}。`)
+      await reloadSecurityDailyReports()
+    } catch (e: any) { setError(e?.message || String(e)) }
+    finally { setSecDailyLoading(false) }
+  }
+
   useEffect(() => { loadBase() }, [])
   useEffect(() => { reloadIssues().catch(() => undefined) }, [issueFilter, issueOffset, issuePageSize])
   useEffect(() => { reloadRules().catch(() => undefined) }, [ruleFilter, ruleScopeFilter, ruleRiskFilter, ruleOffset, rulePageSize])
@@ -673,6 +699,7 @@ export default function InspectionCenterPage() {
   useEffect(() => { reloadProjectRelations().catch(() => undefined) }, [projectId])
   useEffect(() => { reloadLedger().catch(() => undefined) }, [ledgerPeriod, ledgerOffset, ledgerPageSize])
   useEffect(() => { reloadInspectionReports().catch(() => undefined) }, [reportOffset, reportPageSize])
+  useEffect(() => { reloadSecurityDailyReports().catch(() => undefined) }, [])
 
   useEffect(() => {
     if (activeRunIds.length === 0) return
@@ -801,6 +828,7 @@ export default function InspectionCenterPage() {
           ['ledger', '台账报表', inspectionReportsTotal || 0],
           ['issues', '风险问题', issuesTotal || 0],
           ['rules', '巡检规则', rulesTotal || 0],
+          ['security', '安全日报', secDailyReportsTotal || 0],
         ].map(([key, label, count]) => <button key={key as string} className={`cc-tab${tab === key ? ' cc-tab--active' : ''}`} onClick={() => setTab(key as TabKey)}>{label}<small>{count as number}</small></button>)}
       </nav>
 
@@ -1314,6 +1342,74 @@ export default function InspectionCenterPage() {
               </div>
             </div>
           )}
+        </section>
+      )}
+
+      {tab === 'security' && (
+        <section className="panel-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div>
+              <h2 style={{ margin: 0 }}>安全日报巡检</h2>
+              <p className="muted" style={{ margin: '4px 0 0' }}>单独采集已启用安全监控模块的服务器每日安全日报（aureport 登录记录/失败次数/账户变更/fail2ban 封禁/系统负载），写入风险台账并归档到报告中心。</p>
+            </div>
+            <button className="btn primary" onClick={runSecurityDaily} disabled={secDailyLoading}>{secDailyLoading ? '采集中...' : '采集安全日报'}</button>
+          </div>
+
+          {secDailyResult?.summary && (
+            <div className="stats-grid" style={{ marginTop: 12 }}>
+              <div className="stat-card"><span>服务器</span><strong>{secDailyResult.summary.server_count || 0}</strong><small>本次采集</small></div>
+              <div className="stat-card"><span>成功</span><strong>{secDailyResult.summary.ok_count || 0}</strong><small>已入库</small></div>
+              <div className="stat-card"><span>失败</span><strong>{secDailyResult.summary.failed_count || 0}</strong><small>采集异常</small></div>
+              <div className="stat-card"><span>高危</span><strong>{secDailyResult.summary.high_count || 0}</strong><small>最高风险 HIGH</small></div>
+              <div className="stat-card"><span>登录失败</span><strong>{secDailyResult.summary.login_failures_total || 0}</strong><small>合计</small></div>
+              <div className="stat-card"><span>封禁 IP</span><strong>{secDailyResult.summary.banned_ips_total || 0}</strong><small>合计</small></div>
+            </div>
+          )}
+
+          {(secDailyResult?.results || []).length > 0 && (
+            <div className="table-scroll" style={{ marginTop: 12 }}>
+              <strong>本次采集明细</strong>
+              <table className="data-table">
+                <thead><tr><th style={{ minWidth: 140 }}>服务器</th><th style={{ width: 70 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ width: 60 }}>巡检项</th><th style={{ width: 80 }}>登录失败</th><th style={{ width: 80 }}>封禁IP</th><th style={{ width: 90 }}>负载</th><th style={{ minWidth: 200 }}>风险原因</th></tr></thead>
+                <tbody>
+                  {(secDailyResult.results || []).map((r: any) => (
+                    <tr key={r.server}>
+                      <td>{r.server}</td>
+                      <td>{r.ok ? '成功' : (r.status || '失败')}</td>
+                      <td><RiskBadge level={r.max_risk} label={r.max_risk || '-'} /></td>
+                      <td>{r.items_count ?? '-'}</td>
+                      <td>{(r.summary || {}).login_failures ?? '-'}</td>
+                      <td>{(r.summary || {}).banned_ips ?? '-'}</td>
+                      <td>{(r.summary || {}).load_avg ?? '-'}</td>
+                      <td><div style={{ wordBreak: 'break-word' }}>{(r.reasons || []).join('；') || '-'}</div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="table-scroll" style={{ marginTop: 12 }}>
+            <strong>已采集日报历史（{secDailyReportsTotal}）</strong>
+            <table className="data-table">
+              <thead><tr><th style={{ width: 110 }}>日期</th><th style={{ minWidth: 140 }}>服务器</th><th style={{ width: 70 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ width: 80 }}>登录失败</th><th style={{ width: 80 }}>封禁IP</th><th style={{ width: 90 }}>负载</th><th style={{ width: 90 }}>报告</th></tr></thead>
+              <tbody>
+                {secDailyReports.length === 0 ? <tr><td colSpan={8}>暂无安全日报记录，点击上方“采集安全日报”开始。</td></tr> :
+                  secDailyReports.map((r: any) => (
+                    <tr key={r.id}>
+                      <td>{r.report_date}</td>
+                      <td>{r.server_name}</td>
+                      <td>{r.status === 'ok' ? '正常' : (r.status || '-')}</td>
+                      <td><RiskBadge level={r.max_risk} label={r.max_risk || '-'} /></td>
+                      <td>{(r.summary || {}).login_failures ?? '-'}</td>
+                      <td>{(r.summary || {}).banned_ips ?? '-'}</td>
+                      <td>{(r.summary || {}).load_avg ?? '-'}</td>
+                      <td>{r.artifact_id ? <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/view?as=html`} target="_blank" rel="noreferrer">查看</a> : '-'}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 

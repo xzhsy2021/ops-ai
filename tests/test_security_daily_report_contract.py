@@ -148,6 +148,28 @@ def test_security_daily_report_tools_registered(tmp_path):
         assert "ops.security_report.summarize" in tools
         assert "ops.security_report.collect" in tools
         assert "ops.security_module.install" in tools
+        assert "ops.inspection.run_security_daily" in tools
     finally:
         db.close()
         engine.dispose()
+
+
+def test_inspection_page_has_security_daily_entry():
+    """巡检中心页面提供「安全日报」独立入口，可单独触发安全日报采集并展示历史。"""
+    page = open("frontend/src/pages/InspectionCenterPage.tsx", encoding="utf-8").read()
+    api = open("frontend/src/api.ts", encoding="utf-8").read()
+    inspection_api = open("app/api/inspection.py", encoding="utf-8").read()
+
+    assert "'security'" in page  # TabKey 含安全日报
+    assert "'安全日报'" in page
+    assert "runSecurityDaily" in page
+    assert "secDailyResult" in page
+    assert "securityDailyCollect" in page
+    assert "securityDailyReports" in page
+
+    assert "securityDailyCollect: (data?: { report_date?: string; persist_risks?: boolean }) => api.post('/inspection/security-daily/collect', data || {})" in api
+    assert "securityDailyReports" in api
+
+    assert '@router.post("/security-daily/collect")' in inspection_api
+    assert '@router.get("/security-daily/reports")' in inspection_api
+    assert "collect_all(db, report_date=payload.report_date or None" in inspection_api

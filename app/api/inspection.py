@@ -757,3 +757,51 @@ def thresholds_save(payload: dict, request: Request, db: Session = Depends(get_d
     db.refresh(cfg)
     audit("inspection.threshold.update", "inspection_item_config", cfg.id, f"user={user.get('username')} category={category}")
     return api_response(data={"category": category, "thresholds": current["thresholds"]}, message="阈值已更新")
+
+
+class SecurityDailyCollectPayload(BaseModel):
+    report_date: str = Field(default="", description="采集指定日期 YYYY-MM-DD，缺省=今天")
+    persist_risks: bool = Field(default=True)
+
+
+@router.get("/security-daily/reports")
+def security_daily_reports(request: Request, report_date: str = "", server_name: str = "", limit: int = 200, offset: int = 0, db: Session = Depends(get_db)):
+    """查询已采集的每日安全日报记录（安全日报巡检入口的历史展示）。"""
+    require_auth(request, db)
+    from app.db.models import SecurityDailyReport
+
+    q = db.query(SecurityDailyReport)
+    if report_date:
+        q = q.filter(SecurityDailyReport.report_date == report_date)
+    if server_name:
+        q = q.filter(SecurityDailyReport.server_name == server_name)
+    total = q.count()
+    rows = q.order_by(
+        SecurityDailyReport.report_date.desc(),
+        SecurityDailyReport.created_at.desc(),
+    ).offset(offset).limit(limit).all()
+    items = [{
+        "id": r.id,
+        "server_name": r.server_name,
+        "report_date": r.report_date,
+        "status": r.status,
+        "max_risk": r.max_risk,
+        "summary": r.summary or {},
+        "artifact_id": r.artifact_id,
+        "error": r.error,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
+    return api_response(data={"items": items, "total": total})
+
+
+@router.post("/security-daily/collect")
+def security_daily_collect(payload: SecurityDailyCollectPayload, request: Request, db: Session = Depends(get_db)):
+    """单独触发一次安全日报巡检：采集已启用安全监控模块的服务器日报、写入风险台账并归档。"""
+    user = require_auth(request, db)
+    from app.services.security_daily import collect_all
+
+    result = collect_all(db, report_date=payload.report_date or None, persist_risks=payload.persist_risks)
+    summary = result.get("summary") or {}
+    audit("inspection.security_daily.collect", "inspection", result.get("report_date", ""),
+          f"user={user.get('username')} servers={summary.get('server_count')} high={summary.get('high_count')} failed={summary.get('failed_count')}")
+    return api_response(data=result, message="安全日报采集完成")

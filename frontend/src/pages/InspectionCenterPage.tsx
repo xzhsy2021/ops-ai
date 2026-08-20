@@ -679,7 +679,7 @@ export default function InspectionCenterPage() {
 
   async function reloadSecurityDailyReports() {
     try {
-      const res: any = await inspection.securityDailyReports({ limit: 200, offset: 0 })
+      const res: any = await inspection.securityDailyReports({ group_by: 'date', limit: 200, offset: 0 })
       setSecDailyReports(res.data?.items || [])
       setSecDailyReportsTotal(Number(res.data?.total || 0))
     } catch (e: any) { setError(e?.message || String(e)) }
@@ -1436,23 +1436,37 @@ export default function InspectionCenterPage() {
           )}
 
           <div className="table-scroll" style={{ marginTop: 12 }}>
-            <strong>已采集日报历史（{secDailyReportsTotal}）</strong>
+            <strong>已采集日报历史（按执行日期，共 {secDailyReportsTotal} 期）</strong>
             <table className="data-table">
-              <thead><tr><th style={{ width: 110 }}>日期</th><th style={{ minWidth: 140 }}>服务器</th><th style={{ width: 70 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ width: 80 }}>登录失败</th><th style={{ width: 80 }}>封禁IP</th><th style={{ width: 90 }}>负载</th><th style={{ width: 90 }}>报告</th></tr></thead>
+              <thead><tr><th style={{ width: 110 }}>执行日期</th><th style={{ width: 80 }}>服务器数</th><th style={{ width: 70 }}>成功</th><th style={{ width: 70 }}>失败</th><th style={{ width: 80 }}>风险</th><th style={{ width: 90 }}>登录失败</th><th style={{ width: 90 }}>封禁IP</th><th style={{ minWidth: 140 }}>巡检服务器</th><th style={{ minWidth: 240 }}>报告（查看 / 下载）</th></tr></thead>
               <tbody>
-                {secDailyReports.length === 0 ? <tr><td colSpan={8}>暂无安全日报记录，点击上方“采集安全日报”开始。</td></tr> :
-                  secDailyReports.map((r: any) => (
-                    <tr key={r.id}>
-                      <td>{r.report_date}</td>
-                      <td>{r.server_name}</td>
-                      <td>{r.status === 'ok' ? '正常' : (r.status || '-')}</td>
-                      <td><RiskBadge level={r.max_risk} label={r.max_risk || '-'} /></td>
-                      <td>{(r.summary || {}).login_failures ?? '-'}</td>
-                      <td>{(r.summary || {}).banned_ips ?? '-'}</td>
-                      <td>{fmtLoadAvg((r.summary || {}).load_avg)}</td>
-                      <td>{r.artifact_id ? <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/view?as=html`} target="_blank" rel="noreferrer">查看</a> : '-'}</td>
-                    </tr>
-                  ))}
+                {secDailyReports.length === 0 ? <tr><td colSpan={9}>暂无安全日报记录，点击上方“采集安全日报”开始。</td></tr> :
+                  secDailyReports.map((r: any) => {
+                    const servers: string[] = Array.isArray(r.servers) ? r.servers : []
+                    const serverPreview = servers.length > 3 ? `${servers.slice(0, 3).join(', ')} 等 ${servers.length} 台` : servers.join(', ')
+                    return (
+                      <tr key={r.report_date || r.id}>
+                        <td>{r.report_date}</td>
+                        <td>{r.server_count ?? '-'}</td>
+                        <td style={{ color: 'var(--success, #38a169)' }}>{r.ok_count ?? '-'}</td>
+                        <td style={{ color: 'var(--danger, #e53e3e)' }}>{r.failed_count ?? '-'}</td>
+                        <td><RiskBadge level={r.max_risk} label={r.max_risk || '-'} /></td>
+                        <td>{r.login_failures_total ?? '-'}</td>
+                        <td>{r.banned_ips_total ?? '-'}</td>
+                        <td>{servers.length > 0 ? <span title={`${servers.join(', ')}`}>{serverPreview}</span> : '-'}</td>
+                        <td>
+                          {r.artifact_id ? (
+                            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                              <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/view?as=html`} target="_blank" rel="noreferrer" title="在线查看 HTML 报告">查看 HTML</a>
+                              <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/download?as=html`} title="下载 HTML 报告">下载 HTML</a>
+                              <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/view?as=md`} target="_blank" rel="noreferrer" title="在线查看 Markdown 报告">查看 MD</a>
+                              <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/download?as=md`} title="下载 Markdown 报告">下载 MD</a>
+                            </div>
+                          ) : '-'}
+                        </td>
+                      </tr>
+                    )
+                  })}
               </tbody>
             </table>
           </div>

@@ -469,18 +469,29 @@ def aggregate_and_archive(db: Session, results: List[Dict[str, Any]], *,
     archived: Dict[str, Any] = {}
     if ok:
         try:
-            archived = generate_report_from_payload(
+            archived_md = generate_report_from_payload(
                 db, payload, report_type="security_daily",
                 target_id=report_date, fmt="md",
                 title=f"每日安全巡检日报 {report_date}", created_by=created_by,
             )
-            artifact_id = archived.get("report", {}).get("id")
+            archived_html = generate_report_from_payload(
+                db, payload, report_type="security_daily",
+                target_id=report_date, fmt="html",
+                title=f"每日安全巡检日报 {report_date}", created_by=created_by,
+            )
+            # 回写 html artifact id（查看/下载默认 as=html；_resolve_report 会按 format 找兄弟）
+            artifact_id = (archived_html.get("report") or {}).get("id") \
+                or (archived_md.get("report") or {}).get("id")
             if artifact_id:
                 db.query(SecurityDailyReport).filter(
                     SecurityDailyReport.report_date == report_date,
                 ).update({SecurityDailyReport.artifact_id: artifact_id},
                          synchronize_session=False)
                 db.commit()
+            archived = {
+                "md": (archived_md.get("report") or {}).get("id"),
+                "html": (archived_html.get("report") or {}).get("id"),
+            }
         except Exception as exc:  # 归档失败不影响采集结果
             logger.warning("security_daily archive failed: %s", exc)
             archived = {"error": str(exc)}

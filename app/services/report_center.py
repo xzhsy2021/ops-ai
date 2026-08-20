@@ -65,7 +65,7 @@ REPORT_TYPES = {
         "title": "每日安全巡检日报",
         "target_type": "server",
         "description": "服务器每日安全巡检日报：登录记录、登录失败、账户变更、fail2ban 封禁、系统负载。由安全日报采集器生成。",
-        "formats": ["json", "md"],
+        "formats": ["json", "md", "html"],
         "can_generate": False,
     },
 }
@@ -1040,6 +1040,135 @@ def _generic_markdown(title: str, payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _security_daily_markdown(title: str, payload: Dict[str, Any]) -> str:
+    """安全日报 Markdown 报告：摘要 + 巡检到的服务器清单明细。"""
+    summary = payload.get("summary") or {}
+    servers = payload.get("servers") or []
+    metadata = payload.get("metadata") or {}
+    lines = [
+        f"# {title}", "",
+        f"- 报告日期：{payload.get('report_date') or summary.get('report_date') or '-'}",
+        f"- 生成时间：{payload.get('generated_at') or '-'}",
+        f"- 服务器数：{len(servers)} 台（成功 {summary.get('ok_count', 0)} / 失败 {summary.get('failed_count', 0)}）",
+        "",
+    ]
+    if isinstance(summary, dict) and summary:
+        lines.extend(["## 摘要", "", "| 字段 | 值 |", "|---|---|"])
+        for key, value in summary.items():
+            if key == "report_date":
+                continue
+            lines.append(f"| {_table_value(key)} | {_table_value(value)} |")
+        lines.append("")
+    lines.extend(["## 巡检到的服务器", "", "| 服务器 | 状态 | 风险 | 巡检项 | 登录失败 | 封禁IP | 负载 | 风险原因 |", "|---|---|---|---|---|---|---|---|"])
+    if servers:
+        for s in servers:
+            srv_summary = s.get("summary") or {}
+            load = srv_summary.get("load_avg")
+            if isinstance(load, dict):
+                load = load.get("min1")
+            load_str = str(load) if load is not None else "-"
+            reasons = "；".join(s.get("reasons") or []) if s.get("reasons") else "-"
+            status = s.get("status") or ("成功" if s.get("ok") else "失败")
+            lines.append(
+                f"| {_table_value(s.get('server'))} | {_table_value(status)} | {_table_value(s.get('max_risk') or '-')} "
+                f"| {s.get('items_count', '-')} | {srv_summary.get('login_failures', '-')} | {srv_summary.get('banned_ips', '-')} "
+                f"| {_table_value(load_str)} | {_table_value(reasons)} |"
+            )
+    else:
+        lines.append("| - | 无采集结果 | - | - | - | - | - | - |")
+    lines.append("")
+    if isinstance(metadata, dict) and metadata:
+        lines.extend(["## 元数据", "", "| 字段 | 值 |", "|---|---|"])
+        for key, value in metadata.items():
+            if isinstance(value, list):
+                value = "、".join(str(v) for v in value)
+            lines.append(f"| {_table_value(key)} | {_table_value(value)} |")
+        lines.append("")
+    lines.extend(["## 原始 JSON 摘要", "", "```json", json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)[:20000], "```", ""])
+    return "\n".join(lines)
+
+
+def _security_daily_html(title: str, payload: Dict[str, Any]) -> str:
+    """安全日报自包含 HTML 报告：概览 + 巡检到的服务器清单表格。"""
+    summary = payload.get("summary") or {}
+    servers = payload.get("servers") or []
+    metadata = payload.get("metadata") or {}
+    h = []
+    h.append("""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>""" + _html_escape(title) + """</title>
+<style>
+:root{--bg:#f8f9fa;--card:#fff;--border:#e2e8f0;--text:#1a202c;--muted:#718096;--high:#e53e3e;--medium:#dd6b20;--low:#38a169;--accent:#3182ce}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif;background:var(--bg);color:var(--text);line-height:1.6;padding:20px;max-width:1200px;margin:0 auto}
+h1{font-size:1.75rem;margin-bottom:16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{font-size:1.35rem;margin:24px 0 12px;color:var(--text)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px 20px;margin-bottom:16px}
+.overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.overview-item{padding:8px 12px;border-radius:6px;background:var(--bg)}
+.overview-item .label{font-size:.8rem;color:var(--muted)}
+.overview-item .value{font-size:1.1rem;font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:.875rem;margin:8px 0}
+th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--border)}
+th{background:var(--bg);font-weight:600;white-space:nowrap}
+td{vertical-align:top}
+.risk-high{color:var(--high);font-weight:700}
+.risk-medium{color:var(--medium);font-weight:700}
+.risk-low{color:var(--low);font-weight:700}
+code{background:var(--bg);padding:1px 4px;border-radius:3px;font-size:.85em}
+.footer{margin-top:24px;padding-top:12px;border-top:1px solid var(--border);color:var(--muted);font-size:.8rem}
+</style>
+</head>
+<body>
+<h1>""" + _html_escape(title) + """</h1>""")
+    h.append('<div class="card"><h2>📊 概览</h2><div class="overview-grid">')
+    h.append(f'<div class="overview-item"><div class="label">报告日期</div><div class="value">{_html_escape(str(payload.get("report_date") or summary.get("report_date") or "-"))}</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">服务器</div><div class="value">{len(servers)} 台</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">成功</div><div class="value">{summary.get("ok_count", 0)}</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">失败</div><div class="value">{summary.get("failed_count", 0)}</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">高危</div><div class="value">{summary.get("high_count", 0)}</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">中危</div><div class="value">{summary.get("medium_count", 0)}</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">登录失败</div><div class="value">{summary.get("login_failures_total", 0)}</div></div>')
+    h.append(f'<div class="overview-item"><div class="label">封禁IP</div><div class="value">{summary.get("banned_ips_total", 0)}</div></div>')
+    h.append('</div></div>')
+    h.append('<div class="card"><h2>🖥️ 巡检到的服务器</h2>')
+    h.append('<table><thead><tr><th>服务器</th><th>状态</th><th>风险</th><th>巡检项</th><th>登录失败</th><th>封禁IP</th><th>负载</th><th>风险原因</th></tr></thead><tbody>')
+    if servers:
+        for s in servers:
+            srv_summary = s.get("summary") or {}
+            load = srv_summary.get("load_avg")
+            if isinstance(load, dict):
+                load = load.get("min1")
+            load_str = _html_escape(str(load)) if load is not None else "-"
+            reasons = _html_escape("；".join(s.get("reasons") or []) or "-")
+            max_risk = str(s.get("max_risk") or "-")
+            risk_cls = {"HIGH": "risk-high", "MEDIUM": "risk-medium", "LOW": "risk-low"}.get(max_risk, "")
+            risk_html = f'<span class="{risk_cls}">{_html_escape(max_risk)}</span>' if risk_cls else _html_escape(max_risk)
+            status = s.get("status") or ("成功" if s.get("ok") else "失败")
+            h.append(
+                f'<tr><td>{_html_escape(str(s.get("server") or "-"))}</td><td>{_html_escape(str(status))}</td>'
+                f'<td>{risk_html}</td><td>{s.get("items_count", "-")}</td>'
+                f'<td>{srv_summary.get("login_failures", "-")}</td><td>{srv_summary.get("banned_ips", "-")}</td>'
+                f'<td>{load_str}</td><td>{reasons}</td></tr>'
+            )
+    else:
+        h.append('<tr><td colspan="8">无采集结果</td></tr>')
+    h.append('</tbody></table></div>')
+    if isinstance(metadata, dict) and metadata:
+        h.append('<div class="card"><h2>📋 元数据</h2><table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody>')
+        for key, value in metadata.items():
+            if isinstance(value, list):
+                value = "、".join(str(v) for v in value)
+            h.append(f'<tr><td>{_html_escape(str(key))}</td><td>{_html_escape(str(value))}</td></tr>')
+        h.append('</tbody></table></div>')
+    h.append(f'<div class="footer">生成时间：{_html_escape(str(payload.get("generated_at") or "-"))} · 报告类型：{_html_escape(str(payload.get("report_type") or "security_daily"))} · 目标：{_html_escape(str(payload.get("target_id") or "-"))}</div>')
+    h.append('</body></html>')
+    return "\n".join(h)
+
+
 def _payload_for_report(db: Session, report_type: str, target_id: str = "", include_raw: bool = False, focus: str = "") -> Dict[str, Any]:
     if report_type == "diagnostics":
         from app.services.diagnostics import build_diagnostics_report
@@ -1235,8 +1364,14 @@ def generate_report_from_payload(
         _write_json(path, payload)
     elif fmt == "html" and report_type == "inspection":
         path.write_text(_inspection_html(title, payload), encoding="utf-8")
+    elif fmt == "html" and report_type == "security_daily":
+        path.write_text(_security_daily_html(title, payload), encoding="utf-8")
+    elif report_type == "security_daily":
+        path.write_text(_security_daily_markdown(title, payload), encoding="utf-8")
+    elif report_type == "inspection":
+        path.write_text(_inspection_markdown(title, payload), encoding="utf-8")
     else:
-        path.write_text(_inspection_markdown(title, payload) if report_type == "inspection" else _generic_markdown(title, payload), encoding="utf-8")
+        path.write_text(_generic_markdown(title, payload), encoding="utf-8")
     row = ReportArtifact(
         id=report_id,
         report_type=report_type,

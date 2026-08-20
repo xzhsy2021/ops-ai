@@ -765,8 +765,12 @@ class SecurityDailyCollectPayload(BaseModel):
 
 
 @router.get("/security-daily/reports")
-def security_daily_reports(request: Request, report_date: str = "", server_name: str = "", limit: int = 200, offset: int = 0, db: Session = Depends(get_db)):
-    """查询已采集的每日安全日报记录（安全日报巡检入口的历史展示）。"""
+def security_daily_reports(request: Request, report_date: str = "", server_name: str = "", group_by: str = "", limit: int = 200, offset: int = 0, db: Session = Depends(get_db)):
+    """查询已采集的每日安全日报记录（安全日报巡检入口的历史展示）。
+
+    group_by=date 时按执行日期聚合：每日期返回服务器清单、成功/失败数与风险汇总，
+    供「按执行日期展示 + 报告查看/下载」使用。
+    """
     require_auth(request, db)
     from app.db.models import SecurityDailyReport
 
@@ -775,6 +779,40 @@ def security_daily_reports(request: Request, report_date: str = "", server_name:
         q = q.filter(SecurityDailyReport.report_date == report_date)
     if server_name:
         q = q.filter(SecurityDailyReport.server_name == server_name)
+
+    if group_by == "date":
+        rows = q.order_by(
+            SecurityDailyReport.report_date.desc(),
+            SecurityDailyReport.created_at.desc(),
+        ).all()
+        grouped: Dict[str, List[Any]] = {}
+        for r in rows:
+            grouped.setdefault(r.report_date, []).append(r)
+        items = []
+        for date, group in sorted(grouped.items(), key=lambda kv: kv[0], reverse=True):
+            ok = [r for r in group if r.status == "ok"]
+            high = sum(1 for r in group if r.max_risk == "HIGH")
+            medium = sum(1 for r in group if r.max_risk == "MEDIUM")
+            login_failures_total = sum(int((r.summary or {}).get("login_failures") or 0) for r in ok)
+            banned_ips_total = sum(int((r.summary or {}).get("banned_ips") or 0) for r in ok)
+            max_risk = "HIGH" if high else "MEDIUM" if medium else ("LOW" if ok else "NONE")
+            artifact_id = next((r.artifact_id for r in group if r.artifact_id), None)
+            items.append({
+                "report_date": date,
+                "server_count": len(group),
+                "ok_count": len(ok),
+                "failed_count": len(group) - len(ok),
+                "high_count": high,
+                "medium_count": medium,
+                "login_failures_total": login_failures_total,
+                "banned_ips_total": banned_ips_total,
+                "max_risk": max_risk,
+                "artifact_id": artifact_id,
+                "servers": [r.server_name for r in group],
+                "created_at": max((r.created_at.isoformat() if r.created_at else "" for r in group), default=None),
+            })
+        return api_response(data={"items": items, "total": len(items)})
+
     total = q.count()
     rows = q.order_by(
         SecurityDailyReport.report_date.desc(),

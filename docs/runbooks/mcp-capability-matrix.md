@@ -1,6 +1,6 @@
 # MCP Capability Matrix
 
-Updated: 2026-08-13
+Updated: 2026-08-20
 
 This matrix is the current OPS MCP/HTTP tool capability map for local small-team operations.
 
@@ -116,6 +116,24 @@ Notes:
 - UI one-click confirmation only changes the browser workflow. AI agents must keep using the preview-first MCP flow: read `confirmation.confirm_text` from `ops.inspection.profile.preview`, `ops.inspection.profile.retry_issues`, or `ops.inspection.preview_servers_batch`; get explicit user approval; then pass that exact value as `confirm_text` to the execution call.
 - Category values must use full uppercase codes such as `LOGIN_SECURITY`, `ACCOUNT_SECURITY`, `PROCESS_PORT`, `DISK_USAGE`, and `BACKUP`.
 - Servers with `inspectable=false` or `status != online` are skipped by default; pass `skip_disabled=false` only when debugging.
+
+## Security Daily Report Tools
+
+每日安全巡检日报工具：从已启用安全监控模块的服务器现场采集日报（aureport 登录记录/登录失败/账户变更/fail2ban 封禁/系统负载），解析判险后写入风险台账并归档到报告中心（HTML + Markdown 双格式报告，报告含巡检到的服务器清单）。
+
+| HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
+|---|---|---:|---|---|---|
+| `ops.security_report.summarize` | `ops_security_report_summarize` | read | `ops:read`, `server:read` | low | 汇总已采集的每日安全巡检日报，返回结构化风险项（风险等级/登录失败/封禁IP/负载）供 AI 分析 |
+| `ops.security_report.collect` | `ops_security_report_collect` | write | `ops:read`, `server:read` | medium | 触发一次每日日报现场采集（需确认短语）；也可用 `ops.inspection.run_security_daily` 走任务中心后台采集 |
+| `ops.security_report.get_daily_report` | `ops_security_report_get_daily_report` | read | `ops:read`, `server:read` | low | 按报告日期获取安全日报归档报告（HTML/Markdown 双格式）：report_id、在线查看/下载链接与文件正文（含巡检到的服务器清单）；`report_date` 缺省返回最近一期 |
+| `ops.security_module.probe` | `ops_security_module_probe` | read | `ops:read`, `server:read` | low | 只读诊断服务器上安全监控模块/日报脚本/fail2ban/auditd 状态 |
+| `ops.security_module.install` | `ops_security_module_install` | write | `ops:write`, `server:read` | medium | 将服务器标记为「已启用每日安全日报采集」，可立即现场采集一次 |
+
+### Recommended Security Daily Flow
+
+1. `ops.security_report.summarize` 查看已采集日报与风险项；`ops.security_report.collect`（或 `ops.inspection.run_security_daily`，后台任务化）触发采集。
+2. `ops.security_report.get_daily_report(report_date="YYYY-MM-DD", format="html"|"md")` 获取某期报告的正文内容与下载链接；`format` 缺省返回 html + md 双格式。
+3. 高危项可通过 `ops.risk.list` 查询风险台账。
 
 ## 3-Tier Inspection Schedule Tools
 

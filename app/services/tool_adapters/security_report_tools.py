@@ -334,3 +334,98 @@ def install_security_module(args: Dict[str, Any], ctx, db):
         "next": "可调用 ops.security_report.collect 采集全部已启用服务器的今日日报，"
                 "或 ops.security_report.summarize 查看日报。",
     }
+
+
+@registry.register(
+    name="ops.security_report.get_daily_report",
+    title="获取每日安全日报报告（HTML/Markdown 内容与下载链接）",
+    description=(
+        "按报告日期获取每日安全巡检日报的归档报告。返回该日期的 HTML 与 Markdown 双格式报告："
+        "report_id、在线查看/下载链接，以及可选的文件正文内容（include_content=true 时）。"
+        "报告内容包含巡检到的服务器清单（服务器/状态/风险/登录失败/封禁IP/负载/风险原因）。只读。"
+        "中文: 获取安全日报/查看安全日报/安全日报HTML/下载安全日报/安全日报报告. "
+    ),
+    scopes=["ops:read", "server:read"],
+    risk="low",
+    category="report_read",
+    write=False,
+    ai_callable=True,
+    ai_auto_callable=True,
+    data_sensitivity="internal",
+    output_masking=True,
+    related_tools=["ops.security_report.summarize", "ops.security_report.collect",
+                   "ops.list_reports", "ops.get_report"],
+    keywords=["获取安全日报", "查看安全日报", "安全日报HTML", "下载安全日报", "安全日报报告"],
+    example_prompts=["获取 2026-08-20 的每日安全巡检日报 HTML 报告", "查看最近一期安全日报内容"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "report_date": {"type": "string", "description": "报告日期 YYYY-MM-DD，缺省=最近一期"},
+            "format": {"type": "string", "description": "目标格式：html / md；缺省返回全部格式"},
+            "include_content": {"type": "boolean", "default": True,
+                                "description": "是否返回报告文件正文内容"},
+            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 200000,
+                          "description": "正文最大字符数，缺省 50000"},
+        },
+        "additionalProperties": False,
+    },
+)
+def get_daily_report(args: Dict[str, Any], ctx, db):
+    from pathlib import Path
+
+    from app.db.models import ReportArtifact
+
+    report_date = str(args.get("report_date") or "").strip()
+    fmt = str(args.get("format") or "").strip().lower()
+    include_content = bool(args.get("include_content", True))
+    max_chars = max(1000, min(int(args.get("max_chars") or 50000), 200000))
+
+    q = db.query(ReportArtifact).filter(ReportArtifact.report_type == "security_daily")
+    if report_date:
+        q = q.filter(ReportArtifact.target_id == report_date)
+    if fmt in ("html", "md"):
+        q = q.filter(ReportArtifact.format == fmt)
+    rows = q.order_by(ReportArtifact.target_id.desc(), ReportArtifact.created_at.desc()).all()
+    if not rows:
+        return {
+            "ok": False,
+            "message": f"未找到安全日报归档报告{('（' + report_date + '）') if report_date else ''}，"
+                       "可先调用 ops.security_report.collect 或 ops.inspection.run_security_daily 采集。",
+        }
+    if not report_date:
+        # 缺省只取最近一期；同一日期同一格式只保留最新一份归档
+        report_date = rows[0].target_id
+        rows = [r for r in rows if r.target_id == report_date]
+    latest_by_format: Dict[str, ReportArtifact] = {}
+    for r in rows:
+        if r.format not in latest_by_format:
+            latest_by_format[r.format] = r
+
+    reports = []
+    for row in latest_by_format.values():
+        item: Dict[str, Any] = {
+            "report_id": row.id,
+            "format": row.format,
+            "title": row.title,
+            "size_bytes": row.size_bytes or 0,
+            "report_date": row.target_id,
+            "view_url": f"/api/v2/reports/{row.id}/view?as={row.format}",
+            "download_url": f"/api/v2/reports/{row.id}/download?as={row.format}",
+        }
+        if include_content and row.file_path:
+            try:
+                content = Path(row.file_path).read_text(encoding="utf-8", errors="replace")
+                item["content"] = content[:max_chars]
+                item["content_truncated"] = len(content) > max_chars
+            except Exception as exc:
+                item["content_error"] = str(exc)
+        reports.append(item)
+
+    reports.sort(key=lambda r: 0 if r["format"] == "html" else (1 if r["format"] == "md" else 2))
+    return {
+        "ok": True,
+        "report_date": report_date,
+        "reports": reports,
+        "summary": f"已获取 {report_date} 安全日报报告 {len(reports)} 份"
+                   + ("" if include_content else "（未含正文，include_content=false）"),
+    }

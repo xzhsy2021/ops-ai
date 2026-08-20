@@ -5,9 +5,10 @@ import { ROUTES } from '../routes'
 import { EmptyState, FavoriteButton, RiskBadge, RiskConfirmDialog, StatusBadge } from '../components/ui'
 import { DEFAULT_PAGE_SIZE, PaginationControls } from './inspection/PaginationControls'
 import { RunDetailRawModal } from './inspection/RunDetailRawModal'
+import { RunDetailModal } from './inspection/RunDetailModal'
 import { ItemConfigEditorModal } from './inspection/ItemConfigEditorModal'
 import { CategoryOptions } from './inspection/CategoryOptions'
-import { extractShellCommand, formatExecutionEntry, formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
+import { formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
 import { OverviewTab } from './inspection/OverviewTab'
 import { ServerProfileStrip } from './inspection/ServerProfileStrip'
 import { ServerStatsGrid } from './inspection/ServerStatsGrid'
@@ -63,6 +64,7 @@ export default function InspectionCenterPage() {
   const [serverCats, setServerCats] = useState<string[]>([])
   const [projectCats, setProjectCats] = useState<string[]>([])
   const [currentResult, setCurrentResult] = useState<any>(null)
+  const [runDetailOpen, setRunDetailOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [message, setMessage] = useState('')
@@ -250,6 +252,7 @@ export default function InspectionCenterPage() {
       const res: any = await inspection.startServer({ server_id: serverId, categories: serverCats, command_timeout_seconds: commandTimeoutSeconds, run_timeout_seconds: runTimeoutSeconds } as any)
       const runId = res.data?.run?.id
       setCurrentResult(res.data)
+      setRunDetailOpen(true)
       if (runId) setActiveRunIds([runId])
       setMessage('服务器巡检已启动，正在实时输出执行过程')
       setTab('runs')
@@ -273,6 +276,7 @@ export default function InspectionCenterPage() {
       } else {
         setCurrentResult(res.data)
       }
+      setRunDetailOpen(true)
       const targetLabel = groupsList.length > 0 ? `分组 ${groupsList.join('/')}` : `${ids.length} 台服务器`
       const skippedText = res.data?.skipped_count ? `；已自动跳过 ${res.data.skipped_count} 台停用/离线服务器` : ''
       setMessage((res.data?.summary || `已启动 ${targetLabel} 巡检，正在实时输出执行过程`) + skippedText)
@@ -339,6 +343,7 @@ export default function InspectionCenterPage() {
       } else {
         setCurrentResult(res.data)
       }
+      setRunDetailOpen(true)
       setProfileConfirmOpen(false)
       setProfilePreviewData(null)
       setProfileRunMode('profile')
@@ -518,6 +523,7 @@ export default function InspectionCenterPage() {
       const res: any = await inspection.startProject({ project_id: projectId, categories: projectCats, include_server_summary: true })
       const runId = res.data?.run?.id
       setCurrentResult(res.data)
+      setRunDetailOpen(true)
       if (runId) setActiveRunIds([runId])
       setMessage('项目巡检已启动，正在实时输出执行过程')
       setTab('runs')
@@ -532,6 +538,7 @@ export default function InspectionCenterPage() {
     try {
       const res: any = await inspection.runCombined(projectId, { categories: [...serverCats, ...projectCats], generate_report: true })
       setCurrentResult(res.data)
+      setRunDetailOpen(true)
       setMessage('项目综合巡检已完成，并已尝试生成报告')
       await loadBase()
       setTab('runs')
@@ -550,6 +557,7 @@ export default function InspectionCenterPage() {
         const status = detail.data?.run?.status
         if (status === 'RUNNING' || status === 'PENDING') {
           setCurrentResult(detail.data)
+          setRunDetailOpen(true)
           setActiveRunIds((prev) => Array.from(new Set([...prev, id])))
           return setError(`巡检 ${id} 仍在执行中，请等待完成后再生成合并报告。`)
         }
@@ -589,7 +597,7 @@ export default function InspectionCenterPage() {
       setMessage(`已删除 ${res.data?.deleted || 0} 条巡检记录${forceNote}，删除报告 ${res.data?.deleted_reports || 0} 份${skippedNote}`)
       setSelectedRunIds([])
       setSelectedLedgerRunIds([])
-      if (currentResult?.run?.id && normalized.includes(currentResult.run.id)) setCurrentResult(null)
+      if (currentResult?.run?.id && normalized.includes(currentResult.run.id)) { setCurrentResult(null); setRunDetailOpen(false) }
       await Promise.all([reloadRuns(), reloadLedger(), reloadInspectionReports(), reloadIssues()])
     } catch (e: any) { setError(e?.message || String(e)) }
   }
@@ -629,7 +637,7 @@ export default function InspectionCenterPage() {
       const res: any = await inspection.deleteLedger({ period: ledgerPeriod, delete_reports: true })
       setMessage(`已删除 ${res.data?.deleted || 0} 条${label}历史，删除报告 ${res.data?.deleted_reports || 0} 份`)
       setSelectedLedgerRunIds([])
-      if (currentResult?.run?.id && (res.data?.run_ids || []).includes(currentResult.run.id)) setCurrentResult(null)
+      if (currentResult?.run?.id && (res.data?.run_ids || []).includes(currentResult.run.id)) { setCurrentResult(null); setRunDetailOpen(false) }
       await Promise.all([reloadRuns(), reloadLedger(), reloadInspectionReports(), reloadIssues()])
     } catch (e: any) { setError(e?.message || String(e)) }
   }
@@ -1010,25 +1018,7 @@ export default function InspectionCenterPage() {
               <label>范围 <select value={runFilter} onChange={(e) => { setRunFilter(e.target.value); setRunOffset(0); setSelectedRunIds([]) }}><option value="">全部</option><option value="SERVER">服务器</option><option value="PROJECT">项目</option><option value="PROJECT_COMBINED">综合</option></select></label>
             </div>
           </div>
-          {runs.length === 0 ? <EmptyState title="暂无巡检记录" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={runs.length > 0 && runs.every((r: any) => selectedRunIds.includes(r.id))} onChange={(e) => setSelectedRunIds(e.target.checked ? runs.map((r: any) => r.id) : [])} /></th><th style={{ width: 140 }}>时间</th><th style={{ width: 100 }}>范围</th><th style={{ minWidth: 180 }}>对象</th><th style={{ width: 70 }}>评分</th><th style={{ width: 90 }}>风险</th><th style={{ width: 80 }}>状态</th><th style={{ minWidth: 220 }}>操作</th></tr></thead><tbody>{runs.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedRunIds.includes(r.id)} onChange={(e) => toggleRunSelection(r.id, e.target.checked)} /></td><td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(r.created_at)}>{formatTime(r.created_at)}</span></td><td>{r.scope_type}</td><td><span className="ellipsis" style={{ maxWidth: 240 }} title={r.project_id || r.server_id || '-'}>{r.project_id || r.server_id || '-'}</span></td><td><span className={`status-badge status-badge--${scoreTone(r.score)}`}>{r.score}</span></td><td>{r.high_count}/{r.medium_count}/{r.low_count}</td><td><StatusBadge value={r.status} /></td><td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}><button className="btn btn-subtle" onClick={() => inspection.runDetail(r.id).then((res: any) => { setCurrentResult(res.data); const st = res.data?.run?.status; if (st === 'RUNNING' || st === 'PENDING') setActiveRunIds((prev) => Array.from(new Set([...prev, r.id]))); })}>详情</button><button className="btn btn-subtle" onClick={() => openRunDetailRaw(r.id)}>原始数据</button>{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/view?as=html`} target="_blank" rel="noreferrer">查看报告</a>}{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/download?as=md`} target="_blank" rel="noreferrer" download>下载</a>}<button className="btn btn-danger" onClick={() => deleteInspectionRuns([r.id])}>删除</button></div></td></tr>)}</tbody></table></div><PaginationControls total={runsTotal} limit={runPageSize} offset={runOffset} onChange={setRunOffset} onPageSizeChange={setRunPageSize} /></>}
-          {currentResult && <div className="mini-card" style={{ marginTop: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <strong>当前详情：{currentResult.run?.summary || currentResult.summary || '-'}</strong>
-              <span><StatusBadge value={currentResult.run?.status || '-'} /></span>
-            </div>
-            <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
-              {(currentResult.run?.status === 'RUNNING' || currentResult.run?.status === 'PENDING') && <div className="alert alert-info">巡检执行中，页面每 2 秒自动刷新执行过程。已完成 {(currentResult.items || []).length} 项。</div>}
-              {currentResult.ledger && <div className="stats-grid"><div className="stat-card"><span>巡检项</span><strong>{currentResult.ledger.item_count}</strong><small>已入台账</small></div><div className="stat-card"><span>未闭环</span><strong>{currentResult.ledger.open_issue_count}</strong><small>待处理/处理中</small></div><div className="stat-card"><span>已闭环</span><strong>{currentResult.ledger.closed_issue_count}</strong><small>已修复/验证/忽略</small></div><div className="stat-card"><span>执行耗时</span><strong>{currentResult.ledger.duration_text}</strong><small>{currentResult.ledger.trigger_type || '-'}</small></div></div>}
-              {(currentResult.category_summary || []).length > 0 && <div className="table-scroll"><table className="data-table"><thead><tr><th style={{ minWidth: 120 }}>分类</th><th style={{ width: 80 }}>总数</th><th style={{ width: 80 }}>通过</th><th style={{ width: 80 }}>风险</th><th style={{ width: 80 }}>错误</th><th style={{ width: 100 }}>高/中/低</th></tr></thead><tbody>{(currentResult.category_summary || []).map((c: any) => <tr key={c.category}><td><span className="ellipsis" style={{ maxWidth: 180 }} title={c.category}>{c.category}</span></td><td>{c.total}</td><td>{c.pass}</td><td>{c.risk}</td><td>{c.error}</td><td>{c.high}/{c.medium}/{c.low}</td></tr>)}</tbody></table></div>}
-              <div className="table-scroll"><table className="data-table"><thead><tr><th style={{ width: 120 }}>分类</th><th style={{ minWidth: 160 }}>巡检项</th><th style={{ width: 80 }}>等级</th><th style={{ minWidth: 200 }}>结果</th><th style={{ minWidth: 220 }}>可验证 Shell 命令</th><th style={{ minWidth: 200 }}>建议</th></tr></thead><tbody>{(currentResult.items || []).length === 0 ? <tr><td colSpan={6}>暂无巡检项结果；如果状态为 RUNNING，请等待执行输出。</td></tr> : (currentResult.items || []).map((i: any) => <tr key={i.id}><td>{i.category}</td><td>{i.item_name}</td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td><div style={{ wordBreak: 'break-word' }}>{i.message}{i.parsed_facts?.summary ? <><br /><small className="muted" style={{ color: 'var(--accent, #3182ce)' }}>📊 {i.parsed_facts.summary}</small></> : ''}</div></td><td><pre className="inspection-command-cell">{extractShellCommand(i.raw_output, i.command) || '-'}</pre></td><td><div style={{ wordBreak: 'break-word' }}>{i.suggestion}</div></td></tr>)}</tbody></table></div>
-              <div>
-                <strong>执行过程</strong>
-                <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto', background: 'rgba(15,23,42,.05)', borderRadius: 12, padding: 12 }}>
-{(currentResult.logs || currentResult.items || []).map((l: any) => formatExecutionEntry(l)).join('\n\n---\n\n') || '暂无执行输出'}
-                </pre>
-              </div>
-            </div>
-          </div>}
+          {runs.length === 0 ? <EmptyState title="暂无巡检记录" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={runs.length > 0 && runs.every((r: any) => selectedRunIds.includes(r.id))} onChange={(e) => setSelectedRunIds(e.target.checked ? runs.map((r: any) => r.id) : [])} /></th><th style={{ width: 140 }}>时间</th><th style={{ width: 100 }}>范围</th><th style={{ minWidth: 180 }}>对象</th><th style={{ width: 70 }}>评分</th><th style={{ width: 90 }}>风险</th><th style={{ width: 80 }}>状态</th><th style={{ minWidth: 220 }}>操作</th></tr></thead><tbody>{runs.map((r: any) => <tr key={r.id}><td><input type="checkbox" checked={selectedRunIds.includes(r.id)} onChange={(e) => toggleRunSelection(r.id, e.target.checked)} /></td><td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(r.created_at)}>{formatTime(r.created_at)}</span></td><td>{r.scope_type}</td><td><span className="ellipsis" style={{ maxWidth: 240 }} title={r.project_id || r.server_id || '-'}>{r.project_id || r.server_id || '-'}</span></td><td><span className={`status-badge status-badge--${scoreTone(r.score)}`}>{r.score}</span></td><td>{r.high_count}/{r.medium_count}/{r.low_count}</td><td><StatusBadge value={r.status} /></td><td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}><button className="btn btn-subtle" onClick={() => inspection.runDetail(r.id).then((res: any) => { setCurrentResult(res.data); setRunDetailOpen(true); const st = res.data?.run?.status; if (st === 'RUNNING' || st === 'PENDING') setActiveRunIds((prev) => Array.from(new Set([...prev, r.id]))); })}>详情</button><button className="btn btn-subtle" onClick={() => openRunDetailRaw(r.id)}>原始数据</button>{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/view?as=html`} target="_blank" rel="noreferrer">查看报告</a>}{r.report_id && <a className="btn btn-subtle" href={`/api/v2/reports/${r.report_id}/download?as=md`} target="_blank" rel="noreferrer" download>下载</a>}<button className="btn btn-danger" onClick={() => deleteInspectionRuns([r.id])}>删除</button></div></td></tr>)}</tbody></table></div><PaginationControls total={runsTotal} limit={runPageSize} offset={runOffset} onChange={setRunOffset} onPageSizeChange={setRunPageSize} /></>}
         </section>
       )}
 
@@ -1076,7 +1066,7 @@ export default function InspectionCenterPage() {
               </div>
               <div className="mini-card">
                 <strong>台账记录</strong>
-                {(ledgerData.items || []).length === 0 ? <EmptyState title="暂无台账记录" description="执行巡检后会自动沉淀到台账中。" /> : <><div className="table-scroll" style={{ marginTop: 8 }}><table className="data-table data-table--compact"><thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={(ledgerData.items || []).length > 0 && (ledgerData.items || []).every((row: any) => selectedLedgerRunIds.includes(row.run_id))} onChange={(e) => setSelectedLedgerRunIds(e.target.checked ? (ledgerData.items || []).map((row: any) => row.run_id) : [])} /></th><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>对象</th><th style={{ width: 70 }}>评分</th><th style={{ width: 90 }}>风险</th><th style={{ width: 80 }}>操作</th></tr></thead><tbody>{(ledgerData.items || []).map((row: any) => <tr key={row.run_id}><td><input type="checkbox" checked={selectedLedgerRunIds.includes(row.run_id)} onChange={(e) => toggleLedgerRunSelection(row.run_id, e.target.checked)} /></td><td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(row.inspection_time)}>{formatTime(row.inspection_time)}</span></td><td><span className="ellipsis" style={{ maxWidth: 280 }} title={row.target}>{row.target}</span></td><td><span className={`status-badge status-badge--${scoreTone(row.score)}`}>{row.score}</span></td><td>{row.high_count}/{row.medium_count}/{row.low_count}</td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(row.run_id).then((res: any) => { setCurrentResult(res.data); setTab('runs') })}>详情</button></td></tr>)}</tbody></table></div><PaginationControls total={Number(ledgerData.total || 0)} limit={ledgerPageSize} offset={ledgerOffset} onChange={setLedgerOffset} onPageSizeChange={setLedgerPageSize} /></>}
+                {(ledgerData.items || []).length === 0 ? <EmptyState title="暂无台账记录" description="执行巡检后会自动沉淀到台账中。" /> : <><div className="table-scroll" style={{ marginTop: 8 }}><table className="data-table data-table--compact"><thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={(ledgerData.items || []).length > 0 && (ledgerData.items || []).every((row: any) => selectedLedgerRunIds.includes(row.run_id))} onChange={(e) => setSelectedLedgerRunIds(e.target.checked ? (ledgerData.items || []).map((row: any) => row.run_id) : [])} /></th><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>对象</th><th style={{ width: 70 }}>评分</th><th style={{ width: 90 }}>风险</th><th style={{ width: 80 }}>操作</th></tr></thead><tbody>{(ledgerData.items || []).map((row: any) => <tr key={row.run_id}><td><input type="checkbox" checked={selectedLedgerRunIds.includes(row.run_id)} onChange={(e) => toggleLedgerRunSelection(row.run_id, e.target.checked)} /></td><td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(row.inspection_time)}>{formatTime(row.inspection_time)}</span></td><td><span className="ellipsis" style={{ maxWidth: 280 }} title={row.target}>{row.target}</span></td><td><span className={`status-badge status-badge--${scoreTone(row.score)}`}>{row.score}</span></td><td>{row.high_count}/{row.medium_count}/{row.low_count}</td><td><button className="btn btn-subtle" onClick={() => inspection.runDetail(row.run_id).then((res: any) => { setCurrentResult(res.data); setRunDetailOpen(true); setTab('runs') })}>详情</button></td></tr>)}</tbody></table></div><PaginationControls total={Number(ledgerData.total || 0)} limit={ledgerPageSize} offset={ledgerOffset} onChange={setLedgerOffset} onPageSizeChange={setLedgerPageSize} /></>}
               </div>
               <div className="mini-card">
                 <strong>报表口径</strong>
@@ -1383,6 +1373,14 @@ export default function InspectionCenterPage() {
           runId={runDetailRaw.runId}
           items={runDetailRaw.items}
           onClose={() => setRunDetailRaw({ open: false, runId: '', items: [] })}
+        />
+      )}
+
+      {/* 巡检详情与执行过程弹窗 */}
+      {runDetailOpen && currentResult && (
+        <RunDetailModal
+          result={currentResult}
+          onClose={() => setRunDetailOpen(false)}
         />
       )}
 

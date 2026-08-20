@@ -8053,6 +8053,11 @@ html[data-zen='true'] .app-main {
   padding-top: 14px;
   border-top: 1px solid var(--border-subtle, var(--border));
 }
+.inspection-run-detail-modal {
+  width: min(1280px, 96vw);
+  max-height: 90vh;
+  overflow: auto;
+}
 @media (max-width: 860px) {
   .inspection-modal-overlay { align-items: flex-start; padding: 12px; }
   .rule-grid--2col, .rule-grid--threshold { grid-template-columns: 1fr; }

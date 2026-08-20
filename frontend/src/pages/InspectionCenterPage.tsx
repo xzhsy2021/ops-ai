@@ -20,6 +20,12 @@ import DiagnosisCard from '../components/v10/DiagnosisCard'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules' | 'security'
 
+function fmtLoadAvg(v: any): string {
+  if (!v || typeof v !== 'object') return v == null ? '-' : String(v)
+  const parts = [v.min1, v.min5, v.min15].map((x: any) => (x == null ? '-' : x))
+  return parts.join(' / ')
+}
+
 export default function InspectionCenterPage() {
   const [tab, setTab] = useState<TabKey>('overview')
   const [overview, setOverview] = useState<any>({})
@@ -1380,7 +1386,7 @@ export default function InspectionCenterPage() {
                       <td>{r.items_count ?? '-'}</td>
                       <td>{(r.summary || {}).login_failures ?? '-'}</td>
                       <td>{(r.summary || {}).banned_ips ?? '-'}</td>
-                      <td>{(r.summary || {}).load_avg ?? '-'}</td>
+                      <td>{fmtLoadAvg((r.summary || {}).load_avg)}</td>
                       <td><div style={{ wordBreak: 'break-word' }}>{(r.reasons || []).join('；') || '-'}</div></td>
                     </tr>
                   ))}
@@ -1403,7 +1409,7 @@ export default function InspectionCenterPage() {
                       <td><RiskBadge level={r.max_risk} label={r.max_risk || '-'} /></td>
                       <td>{(r.summary || {}).login_failures ?? '-'}</td>
                       <td>{(r.summary || {}).banned_ips ?? '-'}</td>
-                      <td>{(r.summary || {}).load_avg ?? '-'}</td>
+                      <td>{fmtLoadAvg((r.summary || {}).load_avg)}</td>
                       <td>{r.artifact_id ? <a className="btn btn-subtle" href={`/api/v2/reports/${r.artifact_id}/view?as=html`} target="_blank" rel="noreferrer">查看</a> : '-'}</td>
                     </tr>
                   ))}

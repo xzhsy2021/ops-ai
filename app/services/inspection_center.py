@@ -28,6 +28,7 @@ from app.db.models import (
     InspectionBaseline,
     InspectionEvidence,
     InspectionIssue,
+    InspectionItemConfig,
     InspectionItemResult,
     InspectionRule,
     InspectionRun,
@@ -4876,6 +4877,65 @@ def update_issue(db: Session, issue_id: str, payload: Dict[str, Any]) -> Dict[st
     return _issue_to_dict(row)
 
 
+def _running_runs_with_progress(db: Session) -> List[Dict[str, Any]]:
+    """概览页实时进度：当前执行中/等待中的巡检运行及其完成进度。
+
+    - items_done：该 run 已写入的检查项结果数（实时）
+    - items_total：按启用检查项配置估算的预期检查项数
+    - progress_percent：按 items_done/items_total 估算的进度（RUNNING 封顶 99%）
+    """
+    running = (db.query(InspectionRun)
+               .filter(InspectionRun.status.in_(["RUNNING", "PENDING"]))
+               .order_by(InspectionRun.created_at.desc())
+               .limit(50).all())
+    if not running:
+        return []
+
+    run_ids = [r.id for r in running]
+    done_map: Dict[str, int] = {}
+    for (run_id,) in (db.query(InspectionItemResult.run_id)
+                      .filter(InspectionItemResult.run_id.in_(run_ids)).all()):
+        done_map[run_id] = done_map.get(run_id, 0) + 1
+
+    expected_map: Dict[str, int] = {}
+    for r in running:
+        cats = list(r.categories or [])
+        scope = r.scope_type or SERVER_SCOPE
+        if not cats:
+            continue
+        expected_map[r.id] = db.query(InspectionItemConfig).filter(
+            InspectionItemConfig.scope_type == scope,
+            InspectionItemConfig.enabled == True,  # noqa: E712
+            InspectionItemConfig.category.in_(cats),
+        ).count()
+
+    now = _now()
+    items: List[Dict[str, Any]] = []
+    for r in running:
+        run_id = r.id
+        done = done_map.get(run_id, 0)
+        expected = expected_map.get(run_id, 0)
+        if expected > 0 and done >= expected:
+            percent = 99
+        elif expected > 0:
+            percent = max(1, min(99, int(done / expected * 100)))
+        elif done > 0:
+            percent = 99
+        else:
+            percent = 1 if r.status == "RUNNING" else 0
+        started = r.started_at or r.created_at
+        duration_ms = r.duration_ms or 0
+        if started and not r.finished_at:
+            duration_ms = int((now - started).total_seconds() * 1000)
+        item = _run_to_dict(r)
+        item["items_done"] = done
+        item["items_total"] = expected
+        item["progress_percent"] = percent
+        item["duration_ms"] = duration_ms
+        items.append(item)
+    return items
+
+
 def overview(db: Session) -> Dict[str, Any]:
     recent = db.query(InspectionRun).order_by(InspectionRun.created_at.desc()).limit(50).all()
     issues = db.query(InspectionIssue).filter(InspectionIssue.status.in_(["OPEN", "PROCESSING"])).order_by(InspectionIssue.created_at.desc()).limit(200).all()
@@ -4894,6 +4954,7 @@ def overview(db: Session) -> Dict[str, Any]:
         "high_issue_count": sum(1 for i in issues if i.risk_level == "HIGH"),
         "medium_issue_count": sum(1 for i in issues if i.risk_level == "MEDIUM"),
         "low_issue_count": sum(1 for i in issues if i.risk_level == "LOW"),
+        "running_runs": _running_runs_with_progress(db),
         "recent_runs": [_run_to_dict(r) for r in recent[:10]],
         "recent_issues": [_issue_to_dict(i) for i in issues[:10]],
     }

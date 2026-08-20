@@ -149,6 +149,12 @@ def test_security_daily_report_tools_registered(tmp_path):
         assert "ops.security_report.collect" in tools
         assert "ops.security_module.install" in tools
         assert "ops.inspection.run_security_daily" in tools
+        tool = {t.get("name"): t for t in listed.get("tools", [])}["ops.inspection.run_security_daily"]
+        assert "fail2ban" in tool["description"]
+        assert len(tool["description"]) > 50
+        assert len(tool["recommended_use_cases"]) >= 3
+        assert len(tool["example_prompts"]) >= 3
+        assert "登录失败" in tool["keywords"]
     finally:
         db.close()
         engine.dispose()

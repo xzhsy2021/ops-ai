@@ -59,8 +59,12 @@ export default function McpToolsPage() {
                 <span>人工审批</span><strong>{String(selected.requires_human_approval)}</strong>
                 <span>敏感级别</span><strong>{selected.data_sensitivity || '-'}</strong>
               </div>
+              <h4>使用场景</h4>
+              <ul>{(selected.recommended_use_cases || []).map((x: string) => <li key={x}>{x}</li>)}</ul>
+              {!(selected.recommended_use_cases || []).length && <p className="muted">未提供推荐使用场景。</p>}
               <h4>示例问题</h4>
               <ul>{(selected.example_prompts || []).map((x: string) => <li key={x}>{x}</li>)}</ul>
+              {(selected.keywords || []).length > 0 && <><h4>检索关键词</h4><p>{selected.keywords.join('、')}</p></>}
               <h4>Input Schema</h4>
               <pre className="code-block">{JSON.stringify(selected.input_schema || {}, null, 2)}</pre>
               <h4>Output Schema</h4>

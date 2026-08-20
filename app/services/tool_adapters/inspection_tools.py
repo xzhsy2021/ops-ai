@@ -631,10 +631,13 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
     name="ops.inspection.run_security_daily",
     title="执行安全日报巡检",
     description=(
-        "单独触发一次每日安全日报巡检：现场采集所有已启用安全监控模块服务器的安全日报"
-        "（aureport 登录记录/失败次数/账户变更/fail2ban 封禁/系统负载），评估风险并写入风险台账，"
-        "聚合归档为每日安全巡检日报。返回各服务器逐台结果与汇总。"
-        "中文: 安全日报巡检/每日安全巡检/采集安全日报/安全日报. "
+        "单独触发一次每日安全日报巡检（daily security report inspection）。"
+        "现场采集所有已启用安全监控模块服务器的安全日报，每台服务器生成 5 个检查块："
+        "aureport 登录记录/登录失败次数/账户变更/fail2ban 封禁/系统负载。"
+        "依据阈值评估风险并写入风险台账（SecurityRisk），再聚合归档为每日安全巡检日报到报告中心。"
+        "返回逐台采集结果、汇总统计与归档信息。适用于每日例行安全巡检、对指定日期补采、"
+        "或排查近期异常登录/暴力破解/封禁情况。"
+        "中文关键词：安全日报巡检 / 每日安全巡检 / 采集安全日报 / 安全日报 / 登录失败 / fail2ban。"
     ),
     scopes=["ops:read", "ops:write"],
     risk="medium",
@@ -647,8 +650,17 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
     output_masking=True,
     related_tools=["ops.security_report.summarize", "ops.security_report.collect",
                    "ops.inspection.run_server", "ops.inspection.list_runs"],
-    keywords=["安全日报巡检", "每日安全巡检", "采集安全日报", "安全日报", "security daily"],
-    example_prompts=["执行一次安全日报巡检并列出高危服务器"],
+    keywords=["安全日报巡检", "每日安全巡检", "采集安全日报", "安全日报", "登录失败", "fail2ban", "security daily"],
+    recommended_use_cases=[
+        "每日例行安全巡检：批量采集各服务器登录失败、账户变更、fail2ban 封禁与系统负载",
+        "补采历史日期安全日报：report_date 指定 YYYY-MM-DD",
+        "排查异常登录/暴力破解：获取逐台登录失败次数、封禁 IP 与高危服务器",
+    ],
+    example_prompts=[
+        "执行一次安全日报巡检并列出高危服务器",
+        "采集今天各服务器的安全日报，汇总登录失败与封禁情况",
+        "安全日报巡检有哪些服务器失败了",
+    ],
     input_schema={
         "type": "object",
         "properties": {

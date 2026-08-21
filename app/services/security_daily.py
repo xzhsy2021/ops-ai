@@ -500,28 +500,77 @@ def aggregate_and_archive(db: Session, results: List[Dict[str, Any]], *,
 
 def collect_all(db: Session, report_date: Optional[str] = None, *,
                 thresholds: Optional[Dict[str, Any]] = None,
-                persist_risks: bool = True) -> Dict[str, Any]:
-    """采集所有已启用安全监控模块的服务器日报。"""
+                persist_risks: bool = True,
+                progress_cb: Optional[Any] = None,
+                concurrency: Optional[int] = None) -> Dict[str, Any]:
+    """采集所有已启用安全监控模块的服务器日报（并发采集）。
+
+    - 参照 inspection_center 批量巡检的并发模式：ThreadPoolExecutor，
+      每个 worker 使用独立 SQLAlchemy session（collect_server_report 有写库）。
+    - 并发度默认取环境变量 SECURITY_DAILY_CONCURRENCY（缺省 8，上限 16）。
+    - progress_cb：可选回调 progress_cb(percent)，每完成一台服务器调用，
+      用于任务中心实时进度（35 → 90 区间）。
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     report_date = report_date or datetime.now().strftime("%Y-%m-%d")
     servers = security_module_servers(db=db)
-    results: List[Dict[str, Any]] = []
-    for server in servers:
+    total = len(servers)
+    effective = max(1, min(int(concurrency or os.getenv("SECURITY_DAILY_CONCURRENCY", "8") or 8), 16))
+    results: List[Optional[Dict[str, Any]]] = [None] * total
+
+    def worker(server_cfg: Dict[str, Any], index: int):
+        from app.db.base import SessionLocal
+        db2 = SessionLocal()
         try:
-            results.append(collect_server_report(
-                db, server, report_date, thresholds=thresholds,
-                persist_risks=persist_risks))
-        except Exception as exc:
-            logger.warning("collect security_daily failed for %s: %s",
-                           server.get("name"), exc)
-            results.append({
-                "server": server.get("name") or server.get("id") or "-",
-                "ok": False, "status": "error", "error": str(exc),
-            })
-    archived = aggregate_and_archive(db, results, report_date=report_date)
+            try:
+                r = collect_server_report(
+                    db2, server_cfg, report_date, thresholds=thresholds,
+                    persist_risks=persist_risks)
+            except Exception as exc:
+                logger.warning("collect security_daily failed for %s: %s",
+                               server_cfg.get("name"), exc)
+                r = {
+                    "server": server_cfg.get("name") or server_cfg.get("id") or "-",
+                    "ok": False, "status": "error", "error": str(exc),
+                }
+            return index, r
+        finally:
+            db2.close()
+
+    done = 0
+    if total == 0:
+        pass
+    elif effective <= 1 or total <= 1:
+        for i, server in enumerate(servers):
+            _, r = worker(server, i)
+            results[i] = r
+            done += 1
+            if progress_cb is not None and total > 0:
+                try:
+                    progress_cb(35 + int(55 * done / total))
+                except Exception:
+                    pass
+    else:
+        with ThreadPoolExecutor(max_workers=min(effective, total)) as pool:
+            futures = {pool.submit(worker, s, i): i for i, s in enumerate(servers)}
+            for fut in as_completed(futures):
+                i, r = fut.result()
+                results[i] = r
+                done += 1
+                if progress_cb is not None and total > 0:
+                    try:
+                        progress_cb(35 + int(55 * done / total))
+                    except Exception:
+                        pass
+
+    final_results = [r for r in results if r is not None]
+    archived = aggregate_and_archive(db, final_results, report_date=report_date)
     return {
         "report_date": report_date,
         "servers": servers,
-        "results": results,
+        "results": final_results,
         "summary": archived.get("summary") or {},
         "archive": archived.get("archive") or {},
     }

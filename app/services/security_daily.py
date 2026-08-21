@@ -502,22 +502,31 @@ def collect_all(db: Session, report_date: Optional[str] = None, *,
                 thresholds: Optional[Dict[str, Any]] = None,
                 persist_risks: bool = True,
                 progress_cb: Optional[Any] = None,
-                concurrency: Optional[int] = None) -> Dict[str, Any]:
-    """采集所有已启用安全监控模块的服务器日报（并发采集）。
+                concurrency: Optional[int] = None,
+                server_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """采集安全日报（并发采集）。
 
     - 参照 inspection_center 批量巡检的并发模式：ThreadPoolExecutor，
       每个 worker 使用独立 SQLAlchemy session（collect_server_report 有写库）。
     - 并发度默认取环境变量 SECURITY_DAILY_CONCURRENCY（缺省 8，上限 16）。
     - progress_cb：可选回调 progress_cb(percent)，每完成一台服务器调用，
       用于任务中心实时进度（35 → 90 区间）。
+    - server_names：可选，指定要采集的服务器名称列表；缺省=所有已启用
+      安全监控的在线服务器（退回全部在线服务器）。
     """
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     report_date = report_date or datetime.now().strftime("%Y-%m-%d")
-    servers = security_module_servers(db=db)
+    if server_names:
+        names = [str(n).strip() for n in server_names if str(n).strip()]
+        all_servers = get_all_servers(db=db)
+        by_name = {str(s.get("name") or ""): s for s in all_servers}
+        servers = [by_name[n] for n in names if n in by_name]
+    else:
+        servers = security_module_servers(db=db)
     total = len(servers)
-    effective = max(1, min(int(concurrency or os.getenv("SECURITY_DAILY_CONCURRENCY", "8") or 8), 16))
+    effective = max(1, min(int(concurrency or os.getenv("SECURITY_DAILY_CONCURRENCY", "16") or 16), 32))
     results: List[Optional[Dict[str, Any]]] = [None] * total
 
     def worker(server_cfg: Dict[str, Any], index: int):

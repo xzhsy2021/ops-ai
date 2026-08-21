@@ -668,6 +668,8 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
             "report_date": {"type": "string", "description": "采集指定日期 YYYY-MM-DD，缺省=今天"},
             "persist_risks": {"type": "boolean", "default": True,
                               "description": "是否将高风险项写入风险台账"},
+            "servers": {"type": "array", "items": {"type": "string"},
+                        "description": "指定要采集的服务器名称列表；缺省=所有已启用安全监控的在线服务器"},
             "confirm_text": {"type": "string",
                              "description": "确认短语：CONFIRM ops.inspection.run_security_daily"},
         },
@@ -680,6 +682,9 @@ def run_security_daily(args: Dict[str, Any], ctx, db):
     args = args or {}
     report_date = args.get("report_date") or None
     persist_risks = bool(args.get("persist_risks", True))
+    servers_arg = args.get("servers")
+    server_names = [str(s).strip() for s in servers_arg if str(s).strip()] \
+        if isinstance(servers_arg, (list, tuple)) else None
     job_id = getattr(ctx, "job_id", "") or ""
     if job_id:
         from app.services.job_service import update_job_progress
@@ -687,7 +692,7 @@ def run_security_daily(args: Dict[str, Any], ctx, db):
     else:
         progress_cb = None
     result = collect_all(db, report_date=report_date, persist_risks=persist_risks,
-                         progress_cb=progress_cb)
+                         progress_cb=progress_cb, server_names=server_names)
     summary = result.get("summary") or {}
     return {
         "ok": True,

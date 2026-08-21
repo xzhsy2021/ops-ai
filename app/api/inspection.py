@@ -762,6 +762,8 @@ def thresholds_save(payload: dict, request: Request, db: Session = Depends(get_d
 class SecurityDailyCollectPayload(BaseModel):
     report_date: str = Field(default="", description="采集指定日期 YYYY-MM-DD，缺省=今天")
     persist_risks: bool = Field(default=True)
+    servers: List[str] = Field(default_factory=list,
+                               description="指定要采集的服务器名称列表；空=所有已启用安全监控的在线服务器")
 
 
 @router.get("/security-daily/reports")
@@ -863,6 +865,7 @@ def security_daily_collect(payload: SecurityDailyCollectPayload, request: Reques
     args = {
         "report_date": payload.report_date or None,
         "persist_risks": payload.persist_risks,
+        "servers": payload.servers or None,
         "confirm_text": "CONFIRM ops.inspection.run_security_daily",
     }
     job = enqueue_tool_job(db, tool_def=tool, arguments=args, ctx=ctx, policy_result={})

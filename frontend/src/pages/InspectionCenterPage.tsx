@@ -101,6 +101,7 @@ export default function InspectionCenterPage() {
   const [secDailyReportsTotal, setSecDailyReportsTotal] = useState(0)
   const [secDailyLoading, setSecDailyLoading] = useState(false)
   const [secDailyJob, setSecDailyJob] = useState<any>(null)
+  const [secDailyTargetServers, setSecDailyTargetServers] = useState<string[]>([])
 
   async function loadBase() {
     setLoading(true)
@@ -688,11 +689,15 @@ export default function InspectionCenterPage() {
   async function runSecurityDaily() {
     setSecDailyLoading(true); setError(''); setMessage('')
     try {
-      const res: any = await inspection.securityDailyCollect({})
+      const res: any = await inspection.securityDailyCollect({
+        servers: secDailyTargetServers.length ? secDailyTargetServers : undefined,
+      })
       const job = res.data?.job || {}
       setSecDailyResult(null)
       setSecDailyJob({ id: job?.id, status: job?.status || 'queued', progress: Number(job?.progress || 0), result: null })
-      setMessage('安全日报巡检已提交后台任务，正在后台逐台采集，可查看实时进度。')
+      setMessage(secDailyTargetServers.length
+        ? `安全日报巡检已提交后台任务（指定 ${secDailyTargetServers.length} 台服务器），正在后台逐台采集，可查看实时进度。`
+        : '安全日报巡检已提交后台任务，正在后台逐台采集，可查看实时进度。')
     } catch (e: any) { setError(e?.message || String(e)) }
     finally { setSecDailyLoading(false) }
   }
@@ -1397,7 +1402,25 @@ export default function InspectionCenterPage() {
                   {secDailyJob.id && <a style={{ fontSize: 12 }} href={`/tasks?kind=tool&job=${secDailyJob.id}`} target="_blank" rel="noreferrer">任务中心查看</a>}
                 </div>
               )}
-              <button className="btn primary" onClick={runSecurityDaily} disabled={secDailyLoading}>{secDailyLoading ? '提交中...' : '采集安全日报'}</button>
+              <div className="mini-card" style={{ margin: 0, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12 }} className="muted">指定服务器（可多选，空=全部已启用安全监控的在线服务器）：</span>
+                <select
+                  multiple
+                  size={4}
+                  style={{ maxWidth: 240, fontSize: 12 }}
+                  value={secDailyTargetServers}
+                  onChange={(e) => setSecDailyTargetServers(Array.from(e.target.selectedOptions).map((o) => o.value))}
+                >
+                  {servers.map((s: any) => {
+                    const name = s.name || s.id
+                    return <option key={s.id || name} value={name}>{name}{s.host ? ` · ${s.host}` : ''}</option>
+                  })}
+                </select>
+                {secDailyTargetServers.length > 0 && (
+                  <button className="btn btn-subtle" style={{ fontSize: 12 }} onClick={() => setSecDailyTargetServers([])}>清除（全部）</button>
+                )}
+              </div>
+              <button className="btn primary" onClick={runSecurityDaily} disabled={secDailyLoading}>{secDailyLoading ? '提交中...' : secDailyTargetServers.length ? `采集所选 ${secDailyTargetServers.length} 台` : '采集安全日报'}</button>
             </div>
           </div>
 

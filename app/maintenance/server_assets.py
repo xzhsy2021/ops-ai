@@ -93,6 +93,9 @@ def _normalize_server(server: Dict[str, Any], source: str) -> Optional[Dict[str,
     }
     if allowed_roots is not None:
         result["sftp_allowed_roots"] = allowed_roots
+    # 透传安全监控启用标记（ops.security_module.install / batch_enable 写入 metadata）
+    if server.get("security_monitor") is not None:
+        result["security_monitor"] = server["security_monitor"]
     return result
 
 
@@ -116,6 +119,8 @@ def _merge_server_lists(*lists: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]
                         existing[field] = item[field]
                 if not existing.get("sftp_allowed_roots") and item.get("sftp_allowed_roots"):
                     existing["sftp_allowed_roots"] = item["sftp_allowed_roots"]
+                if not existing.get("security_monitor") and item.get("security_monitor"):
+                    existing["security_monitor"] = item["security_monitor"]
                 existing["has_password"] = bool(existing.get("has_password") or item.get("has_password"))
                 existing["has_key_content"] = bool(existing.get("has_key_content") or item.get("has_key_content"))
                 existing["has_key"] = bool(existing.get("has_key") or item.get("has_key"))
@@ -179,6 +184,7 @@ def list_server_assets(db=None) -> List[Dict[str, Any]]:
                     "allowed_roots",
                     "file_roots",
                     "enabled",
+                    "security_monitor",
                 ):
                     if meta_key in meta and meta[meta_key] is not None:
                         item[meta_key] = meta[meta_key]

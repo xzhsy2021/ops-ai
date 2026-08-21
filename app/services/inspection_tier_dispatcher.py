@@ -32,6 +32,7 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.db.models import (
     InspectionTierSchedule,
+    OperationJob,
     Server,
     _utcnow,
 )
@@ -163,6 +164,40 @@ def execute_tier(schedule: InspectionTierSchedule) -> Dict[str, Any]:
     log.info("  servers=%d categories=%s", len(servers), cat_codes)
 
     started = _utcnow()
+    # 创建统一任务中心 job，让巡检概览/工作台能实时看到进度
+    job_id = ""
+    try:
+        from uuid import uuid4
+
+        job_db = SessionLocal()
+        try:
+            job = OperationJob(
+                id=uuid4().hex,
+                job_type="inspection_tier",
+                source="scheduler",
+                source_tool=f"tier:{schedule.tier}",
+                title=f"安全巡检 {schedule.tier}（{schedule.name}）",
+                status="running",
+                progress=1,
+                risk_level="medium",
+                operator="system",
+                target=schedule.name or schedule.tier,
+                request_json={"tier": schedule.tier, "schedule_id": schedule.id},
+                result_json={"progress": {"total_servers": len(servers), "completed_servers": 0}},
+                created_at=started,
+                started_at=started,
+                updated_at=started,
+            )
+            job_db.add(job)
+            job_db.commit()
+            job_id = job.id
+            log.info("  created job_id=%s", job_id)
+        finally:
+            job_db.close()
+    except Exception as exc:
+        log.warning("  failed to create OperationJob: %s", exc)
+        job_id = ""
+
     try:
         # 懒导入避免循环依赖
         from app.services.inspection_center import run_servers_batch_inspection
@@ -175,11 +210,12 @@ def execute_tier(schedule: InspectionTierSchedule) -> Dict[str, Any]:
             trigger_type=schedule.tier.upper(),  # DAILY / WEEKLY / MONTHLY
             created_by=f"tier:{schedule.tier}",
             generate_report=False,                # 报告由后续 reporter 异步生成
-            concurrency=int(schedule.concurrency or 3),
+            concurrency=max(20, int(schedule.concurrency or 20)),
             command_timeout_seconds=min(120, max(10, timeout_sec // max(1, len(cat_codes) or 1))),
             run_timeout_seconds=timeout_sec,
             skip_disabled=True,
             all_servers=False,
+            job_id=job_id,
         )
         # batch_result 是 dict（来自 run_servers_batch_inspection）
         # 它返回一个 "runs" 列表（每个 run 一台 server）+ summary
@@ -216,6 +252,36 @@ def execute_tier(schedule: InspectionTierSchedule) -> Dict[str, Any]:
             "started_at": started.isoformat(),
             "finished_at": _utcnow().isoformat(),
         }
+        # 更新任务中心 job 完成状态
+        if job_id:
+            try:
+                job_db = SessionLocal()
+                try:
+                    job = job_db.query(OperationJob).filter(OperationJob.id == job_id).first()
+                    if job:
+                        job.status = "success"
+                        job.progress = 100
+                        job.result_json = {
+                            "tier": schedule.tier,
+                            "score": score,
+                            "severity": severity,
+                            "run_ids": [r.get("id") for r in runs if r.get("id")],
+                            "server_count": len(servers),
+                            "issue_count": len(all_issues),
+                            "progress": {
+                                "total_servers": len(servers),
+                                "completed_servers": len(servers),
+                                "current_phase": "finished",
+                            },
+                        }
+                        job.finished_at = _utcnow()
+                        job.updated_at = _utcnow()
+                        job_db.commit()
+                finally:
+                    job_db.close()
+            except Exception as exc:
+                log.warning("  failed to update job %s: %s", job_id, exc)
+
         log.info(
             "  ✓ done severity=%s score=%s issues=%d servers=%d",
             severity, score, len(all_issues), len(servers),
@@ -223,6 +289,23 @@ def execute_tier(schedule: InspectionTierSchedule) -> Dict[str, Any]:
         return result
     except Exception as exc:  # noqa
         log.exception("  ✗ tier failed: %s", exc)
+        if job_id:
+            try:
+                job_db = SessionLocal()
+                try:
+                    job = job_db.query(OperationJob).filter(OperationJob.id == job_id).first()
+                    if job:
+                        job.status = "failed"
+                        job.progress = 100
+                        job.error_message = str(exc)
+                        job.result_json = {"error": str(exc)}
+                        job.finished_at = _utcnow()
+                        job.updated_at = _utcnow()
+                        job_db.commit()
+                finally:
+                    job_db.close()
+            except Exception:
+                pass
         return {
             "status": "failed",
             "error": str(exc),

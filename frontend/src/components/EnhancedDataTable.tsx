@@ -1,7 +1,14 @@
 import { useState, useMemo, useCallback, type MouseEvent } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown } from 'lucide-react'
 import { LoadingState, EmptyState, ErrorState } from './ui'
+
+export type EnhancedColumnFilter = {
+  options: Array<{ value: string; label: string }>
+  value: string
+  onChange: (value: string) => void
+}
 
 export type EnhancedColumn<T> = {
   key: string
@@ -16,6 +23,7 @@ export type EnhancedColumn<T> = {
   cellClassName?: string
   label?: string
   sticky?: 'start' | 'end'
+  filter?: EnhancedColumnFilter
 }
 
 export type EnhancedDataTableProps<T> = {
@@ -71,6 +79,7 @@ export function EnhancedDataTable<T>({
 }: EnhancedDataTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  const [filterPanel, setFilterPanel] = useState<{ key: string; left: number; top: number } | null>(null)
 
   const sorted = useMemo(() => {
     if (!sortKey) return rows
@@ -168,6 +177,24 @@ export function EnhancedDataTable<T>({
                 >
                   <span className="sortable-col-header">
                     {column.title}
+                      {column.filter && (
+                        <button
+                          type="button"
+                          title={column.filter.value ? `筛选中（点击修改/清除）` : '按此列筛选'}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (filterPanel?.key === column.key) { setFilterPanel(null); return }
+                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                            setFilterPanel({ key: column.key, left: Math.max(8, r.left - 40), top: r.bottom + 4 })
+                          }}
+                          style={{
+                            border: 'none', background: 'none', cursor: 'pointer', padding: '0 2px',
+                            lineHeight: 1, fontSize: 10,
+                            color: column.filter.value ? 'var(--brand, #3b82f6)' : 'var(--text-faint, #999)',
+                            fontWeight: column.filter.value ? 700 : 400,
+                          }}
+                        >▼</button>
+                      )}
                     {column.sortable && (
                       <span className="sort-icon">
                         {sortKey === column.key ? (
@@ -289,6 +316,44 @@ export function EnhancedDataTable<T>({
           </div>
         </div>
       )}
+        {filterPanel && createPortal(
+          <>
+            <div style={{ position: 'fixed', inset: 0, zIndex: 9990 }} onClick={() => setFilterPanel(null)} />
+            <div style={{
+              position: 'fixed', left: filterPanel.left, top: filterPanel.top, zIndex: 9991,
+              minWidth: 140, maxWidth: 220, maxHeight: 280, overflowY: 'auto',
+              background: 'var(--bg-elevated, var(--bg-card, #fff))', border: '1px solid var(--border)',
+              borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,.16)', padding: 4,
+            }}>
+              {(columns.find((c) => c.key === filterPanel.key)?.filter?.options || []).map((opt) => {
+                const col = columns.find((c) => c.key === filterPanel.key)
+                const active = col?.filter?.value === opt.value
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => {
+                      col?.filter?.onChange(opt.value)
+                      setFilterPanel(null)
+                    }}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                      width: '100%', textAlign: 'left', padding: '6px 10px', fontSize: 12,
+                      background: active ? 'var(--brand-surface, rgba(59,130,246,.1))' : 'none',
+                      border: 'none', cursor: 'pointer', color: 'var(--text-primary)', whiteSpace: 'nowrap',
+                      borderRadius: 4,
+                      fontWeight: active ? 600 : 400,
+                    }}
+                  >
+                    <span>{opt.label}</span>
+                    {active && <span style={{ color: 'var(--brand, #3b82f6)' }}>✓</span>}
+                  </button>
+                )
+              })}
+            </div>
+          </>,
+          document.body
+        )}
     </div>
   )
 }

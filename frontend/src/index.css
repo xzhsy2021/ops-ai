@@ -2,6 +2,17 @@
    Design System — OPS-AI (from WenXiBuddy spec)
    Three themes: crystal / jade / light
    ============================================ */
+
+/* 服务器列表-安全监控：将状态徽章隐藏，统一合并进单个下拉按钮控件 */
+.security-monitor-merged .cc-chip {
+  display: none !important;
+}
+.security-monitor-merged > .btn-subtle {
+  box-shadow: none;
+}
+.security-monitor-merged .btn-subtle:hover {
+  border-color: var(--border-strong, #999);
+}
 :root, [data-theme="crystal"] {
   /* Layout */
   --nav-height: 58px;
@@ -9787,15 +9798,21 @@ html[data-zen='true'] .app-main {
   color: var(--text-primary);
 }
 
-/* 通用：Server 列表两栏布局（分组侧栏 + 主区） */
+/* 通用：Server 列表两栏布局（分组侧栏 + 主区）
+   - 默认单列，.cc-server-side 存在时自动切回两列（用 :has() 探测），
+     这样侧栏关闭后主区可以占满整行，不被预留 220px 占位挤压 */
 .cc-server-layout {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
+.cc-server-layout:has(> .cc-server-side) {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
 @media (max-width: 960px) {
-  .cc-server-layout { grid-template-columns: 1fr; }
+  .cc-server-layout,
+  .cc-server-layout:has(> .cc-server-side) { grid-template-columns: 1fr; }
 }
 
 .cc-server-side {

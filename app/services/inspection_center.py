@@ -4888,51 +4888,80 @@ def _running_runs_with_progress(db: Session) -> List[Dict[str, Any]]:
                .filter(InspectionRun.status.in_(["RUNNING", "PENDING"]))
                .order_by(InspectionRun.created_at.desc())
                .limit(50).all())
-    if not running:
-        return []
-
     run_ids = [r.id for r in running]
-    done_map: Dict[str, int] = {}
-    for (run_id,) in (db.query(InspectionItemResult.run_id)
-                      .filter(InspectionItemResult.run_id.in_(run_ids)).all()):
-        done_map[run_id] = done_map.get(run_id, 0) + 1
-
-    expected_map: Dict[str, int] = {}
-    for r in running:
-        cats = list(r.categories or [])
-        scope = r.scope_type or SERVER_SCOPE
-        if not cats:
-            continue
-        expected_map[r.id] = db.query(InspectionItemConfig).filter(
-            InspectionItemConfig.scope_type == scope,
-            InspectionItemConfig.enabled == True,  # noqa: E712
-            InspectionItemConfig.category.in_(cats),
-        ).count()
 
     now = _now()
     items: List[Dict[str, Any]] = []
-    for r in running:
-        run_id = r.id
-        done = done_map.get(run_id, 0)
-        expected = expected_map.get(run_id, 0)
-        if expected > 0 and done >= expected:
-            percent = 99
-        elif expected > 0:
-            percent = max(1, min(99, int(done / expected * 100)))
-        elif done > 0:
-            percent = 99
-        else:
-            percent = 1 if r.status == "RUNNING" else 0
-        started = r.started_at or r.created_at
-        duration_ms = r.duration_ms or 0
-        if started and not r.finished_at:
-            duration_ms = int((now - started).total_seconds() * 1000)
-        item = _run_to_dict(r)
-        item["items_done"] = done
-        item["items_total"] = expected
-        item["progress_percent"] = percent
-        item["duration_ms"] = duration_ms
-        items.append(item)
+    if run_ids:
+        done_map: Dict[str, int] = {}
+        for (run_id,) in (db.query(InspectionItemResult.run_id)
+                          .filter(InspectionItemResult.run_id.in_(run_ids)).all()):
+            done_map[run_id] = done_map.get(run_id, 0) + 1
+
+        expected_map: Dict[str, int] = {}
+        for r in running:
+            cats = list(r.categories or [])
+            scope = r.scope_type or SERVER_SCOPE
+            if not cats:
+                continue
+            expected_map[r.id] = db.query(InspectionItemConfig).filter(
+                InspectionItemConfig.scope_type == scope,
+                InspectionItemConfig.enabled == True,  # noqa: E712
+                InspectionItemConfig.category.in_(cats),
+            ).count()
+
+        for r in running:
+            run_id = r.id
+            done = done_map.get(run_id, 0)
+            expected = expected_map.get(run_id, 0)
+            if expected > 0 and done >= expected:
+                percent = 99
+            elif expected > 0:
+                percent = max(1, min(99, int(done / expected * 100)))
+            elif done > 0:
+                percent = 99
+            else:
+                percent = 1 if r.status == "RUNNING" else 0
+            started = r.started_at or r.created_at
+            duration_ms = r.duration_ms or 0
+            if started and not r.finished_at:
+                duration_ms = int((now - started).total_seconds() * 1000)
+            item = _run_to_dict(r)
+            item["items_done"] = done
+            item["items_total"] = expected
+            item["progress_percent"] = percent
+            item["duration_ms"] = duration_ms
+            items.append(item)
+
+    # 追加 operation_jobs（MCP 后台工具任务，如安全日报巡检）运行中条目，
+    # 使概览页「当前执行进度」也能实时展示工具任务进度。
+    try:
+        from app.db.models import OperationJob
+        job_rows = (db.query(OperationJob)
+                    .filter(OperationJob.status.in_(["queued", "pending", "running"]))
+                    .order_by(OperationJob.created_at.desc())
+                    .limit(20).all())
+        for job in job_rows:
+            started = job.started_at or job.created_at
+            duration_ms = 0
+            if started:
+                duration_ms = int((now - started).total_seconds() * 1000)
+            items.append({
+                "id": job.id,
+                "job_kind": "operation_job",
+                "source_tool": job.source_tool or "",
+                "title": job.title or job.source_tool or "工具任务",
+                "scope_type": "TOOL",
+                "status": (job.status or "running").upper(),
+                "progress_percent": max(0, min(100, job.progress or 0)),
+                "items_done": 0,
+                "items_total": 0,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "started_at": started.isoformat() if started else None,
+                "duration_ms": duration_ms,
+            })
+    except Exception:
+        pass
     return items
 
 

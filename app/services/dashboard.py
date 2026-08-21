@@ -94,6 +94,8 @@ def _recent_deployments(db: Session, limit: int = 8) -> List[Dict[str, Any]]:
 
 
 def _running_tasks(db: Session, limit: int = 5) -> List[Dict[str, Any]]:
+    """运行中任务：发布任务 + 后台工具任务（MCP / operation_jobs）。"""
+    tasks: List[Dict[str, Any]] = []
     try:
         rows = (
             db.query(DeployTask)
@@ -102,7 +104,7 @@ def _running_tasks(db: Session, limit: int = 5) -> List[Dict[str, Any]]:
             .limit(limit)
             .all()
         )
-        return [
+        tasks.extend([
             {
                 "id": row.id,
                 "deployment_id": row.deployment_id,
@@ -113,9 +115,35 @@ def _running_tasks(db: Session, limit: int = 5) -> List[Dict[str, Any]]:
                 "cancel_requested": bool(row.cancel_requested),
             }
             for row in rows
-        ]
+        ])
     except Exception:
-        return []
+        pass
+    try:
+        from app.db.models import OperationJob
+        jobs = (
+            db.query(OperationJob)
+            .filter(OperationJob.status.in_(["queued", "pending", "running"]))
+            .order_by(OperationJob.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        for job in jobs:
+            started = job.started_at or job.created_at
+            tasks.append({
+                "id": job.id,
+                "kind": "tool",
+                "label": job.title or job.source_tool or "工具任务",
+                "environment": job.source_tool or "",
+                "system": "",
+                "status": job.status or "running",
+                "worker": job.worker_id or "",
+                "created_at": _iso(job.created_at),
+                "started_at": _iso(started) if started else None,
+                "cancel_requested": False,
+            })
+    except Exception:
+        pass
+    return tasks
 
 
 def _package_summary(db: Session) -> Dict[str, Any]:
@@ -222,6 +250,12 @@ def build_dashboard_summary(db: Session, *, backend_online: bool = True) -> Dict
     services_total = _safe_count(db, Service)
     failed = _status_count(deployments_by_status, "failed")
     running = _status_count(deployments_by_status, "running", "pending") + _status_count(deploy_tasks_by_status, "running", "pending")
+    try:
+        from app.db.models import OperationJob
+        running += int(db.query(OperationJob).filter(
+            OperationJob.status.in_(["queued", "pending", "running"])).count() or 0)
+    except Exception:
+        pass
     warnings = int((health.get("summary") or {}).get("warnings") or 0) + int(server_summary.get("warnings") or 0)
     errors = int((health.get("summary") or {}).get("errors") or 0) + int(server_summary.get("errors") or 0)
     if failed:

@@ -119,6 +119,29 @@ def get_operation_job(db: Session, job_id: str) -> Optional[Dict[str, Any]]:
     return runtime_job_to_dict("tool", row) if row else None
 
 
+def update_job_progress(job_id: str, progress: int) -> None:
+    """更新任务中心进度（供长耗时工具 handler 内部回调，避免进度卡在固定档位）。
+
+    与 _set_job_status 不同：用独立 Session 快速回写 progress，
+    供 collect_all 这类串行长任务的每步进度回调使用。
+    """
+    if not job_id:
+        return
+    try:
+        from app.db.base import SessionLocal
+        s = SessionLocal()
+        try:
+            job = s.query(OperationJob).filter(OperationJob.id == job_id).first()
+            if job and job.status in ("queued", "pending", "running", "retrying"):
+                job.progress = max(0, min(100, int(progress)))
+                job.updated_at = _now()
+                s.commit()
+        finally:
+            s.close()
+    except Exception:
+        pass
+
+
 def mark_job_audit_id(db: Session, job_id: str, audit_id: str) -> None:
     job = db.query(OperationJob).filter(OperationJob.id == job_id).first()
     if not job:

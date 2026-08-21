@@ -680,7 +680,14 @@ def run_security_daily(args: Dict[str, Any], ctx, db):
     args = args or {}
     report_date = args.get("report_date") or None
     persist_risks = bool(args.get("persist_risks", True))
-    result = collect_all(db, report_date=report_date, persist_risks=persist_risks)
+    job_id = getattr(ctx, "job_id", "") or ""
+    if job_id:
+        from app.services.job_service import update_job_progress
+        progress_cb = lambda pct: update_job_progress(job_id, pct)  # noqa: E731
+    else:
+        progress_cb = None
+    result = collect_all(db, report_date=report_date, persist_risks=persist_risks,
+                         progress_cb=progress_cb)
     summary = result.get("summary") or {}
     return {
         "ok": True,

@@ -10,6 +10,7 @@ export type OverviewTabProps = {
 }
 
 function runningRunLabel(r: any): string {
+  if (r.job_kind === 'operation_job') return r.title || r.source_tool || '后台工具任务'
   if (r.scope_type === 'PROJECT') return `项目 ${r.project_id || '-'}`
   if (r.scope_type === 'PROJECT_COMBINED') return `综合 ${r.project_id || '-'}`
   return `服务器 ${r.server_id || '-'}`
@@ -74,7 +75,7 @@ export function OverviewTab({ overview, servers, projects }: OverviewTabProps) {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           <strong>{runningRunLabel(r)}</strong>
                           <StatusBadge value={r.status} />
-                          <small className="muted" style={{ fontSize: 12 }}>{r.scope_type === 'PROJECT' || r.scope_type === 'PROJECT_COMBINED' ? '' : `评分 ${r.score ?? '-'}`}</small>
+                          <small className="muted" style={{ fontSize: 12 }}>{r.scope_type === 'PROJECT' || r.scope_type === 'PROJECT_COMBINED' || r.job_kind === 'operation_job' ? '' : `评分 ${r.score ?? '-'}`}</small>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                           <span className="muted" style={{ fontSize: 12 }}>{formatTime(r.created_at)}</span>

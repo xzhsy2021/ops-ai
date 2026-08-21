@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -20,6 +21,47 @@ from app.services.tool_registry import registry
 
 # 服务器上 deanchou/server_security_monitor 的日报脚本（仅用于 probe 诊断，采集不依赖它）
 DAILY_SCRIPT = "/usr/local/bin/security-daily-summary.sh"
+
+# 官方安装脚本地址（一键安装：fail2ban/auditd/每日日报/资源监控 + Telegram 告警）
+SECURITY_MONITOR_INSTALL_URL = "https://raw.githubusercontent.com/deanchou/server_security_monitor/master/install_security_monitor.sh"
+
+
+def _security_monitor_install_cmd(options: Optional[Dict[str, Any]] = None) -> str:
+    """构造一键安装命令（deanchou/server_security_monitor），支持自定义安装选项。
+
+    options（可选）为自定义安装选项变量（键值对，将作为环境变量注入安装脚本），
+    例如：{"INSTALL_FAIL2BAN": "yes", "INSTALL_AUDITD": "yes", "INSTALL_DAILY": "yes",
+          "INSTALL_RESOURCE_MONITOR": "yes", "ALERT_CHANNELS": "telegram",
+          "TG_BOT_TOKEN": "...", "TG_CHAT_ID": "..."}。
+    未提供的选项使用默认值；TG 凭据也优先取 options（不再依赖系统 .env）。
+    高度可定制：传入任意键值即可覆盖/追加安装变量。
+    """
+    options = options or {}
+    script_url = str(options.pop("INSTALL_SCRIPT_URL", None) or SECURITY_MONITOR_INSTALL_URL)
+    defaults = {
+        "INSTALL_FAIL2BAN": "yes",
+        "INSTALL_AUDITD": "yes",
+        "INSTALL_DAILY": "yes",
+        "INSTALL_RESOURCE_MONITOR": "yes",
+        "ALERT_CHANNELS": "telegram",
+    }
+    merged: Dict[str, Any] = {**defaults, **options}
+    tg_token = str(merged.pop("TG_BOT_TOKEN", None) or os.getenv("SECURITY_MONITOR_TG_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN") or "")
+    tg_chat = str(merged.pop("TG_CHAT_ID", None) or os.getenv("SECURITY_MONITOR_TG_CHAT_ID") or os.getenv("TG_CHAT_ID") or "")
+
+    parts = [
+        "cd /root && \\",
+        f"curl -sLO {script_url} && \\",
+        "chmod +x install_security_monitor.sh && \\",
+    ]
+    for key, value in merged.items():
+        parts.append(f"{key}='{value}' \\")
+    if tg_token:
+        parts.append(f"TG_BOT_TOKEN='{tg_token}' \\")
+    if tg_chat:
+        parts.append(f"TG_CHAT_ID='{tg_chat}' \\")
+    parts.append("bash install_security_monitor.sh --auto")
+    return "\n".join(parts)
 
 
 def _resolve_server_or_404(server_key: str):
@@ -157,9 +199,22 @@ def summarize_security_reports(args: Dict[str, Any], ctx, db):
 )
 def collect_security_reports(args: Dict[str, Any], ctx, db):
     from app.services.security_daily import collect_all
+    from app.services.job_service import update_job_progress
     report_date = args.get("report_date") or None
     persist_risks = bool(args.get("persist_risks", True))
-    result = collect_all(db, report_date=report_date, persist_risks=persist_risks)
+    job_id = getattr(ctx, "job_id", "")
+
+    def progress_cb(percent: int, detail: Dict[str, Any]):
+        if job_id:
+            update_job_progress(job_id, percent, detail)
+
+    result = collect_all(
+        db,
+        report_date=report_date,
+        persist_risks=persist_risks,
+        concurrency=16,
+        progress_cb=progress_cb,
+    )
     summary = result.get("summary") or {}
     return {
         "ok": True,
@@ -428,4 +483,108 @@ def get_daily_report(args: Dict[str, Any], ctx, db):
         "reports": reports,
         "summary": f"已获取 {report_date} 安全日报报告 {len(reports)} 份"
                    + ("" if include_content else "（未含正文，include_content=false）"),
+    }
+
+
+@registry.register(
+    name="ops.security_module.setup",
+    title="一键安装服务器安全监控模块",
+    description=(
+        "在目标服务器上远程执行 deanchou/server_security_monitor 官方安装脚本："
+        "安装 fail2ban、auditd、每日安全日报脚本与资源监控，并配置 Telegram 告警，"
+        "安装完成后标记该服务器「已启用安全监控」。"
+        "安装为高风险远端写操作（下载脚本、安装系统服务、修改系统配置），需确认短语，"
+        "执行耗时数分钟，会自动入队统一任务中心（可用 ops.get_job_status 轮询结果）。"
+        "中文: 安装安全监控/一键安装安全模块/安装fail2ban/安全加固. "
+    ),
+    scopes=["ops:write", "server:read", "server:write"],
+    risk="high",
+    category="report_write",
+    write=True,
+    force_taskize=True,
+    requires_confirmation=True,
+    data_sensitivity="internal",
+    keywords=["安装安全监控", "一键安装", "安装fail2ban", "安全加固", "安装监控模块", "setup"],
+    related_tools=["ops.security_module.probe", "ops.security_module.install",
+                   "ops.get_job_status", "ops.security_report.collect"],
+    example_prompts=["给服务器 idn 一键安装安全监控模块", "安装 fail2ban 和审计服务"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "服务器名称、host、UUID 或短 UUID 前缀"},
+            "options": {"type": "object", "additionalProperties": {"type": "string"},
+                        "description": "自定义安装选项变量（键值对，注入安装脚本环境变量），高度可定制；"
+                                       "例如 INSTALL_FAIL2BAN/INSTALL_AUDITD/INSTALL_DAILY/INSTALL_RESOURCE_MONITOR/ALERT_CHANNELS/"
+                                       "TG_BOT_TOKEN/TG_CHAT_ID/INSTALL_SCRIPT_URL；缺省使用默认选项（不依赖系统 .env）"},
+            "confirm_text": {"type": "string", "description": "确认短语: CONFIRM ops.security_module.setup"},
+        },
+        "required": ["server", "confirm_text"],
+        "additionalProperties": False,
+    },
+)
+def setup_security_module(args: Dict[str, Any], ctx, db):
+    """一键安装安全监控：SSH 远程执行官方安装脚本，成功后标记已启用。"""
+    server = _resolve_server_or_404(args.get("server") or "")
+    server_name = server.get("name") or server.get("id") or "-"
+
+    from ssh_client import create_ssh_client
+    ssh = create_ssh_client(server)
+    steps: List[Dict[str, Any]] = []
+    try:
+        ssh.connect(max_retries=2, per_attempt_timeout=20)
+        steps.append({"cmd": "connect", "exit_code": 0,
+                      "stdout": f"已连接 {server_name}", "stderr": ""})
+
+        options = dict(args.get("options") or {})
+        install_cmd = _security_monitor_install_cmd(options)
+        # 脚本包含换行续行符，需逐行合并为单行再交给远端 shell 执行
+        oneliner = install_cmd.replace("\\\n", " ").replace("\n", " ")
+        code, out, err = ssh.exec(oneliner, timeout=900, on_output=lambda _stream, _data: None)
+        steps.append({"cmd": "install_script", "exit_code": code,
+                      "stdout": (out or "")[-6000:], "stderr": (err or "")[-2000:]})
+        if code != 0:
+            return {
+                "ok": False, "server": server_name,
+                "summary": f"{server_name} 安装安全监控失败（exit={code}）",
+                "steps": steps,
+                "error": (err or out or "安装失败").strip()[-1000:],
+                "suggestion": "可调用 ops.security_module.probe 诊断服务器 SSH/网络状态后重试。",
+            }
+    except Exception as exc:
+        return {"ok": False, "server": server_name,
+                "summary": f"{server_name} 安装安全监控异常",
+                "steps": steps, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            ssh.close()
+        except Exception:
+            pass
+
+    # 安装成功：标记服务器已启用安全监控
+    from app.db.models import Server
+    row = db.query(Server).filter(Server.name == server_name).first() or \
+        db.query(Server).filter(Server.id == server.get("id")).first()
+    marked = False
+    if row is not None:
+        meta = dict(row.metadata_json or {})
+        mon = dict(meta.get("security_monitor") or {})
+        mon["enabled"] = True
+        mon["installed"] = True
+        mon["source"] = "auto_install"
+        mon["installed_at"] = _now_iso()
+        meta["security_monitor"] = mon
+        row.metadata_json = meta
+        db.commit()
+        marked = True
+    steps.append({"cmd": "mark_enabled", "exit_code": 0 if marked else 1,
+                  "stdout": f"已标记 {server_name} 启用安全监控" if marked else f"未找到 {server_name} 的 DB 记录，仅完成远端安装",
+                  "stderr": ""})
+
+    return {
+        "ok": True,
+        "server": server_name,
+        "summary": f"{server_name} 安全监控安装完成（fail2ban/auditd/日报/资源监控）",
+        "enabled": True,
+        "steps": steps,
+        "next": "可调用 ops.security_report.collect 采集该服务器安全日报，或 ops.security_module.probe 验证安装结果。",
     }

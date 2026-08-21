@@ -248,6 +248,9 @@ export const serverManagement = {
   list: (withStatus = true) => api.get('/servers', { params: { with_status: withStatus } }),
   opsSummary: () => api.get('/servers/ops-summary'),
   opsHealth: (name: string, force = false) => api.get(`/servers/${encodeURIComponent(name)}/ops-health`, { params: { force } }),
+  securityMonitorSetup: (name: string, confirm_text: string, options?: Record<string, string>) => api.post(`/servers/${encodeURIComponent(name)}/security-monitor/setup`, { confirm_text, options: options || undefined }),
+  securityMonitorProbe: (name: string) => api.get(`/servers/${encodeURIComponent(name)}/security-monitor/probe`),
+  securityMonitorStatus: (name: string, enabled: boolean) => api.post(`/servers/${encodeURIComponent(name)}/security-monitor/status`, { enabled }),
   get: (name: string) => api.get(`/servers/${encodeURIComponent(name)}`),
   create: (data: any) => api.post('/servers', data),
   update: (name: string, data: any) =>
@@ -636,7 +639,7 @@ export const inspection = {
   updateItemConfigRules: (itemId: string, rules: any[]) => api.put(`/inspection/item-configs/${encodeURIComponent(itemId)}/rules`, { rules }),
   getThresholds: () => api.get('/inspection/thresholds'),
   securityDailyReports: (params?: { report_date?: string; server_name?: string; group_by?: string; limit?: number; offset?: number }) => api.get('/inspection/security-daily/reports', { params }),
-  securityDailyCollect: (data?: { report_date?: string; persist_risks?: boolean }) => api.post('/inspection/security-daily/collect', data || {}),
+  securityDailyCollect: (data?: { report_date?: string; persist_risks?: boolean; servers?: string[] }) => api.post('/inspection/security-daily/collect', data || {}),
   saveThresholds: (category: string, thresholds: Record<string, any>) => api.post('/inspection/thresholds', { category, thresholds }),
   getRunRawOutput: (runId: string) => api.get(`/inspection/runs/${encodeURIComponent(runId)}/raw-output`),
 }

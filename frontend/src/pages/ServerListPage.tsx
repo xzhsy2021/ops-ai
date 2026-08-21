@@ -50,6 +50,17 @@ interface ServerRow {
   enabled?: boolean
   config_status?: { status?: string; complete?: boolean; missing?: string[]; suggestions?: string[] }
   health_probe?: { status?: string; disk?: { available_kb: number } }
+  security_monitor?: {
+    enabled?: boolean
+    source?: string
+    enabled_at?: string
+    updated_at?: string
+    installed?: boolean
+    fail2ban_active?: boolean
+    auditd_active?: boolean
+    installer_present?: boolean
+    checked_at?: string
+  }
 }
 
 interface ServerForm {
@@ -201,6 +212,10 @@ function ActionButton({
 
 export default function ServerListPage() {
   const navigate = useNavigate()
+  const [authFilter, setAuthFilter] = useState('') // K1
+  const [monitorFilter, setMonitorFilter] = useState('') // K2
+  // TOPSTATES
+
   const [servers, setServers] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -266,16 +281,26 @@ export default function ServerListPage() {
     else { setSuccess(msg); setTimeout(() => setSuccess(''), 3000) }
   }
 
-  const load = async () => {
-    setLoading(true)
+  const load = async (skipLoading = false) => {
+const scrollEl = document.querySelector('.table-scroll') || document.querySelector('.enhanced-table-wrap')
+  const prevScrollTop = scrollEl?.scrollTop || 0
+    if (!skipLoading) setLoading(true)
     setError('')
     try {
       const res: any = await serverManagement.list()
       setServers(res.data || [])
+requestAnimationFrame(() => {
+          const el = document.querySelector('.table-scroll') || document.querySelector('.enhanced-table-wrap')
+          if (el) el.scrollTop = prevScrollTop
+        })
     } catch (e: any) {
       flash(typeof e === 'string' ? e : e?.message || '加载失败', true)
     }
-    setLoading(false)
+    if (!skipLoading) setLoading(false)
+requestAnimationFrame(() => {
+        const el = document.querySelector('.table-scroll') || document.querySelector('.enhanced-table-wrap')
+        if (el) el.scrollTop = prevScrollTop
+      })
   }
 
   const loadGroups = () => { groupsResource.refresh(true) }
@@ -320,6 +345,17 @@ export default function ServerListPage() {
   const filteredServers = configFilter === 'all'
     ? byStatusServers
     : byStatusServers.filter((s) => (s.config_status?.status || (s.config_status?.complete ? 'passed' : 'blocked')) === configFilter)
+
+  const monitorStateOf = (s: any) => {
+    const mon = s.security_monitor || {}
+    const probed = typeof mon.installed === 'boolean'
+    const installed = Boolean(mon.installed)
+    const enabled = Boolean(mon.enabled)
+    return !probed ? '未探测' : !installed ? '未安装' : enabled ? '已启用' : '未启用'
+  }
+  const monitorFilteredServers = monitorFilter === '' ? filteredServers : filteredServers.filter((s) => monitorStateOf(s) === monitorFilter)
+  const authModeOf = (s: any) => s.auth_type || (s.key_content ? 'key_content' : (s.key || s.key_file) ? 'key_file' : 'password')
+  const tableRows = authFilter === '' ? monitorFilteredServers : monitorFilteredServers.filter((s) => authModeOf(s) === authFilter)
 
   const statusCounts = servers.reduce((acc: Record<string, number>, s: any) => {
     const status = normalizeServerStatus(s)
@@ -674,6 +710,103 @@ export default function ServerListPage() {
     }
   }
 
+  const [monitorSetup, setMonitorSetup] = useState<{ name: string; host: string; optionsText: string } | null>(null)
+  const [probeState, setProbeState] = useState<Record<string, 'idle' | 'loading'>>({})
+  const [monitorMenuFor, setMonitorMenuFor] = useState<string | null>(null)
+  const [monitorMenuPos, setMonitorMenuPos] = useState<{ left: number; top: number } | null>(null)
+  const [groupsModalOpen, setGroupsModalOpen] = useState(false)
+// REMOVED-DUP
+
+  const openMonitorSetup = (s: ServerRow) => {
+    setMonitorSetup({
+      name: s.name,
+      host: s.host,
+      optionsText: 'INSTALL_FAIL2BAN=yes\nINSTALL_AUDITD=yes\nINSTALL_DAILY=yes\nINSTALL_RESOURCE_MONITOR=yes\nALERT_CHANNELS=telegram\n# TG_BOT_TOKEN=...\n# TG_CHAT_ID=...\n# INSTALL_SCRIPT_URL=https://raw.githubusercontent.com/deanchou/server_security_monitor/master/install_security_monitor.sh',
+    })
+  }
+
+  const confirmMonitorSetup = async () => {
+    if (!monitorSetup) return
+    const options: Record<string, string> = {}
+    for (const line of monitorSetup.optionsText.split('\n')) {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) continue
+      const eq = t.indexOf('=')
+      if (eq <= 0) continue
+      const k = t.slice(0, eq).trim()
+      const v = t.slice(eq + 1).trim().replace(/^['"]|['"]$/g, '')
+      if (k) options[k] = v
+    }
+    try {
+      const res: any = await serverManagement.securityMonitorSetup(monitorSetup.name, 'CONFIRM ops.security_module.setup', options)
+      const job = res.data?.job || {}
+      flash(`已提交 ${monitorSetup.name} 安全监控安装任务（${job.status || 'queued'}），可在任务中心查看进度`, false)
+      setMonitorSetup(null)
+    } catch (err: any) {
+      flash(typeof err === 'string' ? err : '安全监控安装提交失败', true)
+    }
+  }
+
+  const handleSecurityMonitorProbe = async (serverName: string) => {
+    setProbeState((prev) => ({ ...prev, [serverName]: 'loading' }))
+    try {
+      const res: any = await serverManagement.securityMonitorProbe(serverName)
+      const data = res.data || res
+      const parts = [
+        `脚本已安装: ${data.security_monitor_installed ? '是' : '否'}`,
+        `fail2ban: ${data.fail2ban_active ? '运行中' : '未运行'}`,
+        `auditd: ${data.auditd_active ? '运行中' : '未运行'}`,
+      ]
+      flash(`${serverName} 探测: ${parts.join(' | ')}`, !data.security_monitor_installed)
+      load()
+    } catch (err: any) {
+      flash(typeof err === 'string' ? err : '安全监控探测失败', true)
+    } finally {
+      setProbeState((prev) => ({ ...prev, [serverName]: 'idle' }))
+    }
+  }
+
+  const handleSecurityMonitorStatus = async (serverName: string, enabled: boolean) => {
+    try {
+      const res: any = await serverManagement.securityMonitorStatus(serverName, enabled)
+      flash(res.data?.message || `已手动标记 ${serverName} 安全监控${enabled ? '启用' : '停用'}`, false)
+      load()
+    } catch (err: any) {
+      flash(typeof err === 'string' ? err : '状态修改失败', true)
+    }
+  }
+const requestEnableMonitor = (s: ServerRow) => {
+      setRiskAction({
+        title: '启用安全监控',
+        description: `手动将 ${s.name} 标记为「已启用安全监控」（仅改平台登记状态，不执行安装）。探测确认脚本已安装，可登记启用。`,
+        target: s.name,
+        confirmText: `ENABLE_SECURITY_MONITOR ${s.name}`,
+        confirmButtonLabel: '确认启用',
+        riskLevel: 'medium',
+        details: [{ label: '主机', value: s.host }, { label: '操作', value: '启用（手动登记）' }],
+        onConfirm: async () => {
+          await handleSecurityMonitorStatus(s.name, true)
+          return { success: true, message: `${s.name} 已启用安全监控` }
+        },
+      })
+    }
+
+    const requestDisableMonitor = (s: ServerRow) => {
+      setRiskAction({
+        title: '停用安全监控',
+        description: `手动将 ${s.name} 标记为「未启用安全监控」（仅改平台登记状态，不卸载服务器上的脚本/服务）。适用于手动安装的服务器人工登记。`,
+        target: s.name,
+        confirmText: `DISABLE_SECURITY_MONITOR ${s.name}`,
+        confirmButtonLabel: '确认停用',
+        riskLevel: 'medium',
+        details: [{ label: '主机', value: s.host }, { label: '操作', value: '停用（手动登记）' }],
+        onConfirm: async () => {
+          await handleSecurityMonitorStatus(s.name, false)
+          return { success: true, message: `${s.name} 已停用安全监控` }
+        },
+      })
+    }
+
   const jumpOptions = servers.filter((s) => !editing || s.name !== editing)
 
   const handleGroupDragOver = (e: React.DragEvent, groupName: string) => {
@@ -801,6 +934,16 @@ export default function ServerListPage() {
     { key: 'user', title: '用户', width: 100, className: 'col-hide-md', render: (s: ServerRow) => <span style={{ color: 'var(--text-secondary)' }}>{s.username || s.user || 'root'}</span> },
     {
       key: 'auth', title: '认证', width: 110,
+        filter: {
+          options: [
+            { value: '', label: '全部' },
+            { value: 'password', label: '密码' },
+            { value: 'key_file', label: '密钥文件' },
+            { value: 'key_content', label: '密钥内容' },
+          ],
+          value: authFilter,
+          onChange: setAuthFilter,
+        },
       render: (s: ServerRow) => {
         const authMode = s.auth_type || (s.key_content ? 'key_content' : s.key || s.key_file ? 'key_file' : 'password')
         const label = authMode === 'password' ? '密码' : authMode === 'key_file' ? '密钥文件' : '密钥内容'
@@ -809,6 +952,19 @@ export default function ServerListPage() {
     },
     {
       key: 'group', title: '分组', width: 130, className: 'col-hide-sm',
+        filter: {
+          options: [
+            { value: '', label: '全部分组' },
+            ...groupNames.map((g: string) => ({ value: g, label: g })),
+            { value: '__ungrouped__', label: '未分组' },
+          ],
+          value: selectedGroup === null ? '' : selectedGroup === '' ? '__ungrouped__' : selectedGroup,
+          onChange: (v: string) => {
+            if (v === '') setSelectedGroup(null)
+            else if (v === '__ungrouped__') setSelectedGroup('')
+            else setSelectedGroup(v)
+          },
+        },
       render: (s: ServerRow) => {
         if (!s.group) return <span style={{ color: 'var(--text-faint)' }}>—</span>
         const groupColor = getGroupColor(s.group)
@@ -833,9 +989,145 @@ export default function ServerListPage() {
     },
     {
       key: 'status', title: '状态', width: 90,
+        filter: {
+          options: [
+            { value: '', label: '全部' },
+            { value: 'online', label: '在线' },
+            { value: 'disabled', label: '停用' },
+            { value: 'offline', label: '离线' },
+          ],
+          value: serverStatusFilter === 'all' ? '' : serverStatusFilter,
+          onChange: (v: string) => setServerStatusFilter(v === '' ? 'all' : (v as any)),
+        },
       render: (s: ServerRow) => {
         const status = normalizeServerStatus(s)
         return <span className={serverStatusChipClass(status)}>{serverStatusLabel(status)}</span>
+      },
+    },
+    {
+      key: 'securityMonitor', title: '安全监控', width: 250,
+        filter: {
+          options: [
+            { value: '', label: '全部' },
+            { value: '未探测', label: '未探测' },
+            { value: '未安装', label: '未安装' },
+            { value: '已启用', label: '已启用' },
+            { value: '未启用', label: '未启用' },
+          ],
+          value: monitorFilter,
+          onChange: setMonitorFilter,
+        },
+      render: (s: ServerRow) => {
+        const mon = s.security_monitor || {}
+        const enabled = Boolean(mon.enabled)
+        const probing = probeState[s.name] === 'loading'
+        // 探测结论已持久化到后端，刷新后仍可见
+        const probed = typeof mon.installed === 'boolean'
+        const installed = Boolean(mon.installed)
+        const checkedTitle = mon.checked_at
+          ? `上次探测: ${new Date(mon.checked_at).toLocaleString()}`
+          : 'SSH 探测实际安装状态'
+        // 单按钮：标签=当前建议的主动作，菜单内聚合全部适用动作
+        const primaryLabel = probing ? '探测中…' : enabled ? '停用' : installed ? '启用' : probed ? '安装' : '探测'
+          const stateLabel = probing ? '探测中…' : !probed ? '未探测' : !installed ? '未安装' : enabled ? '已启用' : '未启用'
+          const stateBg = probing ? 'var(--bg-surface, #f0f0f0)' : !probed ? 'var(--bg-surface, #f0f0f0)' : !installed ? 'var(--danger-surface, rgba(229,62,62,.1))' : enabled ? 'var(--success-surface, rgba(56,161,105,.12))' : 'var(--warning-surface, rgba(236,201,75,.12))'
+          const stateColor = probing ? 'var(--text-muted)' : !probed ? 'var(--text-muted)' : !installed ? 'var(--danger, #e53e3e)' : enabled ? 'var(--success, #38a169)' : 'var(--warning, #d69e2e)'
+        const menuOpen = monitorMenuFor === s.name
+        const closeMenu = () => { setMonitorMenuFor(null); setMonitorMenuPos(null) }
+        const itemStyle: React.CSSProperties = {
+          display: 'block', width: '100%', textAlign: 'left', padding: '6px 12px',
+          fontSize: 12, background: 'none', border: 'none', cursor: 'pointer',
+          color: 'var(--text-primary)', whiteSpace: 'nowrap',
+        }
+        return (
+          <div className="security-monitor-merged" style={{ position: 'relative', display: 'inline-flex', maxWidth: '100%' }} data-stop-row-click>
+            <span className="cc-chip" style={enabled
+              ? { color: 'var(--success, #38a169)', borderColor: 'var(--success, #38a169)', fontWeight: 600 }
+              : { color: 'var(--text-muted)', borderColor: 'var(--border)' }}>
+              {enabled ? '已启用' : '未启用'}
+            </span>
+            {probed && (
+              <span className="cc-chip" title={checkedTitle} style={installed
+                ? { color: 'var(--success, #38a169)', borderColor: 'var(--success, #38a169)', fontSize: 11 }
+                : { color: 'var(--danger, #e53e3e)', borderColor: 'var(--danger, #e53e3e)', fontSize: 11 }}>
+                {installed ? '已安装' : '未安装'}
+              </span>
+            )}
+            <div style={{ position: 'relative' }}>
+              <button className="btn btn-subtle" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '3px 8px', whiteSpace: 'nowrap', maxWidth: 240, borderColor: enabled ? 'var(--success, #38a169)' : 'var(--border)', color: enabled ? 'var(--success, #38a169)' : 'var(--text-primary)', background: enabled ? 'var(--success-surface, rgba(56,161,105,.08))' : 'var(--bg-surface, #fff)' }} disabled={probing}
+                onClick={(e) => { e.stopPropagation(); if (menuOpen) { closeMenu() } else { const r = e.currentTarget.getBoundingClientRect(); setMonitorMenuPos({ left: Math.max(8, r.right - 150), top: r.bottom + 4 }); setMonitorMenuFor(s.name) } }}
+                title={`${stateLabel} · ${primaryLabel} · 点击查看全部操作`}>
+                <span style={{ fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: stateBg, color: stateColor }}>{stateLabel}</span>
+                  
+                  <span style={{ color: 'var(--text-faint, #aaa)', margin: '0 2px' }}>→</span>
+                  <span style={{ fontWeight: 600 }}>{probing ? '探测中…' : primaryLabel}</span>
+                  <span style={{ fontSize: 9, color: 'var(--text-faint, #aaa)' }}>▾</span>
+              </button>
+              {menuOpen && monitorMenuPos && createPortal(
+                <>
+                  <div style={{ position: 'fixed', inset: 0, zIndex: 9990 }} onClick={closeMenu} />
+                  <div style={{
+                    position: 'fixed', left: monitorMenuPos.left, top: monitorMenuPos.top, zIndex: 9991, minWidth: 150, maxWidth: 260,
+                    background: 'var(--bg-elevated, var(--bg-card, #fff))', border: '1px solid var(--border)',
+                    borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,.14)', overflow: 'hidden', padding: 4,
+                  }}>
+                    <button style={itemStyle} disabled={probing}
+                      onClick={(e) => { e.stopPropagation(); closeMenu(); handleSecurityMonitorProbe(s.name) }}>
+                      {probing ? '探测中…' : probed ? '重探（核对实际状态）' : '探测（核对实际状态）'}
+                    </button>
+{!enabled && installed && (
+                        <button style={{ ...itemStyle, color: 'var(--success, #38a169)' }}
+                          onClick={(e) => { e.stopPropagation(); closeMenu(); requestEnableMonitor(s) }}>启用（登记）</button>
+                      )}
+                      {enabled && (
+                        <button style={{ ...itemStyle, color: 'var(--danger, #e53e3e)' }}
+                          onClick={(e) => { e.stopPropagation(); closeMenu(); requestDisableMonitor(s) }}>停用（登记）</button>
+                      )}
+                    {false && !enabled && installed && (
+                      <RiskActionGuard
+                        riskLevel="medium"
+                        title="启用安全监控"
+                        description={`手动将 ${s.name} 标记为「已启用安全监控」（仅改平台登记状态，不执行安装）。探测确认脚本已安装，可登记启用。`}
+                        target={s.name}
+                        confirmText={`ENABLE_SECURITY_MONITOR ${s.name}`}
+                        confirmMode="one-click"
+                        details={[{ label: '主机', value: s.host }, { label: '操作', value: '启用（手动登记）' }]}
+                        onConfirm={() => handleSecurityMonitorStatus(s.name, true)}
+                      >
+                        {(open) => (
+                          <button style={{ ...itemStyle, color: 'var(--success, #38a169)' }}
+                            onClick={(e) => { e.stopPropagation(); closeMenu(); open() }}>启用（登记）</button>
+                        )}
+                      </RiskActionGuard>
+                    )}
+                    {!enabled && !installed && (
+                      <button style={{ ...itemStyle, color: 'var(--brand)' }}
+                        onClick={(e) => { e.stopPropagation(); closeMenu(); openMonitorSetup(s) }}>安装（自定义选项）</button>
+                    )}
+                    {false && enabled && (
+                      <RiskActionGuard
+                        riskLevel="medium"
+                        title="停用安全监控"
+                        description={`手动将 ${s.name} 标记为「未启用安全监控」（仅改平台登记状态，不卸载服务器上的脚本/服务）。适用于手动安装的服务器人工登记。`}
+                        target={s.name}
+                        confirmText={`DISABLE_SECURITY_MONITOR ${s.name}`}
+                        confirmMode="one-click"
+                        details={[{ label: '主机', value: s.host }, { label: '操作', value: '停用（手动登记）' }]}
+                        onConfirm={() => handleSecurityMonitorStatus(s.name, false)}
+                      >
+                        {(open) => (
+                          <button style={{ ...itemStyle, color: 'var(--danger, #e53e3e)' }}
+                            onClick={(e) => { e.stopPropagation(); closeMenu(); open() }}>停用（登记）</button>
+                        )}
+                      </RiskActionGuard>
+                    )}
+                  </div>
+                </>
+                  , document.body
+              )}
+            </div>
+          </div>
+        )
       },
     },
     {
@@ -891,26 +1183,26 @@ export default function ServerListPage() {
 
   return (
     <div className="cc-grid-bg" style={{ display: 'grid', gap: 16, padding: '4px 0 24px' }}>
-      <div className="cc-hero">
+      <div className="cc-hero" style={{ padding: '8px 16px', gap: 12, alignItems: 'center' }}>
         <div>
-          <span className="cc-hero-eyebrow">INFRA · SERVERS</span>
-          <h1 className="cc-hero-title">服务器管理</h1>
-          <p className="cc-hero-desc">共 <strong style={{ color: 'var(--brand)' }}>{servers.length}</strong> 台服务器 · 分组 <strong style={{ color: 'var(--brand)' }}>{groupNames.length}</strong> 个{selectedGroup !== null ? ` · 当前：${selectedGroup === '' ? '未分组' : selectedGroup}` : ''}</p>
+          {null}
+          <h1 style={{ margin: 0, fontSize: 16, lineHeight: 1.3 }}>服务器管理</h1>
+          <p className="cc-hero-desc" style={{ margin: 0, fontSize: 12 }}>共 {servers.length} 台 · 分组 {groupNames.length} 个{selectedGroup !== null ? ` · 当前：${selectedGroup === '' ? '未分组' : selectedGroup}` : ''}</p>
         </div>
-        <div className="cc-hero-stats" style={{ minWidth: 220 }}>
-          <div className="cc-hero-stat cc-hero-stat--ok">
+        <div className="cc-hero-stats" style={{ minWidth: 0, gap: 8 }}>
+          <div className="cc-hero-stat cc-hero-stat--ok" style={{ padding: '2px 8px', fontSize: 11 }}>
             <strong>{statusCounts.online || 0}</strong><span>在线</span>
           </div>
-          <div className="cc-hero-stat cc-hero-stat--warn">
+          <div className="cc-hero-stat cc-hero-stat--warn" style={{ padding: '2px 8px', fontSize: 11 }}>
             <strong>{statusCounts.disabled || 0}</strong><span>停用</span>
           </div>
-          <div className="cc-hero-stat cc-hero-stat--risk">
+          <div className="cc-hero-stat cc-hero-stat--risk" style={{ padding: '2px 8px', fontSize: 11 }}>
             <strong>{statusCounts.offline || 0}</strong><span>离线</span>
           </div>
         </div>
       </div>
     <div className="cc-server-layout">
-      <aside className="cc-server-side">
+      {false && (<aside className="cc-server-side">
         <div className="cc-server-side-head">
           <strong>服务器分组</strong>
           <small>{servers.length} 台</small>
@@ -1002,7 +1294,7 @@ export default function ServerListPage() {
           }}>
           + 新建分组
         </button>
-      </aside>
+      </aside>)}
 
       <div style={{ flex: 1, display: 'grid', gap: 14, minWidth: 0 }}>
         <div className="cc-toolbar">
@@ -1046,6 +1338,9 @@ export default function ServerListPage() {
                 取消选择
               </button>
             )}
+              <button className="cc-icon-btn" onClick={() => setGroupsModalOpen(true)} style={{ height: 30, padding: '0 10px' }}>
+                分组 ({groupNames.length}){selectedGroup !== null ? ` · ${selectedGroup === '' ? '未分组' : selectedGroup}` : ''}
+              </button>
             <button className="cc-icon-btn" onClick={openKeyCreate} style={{ height: 30, padding: '0 10px' }}>
               密钥管理 ({sshKeys.length})
             </button>
@@ -1055,12 +1350,12 @@ export default function ServerListPage() {
           </div>
         </div>
 
-        {error && (
+        {false && error && (
           <div className="card" style={{ background: 'var(--danger-surface)', borderColor: 'var(--danger-border)', color: 'var(--danger)', fontSize: '13px' }}>
             {error}
           </div>
         )}
-        {success && (
+        {false && success && (
           <div className="card" style={{ background: 'var(--success-surface)', borderColor: 'var(--success-border)', color: 'var(--success)', fontSize: '13px' }}>
             {success}
           </div>
@@ -1068,7 +1363,7 @@ export default function ServerListPage() {
 
         <div className="cc-table-wrap" style={{ padding: 0, overflow: 'hidden' }}>
           <EnhancedDataTable
-            rows={filteredServers}
+            rows={tableRows}
             columns={serverColumns}
             rowKey={(s: ServerRow) => s.name}
             loading={loading}
@@ -1468,6 +1763,104 @@ export default function ServerListPage() {
         </div>
       )}
 
+      {monitorSetup && (
+        <div className="cc-modal-overlay" style={{ zIndex: 1200 }} onClick={(e) => { if (e.target === e.currentTarget) setMonitorSetup(null) }}>
+          <div className="cc-modal-shell" style={{ maxWidth: 560 }}>
+            <div className="cc-modal-head">
+              <h3>安装安全监控：{monitorSetup.name}<small>SECURITY MONITOR · SETUP</small></h3>
+              <button className="cc-modal-close" onClick={() => setMonitorSetup(null)}>✕</button>
+            </div>
+            <div style={{ padding: '16px 20px' }}>
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+                自定义安装选项变量（每行 <code>KEY=VALUE</code>，<code>#</code> 开头为注释，注入安装脚本环境变量）。留空键使用默认选项；不依赖系统 .env。安装为远端写操作，提交后在任务中心查看进度。
+              </p>
+              <textarea
+                value={monitorSetup.optionsText}
+                onChange={(e) => setMonitorSetup((prev) => prev ? { ...prev, optionsText: e.target.value } : prev)}
+                spellCheck={false}
+                style={{ width: '100%', minHeight: 220, fontFamily: 'var(--font-mono)', fontSize: 12, padding: 10, borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg, #f8f9fa)' }}
+              />
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+                <button className="btn" onClick={() => setMonitorSetup(null)} style={{ padding: '6px 16px' }}>取消</button>
+                <button className="btn primary" onClick={confirmMonitorSetup} style={{ padding: '6px 16px' }}>确认安装</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+        {groupsModalOpen && (
+          <div className="cc-modal-overlay" style={{ zIndex: 1100 }} onClick={(e) => { if (e.target === e.currentTarget) setGroupsModalOpen(false) }}>
+            <div className="cc-modal-shell cc-modal-shell--narrow">
+              <div className="cc-modal-head">
+                <h3>服务器分组 <small style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>点击分组筛选列表</small></h3>
+                <button className="cc-modal-close" onClick={() => setGroupsModalOpen(false)}>✕</button>
+              </div>
+              <div style={{ padding: '12px 20px', display: 'grid', gap: 6, maxHeight: 420, overflowY: 'auto' }}>
+                <div
+                  onClick={() => { setSelectedGroup(null); setGroupsModalOpen(false) }}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
+                    border: `1px solid ${selectedGroup === null ? 'var(--brand, #3b82f6)' : 'var(--border)'}`,
+                    background: selectedGroup === null ? 'var(--brand-surface, rgba(59,130,246,.08))' : 'transparent',
+                    fontWeight: selectedGroup === null ? 600 : 400, fontSize: 13,
+                  }}
+                >
+                  <span>全部服务器</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{servers.length}</span>
+                </div>
+                <div
+                  onClick={() => { setSelectedGroup(''); setGroupsModalOpen(false) }}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
+                    border: `1px solid ${selectedGroup === '' ? 'var(--brand, #3b82f6)' : 'var(--border)'}`,
+                    background: selectedGroup === '' ? 'var(--brand-surface, rgba(59,130,246,.08))' : 'transparent',
+                    fontWeight: selectedGroup === '' ? 600 : 400, fontSize: 13,
+                  }}
+                >
+                  <span style={{ fontStyle: 'italic', color: 'var(--text-muted)' }}>未分组</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{ungroupedCount}</span>
+                </div>
+                {groupNames.map((name: string) => {
+                  const active = selectedGroup === name
+                  const count = groups.find((g: any) => g.name === name)?.server_count || 0
+                  const color = getGroupColor(name)
+                  return (
+                    <div
+                      key={name}
+                      onClick={() => { setSelectedGroup(name); setGroupsModalOpen(false) }}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
+                        border: `1px solid ${active ? 'var(--brand, #3b82f6)' : 'var(--border)'}`,
+                        background: active ? 'var(--brand-surface, rgba(59,130,246,.08))' : 'transparent',
+                        fontWeight: active ? 600 : 400, fontSize: 13,
+                      }}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 999, background: color?.text, flexShrink: 0 }} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                      </span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{count}</span>
+                        <button className="cc-icon-btn" title="重命名" onClick={(e) => { e.stopPropagation(); handleRenameGroup(name) }} style={{ height: 22, padding: '0 6px', fontSize: 11 }}>✎</button>
+                        <button className="cc-icon-btn cc-icon-btn--danger" title="删除" onClick={(e) => { e.stopPropagation(); handleDeleteGroup(name) }} style={{ height: 22, padding: '0 6px', fontSize: 11 }}>×</button>
+                      </span>
+                    </div>
+                  )
+                })}
+                <button className="cc-icon-btn" onClick={handleCreateGroup}
+                  style={{ marginTop: 4, width: '100%', justifyContent: 'center', fontSize: 12, height: 32, background: 'transparent', border: '1px dashed var(--border-strong)', color: 'var(--text-muted)' }}>
+                  + 新建分组
+                </button>
+                <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--text-muted)' }}>
+                  提示：服务器的分组归属可在行操作「编辑」中修改。
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       <RiskConfirmDialog
         open={Boolean(riskAction)}
         title={riskAction?.title || ''}
@@ -1489,6 +1882,24 @@ export default function ServerListPage() {
           setRiskAction((prev) => prev ? { ...prev, result: res || { success: true, message: '操作已完成' } } : null)
         }}
       />
+        {(error || success) && (
+          <div style={{
+            position: 'fixed',
+            bottom: 24,
+            right: 24,
+            zIndex: 9999,
+            maxWidth: 360,
+            padding: '10px 16px',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+            fontSize: 13,
+            background: error ? 'var(--danger-surface)' : 'var(--success-surface)',
+            border: `1px solid ${error ? 'var(--danger-border)' : 'var(--success-border)'}`,
+            color: error ? 'var(--danger)' : 'var(--success)',
+          }}>
+            {error || success}
+          </div>
+        )}
     </div>
     </div>
   )

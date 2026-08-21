@@ -1124,3 +1124,121 @@ async def server_exec(request: Request, name: str, db: Session = Depends(get_db)
             "hop_context": hop_context,
             "risk_level": level,
         })
+
+
+class SecurityMonitorSetupPayload(BaseModel):
+    confirm_text: str = Field(default="", description="确认短语: CONFIRM ops.security_module.setup")
+    options: Dict[str, str] = Field(default_factory=dict,
+                                    description="自定义安装选项变量（键值对，注入安装脚本环境变量），高度可定制；缺省使用默认选项")
+
+
+class SecurityMonitorStatusPayload(BaseModel):
+    enabled: bool = Field(default=True, description="手动标记安全监控启用(true)/停用(false)")
+
+
+@servers_v2_router.get("/{name}/security-monitor/probe")
+def server_security_monitor_probe(name: str, request: Request, db: Session = Depends(get_db)):
+    """SSH 探测服务器安全监控实际状态（只读）：监控脚本是否安装、fail2ban/auditd 是否启用。
+
+    用于手动安装过安全脚本的服务器核对真实安装情况。
+    探测结论（installed/checked_at 等）持久化到 metadata_json.security_monitor，
+    刷新后列表页仍可直接展示上次探测结果，无需重复探测。
+    """
+    user = require_auth(request, db)
+    from config_manager import resolve_server
+    server = resolve_server(name)
+    if not server:
+        raise HTTPException(status_code=404, detail=f"Server not found: {name}")
+    from app.services.tool_adapters.security_report_tools import _probe_runtime
+    result = _probe_runtime(server)
+    server_name = server.get("name") or server.get("id") or name
+    row = db.query(Server).filter(Server.name == server_name).first() or \
+        db.query(Server).filter(Server.id == server.get("id")).first()
+    if row is not None:
+        meta = dict(row.metadata_json or {})
+        mon = dict(meta.get("security_monitor") or {})
+        mon["installed"] = bool(result.get("security_monitor_installed"))
+        mon["fail2ban_active"] = bool(result.get("fail2ban_active"))
+        mon["auditd_active"] = bool(result.get("auditd_active"))
+        mon["installer_present"] = bool(result.get("installer_present"))
+        from datetime import datetime, timezone
+        mon["checked_at"] = datetime.now(timezone.utc).isoformat()
+        meta["security_monitor"] = mon
+        row.metadata_json = meta
+        db.commit()
+    audit("server.security_monitor.probe", "server", name,
+          f"user={user.get('username')} installed={result.get('security_monitor_installed')}")
+    return api_response(data=result)
+
+
+@servers_v2_router.post("/{name}/security-monitor/status")
+def server_security_monitor_status(name: str, payload: SecurityMonitorStatusPayload,
+                                   request: Request, db: Session = Depends(get_db)):
+    """手动修改服务器安全监控状态（启用/停用），用于手动安装过安全脚本的服务器人工登记。"""
+    user = require_auth(request, db)
+    from config_manager import resolve_server
+    server = resolve_server(name)
+    if not server:
+        raise HTTPException(status_code=404, detail=f"Server not found: {name}")
+    server_name = server.get("name") or server.get("id") or name
+    row = db.query(Server).filter(Server.name == server_name).first() or \
+        db.query(Server).filter(Server.id == server.get("id")).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"未找到服务器记录: {server_name}")
+    meta = dict(row.metadata_json or {})
+    mon = dict(meta.get("security_monitor") or {})
+    mon["enabled"] = bool(payload.enabled)
+    mon["source"] = "manual"
+    from datetime import datetime, timezone
+    mon["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta["security_monitor"] = mon
+    row.metadata_json = meta
+    db.commit()
+    audit("server.security_monitor.status", "server", name,
+          f"user={user.get('username')} enabled={payload.enabled}")
+    return api_response(data={"name": server_name, "enabled": bool(payload.enabled)},
+                        message=f"已手动标记 {server_name} 安全监控{'启用' if payload.enabled else '停用'}")
+
+
+@servers_v2_router.post("/{name}/security-monitor/setup")
+def server_security_monitor_setup(name: str, payload: SecurityMonitorSetupPayload,
+                                  request: Request, db: Session = Depends(get_db)):
+    """一键安装服务器安全监控模块（fail2ban/auditd/每日日报/资源监控 + Telegram 告警）。
+
+    远程执行官方安装脚本为耗时写操作，提交统一任务中心后台执行，立即返回任务 ID；
+    进度与结果可在任务中心查看（ops.get_job_status 轮询）。
+    """
+    user = require_auth(request, db)
+    from app.services.job_service import enqueue_tool_job
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    register_builtin_tools()
+    tool = registry.get("ops.security_module.setup")
+    ctx = ToolContext(
+        username=user.get("username") or "",
+        user_id=user.get("id") or "",
+        role="operator" if user.get("is_admin") else "user",
+        is_admin=bool(user.get("is_admin")),
+        can_deploy=bool(user.get("can_deploy")),
+        auth_type="session",
+        scopes=["*"],
+        allow_write=True,
+        allow_prod=bool(user.get("is_admin")),
+        client_name="ops-web-session",
+        ip_address=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", "") if request else "",
+    )
+    args = {
+        "server": name,
+        "options": payload.options or None,
+        "confirm_text": payload.confirm_text,
+    }
+    job = enqueue_tool_job(db, tool_def=tool, arguments=args, ctx=ctx, policy_result={})
+    audit("server.security_monitor.setup", "server", name,
+          f"user={user.get('username')} job={job.get('id')}")
+    return api_response(
+        data={"job_id": job.get("id"), "job": job, "status": job.get("status"),
+              "task_center_url": f"/tasks?kind=tool&job={job.get('id')}"},
+        message="安全监控安装已提交后台任务，可在任务中心查看进度",
+    )

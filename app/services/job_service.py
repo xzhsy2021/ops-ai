@@ -119,11 +119,12 @@ def get_operation_job(db: Session, job_id: str) -> Optional[Dict[str, Any]]:
     return runtime_job_to_dict("tool", row) if row else None
 
 
-def update_job_progress(job_id: str, progress: int) -> None:
-    """更新任务中心进度（供长耗时工具 handler 内部回调，避免进度卡在固定档位）。
+def update_job_progress(job_id: str, progress: int, detail: Optional[Dict[str, Any]] = None) -> None:
+    """更新任务中心进度与实时明细（供长耗时工具 handler 内部回调）。
 
-    与 _set_job_status 不同：用独立 Session 快速回写 progress，
-    供 collect_all 这类串行长任务的每步进度回调使用。
+    与 _set_job_status 不同：用独立 Session 快速回写 progress 与
+    result_json（detail），供 collect_all 这类逐台采集任务实时上报
+    「执行到哪台、每台成功/失败」明细。
     """
     if not job_id:
         return
@@ -134,6 +135,8 @@ def update_job_progress(job_id: str, progress: int) -> None:
             job = s.query(OperationJob).filter(OperationJob.id == job_id).first()
             if job and job.status in ("queued", "pending", "running", "retrying"):
                 job.progress = max(0, min(100, int(progress)))
+                if detail is not None:
+                    job.result_json = {"detail": detail}
                 job.updated_at = _now()
                 s.commit()
         finally:

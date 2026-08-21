@@ -540,30 +540,43 @@ def collect_all(db: Session, report_date: Optional[str] = None, *,
             db2.close()
 
     done = 0
+    done_list: List[Dict[str, Any]] = []
+
+    def _report_progress(server_result: Dict[str, Any]):
+        nonlocal done, done_list
+        done += 1
+        done_list.append({
+            "server": server_result.get("server") or "-",
+            "ok": bool(server_result.get("ok")),
+            "status": server_result.get("status") or ("" if server_result.get("ok") else "error"),
+            "max_risk": server_result.get("max_risk") or "",
+            "error": server_result.get("error") or "",
+        })
+        if progress_cb is not None and total > 0:
+            try:
+                progress_cb(
+                    35 + int(55 * done / total),
+                    {"done": done, "total": total,
+                     "current": server_result.get("server") or "-",
+                     "servers": list(done_list)},
+                )
+            except Exception:
+                pass
+
     if total == 0:
         pass
     elif effective <= 1 or total <= 1:
         for i, server in enumerate(servers):
             _, r = worker(server, i)
             results[i] = r
-            done += 1
-            if progress_cb is not None and total > 0:
-                try:
-                    progress_cb(35 + int(55 * done / total))
-                except Exception:
-                    pass
+            _report_progress(r)
     else:
         with ThreadPoolExecutor(max_workers=min(effective, total)) as pool:
             futures = {pool.submit(worker, s, i): i for i, s in enumerate(servers)}
             for fut in as_completed(futures):
                 i, r = fut.result()
                 results[i] = r
-                done += 1
-                if progress_cb is not None and total > 0:
-                    try:
-                        progress_cb(35 + int(55 * done / total))
-                    except Exception:
-                        pass
+                _report_progress(r)
 
     final_results = [r for r in results if r is not None]
     archived = aggregate_and_archive(db, final_results, report_date=report_date)

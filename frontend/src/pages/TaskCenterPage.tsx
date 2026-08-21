@@ -230,7 +230,7 @@ export default function TaskCenterPage() {
   }
 
   function openDeleteSelectedTasks() {
-    const selectedItems = sortedItems.filter((item) => selectedTaskKeySet.has(taskKey(item)) && !isLiveStatus(item.status))
+    const selectedItems = sortedItems.filter((item) => selectedTaskKeySet.has(taskKey(item)))
     if (selectedItems.length) setPendingTaskDeleteItems(selectedItems)
   }
 
@@ -239,12 +239,13 @@ export default function TaskCenterPage() {
     setDeletingTasks(true)
     try {
       const itemsToDelete = pendingTaskDeleteItems.map((item) => ({ kind: item.kind, id: item.id }))
+      const hasLive = pendingTaskDeleteItems.some((item) => isLiveStatus(item.status))
       const confirm_text = `DELETE TASKS ${itemsToDelete.length}`
       if (itemsToDelete.length === 1) {
         const only = itemsToDelete[0]
-        await taskCenter.delete(only.kind, only.id, { confirm_text })
+        await taskCenter.delete(only.kind, only.id, { confirm_text, force: hasLive })
       } else {
-        await taskCenter.deleteMany({ items: itemsToDelete, confirm_text })
+        await taskCenter.deleteMany({ items: itemsToDelete, confirm_text, force: hasLive })
       }
       const deletedKeys = new Set(itemsToDelete.map((item) => taskKey(item)))
       setSelectedTaskKeys((prev) => prev.filter((key) => !deletedKeys.has(key)))
@@ -352,7 +353,7 @@ export default function TaskCenterPage() {
                 const times = timeSummary(item)
                 return (
                 <tr key={`${item.kind}-${item.id}`} className={[isLiveStatus(item.status) ? 'task-row-live' : '', ['failed', 'error'].includes(String(item.status || '').toLowerCase()) ? 'task-row-failed' : ''].filter(Boolean).join(' ') || undefined}>
-                  <td><input type="checkbox" aria-label={`选择任务 ${item.title}`} checked={selectedTaskKeySet.has(taskKey(item))} disabled={isLiveStatus(item.status)} onChange={(e) => toggleTaskSelection(item, e.target.checked)} /></td>
+                  <td><input type="checkbox" aria-label={`选择任务 ${item.title}`} checked={selectedTaskKeySet.has(taskKey(item))} onChange={(e) => toggleTaskSelection(item, e.target.checked)} /></td>
                   <td>{KIND_LABEL[item.kind] || item.kind}</td>
                   <td>
                     <div className="ellipsis" style={{ maxWidth: 260 }} title={item.title}>{item.title}</div>
@@ -393,7 +394,7 @@ export default function TaskCenterPage() {
                     <button className="btn small" onClick={() => openDetail(item)}>详情</button>
                     {item.kind === 'deploy' && ['failed', 'success', 'cancelled'].includes(item.status) && <button className="btn small" onClick={() => retryDeploy(item)}>重试</button>}
                     {item.kind === 'deploy' && <a className="btn small" href={deployment.reportTextUrl(item.id)} target="_blank" rel="noreferrer">报告</a>}
-                    <button className="btn small btn-danger" disabled={isLiveStatus(item.status)} onClick={() => setPendingTaskDeleteItems([item])}>删除</button>
+                    <button className="btn small btn-danger" onClick={() => setPendingTaskDeleteItems([item])}>删除</button>
                   </td>
                 </tr>
                 )
@@ -413,7 +414,7 @@ export default function TaskCenterPage() {
       <RiskConfirmDialog
         open={pendingTaskDeleteItems.length > 0}
         title={pendingTaskDeleteItems.length > 1 ? '确认批量删除任务' : '确认删除任务'}
-        description="将删除任务中心记录及其关联运行数据。运行中、排队中或待审批任务不可删除。"
+        description="将删除任务中心记录及其关联运行数据。运行中、排队中或待审批任务需强制删除（force），确认后立即清理，可先停止/重试后再删。"
         target={pendingTaskDeleteItems.length > 1 ? `已选择 ${pendingTaskDeleteItems.length} 个任务` : (pendingTaskDeleteItems[0] ? `${KIND_LABEL[pendingTaskDeleteItems[0].kind] || pendingTaskDeleteItems[0].kind} / ${pendingTaskDeleteItems[0].title}` : '-')}
         confirmText={`DELETE TASKS ${pendingTaskDeleteItems.length}`}
         value=""
@@ -466,6 +467,32 @@ export default function TaskCenterPage() {
                       <div className="stat-card"><div className="stat-label">审计</div><div className="stat-value" style={{ fontSize: 14 }}>{selected.audit_id || '-'}</div></div>
                     </div>
                   )}
+                  {selected.kind === 'tool' && (() => {
+                    const detail = selected.result?.detail
+                    if (!detail || !Array.isArray(detail.servers)) return null
+                    const current = detail.current || '-'
+                    return (
+                      <div style={{ marginBottom: 12 }}>
+                        <div className="stat-label" style={{ marginBottom: 4 }}>逐台服务器执行状态（{detail.done ?? 0}/{detail.total ?? 0}）</div>
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>当前：{current} · 已完成 {detail.done ?? 0} / {detail.total ?? 0}</div>
+                        <div className="table-scroll" style={{ maxHeight: 260, overflow: 'auto', border: '1px solid var(--border, rgba(128,128,128,0.2))', borderRadius: 6 }}>
+                          <table className="data-table" style={{ margin: 0 }}>
+                            <thead><tr><th style={{ minWidth: 140 }}>服务器</th><th style={{ width: 70 }}>状态</th><th style={{ width: 70 }}>风险</th><th style={{ minWidth: 160 }}>信息</th></tr></thead>
+                            <tbody>
+                              {detail.servers.map((s: any, idx: number) => (
+                                <tr key={s.server || idx}>
+                                  <td>{s.server || '-'}</td>
+                                  <td>{s.ok ? <StatusBadge value="success" /> : <StatusBadge value="failed" />}</td>
+                                  <td><RiskBadge level={s.max_risk || ''} label={s.max_risk || '-'} /></td>
+                                  <td><div style={{ wordBreak: 'break-word' }}>{s.error || (s.ok ? '成功' : (s.status || '失败'))}</div></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )
+                  })()}
                   {selected.error_message && <div className="alert alert-error">错误：{selected.error_message}</div>}
                   <pre className="code-block">{JSON.stringify(selected, null, 2)}</pre>
                 </div>

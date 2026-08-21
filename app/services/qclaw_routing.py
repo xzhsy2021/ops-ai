@@ -405,10 +405,38 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
     keyword_matches = []  # (system_name, service_name, priority, matched_by, sys_routing, svc_routing)
     for sys_cfg, routing in active_systems:
         priority = routing.get("priority", 0)
+        # 系统级关键词：取命中的最长关键词（更具体，避免 'trader' 抢在
+        # 'crypto-trader-web' 之前命中），若恰好等于某服务的规范名/别名则
+        # 提升为服务级匹配；否则「处理 crypto-trader-web 发布」会命中系统
+        # keywords 却签发 service_name=None 的系统级 ticket，与 prepare_plan
+        # 的服务级绑定校验（verify_ticket 硬比较 service_name）冲突。
+        matched_kw = ""
         for keyword in routing.get("keywords", []):
             if keyword and normalize_text(keyword) in normalized_msg:
+                if len(keyword) > len(matched_kw):
+                    matched_kw = keyword
+        if matched_kw:
+            kw_norm = normalize_text(matched_kw)
+            svc_hit: tuple | None = None
+            for svc in sys_cfg.get("services", []):
+                svc_routing = _extract_routing(svc)
+                svc_name = svc.get("name", "")
+                if svc_name and normalize_text(svc_name) == kw_norm:
+                    svc_hit = (svc_name, svc_routing)
+                    break
+                for alias in svc_routing.get("aliases", []):
+                    if alias and normalize_text(alias) == kw_norm:
+                        svc_hit = (svc_name, svc_routing)
+                        break
+                if svc_hit:
+                    break
+            if svc_hit:
+                keyword_matches.append(
+                    (sys_cfg.get("name", ""), svc_hit[0], priority,
+                     "system_keyword_service", routing, svc_hit[1])
+                )
+            else:
                 keyword_matches.append((sys_cfg.get("name", ""), None, priority, "system_keyword", routing, None))
-                break
         # 服务级关键词
         for svc in sys_cfg.get("services", []):
             svc_routing = _extract_routing(svc)

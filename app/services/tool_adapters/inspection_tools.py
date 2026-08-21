@@ -650,7 +650,7 @@ def run_servers_batch(args: Dict[str, Any], ctx, db):
     data_sensitivity="internal",
     output_masking=True,
     related_tools=["ops.security_report.summarize", "ops.security_report.collect",
-                   "ops.inspection.run_server", "ops.inspection.list_runs"],
+                   "ops.inspection.run_server", "ops.inspection.list_runs", "ops.get_job_status"],
     keywords=["安全日报巡检", "每日安全巡检", "采集安全日报", "安全日报", "登录失败", "fail2ban", "security daily"],
     recommended_use_cases=[
         "每日例行安全巡检：批量采集各服务器登录失败、账户变更、fail2ban 封禁与系统负载",
@@ -683,7 +683,7 @@ def run_security_daily(args: Dict[str, Any], ctx, db):
     job_id = getattr(ctx, "job_id", "") or ""
     if job_id:
         from app.services.job_service import update_job_progress
-        progress_cb = lambda pct: update_job_progress(job_id, pct)  # noqa: E731
+        progress_cb = lambda pct, detail=None: update_job_progress(job_id, pct, detail)  # noqa: E731
     else:
         progress_cb = None
     result = collect_all(db, report_date=report_date, persist_risks=persist_risks,

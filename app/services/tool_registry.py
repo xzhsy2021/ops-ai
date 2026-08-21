@@ -674,10 +674,17 @@ class ToolRegistry:
                     "summary": "High-risk tool execution was queued as a unified job",
                     "next_actions": [
                         {
+                            "type": "query_job_status",
+                            "tool": "ops.get_job_status",
+                            "arguments": {"job_id": job.get("id")},
+                            "description": "任务完成后调用 ops.get_job_status 查询执行结果（status=success/failed，result 含执行明细）。任务可能耗时数分钟，可反复轮询直到 status 非 running/queued。",
+                            "job_id": job.get("id"),
+                        },
+                        {
                             "type": "open_task_center",
                             "description": "在任务中心查看工具任务进度、结果和审计记录。",
                             "job_id": job.get("id"),
-                        }
+                        },
                     ],
                 }
                 audit_id = record_tool_call_async(

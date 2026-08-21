@@ -38,10 +38,17 @@ def list_jobs_tool(args: Dict[str, Any], ctx, db):
 @registry.register(
     name="ops.get_job_status",
     title="查询统一任务状态",
-    description="查询统一任务中心中的单个任务详情。只读。",
+    description=(
+        "查询统一任务中心中的单个任务详情。用于轮询任务化工具（如 ops.inspection.run_security_daily、"
+        "ops.inspection.run_servers_batch 等）的执行结果：status 为 success/failed 即完成，"
+        "result 含执行结果与逐台明细，error_message 含失败原因。任务可能耗时数分钟，可反复轮询直到完成。只读。"
+        "中文: 查询任务状态/任务结果/轮询任务/任务完成了吗. "
+    ),
     scopes=["ops:read"],
     risk="low",
     category="job_read",
+    related_tools=["ops.list_jobs", "ops.inspection.run_security_daily", "ops.security_report.collect"],
+    keywords=["查询任务", "任务状态", "任务结果", "轮询任务", "任务完成"],
     input_schema={
         "type": "object",
         "properties": {

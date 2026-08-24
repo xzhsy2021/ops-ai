@@ -139,6 +139,12 @@ Matrix 发布额外：
   不限扩展名，`.txt` / `.pdf` / `.log` / `.conf` 等普通文件均可拉入文件中心
   （大小上限仍受 `max_upload_size_mb` 约束）。设 `MATRIX_PULL_ALLOW_ANY_EXTENSION=0`
   可恢复部署包白名单；`deploy_from_matrix` 发布动作保持部署包白名单不变。
+- **入库自由、发布受限（两者不冲突）**：发版流程在两个卡点强制校验制品格式——
+  `execute_release`（执行计划 RELEASE 步骤 / 旧审批发布共用）与
+  `queue_deploy_v2`（Web/Matrix 发布入口）。非白名单后缀的包名会被拒绝
+  （HTTPException 400，RELEASE 步骤转 FAILED），普通文件仅供入库留存，
+  不能经自动回填或手动选择被当作制品发布。守卫实现见
+  `package_retention.ensure_releasable_artifact`。
 - `DeployPackage` 记录 `source_context` / `source_message_key`
   （`matrix:default:{room}:{event_id}`），可在文件中心追溯来源。
 - 额外审计 `deploy.execute.matrix`，记录 `roomId`、`mediaEventId`、

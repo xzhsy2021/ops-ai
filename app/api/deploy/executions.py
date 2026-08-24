@@ -69,6 +69,12 @@ async def queue_deploy_v2(user: Dict[str, Any], data: Dict[str, Any], db: Sessio
     if not is_docker_compose and not req.file_name:
         raise HTTPException(status_code=400, detail="file_name is required")
 
+    # 发版制品格式守卫：文件中心允许任意普通文件入库（如 Matrix 拉取），
+    # 但发布必须限定部署包格式（.tar.gz/.zip/...）；docker_compose 无制品跳过。
+    from app.services.package_retention import ensure_releasable_artifact
+    if not is_docker_compose and req.file_name:
+        ensure_releasable_artifact(db, req.file_name)
+
     req.servers = _derive_servers(req, db)
     req.variables = _merge_release_variables(req, db)
     if not req.servers:

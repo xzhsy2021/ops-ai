@@ -175,6 +175,32 @@ def _is_allowed_extension(name: str, policy: Dict[str, Any]) -> bool:
     return any(lower.endswith(ext) for ext in policy.get("allowed_extensions") or [])
 
 
+def ensure_releasable_artifact(db: Session, package_name: str) -> None:
+    """发版制品格式守卫：package_name 非空时必须命中 allowed_extensions 白名单。
+
+    设计原则（入库自由、发布受限，两者不冲突）：
+    - Matrix 拉取等路径允许任意普通文件（.txt/.pdf/.log...）进入文件中心留存；
+    - 但发版流程的制品必须是限定格式的部署包，普通文件不能被当作制品发布。
+    - package_name 为空视为流程未指定制品，沿用既有行为不做校验。
+
+    校验失败抛 HTTPException(400)，由各发布入口自然传播：
+    执行计划 RELEASE 步骤转为步骤 FAILED；Web/Matrix 发布返回 400。
+    """
+    raw = (package_name or "").strip()
+    if not raw:
+        return
+    name = safe_package_name(raw)
+    if not _is_allowed_extension(name, policy := get_package_retention_policy(db)):
+        allowed = ", ".join(policy.get("allowed_extensions") or [])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"发版制品必须是部署包格式（{allowed}），收到「{name}」。"
+                "普通文件仅供拉取入库留存，不能作为发版制品"
+            ),
+        )
+
+
 def _package_meta_payload(name: str, path: str, *, sha256: str | None = None) -> Dict[str, Any]:
     st = os.stat(path)
     return {

@@ -373,6 +373,11 @@ def execute_release(db: Session, payload: dict, *, operator: str = "system", pac
     """执行发布操作：创建部署记录并触发后台部署 worker。"""
     from app.db.repository import DeploymentRepository
     from app.api.deploy._shared import ensure_deploy_worker_running
+    from app.services.package_retention import ensure_releasable_artifact
+
+    # 发版制品格式守卫：文件中心允许任意普通文件入库（如 Matrix 拉取），
+    # 但发布必须限定部署包格式；不合规直接拒绝，避免把 .txt/.log 当制品发出去。
+    ensure_releasable_artifact(db, package_name)
 
     system_name = payload.get("system_name", "")
     service_name = payload.get("service_name", "") or None

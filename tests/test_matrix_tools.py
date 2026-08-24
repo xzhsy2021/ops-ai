@@ -125,9 +125,11 @@ def _patch_save_package(monkeypatch, mt, meta=None):
     meta = meta or {"package_name": "crypto-frontend.tar.gz", "sha256": "a" * 64, "size_bytes": 10}
     calls = {}
 
-    def fake_save(db, filename, fileobj, system="", service="", uploaded_by="", overwrite=False, source_context=None, source_message_key=None):
+    def fake_save(db, filename, fileobj, system="", service="", uploaded_by="", overwrite=False,
+                  source_context=None, source_message_key=None, allow_any_extension=False):
         calls["filename"] = filename
         calls["source_message_key"] = source_message_key
+        calls["allow_any_extension"] = allow_any_extension
         return meta
 
     monkeypatch.setattr(mt, "save_package_fileobj", fake_save)
@@ -207,6 +209,78 @@ def test_pull_attachment_happy_path(monkeypatch, db):
     assert calls["filename"] == "crypto-frontend.tar.gz"
     assert calls["source_message_key"] == "matrix:default:!room:example.org:$abc"
     assert result["matrix"]["room_id"] == "!room:example.org"
+
+
+def test_pull_attachment_allows_any_file_format(monkeypatch, db):
+    """普通文件（.log/.txt/.pdf 等）拉取入库不受部署包扩展名白名单限制。"""
+    mt = _patch_matrix_client(
+        monkeypatch,
+        event=_media_event(event_id="$plain", filename="server-error.log"),
+        content=b"2026-08-24 ERROR oom killed",
+        filename="server-error.log",
+    )
+    meta = {"package_name": "server-error.log", "sha256": "b" * 64, "size_bytes": 30}
+    calls = _patch_save_package(monkeypatch, mt, meta=meta)
+    from app.services.tool_adapters.matrix_tools import pull_attachment
+
+    result = pull_attachment(
+        {"room_id": "!room:example.org", "sender": "@alice:example.org"},
+        _ctx(),
+        db,
+    )
+    assert result["package_name"] == "server-error.log"
+    assert calls["filename"] == "server-error.log"
+    # 拉取路径显式放行任意扩展名（大小上限仍生效）
+    assert calls["allow_any_extension"] is True
+
+
+def test_pull_attachment_extension_gate_env_kill_switch(monkeypatch, db):
+    """MATRIX_PULL_ALLOW_ANY_EXTENSION=0 时恢复白名单校验（save 收到 False）。"""
+    mt = _patch_matrix_client(monkeypatch, event=_media_event())
+    calls = _patch_save_package(monkeypatch, mt)
+    monkeypatch.setenv("MATRIX_PULL_ALLOW_ANY_EXTENSION", "0")
+    from app.services.tool_adapters.matrix_tools import pull_attachment
+
+    pull_attachment({"room_id": "!room:example.org", "sender": "@alice:example.org"}, _ctx(), db)
+    assert calls["allow_any_extension"] is False
+
+
+def test_save_package_fileobj_allow_any_extension(db, monkeypatch, tmp_path):
+    """文件中心层：allow_any_extension=True 放行普通格式；默认白名单仍拒绝。"""
+    import os
+    from io import BytesIO
+
+    import pytest
+    from fastapi import HTTPException
+
+    from app.db.models import DeployPackage
+    from app.services import package_retention
+
+    monkeypatch.setattr(package_retention, "get_runtime_path", lambda env, default: str(tmp_path / "uploads"))
+
+    # 默认白名单：.txt 被拒
+    with pytest.raises(HTTPException) as exc:
+        package_retention.save_package_fileobj(db, filename="notes.txt", fileobj=BytesIO(b"x"))
+    assert exc.value.status_code == 400
+
+    # 放行后：任意扩展名可入库，元数据完整
+    meta = package_retention.save_package_fileobj(
+        db,
+        filename="notes.txt",
+        fileobj=BytesIO(b"hello plain text"),
+        uploaded_by="matrix",
+        allow_any_extension=True,
+    )
+    assert meta["package_name"] == "notes.txt"
+    assert meta["size_bytes"] == len(b"hello plain text")
+
+    # 清理，避免污染同模块其他用例
+    row = db.query(DeployPackage).filter(DeployPackage.package_name == "notes.txt").first()
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    if os.path.isfile(meta.get("file_path") or ""):
+        os.remove(meta["file_path"])
 
 
 def test_pull_attachment_e2ee_blocked(monkeypatch, db):

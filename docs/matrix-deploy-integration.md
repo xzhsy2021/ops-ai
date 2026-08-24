@@ -135,6 +135,10 @@ Matrix 发布额外：
 
 - 媒体下载到文件中心：`save_package_fileobj` 计算 SHA-256、按保留策略检查扩展名
   与大小（允许 `.tar.gz` / `.tgz` / `.tar` / `.zip` / `.jar` / `.war` / `.gz` / `.bin`）。
+- **任意普通格式**：`ops_matrix_pull_attachment`（及 MATRIX_PULL 计划步骤）默认
+  不限扩展名，`.txt` / `.pdf` / `.log` / `.conf` 等普通文件均可拉入文件中心
+  （大小上限仍受 `max_upload_size_mb` 约束）。设 `MATRIX_PULL_ALLOW_ANY_EXTENSION=0`
+  可恢复部署包白名单；`deploy_from_matrix` 发布动作保持部署包白名单不变。
 - `DeployPackage` 记录 `source_context` / `source_message_key`
   （`matrix:default:{room}:{event_id}`），可在文件中心追溯来源。
 - 额外审计 `deploy.execute.matrix`，记录 `roomId`、`mediaEventId`、

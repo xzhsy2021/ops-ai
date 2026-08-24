@@ -364,11 +364,17 @@ def save_package_fileobj(
     overwrite: bool = False,
     source_context: dict | None = None,
     source_message_key: str | None = None,
+    allow_any_extension: bool = False,
 ) -> Dict[str, Any]:
-    """Stream a file-like object into the File Center with size/hash checks."""
+    """Stream a file-like object into the File Center with size/hash checks.
+
+    allow_any_extension: 跳过 allowed_extensions 白名单校验（大小上限仍生效）。
+    供 Matrix 附件拉取等"任意普通文件入库"场景使用；Web/工具上传默认保持
+    部署包格式白名单不变。
+    """
     policy = get_package_retention_policy(db)
     name = safe_package_name(filename)
-    if not _is_allowed_extension(name, policy):
+    if not allow_any_extension and not _is_allowed_extension(name, policy):
         raise HTTPException(status_code=400, detail=f"Unsupported package extension: {name}")
     max_bytes = int(policy.get("max_upload_size_mb", 1024)) * 1024 * 1024
     os.makedirs(_upload_dir(), exist_ok=True)

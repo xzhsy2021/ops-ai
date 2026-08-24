@@ -36,6 +36,16 @@ from app.services.matrix_e2ee import (
 from app.services.package_retention import save_package_fileobj
 
 
+def _matrix_pull_allow_any_extension() -> bool:
+    """Matrix 附件拉取是否放行任意文件格式。
+
+    默认 True：房间里的 .txt/.pdf/.log/.conf 等普通文件也能拉入文件中心
+    （大小上限仍受 max_upload_size_mb 约束）。设 MATRIX_PULL_ALLOW_ANY_EXTENSION=0
+    可恢复部署包格式白名单。
+    """
+    return os.getenv("MATRIX_PULL_ALLOW_ANY_EXTENSION", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 import concurrent.futures
 import threading
 
@@ -306,6 +316,7 @@ def pull_matrix_attachment_core(
                 "sender_id": sender,
             },
             source_message_key=f"matrix:default:{room_id}:{event.event_id}",
+            allow_any_extension=_matrix_pull_allow_any_extension(),
         )
     except HTTPException:
         raise
@@ -334,7 +345,7 @@ def pull_matrix_attachment_core(
 @registry.register(
     name="ops.matrix.pull_attachment",
     title="Pull latest Matrix attachment into File Center",
-    description="从 Matrix 房间拉取发送者最近一次媒体附件（m.file/m.image/m.video/m.audio）到 OPS 文件中心：下载 mxc 媒体、计算 SHA256、写入 DeployPackage 元数据并返回 package_name，供后续发布计划使用。加密房间的 E2EE 媒体在配置 MATRIX_E2EE_* 后自动解密；解密失败返回明确原因。中文: 从Matrix拉附件/拉取Matrix部署包/Matrix附件入库.",
+    description="从 Matrix 房间拉取发送者最近一次媒体附件（m.file/m.image/m.video/m.audio）到 OPS 文件中心：下载 mxc 媒体、计算 SHA256、写入 DeployPackage 元数据并返回 package_name。支持任意文件格式（.txt/.pdf/.log 等普通文件均可，MATRIX_PULL_ALLOW_ANY_EXTENSION=0 可恢复部署包白名单）。加密房间的 E2EE 媒体在配置 MATRIX_E2EE_* 后自动解密；解密失败返回明确原因。中文: 从Matrix拉附件/拉取Matrix文件/Matrix附件入库/下载房间文件.",
     scopes=["ops:read", "package:write"],
     risk="medium",
     category="package_write",

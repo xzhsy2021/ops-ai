@@ -316,9 +316,6 @@ requestAnimationFrame(() => {
 
   useEffect(() => { load(); loadKeys() }, [])
 
-  // 筛选变化时重置到第一页
-  useEffect(() => { setServerPage(1) }, [selectedGroup, configFilter, serverStatusFilter, serverFilter])
-
   const groupNames = groups
     .filter((g) => !g.is_default)
     .map((g) => g.name)
@@ -356,6 +353,14 @@ requestAnimationFrame(() => {
   const monitorFilteredServers = monitorFilter === '' ? filteredServers : filteredServers.filter((s) => monitorStateOf(s) === monitorFilter)
   const authModeOf = (s: any) => s.auth_type || (s.key_content ? 'key_content' : (s.key || s.key_file) ? 'key_file' : 'password')
   const tableRows = authFilter === '' ? monitorFilteredServers : monitorFilteredServers.filter((s) => authModeOf(s) === authFilter)
+
+  // 筛选/页大小变化时重置并夹紧当前页码（覆盖所有筛选条件，含表头筛选）
+  useEffect(() => {
+    setServerPage((p) => {
+      const totalPages = Math.max(1, Math.ceil(tableRows.length / serverPageSize))
+      return Math.min(Math.max(1, p), totalPages)
+    })
+  }, [selectedGroup, configFilter, serverStatusFilter, serverFilter, authFilter, monitorFilter, serverPageSize, tableRows.length])
 
   const statusCounts = servers.reduce((acc: Record<string, number>, s: any) => {
     const status = normalizeServerStatus(s)
@@ -1367,7 +1372,11 @@ const requestEnableMonitor = (s: ServerRow) => {
             columns={serverColumns}
             rowKey={(s: ServerRow) => s.name}
             loading={loading}
-            emptyTitle={selectedGroup !== null ? '该分组下暂无服务器' : '暂无服务器配置，点击上方 "新增服务器" 添加'}
+            emptyTitle={
+              (selectedGroup !== null || configFilter !== 'all' || serverStatusFilter !== 'all' || serverFilter || authFilter || monitorFilter)
+                ? '当前筛选条件下无匹配服务器'
+                : '暂无服务器配置，点击上方 "新增服务器" 添加'
+            }
             selectedKeys={Array.from(selected)}
             onSelectionChange={(keys) => {
               const newSet = new Set<string>(keys)
@@ -1391,7 +1400,7 @@ const requestEnableMonitor = (s: ServerRow) => {
             onExpandChange={(keys) => setExpandedRows(new Set(keys))}
             pageSize={serverPageSize}
             currentPage={serverPage}
-            totalCount={filteredServers.length}
+            totalCount={tableRows.length}
             onPageChange={setServerPage}
             onPageSizeChange={setServerPageSize}
             stackOnNarrow

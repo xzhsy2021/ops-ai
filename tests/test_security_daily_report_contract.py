@@ -175,7 +175,8 @@ def test_inspection_page_has_security_daily_entry():
     assert "securityDailyCollect" in page
     assert "securityDailyReports" in page
 
-    assert "securityDailyCollect: (data?: { report_date?: string; persist_risks?: boolean }) => api.post('/inspection/security-daily/collect', data || {})" in api
+    # f9848f0 起 collect 支持指定服务器集合（servers?: string[]），断言随签名演进。
+    assert "securityDailyCollect: (data?: { report_date?: string; persist_risks?: boolean; servers?: string[] }) => api.post('/inspection/security-daily/collect', data || {})" in api
     assert "securityDailyReports" in api
 
     assert '@router.post("/security-daily/collect")' in inspection_api

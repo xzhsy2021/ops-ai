@@ -153,13 +153,19 @@ These tools manage DB-backed DAILY / WEEKLY / MONTHLY inspection schedules. The 
 
 ## Matrix Package Tools
 
-Matrix 部署包对接：从 Matrix 房间（qclaw 所在群/私聊）拉取用户发送的部署包附件，经 E2EE 自动解密后入库文件中心并发布。加密房间由 OPS 专用设备（`MATRIX_DEVICE_ID`）解密；仅能解密该设备创建之后新发送的媒体（room key 不补发）。详见 [matrix-deploy-integration.md](../matrix-deploy-integration.md) 与 [MATRIX_E2EE_SETUP.md](./MATRIX_E2EE_SETUP.md)。
+Matrix 文件对接：从 Matrix 房间（qclaw 所在群/私聊）拉取用户发送的文件附件，经 E2EE 自动解密后入库文件中心并按需发布。**支持任意普通文件格式**（.txt/.pdf/.log 等与部署包均可入库）；发版流程强制校验制品格式（见下方「入库自由、发布受限」）。加密房间由 OPS 专用设备（`MATRIX_DEVICE_ID`）解密；仅能解密该设备创建之后新发送的媒体（room key 不补发）。详见 [matrix-deploy-integration.md](../matrix-deploy-integration.md) 与 [MATRIX_E2EE_SETUP.md](./MATRIX_E2EE_SETUP.md)。
 
 | HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
 |---|---|---:|---|---|---|
-| `ops.matrix.scan_media_events` | `ops_matrix_scan_media_events` | read | `ops:read` | low | 预览房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 文件名），返回 event_id、文件名与是否加密；不下载 |
-| `ops.matrix.pull_attachment` | `ops_matrix_pull_attachment` | write | `ops:read`, `package:write` | medium | 拉取发送者最新媒体附件到文件中心（下载 → E2EE 解密 → SHA256 → 入库），需确认短语 `CONFIRM ops.matrix.pull_attachment`（schema 已暴露 `confirm_text`） |
-| `ops.matrix.deploy_from_matrix` | `ops_matrix_deploy_from_matrix` | execute | `ops:read`, `package:write`, `deploy:execute` | high | 完整链路：拉附件 → 文件中心 → 排队发布，一次调用 + 一次确认 |
+| `ops.matrix.scan_media_events` | `ops_matrix_scan_media_events` | read | `ops:read` | low | 预览房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 文件名），任意文件类型均可见；返回 event_id、文件名与是否加密；不下载 |
+| `ops.matrix.pull_attachment` | `ops_matrix_pull_attachment` | write | `ops:read`, `package:write` | medium | 拉取发送者最新附件到文件中心（下载 → E2EE 解密 → SHA256 → 入库），**不限文件格式**；需确认短语 `CONFIRM ops.matrix.pull_attachment`（schema 已暴露 `confirm_text`）。普通文件的 `next_actions` 会提示仅入库留存 |
+| `ops.matrix.deploy_from_matrix` | `ops_matrix_deploy_from_matrix` | execute | `ops:read`, `package:write`, `deploy:execute` | high | 完整链路：拉附件 → 文件中心 → 排队发布，一次调用 + 一次确认。**仅接受部署包格式制品** |
+
+### 入库自由、发布受限
+
+- **入库**：Matrix 拉取不限扩展名，`.txt` / `.pdf` / `.log` / `.conf` 等普通文件均可留存（大小上限 `max_upload_size_mb` 仍生效）。开关：`MATRIX_PULL_ALLOW_ANY_EXTENSION=0` 恢复部署包白名单。
+- **发布**：所有发版入口（执行计划 RELEASE 步骤 / `deploy_from_matrix` / Web 发布表单）强制校验制品格式——仅接受 `.tar.gz` / `.tgz` / `.tar` / `.zip` / `.jar` / `.war` / `.gz` / `.bin`；普通文件被拒绝且 RELEASE 步骤转 FAILED 并提示原因。
+- Agent 判断依据：pull 结果的 `next_actions` 字段（部署包→给出发布建议；普通文件→提示仅留存）。
 
 ### Recommended Matrix Deploy Flow
 
@@ -182,8 +188,9 @@ ops_approval_prepare_plan(steps=[
 ```
 
 - 授权人批准短码后步骤自动顺序执行；`MATRIX_PULL` 结果的 `package_name` 自动回填到依赖的 `RELEASE` 步骤（显式指定则优先）。
+- `MATRIX_PULL` 支持任意文件格式；但 RELEASE 强制校验制品格式——普通文件会被拒绝（步骤 FAILED）。拉取普通文件时不要编排 RELEASE 步骤。
 - 拉取失败时计划 FAILED，后续 RELEASE 不执行；计划内步骤不再要求各工具的 `confirm_text`。
-- 也可用 `ops_matrix_deploy_from_matrix` 一步到位（拉取 + 发布单次调用）。
+- 也可用 `ops_matrix_deploy_from_matrix` 一步到位（拉取 + 发布单次调用，仅部署包格式）。
 
 
 

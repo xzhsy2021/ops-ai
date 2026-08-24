@@ -9,7 +9,8 @@
 - `ops.approval.prepare_*` 和 `ops.approval.execute` 仍保留给旧客户端和单动作兼容场景，不是多步骤消息的首选流程。
 - 当前 `ExecutionPlan` 执行器已注册八类步骤：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`、`MATRIX_PULL`。上传/发布/回滚/DML/包清理/Matrix拉包可写入计划步骤（`prepare_plan` 的 `steps`），执行时由执行器内部调用共享业务函数完成，不再逐动作审批。
 - stdio MCP 的 `FILE_UPLOAD` 步骤可在 `action_parameters.local_path` 中引用本机受控包。桥接层会先通过房间绑定的审批接收入口暂存到 OPS File Center，再把包名、SHA-256 和大小冻结进同一个计划；不为文件上传创建第二个审批。
-- `MATRIX_PULL` 步骤用于「用户在 Matrix 房间发了部署包」场景：参数只需 `room_id` + `sender`（可选 `minutes`/`filename`/`system`/`service`/`overwrite`）。执行时自动拉取最新附件入库（E2EE 加密房间自动解密），其结果 `package_name` **自动回填**到依赖它的 `RELEASE` 步骤——「拉包 + 发布」只需一次审批，无需预知包名。
+- `MATRIX_PULL` 步骤用于「用户在 Matrix 房间发了文件」场景：参数只需 `room_id` + `sender`（可选 `minutes`/`filename`/`system`/`service`/`overwrite`）。执行时自动拉取最新附件入库（E2EE 加密房间自动解密），**支持任意文件格式**（.txt/.pdf/.log 等普通文件与部署包均可入库），其结果 `package_name` **自动回填**到依赖它的 `RELEASE` 步骤——「拉包 + 发布」只需一次审批，无需预知包名。
+- **入库自由、发布受限**：发版制品必须是部署包格式（`.tar.gz` / `.tgz` / `.tar` / `.zip` / `.jar` / `.war` / `.gz` / `.bin`）。普通文件拉取后仅入库留存；若被 RELEASE 步骤引用会被格式守卫拒绝（步骤转 FAILED 并提示原因）。用户只发普通文件时不建议编排 RELEASE 步骤。
 
 ## 身份
 
@@ -105,9 +106,9 @@
 | 场景 | 推荐工具 |
 |------|---------|
 | 多步骤运维请求（上传/发布/回滚/DML/包清理/服务控制/Matrix拉包） | `ops.approval.prepare_plan`（steps 可含 SERVICE_CONTROL/HEALTH_CHECK/FILE_UPLOAD/RELEASE/ROLLBACK/DML/PACKAGE_CLEANUP/MATRIX_PULL）→ `ops.approval.execute_plan` |
-| Matrix 房间拉包 + 发布（推荐一次审批） | `ops.approval.prepare_plan`（steps: MATRIX_PULL → RELEASE 依赖 pull）→ 用户批准短码 → `ops.approval.execute_plan`；package_name 自动从 pull 步骤回填 |
-| 只拉包不发布 | `ops.matrix.scan_media_events`（预览）→ `ops.matrix.pull_attachment(confirm_text="CONFIRM ops.matrix.pull_attachment")` |
-| 拉包并发布（单次调用兼容路径） | `ops.matrix.deploy_from_matrix(room_id, sender, service, env)` |
+| Matrix 房间拉包 + 发布（推荐一次审批） | `ops.approval.prepare_plan`（steps: MATRIX_PULL → RELEASE 依赖 pull）→ 用户批准短码 → `ops.approval.execute_plan`；package_name 自动从 pull 步骤回填（RELEASE 仅接受部署包格式制品） |
+| 只拉文件不发布（任意格式） | `ops.matrix.scan_media_events`（预览）→ `ops.matrix.pull_attachment(confirm_text="CONFIRM ops.matrix.pull_attachment")`；.txt/.pdf/.log 等普通文件均可入库留存 |
+| 拉包并发布（单次调用兼容路径） | `ops.matrix.deploy_from_matrix(room_id, sender, service, env)`（仅部署包格式） |
 | 单动作重启/停止/启动（兼容） | `ops.restart_service` / `ops.stop_service` / `ops.start_service` → 对应旧 `ops.approval.prepare_service_control` |
 | 发布（单动作兼容） | `ops.prepare_release_from_local_package` → `ops.approval.prepare_release` → `ops.approval.execute` |
 | 回滚（单动作兼容） | `ops.create_rollback_plan` → `ops.approval.prepare_rollback` → `ops.approval.execute` |
@@ -193,5 +194,24 @@ Agent:
   4. pull 步骤自动拉包入库（E2EE 加密房间自动解密）→ package_name 回填 release
   5. 查询部署状态并反馈结果
 ```
-注意：只拉包不发布时，用 `ops.matrix.pull_attachment` 并带上确认短语
-`confirm_text="CONFIRM ops.matrix.pull_attachment"`。
+注意：
+- 只拉文件不发布时，用 `ops.matrix.pull_attachment` 并带上确认短语
+  `confirm_text="CONFIRM ops.matrix.pull_attachment"`。
+- **任意格式**：拉取支持 .txt/.pdf/.log 等普通文件（仅入库留存）；RELEASE
+  只接受部署包格式制品。若 pull 到的是普通文件，不要编排 RELEASE 步骤，
+  告知用户"该文件已入库，但不能作为发版制品"。
+- 判断依据：pull 结果的 `next_actions` 字段——部署包给出发布建议，
+  普通文件给出"仅留存"说明。
+
+### 场景6：从 Matrix 房间拉取普通文件（不发布）
+```
+用户: "把房间里 @alice 发的 server-error.log 拉下来"
+Agent:
+  1. ops.matrix.scan_media_events(room_id=当前房间, sender="@alice", filename="server-error.log")
+     → 确认事件存在与文件名
+  2. ops.matrix.pull_attachment(room_id=当前房间, sender="@alice",
+       filename="server-error.log",
+       confirm_text="CONFIRM ops.matrix.pull_attachment")
+     → 返回 package_name="server-error.log"，已入文件中心；next_actions 提示仅留存
+  3. 告知用户：文件已存入 OPS 文件中心；如需发版请上传部署包格式制品
+```

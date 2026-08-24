@@ -22,17 +22,80 @@ _TOPIC_RULES: dict[str, list[str]] = {
     "审批": ["approval"],
     "包上传": ["upload", "package"],
     "部署": ["deploy", "plan", "release", "rollback"],
+    "发版": ["release", "deploy", "plan"],
+    "发布": ["release", "deploy", "plan"],
     "巡检": ["inspection"],
     "服务器": ["server", "ssh"],
     "数据库": ["db", "connection"],
     "备份": ["backup"],
     "日志": ["log"],
     "风险": ["risk"],
+    "Matrix附件": ["matrix"],
+    "Matrix拉取": ["matrix"],
+    "Matrix下载": ["matrix"],
+    "拉取文件": ["matrix"],
+    "下载文件": ["matrix", "file_transfer"],
+    "附件": ["matrix"],
 }
 
 # 主题 → 完整申请示例（帮助输出，不泄露任何密钥/确认码）
 # 每个示例包含：自然语言申请消息、对应的工具与参数、后续流程提示。
 _TOPIC_EXAMPLES: dict[str, list[dict[str, Any]]] = {
+    "Matrix拉取": [
+        {
+            "message": "把 Matrix 房间里 @alice 刚发的附件拉到文件中心",
+            "tool": "ops.matrix.pull_attachment",
+            "operation": "pull",
+            "arguments": {
+                "room_id": "!room:example.org",
+                "sender": "@alice:example.org",
+                "minutes": 15,
+                "confirm_text": "CONFIRM ops.matrix.pull_attachment",
+            },
+            "note": (
+                "支持任意普通文件格式（.txt/.pdf/.log 等均可入库，不限部署包扩展名）；"
+                "加密房间自动解密。返回 package_name 供后续引用；"
+                "注意：非部署包格式仅入库留存，不能作为发版制品。"
+            ),
+        },
+        {
+            "message": "看看房间里最近发了什么文件",
+            "tool": "ops.matrix.scan_media_events",
+            "operation": "scan",
+            "arguments": {"room_id": "!room:example.org", "minutes": 30},
+            "note": "只读预览，不下载；返回 event_id/文件名/是否加密。",
+        },
+    ],
+    "Matrix附件": [
+        {
+            "message": "用户在房间发了新包，帮我一次审批完成拉包+发布到测试环境",
+            "tool": "ops.approval.prepare_plan",
+            "operation": "prepare_plan",
+            "arguments": {
+                "system_name": "crypto-trader",
+                "environment": "test",
+                "steps": [
+                    {
+                        "step_key": "pull",
+                        "action_type": "MATRIX_PULL",
+                        "parameters": {"room_id": "!room:example.org", "sender": "@alice:example.org"},
+                        "dependencies": [],
+                    },
+                    {
+                        "step_key": "release",
+                        "action_type": "RELEASE",
+                        "parameters": {},
+                        "dependencies": ["pull"],
+                    },
+                ],
+            },
+            "note": (
+                "MATRIX_PULL 拉到的 package_name 自动回填 RELEASE 步骤，无需预知包名；"
+                "RELEASE 只接受部署包格式制品（.tar.gz/.tgz/.tar/.zip/.jar/.war/.gz/.bin），"
+                "普通文件会被格式守卫拒绝。"
+            ),
+        },
+    ],
     "临时授权": [
         {
             "message": "给@Leo 申请后端服务 RELEASE、SERVICE_CONTROL 权限，时长一周，用途：后端开发自测发版",

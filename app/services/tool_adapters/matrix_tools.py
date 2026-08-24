@@ -143,12 +143,12 @@ def _event_to_dict(event: MatrixMediaEvent) -> Dict[str, Any]:
 @registry.register(
     name="ops.matrix.scan_media_events",
     title="Scan Matrix room media events",
-    description="预览 Matrix 房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 可选文件名），不下载、不发布。返回匹配事件的 event_id、文件名、mxc 地址与是否加密。中文: 查看Matrix房间媒体/扫描房间附件/房间发了什么包.",
+    description="预览 Matrix 房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 可选文件名），不下载、不发布。返回匹配事件的 event_id、文件名、mxc 地址与是否加密。任意文件类型均可见（部署包或 .txt/.pdf 等普通文件）。中文: 查看Matrix房间媒体/扫描房间附件/房间发了什么文件.",
     scopes=["ops:read"],
     risk="low",
     category="package_read",
-    keywords=["matrix", "room", "media", "attachment", "scan", "附件"],
-    recommended_use_cases=["Agent 需要确认 Matrix 房间里谁发了什么部署包"],
+    keywords=["matrix", "room", "media", "attachment", "scan", "附件", "文件"],
+    recommended_use_cases=["Agent 需要确认 Matrix 房间里谁发了什么文件（部署包或普通文件）"],
     example_prompts=["扫一下 Matrix 房间里的媒体事件", "看看房间最近有没有人发部署包"],
     input_schema={
         "type": "object",
@@ -392,17 +392,34 @@ def pull_attachment(args: Dict[str, Any], ctx, db) -> Dict[str, Any]:
         homeserver_url=str(args.get("homeserver_url") or args.get("homeserverUrl") or ""),
         access_token=str(args.get("access_token") or args.get("accessToken") or ""),
     )
-    result["next_actions"] = [
-        {"tool": "ops_matrix_deploy_from_matrix", "description": "直接用这个包触发发布"},
-        {"tool": "ops_create_deploy_plan", "arguments": {"package_name": result["package_name"]}, "description": "先创建发布计划"},
-    ]
+    # 部署包格式 → 建议后续发布动作；普通文件（非白名单后缀）仅入库留存，
+    # 提示不能发布（发版制品格式守卫会拒绝）。
+    deployable = any(
+        result["package_name"].lower().endswith(ext)
+        for ext in (".tar.gz", ".tgz", ".tar", ".zip", ".jar", ".war", ".gz", ".bin")
+    )
+    if deployable:
+        result["next_actions"] = [
+            {"tool": "ops_matrix_deploy_from_matrix", "description": "直接用这个包触发发布"},
+            {"tool": "ops_create_deploy_plan", "arguments": {"package_name": result["package_name"]}, "description": "先创建发布计划"},
+        ]
+    else:
+        result["next_actions"] = [
+            {
+                "note": (
+                    f"「{result['package_name']}」是普通文件，已入库留存；"
+                    "发版制品必须是部署包格式（.tar.gz/.tgz/.tar/.zip/.jar/.war/.gz/.bin），"
+                    "该文件不能作为发版制品"
+                ),
+            },
+        ]
     return result
 
 
 @registry.register(
     name="ops.matrix.deploy_from_matrix",
     title="Deploy package pulled from Matrix room",
-    description="完整 Matrix 发布链路：从 Matrix 房间拉取发送者最近媒体附件 → 写入文件中心（SHA256）→ 排队发布（复用现有发布流程：校验和/制品库/集群/发版/审计）。生产环境需管理员或 allow_prod 权限并附 confirm_text。中文: Matrix发布/从Matrix发版/拉取Matrix附件并发布.",
+    description="完整 Matrix 发布链路：从 Matrix 房间拉取发送者最近媒体附件 → 写入文件中心（SHA256）→ 排队发布（复用现有发布流程：校验和/制品库/集群/发版/审计）。仅接受部署包格式制品（.tar.gz/.tgz/.tar/.zip/.jar/.war/.gz/.bin）；普通文件请用 ops.matrix.pull_attachment 仅入库。生产环境需管理员或 allow_prod 权限并附 confirm_text。中文: Matrix发布/从Matrix发版/拉取Matrix附件并发布.",
     scopes=["ops:read", "package:write", "deploy:execute"],
     risk="high",
     category="deploy_execute",

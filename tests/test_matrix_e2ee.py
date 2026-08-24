@@ -392,7 +392,10 @@ def test_fetch_media_ciphertext_falls_back_to_v3_on_404(monkeypatch):
     def fake_request(method, path, headers=None, params=None, timeout=None):
         paths.append(path)
         if path.startswith("/_matrix/client/v1/"):
-            raise mc_module.MatrixClientError(f"Matrix GET {path} -> HTTP 404: unrecognized")
+            raise mc_module.MatrixClientError(
+                f"Matrix GET {path} -> HTTP 404: "
+                '{"errcode":"M_UNRECOGNIZED","error":"Unrecognized request"}'
+            )
         return _FakeMediaResponse()
 
     monkeypatch.setattr(client, "_request", fake_request)
@@ -402,8 +405,8 @@ def test_fetch_media_ciphertext_falls_back_to_v3_on_404(monkeypatch):
     assert paths[-1] == "/_matrix/client/v3/media/download/hs.example/AbCdEf"
 
 
-def test_fetch_media_ciphertext_retries_then_raises_on_404(monkeypatch):
-    """v1 报 404（端点缺失或媒体不存在）时回退 v3；最终错误仍向上抛。"""
+def test_fetch_media_ciphertext_raises_immediately_on_media_not_found(monkeypatch):
+    """媒体本身不存在（M_NOT_FOUND）不回退端点，立即抛出真实原因，避免掩盖错误。"""
     client = MatrixClient(homeserver_url="https://hs.example", access_token="tok")
     calls = []
 
@@ -412,10 +415,11 @@ def test_fetch_media_ciphertext_retries_then_raises_on_404(monkeypatch):
         raise mc_module.MatrixClientError(f"Matrix GET {path} -> HTTP 404: M_NOT_FOUND")
 
     monkeypatch.setattr(client, "_request", fake_request)
-    with pytest.raises(mc_module.MatrixClientError):
+    with pytest.raises(mc_module.MatrixClientError) as exc:
         client.fetch_media_ciphertext("mxc://hs.example/Missing")
+    assert "M_NOT_FOUND" in str(exc.value)
+    assert len(calls) == 1
     assert calls[0].startswith("/_matrix/client/v1/")
-    assert calls[-1] == "/_matrix/client/v3/media/download/hs.example/Missing"
 
 
 # ── Megolm 事件解密封装 ──

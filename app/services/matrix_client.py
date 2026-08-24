@@ -422,38 +422,54 @@ class MatrixClient:
 
     # ── 3. 下载媒体 ──
 
-    def download_media(self, mxc_url: str) -> Tuple[bytes, str]:
-        """下载 mxc 媒体，返回 (bytes, 文件名)。
+    # 媒体下载端点尝试顺序：
+    # - /_matrix/client/v1/... : MSC3916 认证媒体端点（新 Synapse 默认启用）
+    # - /_matrix/client/v3/... : 较早的客户端媒体路径（部分实现支持）
+    # - /_matrix/media/v3|r0/...: 传统内容仓库端点（旧 homeserver）
+    _MEDIA_DOWNLOAD_PATHS = (
+        "/_matrix/client/v1/media/download/",
+        "/_matrix/client/v3/media/download/",
+        "/_matrix/media/v3/download/",
+        "/_matrix/media/r0/download/",
+    )
 
-        文件名优先取 Content-Disposition 头；取不到返回空串，由调用方决定兜底名。
-        """
-        parsed = parse_mxc_url(mxc_url)
-        if not parsed:
-            raise MatrixClientError(f"无效的媒体地址: {mxc_url}")
-        server_name, media_id = parsed
-        path = f"/_matrix/client/v3/media/download/{quote(server_name, safe='')}/{quote(media_id, safe='')}"
-        resp = self._request("GET", path)
-        filename = _filename_from_disposition(resp.headers.get("content-disposition", ""))
-        return resp.content, filename
+    def _media_download_response(self, mxc_url: str):
+        """按端点优先级下载 mxc 媒体，返回首个可用端点的响应。
 
-    def fetch_media_ciphertext(self, mxc_url: str) -> Tuple[bytes, str]:
-        """下载（可能加密的）媒体密文，返回 (ciphertext bytes, 文件名)。
-
-        优先走认证媒体端点 /_matrix/client/v1/media/download（新 homeserver 要求），
-        404/405 时回退旧版 v3 未认证端点。解密由 matrix_e2ee.decrypt_media_payload 完成。
+        端点不存在（HTTP 404 + M_UNRECOGNIZED）时自动回退下一候选；
+        媒体本身的错误（如 M_NOT_FOUND、限流 429）立即抛出，不掩盖真实原因。
         """
         parsed = parse_mxc_url(mxc_url)
         if not parsed:
             raise MatrixClientError(f"无效的媒体地址: {mxc_url}")
         server_name, media_id = parsed
         quoted = f"{quote(server_name, safe='')}/{quote(media_id, safe='')}"
-        try:
-            resp = self._request("GET", f"/_matrix/client/v1/media/download/{quoted}")
-        except MatrixClientError as exc:
-            # 仅在端点不存在时回退；媒体本身的错误（404 M_NOT_FOUND 等）直接抛出
-            message = str(exc)
-            if "HTTP 404" not in message and "HTTP 405" not in message:
-                raise
-            resp = self._request("GET", f"/_matrix/client/v3/media/download/{quoted}")
+        last_exc: Optional[MatrixClientError] = None
+        for base in self._MEDIA_DOWNLOAD_PATHS:
+            try:
+                return self._request("GET", f"{base}{quoted}")
+            except MatrixClientError as exc:
+                message = str(exc)
+                if "M_UNRECOGNIZED" not in message:
+                    raise
+                last_exc = exc
+        raise last_exc or MatrixClientError(f"无法下载媒体: {mxc_url}")
+
+    def download_media(self, mxc_url: str) -> Tuple[bytes, str]:
+        """下载明文 mxc 媒体，返回 (bytes, 文件名)。
+
+        文件名优先取 Content-Disposition 头；取不到返回空串，由调用方决定兜底名。
+        """
+        resp = self._media_download_response(mxc_url)
+        filename = _filename_from_disposition(resp.headers.get("content-disposition", ""))
+        return resp.content, filename
+
+    def fetch_media_ciphertext(self, mxc_url: str) -> Tuple[bytes, str]:
+        """下载（可能加密的）媒体密文，返回 (ciphertext bytes, 文件名)。
+
+        与 download_media 共用同一条端点回退链（认证媒体 v1 优先）。
+        解密由 matrix_e2ee._decrypt_attachment_bytes 完成。
+        """
+        resp = self._media_download_response(mxc_url)
         filename = _filename_from_disposition(resp.headers.get("content-disposition", ""))
         return resp.content, filename

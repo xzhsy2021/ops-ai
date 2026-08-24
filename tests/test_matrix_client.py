@@ -124,6 +124,7 @@ def test_fetch_room_messages_raises_on_error(monkeypatch):
 
 
 def test_download_media(monkeypatch):
+    """明文下载：优先认证媒体端点 v1，成功即返回。"""
     class FakeResponse:
         content = b"PACKAGE-BYTES"
         headers = {"content-disposition": 'attachment; filename="crypto-frontend.tar.gz"'}
@@ -139,7 +140,47 @@ def test_download_media(monkeypatch):
     data, filename = client.download_media("mxc://hs.example/AbCdEf")
     assert data == b"PACKAGE-BYTES"
     assert filename == "crypto-frontend.tar.gz"
-    assert captured["path"] == "/_matrix/client/v3/media/download/hs.example/AbCdEf"
+    assert captured["path"] == "/_matrix/client/v1/media/download/hs.example/AbCdEf"
+
+
+def test_download_media_falls_back_when_endpoint_unrecognized(monkeypatch):
+    """v1 端点不存在（M_UNRECOGNIZED）时按链回退到可用端点。"""
+    class FakeResponse:
+        content = b"BYTES"
+        headers = {}
+
+    attempted = []
+
+    def fake_request(method, path, headers=None, params=None, timeout=None):
+        attempted.append(path)
+        if path.startswith("/_matrix/client/v1/"):
+            raise MatrixClientError(
+                "Matrix GET /_matrix/client/v1/media/download/hs/A -> HTTP 404: "
+                '{"errcode":"M_UNRECOGNIZED","error":"Unrecognized request"}'
+            )
+        return FakeResponse()
+
+    client = MatrixClient(homeserver_url="https://hs.example", access_token="secret")
+    monkeypatch.setattr(client, "_request", fake_request)
+    data, _ = client.download_media("mxc://hs/A")
+    assert data == b"BYTES"
+    assert attempted[0].startswith("/_matrix/client/v1/")
+    assert attempted[1].startswith("/_matrix/client/v3/")
+
+
+def test_download_media_raises_on_real_media_miss(monkeypatch):
+    """媒体本身不存在（M_NOT_FOUND）不回退端点，立即抛出真实原因。"""
+    def fake_request(method, path, headers=None, params=None, timeout=None):
+        raise MatrixClientError(
+            f"Matrix GET {path} -> HTTP 404: "
+            '{"errcode":"M_NOT_FOUND","error":"Media not found"}'
+        )
+
+    client = MatrixClient(homeserver_url="https://hs.example", access_token="secret")
+    monkeypatch.setattr(client, "_request", fake_request)
+    with pytest.raises(MatrixClientError) as exc:
+        client.download_media("mxc://hs/gone")
+    assert "M_NOT_FOUND" in str(exc.value)
 
 
 def test_download_media_rejects_non_mxc(monkeypatch):

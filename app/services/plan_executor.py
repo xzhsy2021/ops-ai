@@ -186,6 +186,64 @@ def _file_upload_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Sessi
     return ApprovalExecutor(db)._execute_file_upload(approval, payload)
 
 
+def _matrix_pull_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """Matrix 附件拉取步骤：从房间拉取最新媒体包入库（SHA256）。
+
+    复用 MCP 工具同一核心实现（pull_matrix_attachment_core），计划审批
+    已覆盖本步骤，无需再次 confirm_text。结果中的 package_name / sha256
+    供后续 RELEASE 步骤通过依赖回填使用。
+    """
+    from app.services.tool_adapters.matrix_tools import pull_matrix_attachment_core
+
+    params = step.parameters or {}
+    return pull_matrix_attachment_core(
+        db,
+        room_id=str(params.get("room_id") or ""),
+        sender=str(params.get("sender") or ""),
+        minutes=params.get("minutes"),
+        filename_hint=str(params.get("filename") or ""),
+        system=str(params.get("system_name") or params.get("system") or plan.system_name or ""),
+        service=str(params.get("service_name") or params.get("service") or plan.service_name or ""),
+        overwrite=bool(params.get("overwrite", False)),
+        uploaded_by=plan.approved_by or "system",
+        homeserver_url=str(params.get("homeserver_url") or ""),
+        access_token=str(params.get("access_token") or ""),
+    )
+
+
+def _dependency_package_name(plan: ExecutionPlan, step: ExecutionPlanStep) -> str:
+    """从依赖步骤的执行结果中回填 package_name（如 MATRIX_PULL → RELEASE）。
+
+    计划 manifest 在审批时冻结，而拉取到的包名只有运行时才知道；
+    因此 RELEASE 步骤未显式指定 package_name 时，按依赖顺序查找
+    前置步骤结果里的 package_name。
+    """
+    by_key = {s.step_key: s for s in plan.steps}
+    for dep in step.dependencies or []:
+        dep_step = by_key.get(dep)
+        result = getattr(dep_step, "result", None) or {}
+        package_name = str(result.get("package_name") or "").strip()
+        if package_name:
+            return package_name
+    return ""
+
+
+def _release_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
+    """发布步骤。复用共享执行函数 execute_release，不触发旧审批工具。"""
+    from app.services.approval_executor import execute_release
+
+    params = step.parameters or {}
+    payload = {
+        "system_name": params.get("system_name") or plan.system_name,
+        "service_name": params.get("service_name") or plan.service_name,
+        "environment": params.get("environment") or plan.environment,
+        "targets": params.get("targets") or plan.targets or [],
+        "action_parameters": params.get("action_parameters", {}),
+    }
+    package_name = params.get("package_name") or plan.package_name or _dependency_package_name(plan, step)
+    return execute_release(db, payload, operator=plan.approved_by or "system", package_name=package_name)
+
+
 STEP_HANDLERS: dict[str, StepHandler] = {
     "SERVICE_CONTROL": _service_control_handler,
     "HEALTH_CHECK": _health_check_handler,
@@ -194,6 +252,7 @@ STEP_HANDLERS: dict[str, StepHandler] = {
     "DML": _dml_handler,
     "PACKAGE_CLEANUP": _package_cleanup_handler,
     "FILE_UPLOAD": _file_upload_handler,
+    "MATRIX_PULL": _matrix_pull_handler,
 }
 
 

@@ -1,5 +1,28 @@
 
-## v2.1.13 - DB Proxy Server Asset Selector Runtime Hotfix
+## v2.1.14 - Matrix 部署包对接（Matrix deploy package integration）
+
+- 新增 Matrix 集成：用户可在 Matrix 房间发送部署包（m.file / m.image / m.video / m.audio，未 @），再 @bot 下达发布指令；Agent 调用运维中心 API 完成“拉事件 → 找最新媒体 → 下载 → 入文件中心 → 走现有发布流程 → 审计”。
+- 新增 `app/services/matrix_client.py`：Matrix Client-Server API 客户端（拉房间事件、按 sender / msgtype / 时间窗口 / 文件名筛选最新媒体事件、下载 mxc 媒体）。
+- 新增 `app/api/matrix.py` 路由：
+  - `GET /api/v2/matrix/status` —— 连接与配置状态。
+  - `POST /api/v2/matrix/rooms/{room_id}/scan` —— 预览房间内匹配的媒体事件（不触发发布）。
+  - `POST /api/v2/matrix/deploy` 与 `POST /api/deploy` —— 发布入口（支持 session 与 Bearer tool token 鉴权）。
+- 新增 MCP 工具 `app/services/tool_adapters/matrix_tools.py`，把「OPS 直接从 Matrix 拉附件」能力暴露给 qclaw / OpenClaw Agent：
+  - `ops.matrix.scan_media_events` —— 预览房间媒体事件（只读）。
+  - `ops.matrix.pull_attachment` —— 拉取房间最新附件到文件中心（下载 + SHA256 + 入库，返回 package_name）。
+  - `ops.matrix.deploy_from_matrix` —— 完整发布链路（拉附件 → 文件中心 → 排队发布）。
+  - 支持 qclaw token 房间绑定（bound_room_ids）校验；E2EE 加密媒体返回明确错误。
+  - HTTP 端点与 MCP 工具共用 `matrix_deploy_core` 核心链路，行为一致。
+- Matrix 的 homeserver 与 access token **由 Agent 调用时动态传入**（HTTP `matrix.homeserverUrl` / `matrix.accessToken`，MCP `homeserver_url` / `access_token`），不再强制固定配置；未传入时回退到环境变量 `MATRIX_HOMESERVER_URL` / `MATRIX_ACCESS_TOKEN`。
+- 媒体事件扫描未匹配时自动附带 `debug` 诊断信息（`MatrixClient.debug_recent_events`）：msgtype 分布 / sender 分布 / 文字含文件名提示。HTTP scan/MCP scan/publish 404 三处统一提示「用户在房间只发送了文字（m.text），并未真上传 Matrix 附件」，便于 Agent 引导用户正确上传。
+- 默认扫描 limit 从 50 提升到 200（Matrix API 上限），避免消息密集的房间拉不到最新附件事件。
+- 重构 `app/api/deploy/executions.py`：抽取 `queue_deploy_v2(user, data, db)` 共享函数，Matrix 发布与 Web 发布复用同一套确认/锁/任务/审计/通知流程，不重复实现。
+- 审计记录 roomId、mediaEventId、triggerEventId、sender、环境、服务名；文件中心元数据带 `matrix:default:{room}:{event}` 来源标记。
+- E2EE 加密媒体（content.file 无明文 mxc url）暂不支持解密，接口返回明确错误；未加密房间 / Bot 已验证房间可直接使用。
+- 新增配置：`MATRIX_HOMESERVER_URL`、`MATRIX_ACCESS_TOKEN`、`MATRIX_MEDIA_WINDOW_MINUTES`（默认 15）、`MATRIX_HTTP_TIMEOUT`、`MATRIX_MEDIA_MSGTYPES`。
+- 新增测试 `tests/test_matrix_client.py`、`tests/test_matrix_deploy_api.py`、`tests/test_matrix_tools.py`。
+
+
 
 - 修复数据库连接 SSH 跳板机 / 目标主机下拉无服务器选项的问题。
 - 前端生产 dist 现在实际加载服务器资产与 SSH 密钥列表，不再只显示“手动填写”。

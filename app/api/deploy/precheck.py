@@ -383,12 +383,22 @@ async def deploy_precheck(request: Request, db: Session = Depends(get_db)):
     variables: Dict[str, Any] = data.get("variables") or {}
     pipeline_id: str = data.get("pipeline_id") or data.get("pipelineId") or ""
 
-    checks, ssh_fail, remote_disks, _ssh_cache, topology, package_match = \
-        _collect_precheck_checks(
-            system, service, environment, file_name,
-            servers_raw, variables, data.get("server_group", ""), db,
-            pipeline_id=pipeline_id,
-        )
+    # 逐台 SSH 连接 + 多项远程探测是长阻塞操作，必须放入线程池，
+    # 否则主事件循环被占住、整个站点在预检期间无响应。
+    from fastapi.concurrency import run_in_threadpool
+
+    checks, ssh_fail, remote_disks, _ssh_cache, topology, package_match = await run_in_threadpool(
+        _collect_precheck_checks,
+        system,
+        service,
+        environment,
+        file_name,
+        servers_raw,
+        variables,
+        data.get("server_group", ""),
+        db,
+        pipeline_id,
+    )
 
     pkg = package_match.get("package", {})
     servers_list = [

@@ -844,7 +844,7 @@ def ensure_builtin_registered():
     with _builtin_lock:
         if _builtin_registered:
             return registry
-        from app.services.tool_adapters import deploy_tools, file_tools, file_transfer_tools, server_tools, audit_tools, capability_tools, diagnostic_tools, backup_tools, job_tools, report_tools, db_tools, inspection_tools, risk_tools, log_tools, connection_tools, ssh_key_tools, pipeline_tools, approval_tools, help_tools, remote_exec_tools, security_report_tools  # noqa: F401
+        from app.services.tool_adapters import deploy_tools, file_tools, file_transfer_tools, server_tools, audit_tools, capability_tools, diagnostic_tools, backup_tools, job_tools, report_tools, db_tools, inspection_tools, risk_tools, log_tools, connection_tools, ssh_key_tools, pipeline_tools, approval_tools, help_tools, remote_exec_tools, security_report_tools, matrix_tools  # noqa: F401
         _builtin_registered = True
         registry.invalidate_capability_cache()
         return registry

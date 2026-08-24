@@ -1,6 +1,8 @@
 # 消息级执行计划与一次审批设计
 
 > **实施状态（2026-08-06）**：方案 2 的后端主链路已落地并通过专项测试。执行器注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`；发布、回滚、DML、包清理的执行业务逻辑与旧单动作审批路径共享 `approval_executor.execute_*` 函数。
+>
+> **增量（2026-08-22）**：新增 `MATRIX_PULL` 步骤（从 Matrix 房间拉取最新附件入库，复用 `ops.matrix.pull_attachment` 核心实现）与 `FILE_UPLOAD` 步骤。`MATRIX_PULL` 结果中的 `package_name` 自动回填到依赖它的 `RELEASE` 步骤——「拉取附件 + 发布」只需一次审批。
 
 ## 目标
 
@@ -102,6 +104,6 @@ PENDING_APPROVAL -> REJECTED / EXPIRED
 ## 当前限制
 
 - qclaw 消息路由目前由外部 Agent 通过 MCP 工具编排；仓库内没有独立的 qclaw 消息消费进程。仓库中的端到端契约测试覆盖“路由 → prepare_plan → execute_plan”边界。
-- `PlanExecutor` 当前注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP` 六类步骤。发布/回滚/DML/包清理的执行业务逻辑已从 `ApprovalExecutor` 抽为共享 `execute_*` 函数，旧单动作审批与新计划步骤共用同一实现（`bb4e5d8`）。
+- `PlanExecutor` 当前注册 `SERVICE_CONTROL`、`HEALTH_CHECK`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`、`FILE_UPLOAD`、`MATRIX_PULL` 八类步骤。发布/回滚/DML/包清理的执行业务逻辑已从 `ApprovalExecutor` 抽为共享 `execute_*` 函数，旧单动作审批与新计划步骤共用同一实现（`bb4e5d8`）；`MATRIX_PULL` 复用 `matrix_tools.pull_matrix_attachment_core`，其 `package_name` 结果自动回填依赖的 `RELEASE` 步骤。
 - 高危动作作为计划步骤时**只**在执行器内部调用共享业务函数；`prepare_plan` 的调用方仍只接触 `ops.approval.prepare_plan` / `execute_plan`，不直接接触底层危险 scope。
 - 方案 2 的专项测试已通过；完整后端测试仍有与本方案无关的既有基线失败，主要来自未提交的前端重构和风险策略测试。

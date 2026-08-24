@@ -124,18 +124,28 @@ def _normalize_steps(steps: list[dict]) -> list[dict]:
 
 def step_approval_details(action_type: str, parameters: dict | None, default_targets: list[str] | None = None) -> dict:
     """Return the non-secret fields an approver must see for a plan step."""
-    if str(action_type or "").strip() != "FILE_UPLOAD":
-        return {}
+    action_type = str(action_type or "").strip()
     params = dict(parameters or {})
-    action_parameters = dict(params.get("action_parameters") or {})
-    return {
-        "package_name": action_parameters.get("package_name") or "",
-        "remote_path": action_parameters.get("remote_path") or "",
-        "overwrite": bool(action_parameters.get("overwrite", False)),
-        "expected_sha256": action_parameters.get("expected_sha256") or "",
-        "expected_size_bytes": action_parameters.get("expected_size_bytes"),
-        "targets": list(params.get("targets") or default_targets or []),
-    }
+    if action_type == "FILE_UPLOAD":
+        action_parameters = dict(params.get("action_parameters") or {})
+        return {
+            "package_name": action_parameters.get("package_name") or "",
+            "remote_path": action_parameters.get("remote_path") or "",
+            "overwrite": bool(action_parameters.get("overwrite", False)),
+            "expected_sha256": action_parameters.get("expected_sha256") or "",
+            "expected_size_bytes": action_parameters.get("expected_size_bytes"),
+            "targets": list(params.get("targets") or default_targets or []),
+        }
+    if action_type == "MATRIX_PULL":
+        minutes = params.get("minutes")
+        return {
+            "room_id": str(params.get("room_id") or ""),
+            "sender": str(params.get("sender") or ""),
+            "filename_hint": str(params.get("filename") or ""),
+            "minutes": int(minutes) if minutes else None,
+            "note": "将从 Matrix 房间拉取该发送者最新媒体附件入库；package_name 由执行时回填到后续 RELEASE 步骤",
+        }
+    return {}
 
 
 def compute_plan_digest(

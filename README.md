@@ -41,6 +41,7 @@ http://localhost:8000
 - HTTP Tool API and MCP-compatible access.
 - Risk policy, confirmation text, taskization, and audit fallback for high-risk operations.
 - Channel-neutral qclaw approval integration (Matrix / WeChat / Telegram) with a normalized `message_context`, routing tickets, one-time execution-plan approvals, and temporary self-approval grants for test environments.
+- Matrix deploy package integration – Bot/Service account pulls room events, finds the latest media (`m.file`/`m.image`/`m.video`/`m.audio`) from the sender within a time window, downloads `mxc://` media to the File Center, then queues the existing deploy flow (checksum, artifact store, server selection, release, audit). Full audit trail: `roomId`, `mediaEventId`, `triggerEventId`, `sender`, `environment`, `service`.
 
 ## AI / MCP Safety Baseline
 

@@ -1,0 +1,483 @@
+"""Matrix 部署包对接 MCP 工具。
+
+把「OPS 直接从 Matrix 房间拉附件」能力暴露给 qclaw / OpenClaw Agent：
+- ops.matrix.scan_media_events    预览房间内匹配的媒体事件（只读，不下载）
+- ops.matrix.pull_attachment     从 Matrix 房间拉取最新媒体附件到文件中心（下载 + 校验和 + 入库）
+- ops.matrix.deploy_from_matrix  完整链路：拉附件 → 文件中心 → 排队发布（复用 queue_deploy_v2）
+
+这些工具与 app/api/matrix.py 的 HTTP 端点共用 MatrixClient / save_package_fileobj /
+queue_deploy_v2，保证 HTTP 与 MCP 两条通道行为一致。
+E2EE：加密房间事件经 app/services/matrix_e2ee.py 解密（matrix-nio[e2e] +
+持久化 crypto store），未配置或解密失败时返回带原因的明确错误。
+"""
+from __future__ import annotations
+
+import asyncio
+import io
+import os
+import re
+from typing import Any, Dict
+
+from fastapi import HTTPException
+
+from app.services.tool_registry import registry
+from app.services.matrix_client import (
+    MATRIX_MEDIA_WINDOW_MINUTES,
+    MatrixClient,
+    MatrixClientError,
+    MatrixMediaEvent,
+)
+from app.services.matrix_e2ee import (
+    MatrixE2eeError,
+    build_room_event_decryptor,
+    e2ee_unavailable_detail,
+    pull_media_bytes,
+)
+from app.services.package_retention import save_package_fileobj
+
+
+import concurrent.futures
+import threading
+
+
+def _run_coroutine_sync(coroutine):
+    """在同步上下文中执行协程的桥接器。
+
+    - 无事件循环（pytest / CLI / 线程池 worker）：直接 asyncio.run；
+    - 已有事件循环在跑（MCP HTTP 异步端点 mcp_streamable_http_endpoint
+      直接调用同步工具）：asyncio.run 会抛 "cannot be called from a
+      running event loop" 并丢弃协程 —— 转投独立线程用私有 loop 执行。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+
+    from app.services.matrix_e2ee import aclose_loop_session
+
+    def _runner():
+        async def _main():
+            try:
+                return await coroutine
+            finally:
+                # 线程 loop 即将销毁：关闭绑定其上的 E2EE 会话，避免连接泄漏
+                try:
+                    await aclose_loop_session()
+                except Exception:
+                    pass
+
+        return asyncio.run(_main())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="matrix-sync-bridge") as pool:
+        return pool.submit(_runner).result(timeout=180)
+
+
+def _try_build_decryptor(room_id: str) -> Any | None:
+    """尽力构建 m.room.encrypted 解密器；E2EE 不可用时返回 None。
+
+    仅使用 .env 专用 Bot 凭据（专用设备守卫，见 matrix_e2ee.get_e2ee_session）。
+    """
+    try:
+        return _run_coroutine_sync(build_room_event_decryptor(room_id=room_id))
+    except MatrixE2eeError:
+        return None
+
+
+def _matrix_client(args: Dict[str, Any] | None = None) -> MatrixClient:
+    """构建 MatrixClient。homeserver / token 由 Agent 调用时传入（参数优先），
+    未传时回退到环境变量 MATRIX_HOMESERVER_URL / MATRIX_ACCESS_TOKEN。"""
+    args = args or {}
+    homeserver_url = str(args.get("homeserver_url") or args.get("homeserverUrl") or "").strip()
+    access_token = str(args.get("access_token") or args.get("accessToken") or "").strip()
+    client = MatrixClient(homeserver_url=homeserver_url, access_token=access_token)
+    if not client.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Matrix 连接参数缺失：请传入 homeserver_url 与 access_token，"
+            "或配置 MATRIX_HOMESERVER_URL / MATRIX_ACCESS_TOKEN",
+        )
+    return client
+
+
+def _conn_args(args: Dict[str, Any] | None = None) -> Dict[str, str]:
+    """从工具参数提取 Matrix 连接信息（供 E2EE 会话复用）。"""
+    args = args or {}
+    return {
+        "homeserver_url": str(args.get("homeserver_url") or args.get("homeserverUrl") or "").strip(),
+        "access_token": str(args.get("access_token") or args.get("accessToken") or "").strip(),
+    }
+
+
+def _enforce_room_binding(ctx, room_id: str) -> None:
+    """qclaw token 绑定房间后，只能拉取绑定房间内的媒体。"""
+    bound = list(getattr(ctx, "bound_room_ids", []) or [])
+    if bound and room_id not in bound:
+        raise HTTPException(
+            status_code=403,
+            detail=f"room_id {room_id} 不在当前 token 绑定房间内: {','.join(bound)}",
+        )
+
+
+def _event_to_dict(event: MatrixMediaEvent) -> Dict[str, Any]:
+    return {
+        "event_id": event.event_id,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "msgtype": event.msgtype,
+        "filename": event.filename,
+        "mxc_url": event.mxc_url,
+        "encrypted": event.encrypted,
+    }
+
+
+@registry.register(
+    name="ops.matrix.scan_media_events",
+    title="Scan Matrix room media events",
+    description="预览 Matrix 房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 可选文件名），不下载、不发布。返回匹配事件的 event_id、文件名、mxc 地址与是否加密。中文: 查看Matrix房间媒体/扫描房间附件/房间发了什么包.",
+    scopes=["ops:read"],
+    risk="low",
+    category="package_read",
+    keywords=["matrix", "room", "media", "attachment", "scan", "附件"],
+    recommended_use_cases=["Agent 需要确认 Matrix 房间里谁发了什么部署包"],
+    example_prompts=["扫一下 Matrix 房间里的媒体事件", "看看房间最近有没有人发部署包"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "room_id": {"type": "string", "description": "Matrix 房间 ID，如 !room:example.org"},
+            "sender": {"type": "string", "description": "限定发送者（Matrix user id），为空则不限"},
+            "minutes": {"type": "integer", "description": f"回看窗口（分钟），默认 {MATRIX_MEDIA_WINDOW_MINUTES}"},
+            "filename": {"type": "string", "description": "可选文件名匹配（content.body / filename）"},
+            "limit": {"type": "integer", "description": "拉取事件条数，默认 200（Matrix API 上限）"},
+            "include_debug": {"type": "boolean", "description": "是否额外返回房间事件诊断（msgtype 分布 / 文字含文件名提示），用于排查为什么没匹配到媒体"},
+            "homeserver_url": {"type": "string", "description": "Matrix homeserver 地址（Agent 传入），如 https://matrix.example.org"},
+            "access_token": {"type": "string", "description": "Matrix Bot/Service 账号 access token（Agent 传入）"},
+        },
+        "required": ["room_id"],
+        "additionalProperties": False,
+    },
+)
+def scan_media_events(args: Dict[str, Any], ctx, db) -> Dict[str, Any]:
+    room_id = str(args.get("room_id") or "").strip()
+    if not room_id:
+        raise HTTPException(status_code=400, detail="room_id is required")
+    _enforce_room_binding(ctx, room_id)
+    minutes = int(args.get("minutes") or MATRIX_MEDIA_WINDOW_MINUTES)
+    limit = int(args.get("limit") or 200)
+    client = _matrix_client(args)
+    conn = _conn_args(args)
+    decryptor = _try_build_decryptor(room_id)
+    try:
+        if decryptor is not None:
+            events = _run_coroutine_sync(
+                client.list_media_events_async(
+                    room_id,
+                    sender=str(args.get("sender") or "").strip(),
+                    minutes=minutes,
+                    filename_hint=str(args.get("filename") or "").strip(),
+                    limit=limit,
+                    event_decryptor=decryptor,
+                )
+            )
+        else:
+            events = client.list_media_events(
+                room_id,
+                sender=str(args.get("sender") or "").strip(),
+                minutes=minutes,
+                filename_hint=str(args.get("filename") or "").strip(),
+                limit=limit,
+            )
+    except MatrixClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    result: Dict[str, Any] = {
+        "room_id": room_id,
+        "window_minutes": minutes,
+        "limit": limit,
+        "media_msgtypes": list(client.media_msgtypes),
+        "events": [_event_to_dict(ev) for ev in events],
+        "e2ee": {"decryptor_active": decryptor is not None},
+        "summary": f"找到 {len(events)} 条匹配的媒体事件"
+        + (
+            "（窗口内 0 条媒体：若用户发了文件名，房间内大概率只有 m.text 而无 m.file，请提示真上传附件）"
+            if not events else ""
+        ),
+    }
+    if args.get("include_debug") or not events:
+        try:
+            result["debug"] = client.debug_recent_events(
+                room_id,
+                sender=str(args.get("sender") or "").strip(),
+                minutes=minutes,
+                limit=limit,
+            )
+        except MatrixClientError as exc:
+            result["debug"] = {"error": str(exc)}
+    return result
+
+
+def pull_matrix_attachment_core(
+    db,
+    *,
+    room_id: str,
+    sender: str,
+    minutes: int | None = None,
+    filename_hint: str = "",
+    system: str = "",
+    service: str = "",
+    overwrite: bool = False,
+    uploaded_by: str = "",
+    homeserver_url: str = "",
+    access_token: str = "",
+) -> Dict[str, Any]:
+    """拉取 Matrix 附件到文件中心的核心实现（MCP 工具与计划步骤共用）。
+
+    下载最新匹配媒体 → E2EE 解密（如加密）→ SHA256 → save_package_fileobj 入库。
+    失败抛 HTTPException（计划步骤执行器会转为步骤 FAILED）。
+    """
+    if not room_id or not sender:
+        raise HTTPException(status_code=400, detail="room_id 与 sender 必填")
+    client = _matrix_client({
+        "homeserver_url": homeserver_url,
+        "access_token": access_token,
+    })
+    # 加密事件在解密前没有 mxc_url，同步筛选对它不可见（表现为"未找到媒体事件"）。
+    # 因此优先走带 E2EE 解密器的异步筛选路径；解密器不可用或旧客户端无异步方法时回退同步。
+    decryptor = _try_build_decryptor(room_id)
+    async_finder = getattr(client, "find_latest_media_event_async", None)
+    minutes = int(minutes or MATRIX_MEDIA_WINDOW_MINUTES)
+    try:
+        if async_finder is not None:
+            event = _run_coroutine_sync(
+                async_finder(
+                    room_id,
+                    sender=sender,
+                    minutes=minutes,
+                    filename_hint=filename_hint,
+                    limit=100,
+                    event_decryptor=decryptor,
+                )
+            )
+        else:
+            event = client.find_latest_media_event(
+                room_id,
+                sender=sender,
+                minutes=minutes,
+                filename_hint=filename_hint,
+                limit=100,
+            )
+    except MatrixClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if not event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到 {sender} 最近 {minutes or MATRIX_MEDIA_WINDOW_MINUTES} 分钟内的媒体事件",
+        )
+    try:
+        # 未加密事件直接下载；加密事件走「密文下载 + E2EE 解密」
+        media_bytes, disposition_filename = _run_coroutine_sync(
+            pull_media_bytes(client, event, homeserver_url=homeserver_url, access_token=access_token)
+        )
+    except MatrixE2eeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"该媒体为 E2EE 加密媒体，解密未完成：{e2ee_unavailable_detail(exc)}",
+        )
+    except MatrixClientError as exc:
+        raise HTTPException(status_code=502, detail=f"下载媒体失败: {exc}")
+
+    package_name = event.filename or disposition_filename
+    if not package_name:
+        package_name = f"matrix-{re.sub(r'[^A-Za-z0-9._-]', '_', event.event_id)[:24]}.bin"
+    package_name = os.path.basename(package_name)
+
+    try:
+        meta = save_package_fileobj(
+            db,
+            filename=package_name,
+            fileobj=io.BytesIO(media_bytes),
+            system=system,
+            service=service,
+            uploaded_by=uploaded_by or "matrix",
+            overwrite=overwrite,
+            source_context={
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "conversation_id": room_id,
+                "message_id": event.event_id,
+                "sender_id": sender,
+            },
+            source_message_key=f"matrix:default:{room_id}:{event.event_id}",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"保存媒体包失败: {exc}")
+
+    return {
+        "package_name": meta.get("package_name") or package_name,
+        "sha256": meta.get("sha256"),
+        "size_bytes": meta.get("size_bytes"),
+        "event_id": event.event_id,
+        "sender": sender,
+        "room_id": room_id,
+        "mxc_url": event.mxc_url,
+        "filename": event.filename,
+        "encrypted": event.encrypted,
+        "matrix": {
+            "room_id": room_id,
+            "media_event_id": event.event_id,
+            "sender": sender,
+            "filename": meta.get("package_name") or package_name,
+        },
+    }
+
+
+@registry.register(
+    name="ops.matrix.pull_attachment",
+    title="Pull latest Matrix attachment into File Center",
+    description="从 Matrix 房间拉取发送者最近一次媒体附件（m.file/m.image/m.video/m.audio）到 OPS 文件中心：下载 mxc 媒体、计算 SHA256、写入 DeployPackage 元数据并返回 package_name，供后续发布计划使用。加密房间的 E2EE 媒体在配置 MATRIX_E2EE_* 后自动解密；解密失败返回明确原因。中文: 从Matrix拉附件/拉取Matrix部署包/Matrix附件入库.",
+    scopes=["ops:read", "package:write"],
+    risk="medium",
+    category="package_write",
+    write=True,
+    requires_confirmation=True,
+    data_sensitivity="sensitive",
+    keywords=["matrix", "attachment", "pull", "download", "file center", "拉附件", "拉取"],
+    recommended_use_cases=["用户说'从 Matrix 房间拉取我发的部署包'时，拉取附件到文件中心"],
+    example_prompts=["把 Matrix 房间里的最新附件拉到文件中心", "拉取 alice 发的部署包"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "room_id": {"type": "string", "description": "Matrix 房间 ID，如 !room:example.org"},
+            "sender": {"type": "string", "description": "发送者 Matrix user id（谁发的包），必填"},
+            "minutes": {"type": "integer", "description": f"回看窗口（分钟），默认 {MATRIX_MEDIA_WINDOW_MINUTES}"},
+            "filename": {"type": "string", "description": "可选文件名匹配（content.body / filename）"},
+            "system": {"type": "string", "description": "所属系统（可选，入库元数据用）"},
+            "service": {"type": "string", "description": "所属服务（可选，入库元数据用）"},
+            "overwrite": {"type": "boolean", "description": "同名包已存在时是否覆盖，默认 false"},
+            "confirm_text": {"type": "string", "description": "确认短语：CONFIRM ops.matrix.pull_attachment（中风险写操作必需；作为执行计划步骤执行时无需此参数）"},
+            "homeserver_url": {"type": "string", "description": "Matrix homeserver 地址（Agent 传入），如 https://matrix.example.org"},
+            "access_token": {"type": "string", "description": "Matrix Bot/Service 账号 access token（Agent 传入）"},
+        },
+        "required": ["room_id", "sender"],
+        "additionalProperties": False,
+    },
+)
+def pull_attachment(args: Dict[str, Any], ctx, db) -> Dict[str, Any]:
+    room_id = str(args.get("room_id") or "").strip()
+    sender = str(args.get("sender") or "").strip()
+    if not room_id or not sender:
+        raise HTTPException(status_code=400, detail="room_id 与 sender 必填")
+    _enforce_room_binding(ctx, room_id)
+    result = pull_matrix_attachment_core(
+        db,
+        room_id=room_id,
+        sender=sender,
+        minutes=int(args.get("minutes") or MATRIX_MEDIA_WINDOW_MINUTES),
+        filename_hint=str(args.get("filename") or "").strip(),
+        system=str(args.get("system") or ""),
+        service=str(args.get("service") or ""),
+        overwrite=bool(args.get("overwrite")),
+        uploaded_by=ctx.username or ctx.token_owner or "matrix",
+        homeserver_url=str(args.get("homeserver_url") or args.get("homeserverUrl") or ""),
+        access_token=str(args.get("access_token") or args.get("accessToken") or ""),
+    )
+    result["next_actions"] = [
+        {"tool": "ops_matrix_deploy_from_matrix", "description": "直接用这个包触发发布"},
+        {"tool": "ops_create_deploy_plan", "arguments": {"package_name": result["package_name"]}, "description": "先创建发布计划"},
+    ]
+    return result
+
+
+@registry.register(
+    name="ops.matrix.deploy_from_matrix",
+    title="Deploy package pulled from Matrix room",
+    description="完整 Matrix 发布链路：从 Matrix 房间拉取发送者最近媒体附件 → 写入文件中心（SHA256）→ 排队发布（复用现有发布流程：校验和/制品库/集群/发版/审计）。生产环境需管理员或 allow_prod 权限并附 confirm_text。中文: Matrix发布/从Matrix发版/拉取Matrix附件并发布.",
+    scopes=["ops:read", "package:write", "deploy:execute"],
+    risk="high",
+    category="deploy_execute",
+    write=True,
+    requires_confirmation=True,
+    requires_human_approval=True,
+    data_sensitivity="sensitive",
+    keywords=["matrix", "deploy", "release", "发版", "发布"],
+    recommended_use_cases=["用户说'把 Matrix 房间里我发的包部署到测试环境'时，走完整发布链路"],
+    example_prompts=["从 Matrix 房间拉取部署包并发布到测试环境", "部署 alice 刚在房间发的包"],
+    input_schema={
+        "type": "object",
+        "properties": {
+            "room_id": {"type": "string", "description": "Matrix 房间 ID，如 !room:example.org"},
+            "sender": {"type": "string", "description": "发送者 Matrix user id（谁发的包），必填"},
+            "env": {"type": "string", "description": "发布环境，如 test / staging / prod"},
+            "environment": {"type": "string", "description": "environment 别名（与 env 二选一）"},
+            "system": {"type": "string", "description": "所属系统"},
+            "service": {"type": "string", "description": "所属服务，必填"},
+            "minutes": {"type": "integer", "description": f"回看窗口（分钟），默认 {MATRIX_MEDIA_WINDOW_MINUTES}"},
+            "filename": {"type": "string", "description": "可选文件名匹配"},
+            "version": {"type": "string", "description": "版本号，缺省用包名"},
+            "servers": {"type": "array", "items": {"type": "string"}},
+            "server_group": {"type": "string"},
+            "pipeline_id": {"type": "string"},
+            "variables": {"type": "object"},
+            "confirm_text": {"type": "string", "description": "生产环境二次确认短语（CONFIRM / 确认发布 xxx）"},
+            "reason": {"type": "string", "description": "发布原因（生产环境必填）"},
+            "trigger_event_id": {"type": "string", "description": "触发指令的 Matrix 事件 id（审计记录用）"},
+            "homeserver_url": {"type": "string", "description": "Matrix homeserver 地址（Agent 传入），如 https://matrix.example.org"},
+            "access_token": {"type": "string", "description": "Matrix Bot/Service 账号 access token（Agent 传入）"},
+        },
+        "required": ["room_id", "sender", "service"],
+        "additionalProperties": False,
+    },
+)
+def deploy_from_matrix(args: Dict[str, Any], ctx, db) -> Dict[str, Any]:
+    room_id = str(args.get("room_id") or "").strip()
+    sender = str(args.get("sender") or "").strip()
+    service = str(args.get("service") or "").strip()
+    environment = str(args.get("env") or args.get("environment") or "").strip()
+    if not room_id or not sender:
+        raise HTTPException(status_code=400, detail="room_id 与 sender 必填")
+    if not service:
+        raise HTTPException(status_code=400, detail="service 必填")
+    if not environment:
+        raise HTTPException(status_code=400, detail="env/environment 必填")
+    _enforce_room_binding(ctx, room_id)
+
+    # 与 HTTP POST /api/deploy 共用同一核心链路（拉事件、下载、入库、排队发布、审计）
+    from app.api.matrix import matrix_deploy_core
+
+    user = {
+        "username": ctx.username or ctx.token_owner or "",
+        "role": ctx.role,
+        "is_admin": bool(getattr(ctx, "is_admin", False)),
+        "can_deploy": bool(getattr(ctx, "can_deploy", False) or getattr(ctx, "allow_write", False)),
+        "allow_prod": bool(getattr(ctx, "allow_prod", False)),
+        "auth_type": getattr(ctx, "auth_type", ""),
+    }
+    body = {
+        "env": environment,
+        "system": str(args.get("system") or ""),
+        "service": service,
+        "version": str(args.get("version") or ""),
+        "servers": args.get("servers") or [],
+        "server_group": str(args.get("server_group") or ""),
+        "pipeline_id": str(args.get("pipeline_id") or ""),
+        "variables": args.get("variables") or {},
+        "confirm_text": str(args.get("confirm_text") or ""),
+        "reason": str(args.get("reason") or ""),
+        "matrix": {
+            "roomId": room_id,
+            "sender": sender,
+            "triggerEventId": str(args.get("trigger_event_id") or ""),
+            "filename": str(args.get("filename") or ""),
+            "minutes": int(args.get("minutes") or MATRIX_MEDIA_WINDOW_MINUTES),
+            "homeserverUrl": str(args.get("homeserver_url") or args.get("homeserverUrl") or ""),
+            "accessToken": str(args.get("access_token") or args.get("accessToken") or ""),
+        },
+    }
+
+    try:
+        result = _run_coroutine_sync(matrix_deploy_core(user, body, db))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Matrix 发布失败: {exc}")
+    return result

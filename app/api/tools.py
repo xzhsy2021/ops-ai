@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, File, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -387,7 +388,9 @@ async def call_tool_stream(payload: ToolCallPayload, request: Request, db: Sessi
     streamable = getattr(tool, "streamable", False) if tool else False
 
     if not streamable:
-        result = registry.call(db, payload.tool, payload.arguments or {}, ctx)
+        # 本端点为 async；非流式分支同样可能调用含 SSH/磁盘哈希的同步工具，
+        # 必须放线程池执行，否则占住主事件循环、全站无响应。
+        result = await run_in_threadpool(registry.call, db, payload.tool, payload.arguments or {}, ctx)
         return api_response(data=result)
 
     registry.normalize_and_enforce_call(tool, payload.arguments or {}, ctx)
@@ -554,7 +557,10 @@ async def upload_package_by_tool_token(
         pass
     if meta is None:
         try:
-            meta = save_package_fileobj(
+            # 磁盘写入 + SHA256 是阻塞操作；本端点为 async（qclaw 包接收入口），
+            # 必须放线程池执行，否则大包上传期间主事件循环被占住、全站无响应。
+            meta = await run_in_threadpool(
+                save_package_fileobj,
                 db,
                 filename=filename,
                 fileobj=file.file,
@@ -570,7 +576,7 @@ async def upload_package_by_tool_token(
             expected_package_sha256 = str(package_sha256 or "").strip().lower()
             if not approval_intake or exc.status_code != 409 or not os.path.isfile(existing_path):
                 raise
-            if sha256_file(existing_path).lower() != expected_package_sha256:
+            if (await run_in_threadpool(sha256_file, existing_path)).lower() != expected_package_sha256:
                 raise
             row = upsert_package_metadata(
                 db,
@@ -1119,7 +1125,10 @@ async def mcp_streamable_http_endpoint(request: Request, db: Session = Depends(g
             if not isinstance(item, dict):
                 responses.append(_mcp_jsonrpc_error(None, -32600, "Invalid request"))
                 continue
-            response = _handle_mcp_http_message(item, request, db)
+            # 同步工具处理器可能包含 SSH/SFTP/磁盘哈希等阻塞操作；
+            # 本端点为 async（qclaw MCP 唯一入口），必须在线程池执行，
+            # 否则任一慢工具都会占住主事件循环、全站无响应。
+            response = await run_in_threadpool(_handle_mcp_http_message, item, request, db)
             if response is not None:
                 responses.append(response)
         if not responses:
@@ -1128,7 +1137,7 @@ async def mcp_streamable_http_endpoint(request: Request, db: Session = Depends(g
 
     if not isinstance(payload, dict):
         return JSONResponse(content=_mcp_jsonrpc_error(None, -32600, "Invalid request"), status_code=400)
-    response = _handle_mcp_http_message(payload, request, db)
+    response = await run_in_threadpool(_handle_mcp_http_message, payload, request, db)
     if response is None:
         return FastAPIResponse(status_code=202)
     resp = JSONResponse(content=response, media_type="application/json")

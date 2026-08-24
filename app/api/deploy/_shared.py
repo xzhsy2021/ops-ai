@@ -1599,7 +1599,13 @@ async def _run_pipeline_task_one_server(
         variables = merge_release_variables(req, db)
         try:
             distribute_package = _compat_value("_distribute_package_to_server", _distribute_package_to_server)
-            distribute_package(task_id, deployment_id, req, ssh, server_name, variables, steps, db)
+            # 整包 SFTP 上传 + 本地/远端 SHA256 校验都是阻塞操作；worker 与
+            # uvicorn 共享主事件循环，直接调用会冻结整个站点直到传输完成。
+            # 必须放入线程池执行（与上方 connect_ssh 的处理方式一致）。
+            await loop.run_in_executor(
+                None,
+                lambda: distribute_package(task_id, deployment_id, req, ssh, server_name, variables, steps, db),
+            )
         except Exception as e:
             runtime_repo.update_server_task(server_task.id, "failed", f"发布包分发失败: {e}")
             _log_to_db(task_id, "error", f"发布包分发失败: {server_name}: {e}", f"package:{server_name}", deployment_id)

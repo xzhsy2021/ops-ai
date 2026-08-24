@@ -9,3 +9,5 @@ pyyaml>=6.0.2,<7.0.0
 sqlalchemy>=2.0.0,<3.0.0
 pymysql>=1.1.0,<2.0.0
 cryptography>=42.0.0,<46.0.0
+# Matrix E2EE SDK（加密房间部署包解密；vodozemac 加密后端 + SQLite crypto store）
+matrix-nio[e2e]>=0.25.0,<0.27

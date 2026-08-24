@@ -30,7 +30,16 @@ from app.services.message_context import SUPPORTED_CHANNELS, MessageContext
 
 @pytest.fixture(scope="module")
 def db():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    # StaticPool：所有线程共享同一条内存连接。上传端点会把
+    # save_package_fileobj 卸载到线程池，默认 SingletonThreadPool 下
+    # 工作线程会拿到一条全新的空 ：memory: 连接（no such table）。
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     run_schema_migrations(engine)
     Session = sessionmaker(bind=engine)
@@ -211,6 +220,18 @@ def test_upload_verifies_actual_package_sha256(monkeypatch, tmp_path, db):
     assert exc.value.status_code == 409
 
 
+def _purge_matrix_intake_rows(db):
+    """清理本消息键的既有包记录，保证用例不依赖其他用例的回滚副作用。
+
+    同模块的 metadata 用例会先写入相同 source_message_key（固定 room-1/message-1）；
+    全量运行时后续用例的异常路径会顺带回滚该插入，而按 -k 过滤运行时不会，
+    导致 retry/409 用例首传即命中 reused=True。显式清空消除顺序依赖。
+    """
+    deleted = db.query(DeployPackage).delete()
+    db.commit()
+    return deleted
+
+
 @pytest.mark.parametrize("channel", sorted(SUPPORTED_CHANNELS))
 def test_retry_same_message_same_hash_reuses_package(monkeypatch, tmp_path, db, channel):
     """同消息同哈希重试复用已有包，不重复写入。"""
@@ -218,6 +239,7 @@ def test_retry_same_message_same_hash_reuses_package(monkeypatch, tmp_path, db, 
     content = b"package payload"
     package_sha256 = hashlib.sha256(content).hexdigest()
     payload = json.dumps(context.to_dict())
+    _purge_matrix_intake_rows(db)
 
     monkeypatch.setattr(tools_api, "get_tool_context", lambda request, db: _token_ctx(_bindings(channel)))
     monkeypatch.setattr(tools_api, "register_builtin_tools", lambda: None)
@@ -245,6 +267,7 @@ def test_same_message_different_hash_returns_409(monkeypatch, tmp_path, db, chan
     first_content = b"package payload"
     first_sha = hashlib.sha256(first_content).hexdigest()
     payload = json.dumps(context.to_dict())
+    _purge_matrix_intake_rows(db)
 
     monkeypatch.setattr(tools_api, "get_tool_context", lambda request, db: _token_ctx(_bindings(channel)))
     monkeypatch.setattr(tools_api, "register_builtin_tools", lambda: None)

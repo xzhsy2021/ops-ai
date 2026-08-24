@@ -133,8 +133,8 @@ QClaw 下载附件后，通过 `POST /api/v2/tools/packages/upload`（`approval_
 
 多步骤消息使用一次 `ops.approval.prepare_plan`（冻结 manifest + 一次性短码）与一次 `ops.approval.execute_plan`（消费短码后按声明顺序执行）：
 
-- 支持的步骤类型：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。
-- 计划不可变：任何步骤或包哈希的变更都会使计划摘要失效，受益人无法消费。
+- 支持的步骤类型：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`、`MATRIX_PULL`（从 Matrix 房间拉取最新附件入库，参数 `room_id` + `sender` 必填；其结果 `package_name` 自动回填依赖的 `RELEASE` 步骤，「拉包 + 发布」一次审批完成）。
+- 计划不可变：任何步骤或包哈希的变更都会使计划摘要失效，受益人无法消费。`MATRIX_PULL` 的 `package_name` 是运行时产物，不参与 manifest 冻结。
 - 临时授权生效时：受益人获得自审批路径，计划记录 `temporary_grant_id`；原始审批人仍在授权身份中，但**不作为通知目标**。
 - 授权过期/撤销后：受益人不能消费；**原始审批人仍可消费已有计划**。
 - 空授权身份集合**fail-closed**：没有任何授权人可以批准写计划。

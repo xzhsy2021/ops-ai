@@ -546,6 +546,29 @@ def issue_ticket(
     return RoutingTicket(ticket=ticket, digest=digest, expires_at=expires_at)
 
 
+def _decode_ticket_payload(ticket_str: str) -> dict | None:
+    """验签并解码路由票据 payload；签名无效/格式非法返回 None。
+
+    供校验方在未显式传 service_name 时读取票据自身绑定的目标服务名。
+    """
+    if not ticket_str or "." not in ticket_str:
+        return None
+    parts = ticket_str.rsplit(".", 1)
+    if len(parts) != 2:
+        return None
+    payload_b64, sig = parts
+    try:
+        key = _get_signing_key().encode("utf-8")
+        expected_sig = hmac.new(key, payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
+        payload = json.loads(payload_json)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
 def verify_ticket(
     ticket_str: str,
     expected_message_context: MessageContext | Mapping[str, Any],

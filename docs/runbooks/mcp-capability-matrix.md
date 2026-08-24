@@ -151,6 +151,42 @@ These tools manage DB-backed DAILY / WEEKLY / MONTHLY inspection schedules. The 
 | `ops.tier.approve` | `ops_tier_approve` | write | `ops:write`, `ops:admin` | high | Approve/unlock a tier that requires approval, usually MONTHLY first run |
 | `ops.tier.history` | `ops_tier_history` | read | `ops:read` | low | Query historical inspection runs for one tier |
 
+## Matrix Package Tools
+
+Matrix 部署包对接：从 Matrix 房间（qclaw 所在群/私聊）拉取用户发送的部署包附件，经 E2EE 自动解密后入库文件中心并发布。加密房间由 OPS 专用设备（`MATRIX_DEVICE_ID`）解密；仅能解密该设备创建之后新发送的媒体（room key 不补发）。详见 [matrix-deploy-integration.md](../matrix-deploy-integration.md) 与 [MATRIX_E2EE_SETUP.md](./MATRIX_E2EE_SETUP.md)。
+
+| HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
+|---|---|---:|---|---|---|
+| `ops.matrix.scan_media_events` | `ops_matrix_scan_media_events` | read | `ops:read` | low | 预览房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 文件名），返回 event_id、文件名与是否加密；不下载 |
+| `ops.matrix.pull_attachment` | `ops_matrix_pull_attachment` | write | `ops:read`, `package:write` | medium | 拉取发送者最新媒体附件到文件中心（下载 → E2EE 解密 → SHA256 → 入库），需确认短语 `CONFIRM ops.matrix.pull_attachment`（schema 已暴露 `confirm_text`） |
+| `ops.matrix.deploy_from_matrix` | `ops_matrix_deploy_from_matrix` | execute | `ops:read`, `package:write`, `deploy:execute` | high | 完整链路：拉附件 → 文件中心 → 排队发布，一次调用 + 一次确认 |
+
+### Recommended Matrix Deploy Flow
+
+独立调用路径（每步单独确认）：
+
+1. `ops_matrix_scan_media_events(room_id=..., sender=...)` 确认房间内最新媒体事件。
+2. `ops_matrix_pull_attachment(room_id=..., sender=..., confirm_text="CONFIRM ops.matrix.pull_attachment")` → `{package_name, sha256}`。
+3. `ops_create_deploy_plan(package_name=...)` → `ops_execute_deploy_plan(plan_id=..., confirm_text=...)`。
+
+**推荐：执行计划批量审批**（qclaw/Element 消息流，一次审批完成拉取 + 发布）：
+
+```json
+ops_approval_prepare_plan(steps=[
+  {"step_key": "pull", "action_type": "MATRIX_PULL",
+   "parameters": {"room_id": "!room:x", "sender": "@alice:x", "minutes": 30},
+   "dependencies": []},
+  {"step_key": "release", "action_type": "RELEASE",
+   "parameters": {}, "dependencies": ["pull"]}
+])
+```
+
+- 授权人批准短码后步骤自动顺序执行；`MATRIX_PULL` 结果的 `package_name` 自动回填到依赖的 `RELEASE` 步骤（显式指定则优先）。
+- 拉取失败时计划 FAILED，后续 RELEASE 不执行；计划内步骤不再要求各工具的 `confirm_text`。
+- 也可用 `ops_matrix_deploy_from_matrix` 一步到位（拉取 + 发布单次调用）。
+
+
+
 ## Approval And Execution Plan Tools
 
 Message-level execution plans consolidate many high-risk actions into one approval. See the [design doc](../plans/2026-08-06-message-execution-plan-design.md) for the manifest/digest and step model.
@@ -159,7 +195,7 @@ Registered approval tools (all gated by the one-time short code, not by token sc
 
 | HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
 |---|---:|---|---|---|---|
-| `ops.approval.prepare_plan` | `ops_approval_prepare_plan` | plan | `ops:read` | low | Create one immutable execution plan from steps (SERVICE_CONTROL, HEALTH_CHECK, FILE_UPLOAD, RELEASE, ROLLBACK, DML, PACKAGE_CLEANUP) and emit a one-time approval code; stdio local FILE_UPLOAD inputs are staged through a room-bound intake and remain covered by this single approval |
+| `ops.approval.prepare_plan` | `ops_approval_prepare_plan` | plan | `ops:read` | low | Create one immutable execution plan from steps (SERVICE_CONTROL, HEALTH_CHECK, FILE_UPLOAD, RELEASE, ROLLBACK, DML, PACKAGE_CLEANUP, MATRIX_PULL) and emit a one-time approval code; stdio local FILE_UPLOAD inputs are staged through a room-bound intake and remain covered by this single approval. A MATRIX_PULL step pulls the latest Matrix room attachment into the File Center and its result package_name auto-feeds a dependent RELEASE step — pull+release needs only ONE approval |
 | `ops.approval.execute_plan` | `ops_approval_execute_plan` | execute | `ops:read` | low | Consume the approved code and run the frozen steps in order |
 | `ops.approval.prepare_service_control` | `ops_approval_prepare_service_control` | plan | `ops:read` | low | Legacy single-action service-control approval (restart/stop/start/update) |
 | `ops.approval.execute` | `ops_approval_execute` | execute | `ops:read` | low | Legacy single-action approval consume (deploy/rollback/DML/package-cleanup) |

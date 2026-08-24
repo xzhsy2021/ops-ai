@@ -7,8 +7,9 @@
 - 本文档对应方案 2：一条消息先生成一个完整 `ExecutionPlan`，授权人只审批一次，之后按冻结步骤顺序执行。
 - 多步骤消息的主流程使用 `ops.approval.prepare_plan` 和 `ops.approval.execute_plan`。
 - `ops.approval.prepare_*` 和 `ops.approval.execute` 仍保留给旧客户端和单动作兼容场景，不是多步骤消息的首选流程。
-- 当前 `ExecutionPlan` 执行器已注册七类步骤：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`。上传/发布/回滚/DML/包清理可写入计划步骤（`prepare_plan` 的 `steps`），执行时由执行器内部调用共享业务函数完成，不再逐动作审批。
+- 当前 `ExecutionPlan` 执行器已注册八类步骤：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`、`MATRIX_PULL`。上传/发布/回滚/DML/包清理/Matrix拉包可写入计划步骤（`prepare_plan` 的 `steps`），执行时由执行器内部调用共享业务函数完成，不再逐动作审批。
 - stdio MCP 的 `FILE_UPLOAD` 步骤可在 `action_parameters.local_path` 中引用本机受控包。桥接层会先通过房间绑定的审批接收入口暂存到 OPS File Center，再把包名、SHA-256 和大小冻结进同一个计划；不为文件上传创建第二个审批。
+- `MATRIX_PULL` 步骤用于「用户在 Matrix 房间发了部署包」场景：参数只需 `room_id` + `sender`（可选 `minutes`/`filename`/`system`/`service`/`overwrite`）。执行时自动拉取最新附件入库（E2EE 加密房间自动解密），其结果 `package_name` **自动回填**到依赖它的 `RELEASE` 步骤——「拉包 + 发布」只需一次审批，无需预知包名。
 
 ## 身份
 
@@ -103,7 +104,10 @@
 ### 操作类工具（需审批）
 | 场景 | 推荐工具 |
 |------|---------|
-| 多步骤运维请求（上传/发布/回滚/DML/包清理/服务控制） | `ops.approval.prepare_plan`（steps 可含 SERVICE_CONTROL/HEALTH_CHECK/FILE_UPLOAD/RELEASE/ROLLBACK/DML/PACKAGE_CLEANUP）→ `ops.approval.execute_plan` |
+| 多步骤运维请求（上传/发布/回滚/DML/包清理/服务控制/Matrix拉包） | `ops.approval.prepare_plan`（steps 可含 SERVICE_CONTROL/HEALTH_CHECK/FILE_UPLOAD/RELEASE/ROLLBACK/DML/PACKAGE_CLEANUP/MATRIX_PULL）→ `ops.approval.execute_plan` |
+| Matrix 房间拉包 + 发布（推荐一次审批） | `ops.approval.prepare_plan`（steps: MATRIX_PULL → RELEASE 依赖 pull）→ 用户批准短码 → `ops.approval.execute_plan`；package_name 自动从 pull 步骤回填 |
+| 只拉包不发布 | `ops.matrix.scan_media_events`（预览）→ `ops.matrix.pull_attachment(confirm_text="CONFIRM ops.matrix.pull_attachment")` |
+| 拉包并发布（单次调用兼容路径） | `ops.matrix.deploy_from_matrix(room_id, sender, service, env)` |
 | 单动作重启/停止/启动（兼容） | `ops.restart_service` / `ops.stop_service` / `ops.start_service` → 对应旧 `ops.approval.prepare_service_control` |
 | 发布（单动作兼容） | `ops.prepare_release_from_local_package` → `ops.approval.prepare_release` → `ops.approval.execute` |
 | 回滚（单动作兼容） | `ops.create_rollback_plan` → `ops.approval.prepare_rollback` → `ops.approval.execute` |
@@ -166,3 +170,28 @@ Agent:
   7. 授权人批准 → ops.approval.execute_plan → 按冻结步骤执行发布
   8. 查询部署状态、报告和日志并反馈结果
 ```
+
+### 场景5：从 Matrix 房间拉取部署包并发布（一次审批）
+```
+用户（在 Matrix 房间）: "我刚发了新包，帮我发布到测试环境"
+Agent:
+  1. ops.matrix.scan_media_events(room_id=当前房间, sender=用户) → 确认最新媒体事件与文件名
+  2. 组装执行计划：
+     ops.approval.prepare_plan(
+       message_context=当前消息上下文,
+       system_name="crypto", service_name="strategy", environment="test", targets=[...],
+       steps=[
+         {"step_key": "pull", "action_type": "MATRIX_PULL",
+          "parameters": {"room_id": "<房间ID>", "sender": "<发送者>", "minutes": 30},
+          "dependencies": []},
+         {"step_key": "release", "action_type": "RELEASE",
+          "parameters": {}, "dependencies": ["pull"]}
+       ])
+     → 向房间展示计划摘要 + 一次性审批短码
+     注意：无需预知包名，RELEASE 自动使用 pull 步骤拉到的包
+  3. 授权人回复"批准 <短码>" → ops.approval.execute_plan
+  4. pull 步骤自动拉包入库（E2EE 加密房间自动解密）→ package_name 回填 release
+  5. 查询部署状态并反馈结果
+```
+注意：只拉包不发布时，用 `ops.matrix.pull_attachment` 并带上确认短语
+`confirm_text="CONFIRM ops.matrix.pull_attachment"`。

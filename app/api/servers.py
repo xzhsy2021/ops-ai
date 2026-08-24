@@ -1032,38 +1032,47 @@ async def server_process_action(request: Request, name: str, db: Session = Depen
         )
 
     started = time.time()
-    with _ssh_session(name) as (ssh, srv):
-        command = _resolve_action_command(action, process, mode, services)
-        exit_code, out, err = ssh.exec(command, timeout=60)
-        out = sanitize_command_output(out, _MAX_OUTPUT_LENGTH)
-        err = sanitize_command_output(err, _MAX_OUTPUT_LENGTH)
-        duration_ms = int((time.time() - started) * 1000)
-        ac = build_audit_context(srv, name)
-        audit(
-            f"server.process.{action}",
-            "server",
-            name,
-            format_audit_detail(
-                ac,
-                user=request.state.username,
-                process=process or "(all)",
-                mode=mode,
-                exit=exit_code,
-                dur=f"{duration_ms}ms",
-            ),
-        )
-        if exit_code != 0:
-            detail = err or out or f"{action} failed"
-            raise HTTPException(status_code=502, detail=detail.strip()[:500])
-        return api_response(data={
-            "process": process,
-            "action": action,
-            "mode": mode,
-            "exit_code": exit_code,
-            "stdout": out,
-            "stderr": err,
-            "duration_ms": duration_ms,
-        })
+
+    def _action_blocking():
+        """SSH 连接 + 进程操作命令是阻塞操作；本端点为 async，
+        必须放线程池执行，否则主事件循环被占住、全站无响应。"""
+        with _ssh_session(name) as (ssh, srv):
+            command = _resolve_action_command(action, process, mode, services)
+            exit_code, out, err = ssh.exec(command, timeout=60)
+            return exit_code, out, err, srv, command
+
+    from fastapi.concurrency import run_in_threadpool
+    exit_code, out, err, srv, command = await run_in_threadpool(_action_blocking)
+
+    out = sanitize_command_output(out, _MAX_OUTPUT_LENGTH)
+    err = sanitize_command_output(err, _MAX_OUTPUT_LENGTH)
+    duration_ms = int((time.time() - started) * 1000)
+    ac = build_audit_context(srv, name)
+    audit(
+        f"server.process.{action}",
+        "server",
+        name,
+        format_audit_detail(
+            ac,
+            user=request.state.username,
+            process=process or "(all)",
+            mode=mode,
+            exit=exit_code,
+            dur=f"{duration_ms}ms",
+        ),
+    )
+    if exit_code != 0:
+        detail = err or out or f"{action} failed"
+        raise HTTPException(status_code=502, detail=detail.strip()[:500])
+    return api_response(data={
+        "process": process,
+        "action": action,
+        "mode": mode,
+        "exit_code": exit_code,
+        "stdout": out,
+        "stderr": err,
+        "duration_ms": duration_ms,
+    })
 
 
 @servers_v2_router.post("/{name}/exec")
@@ -1083,47 +1092,55 @@ async def server_exec(request: Request, name: str, db: Session = Depends(get_db)
         raise HTTPException(status_code=400, detail=f"Command rejected: {reason}")
 
     started = time.time()
-    with _ssh_session(name) as (ssh, srv):
-        exit_code, out, err = ssh.exec(command, timeout=timeout)
 
-        out = sanitize_command_output(out, _MAX_OUTPUT_LENGTH)
-        err = sanitize_command_output(err, _MAX_OUTPUT_LENGTH)
+    def _exec_blocking():
+        """SSH 连接 + 命令执行是阻塞操作；本端点为 async，
+        必须放线程池执行，否则主事件循环被占住、全站无响应。"""
+        with _ssh_session(name) as (ssh, srv):
+            exit_code, out, err = ssh.exec(command, timeout=timeout)
+            return exit_code, out, err, srv
 
-        hop_context = get_hop_summary(srv)
-        duration_ms = int((time.time() - started) * 1000)
-        ac = build_audit_context(srv, name)
-        masked_command = _mask_sensitive_command(command)
+    from fastapi.concurrency import run_in_threadpool
+    exit_code, out, err, srv = await run_in_threadpool(_exec_blocking)
 
-        audit("server.exec", "server", name,
-              format_audit_detail(ac,
-                  user=request.state.username,
-                  exit=exit_code,
-                  dur=f"{duration_ms}ms",
-                  cmd=masked_command[:80],
-                  risk=level))
+    out = sanitize_command_output(out, _MAX_OUTPUT_LENGTH)
+    err = sanitize_command_output(err, _MAX_OUTPUT_LENGTH)
 
-        record_execution(
-            db,
-            server_name=name,
-            username=request.state.username,
-            command=masked_command,
-            exit_code=exit_code,
-            stdout=out,
-            stderr=err,
-            duration_ms=duration_ms,
-            risk_level=level,
-            hop_context=hop_context,
-            auth_mode=ac.get("auth_mode"),
-        )
+    hop_context = get_hop_summary(srv)
+    duration_ms = int((time.time() - started) * 1000)
+    ac = build_audit_context(srv, name)
+    masked_command = _mask_sensitive_command(command)
 
-        return api_response(data={
-            "exit_code": exit_code,
-            "stdout": out,
-            "stderr": err,
-            "duration_ms": duration_ms,
-            "hop_context": hop_context,
-            "risk_level": level,
-        })
+    audit("server.exec", "server", name,
+          format_audit_detail(ac,
+              user=request.state.username,
+              exit=exit_code,
+              dur=f"{duration_ms}ms",
+              cmd=masked_command[:80],
+              risk=level))
+
+    record_execution(
+        db,
+        server_name=name,
+        username=request.state.username,
+        command=masked_command,
+        exit_code=exit_code,
+        stdout=out,
+        stderr=err,
+        duration_ms=duration_ms,
+        risk_level=level,
+        hop_context=hop_context,
+        auth_mode=ac.get("auth_mode"),
+    )
+
+    return api_response(data={
+        "exit_code": exit_code,
+        "stdout": out,
+        "stderr": err,
+        "duration_ms": duration_ms,
+        "hop_context": hop_context,
+        "risk_level": level,
+    })
 
 
 class SecurityMonitorSetupPayload(BaseModel):

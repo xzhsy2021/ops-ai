@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
+from fastapi.concurrency import run_in_threadpool
 from app.api.helpers import api_response, audit
 from app.pipeline import PipelineEngine
 from app.db import get_db, DeployTaskRepository, DeployLogRepository, DeploymentRepository, PipelineRepository, PipelineStepRepository, DeploymentRuntimeRepository
@@ -1214,7 +1215,8 @@ async def checksum_file(file_name: str, db: Session = Depends(get_db)):
     fp = package_path(name)
     if not os.path.isfile(fp):
         raise HTTPException(status_code=404, detail="File not found")
-    row = upsert_package_metadata(db, name, fp)
+    # upsert 未显式给 sha256 时会对整个文件做哈希，阻塞操作放线程池。
+    row = await run_in_threadpool(upsert_package_metadata, db, name, fp)
     return api_response(data={"sha256": row.sha256, "name": name})
 
 
@@ -1225,12 +1227,27 @@ async def browse_remote(request: Request, server_name: str):
     srv = inventory.get_server(server_name)
     if not srv:
         raise HTTPException(status_code=404, detail=f"Server '{server_name}' not found")
-    try:
+    from fastapi.concurrency import run_in_threadpool
+
+    def _browse_remote_sync(srv, path):
+        """SSH 连接 + 远程 ls 是阻塞操作，放线程池避免冻结主事件循环。"""
         ssh = _connect_ssh(srv)
         if not ssh:
-            raise HTTPException(status_code=503, detail=f"Cannot connect to {server_name}")
-        cmd = f"ls -alh --time-style=long-iso '{path}' 2>/dev/null | tail -n +2"
-        exit_code, out, err = ssh.exec(cmd, timeout=10)
+            return None, "", "Cannot connect", f"Cannot connect to {server_name}"
+        try:
+            cmd = f"ls -alh --time-style=long-iso '{path}' 2>/dev/null | tail -n +2"
+            exit_code, out, err = ssh.exec(cmd, timeout=10)
+            return exit_code, out, err, None
+        finally:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+
+    try:
+        exit_code, out, err, connect_error = await run_in_threadpool(_browse_remote_sync, srv, path)
+        if connect_error is not None:
+            raise HTTPException(status_code=503, detail=connect_error)
         items = []
         if exit_code == 0:
             for line in (out or "").splitlines():
@@ -1243,8 +1260,9 @@ async def browse_remote(request: Request, server_name: str):
                         "size": parts[4],
                         "modified": " ".join(parts[5:7]),
                     })
-        ssh.close()
         return api_response(data={"path": path, "items": items})
+    except HTTPException:
+        raise
     except Exception as e:
         return api_response(data={"path": path, "items": [], "error": str(e)})
 
@@ -1257,7 +1275,8 @@ async def upload_file(request: Request, file: UploadFile = File(...), system: st
         await file.seek(0)
     except Exception:
         pass
-    meta = save_package_fileobj(
+    meta = await run_in_threadpool(
+        save_package_fileobj,
         db,
         filename=file.filename or "uploaded_file",
         fileobj=file.file,
@@ -1293,7 +1312,8 @@ async def update_package_retention(payload: Dict[str, Any], request: Request, db
 @resource_v2_router.post("/files/packages/cleanup/preview")
 async def preview_package_cleanup_api(payload: Dict[str, Any] | None = None, db: Session = Depends(get_db)):
     from app.services.package_retention import preview_package_cleanup
-    return api_response(data=preview_package_cleanup(db, (payload or {}).get("policy") or payload or {}))
+    # preview 会先 sync_package_metadata：遍历磁盘包并对新/变更文件全量哈希，阻塞操作放线程池。
+    return api_response(data=await run_in_threadpool(preview_package_cleanup, db, (payload or {}).get("policy") or payload or {}))
 
 
 @resource_v2_router.post("/files/packages/cleanup")
@@ -1304,7 +1324,14 @@ async def cleanup_package_api(payload: Dict[str, Any] | None = None, request: Re
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
     payload = payload or {}
-    result = cleanup_packages(db, payload.get("policy") or {}, dry_run=bool(payload.get("dry_run", True)), actor=getattr(request.state, "username", ""))
+    # 清理可能扫描/删除大量包文件（含哈希校验），阻塞操作放线程池。
+    result = await run_in_threadpool(
+        cleanup_packages,
+        db,
+        payload.get("policy") or {},
+        dry_run=bool(payload.get("dry_run", True)),
+        actor=getattr(request.state, "username", ""),
+    )
     audit("package.retention.cleanup", "file", "deploy_packages", f"dry_run={result.get('dry_run')} count={result.get('summary', {}).get('cleanup_count')}")
     return api_response(data=result, message="Package cleanup completed" if not result.get("dry_run") else "Package cleanup preview completed")
 
@@ -1331,9 +1358,13 @@ async def protect_package_api(package_name: str, payload: Dict[str, Any] | None 
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin permission required")
     name = safe_package_name(package_name)
-    row = db.query(DeployPackage).filter(DeployPackage.package_name == name).first()
-    if not row and os.path.isfile(package_path(name)):
-        row = upsert_package_metadata(db, name, uploaded_by=getattr(request.state, "username", ""))
+    if not db.query(DeployPackage).filter(DeployPackage.package_name == name).first() and os.path.isfile(package_path(name)):
+        # 行缺失时 upsert 会对文件做全量哈希，阻塞操作放线程池。
+        row = await run_in_threadpool(
+            upsert_package_metadata, db, name, uploaded_by=getattr(request.state, "username", "")
+        )
+    else:
+        row = db.query(DeployPackage).filter(DeployPackage.package_name == name).first()
     if not row:
         raise HTTPException(status_code=404, detail="Package not found")
     row.protected = bool((payload or {}).get("protected", True))
@@ -1350,29 +1381,43 @@ async def upload_remote(request: Request, server_name: str, file: UploadFile = F
     form = await request.form()
     remote_path = form.get("remote_path", f"/tmp/{file.filename}")
     content = await file.read()
-    ssh = None
-    try:
-        ssh = _connect_ssh(srv)
-        if not ssh:
-            raise HTTPException(status_code=503, detail=f"Cannot connect to {server_name}")
-        sftp = ssh.client.open_sftp()
-        with sftp.file(str(remote_path), "wb") as f:
-            f.write(content)
-        sftp.close()
-        ssh.close()
-        import hashlib
-        sha = hashlib.sha256()
-        sha.update(content)
-        return api_response(data={
-            "name": file.filename,
-            "remote_path": str(remote_path),
-            "size": len(content),
-            "sha256": sha.hexdigest(),
-        }, message="Remote upload successful")
-    except Exception as e:
-        if ssh:
-            try:
-                ssh.close()
-            except Exception:
-                pass
-        raise HTTPException(status_code=500, detail=str(e))
+
+    def _upload_remote_blocking():
+        """SSH 连接 + SFTP 写入是阻塞操作；本端点为 async，
+        必须放线程池执行，否则主事件循环被占住、全站无响应。"""
+        ssh = None
+        try:
+            ssh = _connect_ssh(srv)
+            if not ssh:
+                raise HTTPException(status_code=503, detail=f"Cannot connect to {server_name}")
+            sftp = ssh.client.open_sftp()
+            with sftp.file(str(remote_path), "wb") as f:
+                f.write(content)
+            sftp.close()
+            ssh.close()
+            import hashlib
+            sha = hashlib.sha256()
+            sha.update(content)
+            return {
+                "name": file.filename,
+                "remote_path": str(remote_path),
+                "size": len(content),
+                "sha256": sha.hexdigest(),
+            }
+        except HTTPException:
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+            raise
+        except Exception as e:
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail=str(e))
+
+    data = await run_in_threadpool(_upload_remote_blocking)
+    return api_response(data=data, message="Remote upload successful")

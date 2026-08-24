@@ -45,6 +45,15 @@ exec_router = APIRouter(tags=["发布管理v2-执行"])
 async def deploy_execute_v2(request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
     data = await request.json()
+    return await queue_deploy_v2(user, data, db)
+
+
+async def queue_deploy_v2(user: Dict[str, Any], data: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """Queue a deploy task from a normalized request dict.
+
+    Shared by the web execute endpoint and the Matrix deploy endpoint so both
+    paths run the same confirmation / lock / task / audit logic.
+    """
     req = DeployRequest(**data)
 
     require_deploy_for_env(user, req.environment)

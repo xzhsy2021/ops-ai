@@ -377,11 +377,20 @@ def _validated_prepare_ticket(args, ctx):
         # revision 仅作信息返回（routing_config_revision），不再作为票据有效性的
         # 硬校验条件：它是全局配置快照，任何系统路由字段变更都会使其改变，硬比对
         # 会让在途票据在配置变动时集体失效。房间作用域与审批人仍按当前配置重新校验。
+        expected_service_name = args.get("service_name")
+        if not expected_service_name:
+            # 调用方未显式传服务名时，读取票据自身绑定的服务名作为期望值：
+            # 服务级 ticket（如 crypto-trader-web）必须能被 prepare_plan 接受，
+            # 而不是与 None 硬比较失败。
+            from app.services.qclaw_routing import _decode_ticket_payload
+            ticket_payload = _decode_ticket_payload(routing_ticket)
+            if isinstance(ticket_payload, dict) and ticket_payload.get("service_name"):
+                expected_service_name = ticket_payload.get("service_name")
         valid = verify_ticket(
             routing_ticket,
             expected_message_context=context,
             expected_system_name=args["system_name"],
-            expected_service_name=args.get("service_name"),
+            expected_service_name=expected_service_name,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -851,7 +860,7 @@ def _plan_steps_schema() -> dict:
             "type": "object",
             "properties": {
                 "step_key": {"type": "string", "description": "计划内唯一步骤键"},
-                "action_type": {"type": "string", "description": "Step type, for example SERVICE_CONTROL / FILE_UPLOAD / HEALTH_CHECK"},
+                "action_type": {"type": "string", "description": "Step type: SERVICE_CONTROL / FILE_UPLOAD / HEALTH_CHECK / RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP / MATRIX_PULL（从 Matrix 房间拉取附件到文件中心，parameters: room_id, sender, minutes?, filename?, system?, service?, overwrite?）"},
                 "parameters": {"type": "object", "description": "冻结的步骤参数"},
                 "dependencies": {
                     "type": "array",

@@ -128,3 +128,43 @@ cd frontend; .\node_modules\.bin\tsc.cmd --noEmit -p tsconfig.json; node scripts
 git status --short
 git diff --cached --stat   # staged：16 个 lab 删除
 ```
+
+## 9. Matrix E2EE 接入（2026 新增）
+
+- **SDK**：`matrix-nio[e2e]`（vodozemac 后端），已入 `requirements.txt`。
+- **模块**：`app/services/matrix_e2ee.py` —— E2EE 会话管理 + crypto store
+  （SQLite，默认 `<APP_DATA_DIR>/matrix/crypto_store/<user>_<device>.db`，
+  持久化 Olm 账号与 Megolm 入站会话）+ m.room.encrypted 解密器 + 加密媒体解密。
+- **配置**：`MATRIX_E2EE_ENABLED`（默认 true）/ `MATRIX_USER_ID`（留空 whoami 自动解析）/
+  `MATRIX_DEVICE_ID`（默认 OPS-AI-BOT，必须稳定）/ `MATRIX_CRYPTO_STORE_PATH` /
+  `MATRIX_E2EE_SYNC_TIMEOUT_MS`。见 `.env.example` 与 `docs/runbooks/MATRIX_E2EE_SETUP.md`。
+- **链路**：加密房间（m.room.encrypted 包装）事件解密后参与 scan/deploy 匹配；
+  媒体密文优先走认证端点 `/v1/media/download`（404 回退 v3）；未配置/失败时保持旧行为。
+- **专用设备守卫**：E2EE sync 只允许 `.env` 专用 Bot 凭据；调用方动态传入的
+  token（如在线 qclaw 的设备凭据）仅用于明文操作，用于解密会被拒绝 ——
+  共用设备会覆盖设备密钥并偷走 to-device room key，破坏原客户端。
+- **契约**：加密媒体错误必须为 HTTP 400 且 detail 含 "E2EE"
+  （`test_matrix_deploy_e2ee_encrypted` / `test_pull_attachment_e2ee_blocked`）；
+  `MatrixClient.download_media` 仍走 v3 未认证端点；明文 m.room.message 带
+  content.file 仍识别 encrypted=True。
+- **拉取必须走异步解密路径（2026-08-22 修复）**：加密事件解密前无 mxc_url，
+  同步 `find_latest_media_event` 对其不可见（误报"未找到媒体事件"）——
+  `pull_matrix_attachment_core` 现构建 E2EE 解密器并调用
+  `find_latest_media_event_async`（旧客户端 getattr 回退同步）。回归测试：
+  `test_pull_attachment_encrypted_event_via_async_decryptor`；真实服务器
+  加密媒体往返自检通过（SHA256 一致）。
+- **测试**：`tests/test_matrix_e2ee.py`。
+- **落地状态（2026-08-22）**：方案 A 完成——专用设备 `OPS-AI-BOT` 已登录并启用 E2EE
+  （token 写入 `.env`，crypto store 在 `data/matrix/crypto_store/`），端到端自检通过；
+  qclaw 设备 `XHBNAXVZFQ` 未受影响。仅能解密设备创建之后的新消息（room key 不补发）。
+- **MCP 工具事件循环契约**：MCP HTTP 异步端点直接调用同步工具，工具内禁止裸
+  `asyncio.run`——统一走 `matrix_tools._run_coroutine_sync` 桥接（无 loop 直接跑，
+  有 loop 转投线程私有 loop）；E2EE 会话按运行中 loop 的弱引用缓存
+  （WeakKeyDictionary），解密器惰性解析会话。回归测试：
+  `test_try_build_decryptor_runs_inside_running_loop` 等。
+- **批量审批融合**：执行计划新增 `MATRIX_PULL` 步骤类型（复用
+  `matrix_tools.pull_matrix_attachment_core`），结果 `package_name` 自动回填依赖的
+  `RELEASE` 步骤——「拉取附件 + 发布」一次审批完成；独立调用
+  `ops.matrix.pull_attachment` 时 schema 已暴露 `confirm_text`
+  （短语 `CONFIRM ops.matrix.pull_attachment`）。文档见
+  `docs/runbooks/mcp-capability-matrix.md` 与 `docs/matrix-deploy-integration.md`。

@@ -157,13 +157,21 @@ def test_targets_are_sorted_in_canonical_json():
 # ── prepare 生命周期 ──
 
 def test_prepare_creates_pending_plan_with_short_code(db):
-    """prepare 创建 PENDING_APPROVAL 计划并返回一次性明文短码。"""
+    """prepare 创建 PENDING_APPROVAL 计划并返回一次性明文确认短语。"""
     service = ExecutionPlanService(db)
     plan, short_code = _prepare(service, "basic")
 
     assert plan.status == "PENDING_APPROVAL"
-    assert len(short_code) == 8
-    assert short_code == short_code.upper()
+    # 描述性确认短语：批准<动作摘要> <system>@<env> <指纹8位大写十六进制>
+    assert short_code.startswith("批准")
+    parts = short_code.split(" ")
+    assert len(parts) == 3
+    assert "@" in parts[1]
+    fingerprint = parts[2]
+    assert len(fingerprint) == 8
+    assert fingerprint == fingerprint.upper()
+    int(fingerprint, 16)  # 末段为十六进制指纹
+    assert "服务控制" in short_code and "健康检查" in short_code
     assert plan.plan_digest and len(plan.plan_digest) == 64
     # 数据库只存哈希
     assert plan.approval_code_hash.startswith("pbkdf2_sha256$")

@@ -484,7 +484,7 @@ def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
 @registry.register(
     name="ops.approval.prepare_service_control",
     title="准备服务控制审批",
-    description="为服务控制操作（重启/停止/启动/更新）创建不可变审批工单，返回一次性审批短码。qclaw 将短码展示在 Element 房间，授权用户回复「批准 <短码>」来审批。",
+    description="为服务控制操作（重启/停止/启动/更新）创建不可变审批工单，返回一次性确认短语（如「批准服务控制 crypto-trader@test A3F9C2D1」）。qclaw 将短语展示在 Element 房间，授权用户回复该短语来审批。",
     scopes=["ops:read"],
     risk="low",
     category="approval_prepare",
@@ -670,7 +670,7 @@ def approval_prepare_file_upload(args, ctx, db):
 @registry.register(
     name="ops.approval.execute",
     title="执行已审批的操作",
-    description="消费审批短码，验证通过后将审批工单标记为 EXECUTING 并触发实际操作（部署/回滚/DML/包清理）。安全门禁是审批短码本身（一次性、15 分钟过期、绑定房间+事件），而非调用方 token scope，因此只需 ops:read。",
+    description="消费审批确认短语（如「批准服务控制 crypto-trader@test A3F9C2D1」），验证通过后将审批工单标记为 EXECUTING 并触发实际操作（部署/回滚/DML/包清理）。安全门禁是确认短语本身（一次性、15 分钟过期、绑定房间+事件、内容指纹防跨单复用），而非调用方 token scope，因此只需 ops:read。",
     scopes=["ops:read"],
     risk="low",
     category="approval_execute",
@@ -679,7 +679,7 @@ def approval_prepare_file_upload(args, ctx, db):
         "type": "object",
         "properties": {
             "approval_id": {"type": "string", "description": "审批工单 ID"},
-            "short_code": {"type": "string", "description": "一次性审批短码"},
+            "short_code": {"type": "string", "description": "一次性确认短语，来自 prepare 返回（如 批准服务控制 crypto-trader@test A3F9C2D1）"},
             "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
@@ -712,7 +712,7 @@ def approval_execute(args, ctx, db):
     if not approval:
         return {
             "ok": False,
-            "error": "审批码无效、已过期、已被消费或房间不匹配",
+            "error": "确认短语无效、已过期、已被消费或房间不匹配",
             "approval_id": args["approval_id"],
         }
 
@@ -877,7 +877,7 @@ def _plan_steps_schema() -> dict:
 @registry.register(
     name="ops.approval.prepare_plan",
     title="准备消息级执行计划审批",
-    description="为一条 Element 消息的完整执行流程创建不可变执行计划，返回一次性审批短码。授权人批准一次后，计划内所有步骤按顺序自动执行。相同计划内容（plan_digest）的待审批计划幂等复用，不生成新短码。",
+    description="为一条 Element 消息的完整执行流程创建不可变执行计划，返回一次性确认短语（如「批准发布+健康检查 crypto-trader@test A3F9C2D1」——动词=计划动作，目标=系统@环境，末尾为内容指纹）。授权人批准一次后，计划内所有步骤按顺序自动执行。相同计划内容（plan_digest）的待审批计划幂等复用，不生成新短语。",
     scopes=["ops:read"],
     risk="low",
     category="approval_prepare",
@@ -910,7 +910,7 @@ def _plan_steps_schema() -> dict:
     },
 )
 def approval_prepare_plan(args, ctx, db):
-    """创建消息级执行计划并返回一次性审批短码。
+    """创建消息级执行计划并返回一次性确认短语。
 
     若存在活跃临时自审批授权且当前请求方为授权受益人，则把受益人加入
     授权身份集合并记录 temporary_grant_id，使受益人可通过自审批路径消费计划。
@@ -1007,7 +1007,7 @@ def approval_prepare_plan(args, ctx, db):
 @registry.register(
     name="ops.approval.execute_plan",
     title="执行已审批的执行计划",
-    description="消费一次性审批短码，验证通过后将执行计划置为可执行并按冻结步骤顺序执行。安全门禁是审批短码本身（一次性、15 分钟过期、绑定房间+事件），而非调用方 token scope，因此只需 ops:read。",
+    description="消费一次性确认短语（如「批准发布+健康检查 crypto-trader@test A3F9C2D1」），验证通过后将执行计划置为可执行并按冻结步骤顺序执行。安全门禁是确认短语本身（一次性、15 分钟过期、绑定房间+事件、内容指纹防跨计划复用），而非调用方 token scope，因此只需 ops:read。",
     scopes=["ops:read"],
     risk="low",
     category="approval_execute",
@@ -1016,7 +1016,7 @@ def approval_prepare_plan(args, ctx, db):
         "type": "object",
         "properties": {
             "plan_id": {"type": "string", "description": "执行计划 ID"},
-            "short_code": {"type": "string", "description": "一次性审批短码"},
+            "short_code": {"type": "string", "description": "一次性确认短语，来自 prepare_plan 返回（如 批准发布+健康检查 crypto-trader@test A3F9C2D1）"},
             "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
@@ -1027,7 +1027,7 @@ def approval_prepare_plan(args, ctx, db):
     },
 )
 def approval_execute_plan(args, ctx, db):
-    """消费短码并执行已审批的计划。"""
+    """消费确认短语并执行已审批的计划。"""
     approval_context = normalize_message_context(
         args.get("message_context") or {
             "room_id": args.get("room_id"),
@@ -1048,7 +1048,7 @@ def approval_execute_plan(args, ctx, db):
     if not plan:
         return {
             "ok": False,
-            "error": "审批码无效、已过期、已被消费、房间不匹配或计划内容已变化",
+            "error": "确认短语无效、已过期、已被消费、房间不匹配或计划内容已变化",
             "plan_id": args["plan_id"],
         }
 

@@ -182,7 +182,9 @@ def test_prepare_plan_creates_plan_and_enforces_room_binding(db):
     result = approval_prepare_plan(_prepare_args(suffix), ctx=ctx, db=db)
 
     assert result["plan_id"]
-    assert len(result["short_code"]) == 8
+    # 描述性确认短语：批准<动作> <system>@<env> <指纹8>
+    assert result["short_code"].startswith("批准")
+    assert len(result["short_code"].split(" ")[-1]) == 8
     assert result["status"] == "PENDING_APPROVAL"
     assert result["step_count"] == 2
     # 授权审批人来自 token 白名单

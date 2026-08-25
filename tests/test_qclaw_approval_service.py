@@ -58,13 +58,17 @@ def _prepare(service, suffix, **overrides):
 
 
 def test_prepare_generates_one_time_short_code_and_hash_only(db):
-    """prepare 返回明文短码，数据库只存哈希"""
+    """prepare 返回明文确认短语，数据库只存哈希"""
     service = ActionApprovalService(db)
     approval, short_code = _prepare(service, "hash-only")
 
-    # 明文短码是 8 字符大写十六进制
-    assert len(short_code) == 8
-    assert short_code == short_code.upper()
+    # 描述性确认短语：批准<动作> <system>@<env> <指纹8位大写十六进制>
+    assert short_code.startswith("批准")
+    parts = short_code.split(" ")
+    assert len(parts) == 3
+    fingerprint = parts[2]
+    assert len(fingerprint) == 8
+    assert fingerprint == fingerprint.upper()
     # 数据库中只存哈希，不存明文
     assert approval.approval_code_hash is not None
     assert short_code not in approval.approval_code_hash

@@ -187,7 +187,7 @@ ops_approval_prepare_plan(steps=[
 ])
 ```
 
-- 授权人批准短码后步骤自动顺序执行；`MATRIX_PULL` 结果的 `package_name` 自动回填到依赖的 `RELEASE` 步骤（显式指定则优先）。
+- 授权人回复描述性确认短语（批准<动作> <system>@<env> <指纹>）后步骤自动顺序执行；`MATRIX_PULL` 结果的 `package_name` 自动回填到依赖的 `RELEASE` 步骤（显式指定则优先）。
 - `MATRIX_PULL` 支持任意文件格式；但 RELEASE 强制校验制品格式——普通文件会被拒绝（步骤 FAILED）。拉取普通文件时不要编排 RELEASE 步骤。
 - 拉取失败时计划 FAILED，后续 RELEASE 不执行；计划内步骤不再要求各工具的 `confirm_text`。
 - 也可用 `ops_matrix_deploy_from_matrix` 一步到位（拉取 + 发布单次调用，仅部署包格式）。

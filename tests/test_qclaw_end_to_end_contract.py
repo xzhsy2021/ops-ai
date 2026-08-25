@@ -193,10 +193,12 @@ class TestEndToEndReleaseFlow:
             package_size_bytes=12345678,
         )
         assert approval.status == "PENDING_APPROVAL"
-        assert len(short_code) == 8
+        # 描述性确认短语：批准<动作> <system>@<env> <指纹8>
+        assert short_code.startswith("批准")
+        assert len(short_code.split(" ")[-1]) == 8
         assert approval.action_digest is not None
 
-        # Step 4: consume 消费短码（模拟授权用户在 Element 回复"批准 <短码>"）
+        # Step 4: consume 消费确认短语（模拟授权用户在 Element 回复该短语）
         approval_event = _event("approval-full-flow")
         consumed = service.consume(
             approval_id=approval.id,
@@ -983,7 +985,7 @@ class TestMCPExecuteChain:
         )
 
         assert result["ok"] is False
-        assert "审批码无效" in result["error"]
+        assert "确认短语无效" in result["error"]
 
         # 工单仍为 PENDING_APPROVAL（未被消费）
         db.refresh(approval)

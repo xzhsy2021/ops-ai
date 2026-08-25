@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import QCLAW_APPROVAL_TTL_SECONDS
 from app.db.models import ExecutionPlan, ExecutionPlanStep
+from app.services.approval_phrase import build_approval_phrase
 from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
@@ -287,7 +288,14 @@ class ExecutionPlanService:
         if existing:
             return existing, ""
 
-        short_code = secrets.token_hex(4).upper()  # 8 字符十六进制
+        # 描述性确认短语：批准<动作摘要> <system>@<env> <指纹8>，
+        # 指纹绑定 plan_digest 防跨计划复用（校验机制不变：加盐哈希+一次性+15min）
+        short_code = build_approval_phrase(
+            action_types=[s.get("action_type") for s in manifest["steps"]],
+            system_name=system_name,
+            environment=environment,
+            digest=digest,
+        )
         code_hash = _hash_approval_code(short_code)
         expires_at = _utcnow() + timedelta(seconds=QCLAW_APPROVAL_TTL_SECONDS)
 

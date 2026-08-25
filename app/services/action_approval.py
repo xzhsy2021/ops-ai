@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import QCLAW_APPROVAL_TTL_SECONDS
 from app.db.models import AiActionApproval
+from app.services.approval_phrase import build_approval_phrase
 from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
@@ -198,7 +199,13 @@ class ActionApprovalService:
         ).first()
         if existing:
             return existing, ""
-        short_code = secrets.token_hex(4).upper()
+        # 描述性确认短语：批准<动作> <system>@<env> <指纹8>（指纹绑定 action_digest）
+        short_code = build_approval_phrase(
+            action_types=[action_type],
+            system_name=system_name,
+            environment=environment,
+            digest=digest,
+        )
         approval = AiActionApproval(
             action_type=action_type,
             tool_name=tool_name,

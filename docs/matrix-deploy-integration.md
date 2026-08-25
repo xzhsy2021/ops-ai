@@ -194,7 +194,7 @@ homeserver 与 token 由 Agent 在参数里传入（`homeserver_url` / `access_t
 ### 推荐：执行计划批量审批（一次审批完成拉取 + 发布）
 
 面向 qclaw/Element 消息流，优先用消息级执行计划把「拉附件」和「发布」合并为**一次审批**。
-授权人批准短码后，步骤按顺序自动执行，无需逐步确认：
+授权人回复确认短语（如「批准拉取附件+发布 crypto@test A3F9C2D1」）后，步骤按顺序自动执行，无需逐步确认：
 
 ```json
 ops_approval_prepare_plan(

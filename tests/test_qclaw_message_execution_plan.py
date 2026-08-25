@@ -210,7 +210,9 @@ class TestMessageExecutionPlanFlow:
             db=db,
         )
         assert prepared["status"] == "PENDING_APPROVAL"
-        assert len(prepared["short_code"]) == 8
+        # 描述性确认短语：批准<动作> <system>@<env> <指纹8>
+        assert prepared["short_code"].startswith("批准")
+        assert len(prepared["short_code"].split(" ")[-1]) == 8
         assert prepared["step_count"] == 2
 
         # 数据库中仅一条待审批执行计划

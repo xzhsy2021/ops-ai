@@ -6,6 +6,8 @@ The files kept in `docs/runbooks/` are current operational references that still
 
 - `AI_CAPABILITY_DISCOVERY.md`
 - `AI_TOOL_MCP_EXAMPLES.md`
+- `CONCURRENCY_ISSUES_REVIEW.md` — 并发问题全量复盘：阻塞修复 + SQLite 锁竞争 + 真并行并发审查结论（2026-08-25）
+- `EVENT_LOOP_BLOCKING_FIXES.md` — 单进程事件循环阻塞修复逐项清单
 - `INSPECTION_TROUBLESHOOTING.md` — 巡检中心 oncall / 已知缺陷 / 修复记录
 - `MCP_PACKAGE_UPLOAD_AND_RETENTION.md`
 - `RELEASE_AUDIT_RETENTION_POLICY.md`

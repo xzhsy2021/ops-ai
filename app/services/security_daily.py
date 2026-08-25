@@ -9,16 +9,50 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config.servers import get_all_servers
 from app.db.models import SecurityDailyReport, SecurityRisk
 
 logger = logging.getLogger(__name__)
+
+# SQLite 单写者：批量采集的多 worker 并发做 SSH 读（互不阻塞），
+# 但落库写段用进程内锁串行化，避免 16 路写事务互相等待超时（database is locked）。
+_PERSIST_LOCK = threading.Lock()
+
+
+def _run_db_write(fn, db: Session, *, attempts: int = 3):
+    """执行一个写事务函数；遇 database is locked 回滚后指数退避重试。
+
+    兜底跨组件竞争（部署 worker / 日志落盘 / 清理任务等非本模块写者）；
+    进程内的采集并发竞争已由 _PERSIST_LOCK 消除。
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            last_exc = exc
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            delay = 0.5 * (2 ** attempt)
+            logger.warning(
+                "security_daily DB write locked (attempt %s/%s), retry in %.1fs",
+                attempt + 1, attempts, delay,
+            )
+            time.sleep(delay)
+    raise last_exc  # pragma: no cover - 循环必经 return/raise
 
 # 默认风险阈值
 DEFAULT_THRESHOLDS = {
@@ -365,21 +399,24 @@ def collect_server_report(db: Session, server_cfg: Dict[str, Any],
     server_name = server_cfg.get("name") or server_cfg.get("id") or "-"
     fetched = read_daily_markdown(server_cfg, report_date)
     if not fetched["ok"] or fetched.get("missing"):
-        # 标记缺失，不覆盖已有正常记录
-        existing = (db.query(SecurityDailyReport)
-                    .filter_by(server_name=server_name, report_date=report_date)
-                    .first())
-        if not existing:
-            db.add(SecurityDailyReport(
-                server_name=server_name,
-                report_date=report_date,
-                report_path=fetched.get("path"),
-                status="missing",
-                error=(fetched.get("error") or "日报文件不存在"),
-                summary={"fetched": False},
-                max_risk="LOW",
-            ))
-            db.commit()
+        # 标记缺失，不覆盖已有正常记录（写段串行化 + 锁重试）
+        with _PERSIST_LOCK:
+            def _persist_missing():
+                existing = (db.query(SecurityDailyReport)
+                            .filter_by(server_name=server_name, report_date=report_date)
+                            .first())
+                if not existing:
+                    db.add(SecurityDailyReport(
+                        server_name=server_name,
+                        report_date=report_date,
+                        report_path=fetched.get("path"),
+                        status="missing",
+                        error=(fetched.get("error") or "日报文件不存在"),
+                        summary={"fetched": False},
+                        max_risk="LOW",
+                    ))
+                    db.commit()
+            _run_db_write(_persist_missing, db)
         return {"server": server_name, "ok": False,
                 "status": "missing", "error": fetched.get("error")
                 or "Daily report file not found on server"}
@@ -389,35 +426,41 @@ def collect_server_report(db: Session, server_cfg: Dict[str, Any],
     max_risk, reasons = evaluate_risk(items, thresholds=thresholds)
     collection_id = uuid4().hex
 
-    row = (db.query(SecurityDailyReport)
-           .filter_by(server_name=server_name, report_date=report_date)
-           .first())
-    if row is None:
-        row = SecurityDailyReport(server_name=server_name, report_date=report_date)
-        db.add(row)
-    row.report_path = fetched["path"]
-    row.raw_md = md
-    row.items = items
-    row.summary = {
-        "login_failures": next((i.get("count") for i in items if i["kind"] == "login_failures"), 0),
-        "banned_ips": len(next((i.get("ips") for i in items if i["kind"] == "fail2ban_bans"), [])),
-        "account_changes": next((i.get("count") for i in items if i["kind"] == "account_changes"), 0),
-        "load_avg": next((i.get("load_avg") for i in items if i["kind"] == "system_load"), None),
-        "reasons": reasons,
-    }
-    row.max_risk = max_risk
-    row.status = "ok"
-    row.error = None
+    # ---- DB 写段（串行化 + 锁重试）：SSH 读已在上方完成，此处不持慢锁 ----
+    with _PERSIST_LOCK:
+        def _persist_ok():
+            row = (db.query(SecurityDailyReport)
+                   .filter_by(server_name=server_name, report_date=report_date)
+                   .first())
+            if row is None:
+                row = SecurityDailyReport(server_name=server_name, report_date=report_date)
+                db.add(row)
+            row.report_path = fetched["path"]
+            row.raw_md = md
+            row.items = items
+            row.summary = {
+                "login_failures": next((i.get("count") for i in items if i["kind"] == "login_failures"), 0),
+                "banned_ips": len(next((i.get("ips") for i in items if i["kind"] == "fail2ban_bans"), [])),
+                "account_changes": next((i.get("count") for i in items if i["kind"] == "account_changes"), 0),
+                "load_avg": next((i.get("load_avg") for i in items if i["kind"] == "system_load"), None),
+                "reasons": reasons,
+            }
+            row.max_risk = max_risk
+            row.status = "ok"
+            row.error = None
 
-    if persist_risks:
-        db.query(SecurityRisk).filter(
-            SecurityRisk.server_id == server_name,
-            SecurityRisk.report_date == report_date,
-            SecurityRisk.source == "security_daily",
-        ).delete(synchronize_session=False)
-        for risk in _risk_objects(server_cfg, report_date, items, max_risk, reasons, collection_id):
-            db.add(risk)
-    db.commit()
+            if persist_risks:
+                db.query(SecurityRisk).filter(
+                    SecurityRisk.server_id == server_name,
+                    SecurityRisk.report_date == report_date,
+                    SecurityRisk.source == "security_daily",
+                ).delete(synchronize_session=False)
+                for risk in _risk_objects(server_cfg, report_date, items, max_risk, reasons, collection_id):
+                    db.add(risk)
+            db.commit()
+            return row
+
+        row = _run_db_write(_persist_ok, db)
 
     return {
         "server": server_name,

@@ -29,7 +29,9 @@ if DATABASE_URL.startswith("sqlite"):
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
+            # 15s：并发写者（巡检批量采集/部署 worker/日志落盘）竞争单写锁的等待余量；
+            # 超时才向上抛 database is locked，由业务层重试兜底。
+            cursor.execute("PRAGMA busy_timeout=15000")
             cursor.execute("PRAGMA foreign_keys=ON")
         finally:
             cursor.close()

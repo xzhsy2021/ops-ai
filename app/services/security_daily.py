@@ -399,9 +399,10 @@ def collect_server_report(db: Session, server_cfg: Dict[str, Any],
     server_name = server_cfg.get("name") or server_cfg.get("id") or "-"
     fetched = read_daily_markdown(server_cfg, report_date)
     if not fetched["ok"] or fetched.get("missing"):
-        # 标记缺失，不覆盖已有正常记录（写段串行化 + 锁重试）
-        with _PERSIST_LOCK:
-            def _persist_missing():
+        # 标记缺失，不覆盖已有正常记录（写段串行化 + 锁重试；
+        # 锁按次获取：重试退避睡眠不持锁，避免拖住其他 worker 的写段）
+        def _persist_missing():
+            with _PERSIST_LOCK:
                 existing = (db.query(SecurityDailyReport)
                             .filter_by(server_name=server_name, report_date=report_date)
                             .first())
@@ -416,7 +417,7 @@ def collect_server_report(db: Session, server_cfg: Dict[str, Any],
                         max_risk="LOW",
                     ))
                     db.commit()
-            _run_db_write(_persist_missing, db)
+        _run_db_write(_persist_missing, db)
         return {"server": server_name, "ok": False,
                 "status": "missing", "error": fetched.get("error")
                 or "Daily report file not found on server"}
@@ -426,9 +427,10 @@ def collect_server_report(db: Session, server_cfg: Dict[str, Any],
     max_risk, reasons = evaluate_risk(items, thresholds=thresholds)
     collection_id = uuid4().hex
 
-    # ---- DB 写段（串行化 + 锁重试）：SSH 读已在上方完成，此处不持慢锁 ----
-    with _PERSIST_LOCK:
-        def _persist_ok():
+    # ---- DB 写段（串行化 + 锁重试）：SSH 读已在上方完成，此处不持慢锁；
+    #      锁按次获取——重试退避睡眠不持锁，避免拖住其他 worker 的写段 ----
+    def _persist_ok():
+        with _PERSIST_LOCK:
             row = (db.query(SecurityDailyReport)
                    .filter_by(server_name=server_name, report_date=report_date)
                    .first())
@@ -460,7 +462,7 @@ def collect_server_report(db: Session, server_cfg: Dict[str, Any],
             db.commit()
             return row
 
-        row = _run_db_write(_persist_ok, db)
+    row = _run_db_write(_persist_ok, db)
 
     return {
         "server": server_name,

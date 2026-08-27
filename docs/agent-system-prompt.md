@@ -112,6 +112,9 @@
 | 单动作重启/停止/启动（兼容） | `ops.restart_service` / `ops.stop_service` / `ops.start_service` → 对应旧 `ops.approval.prepare_service_control` |
 | 发布（单动作兼容） | `ops.prepare_release_from_local_package` → `ops.approval.prepare_release` → `ops.approval.execute` |
 | 回滚（单动作兼容） | `ops.create_rollback_plan` → `ops.approval.prepare_rollback` → `ops.approval.execute` |
+| 拒绝/放弃待审批工单（同步状态） | `ops.approval.reject_plan`（将 PENDING_APPROVAL 计划标记为 REJECTED；可附 reason；幂等） |
+
+> **拒绝工单说明**：当执行计划被授权人否决、用户取消且未批准，或上级/流程要求撤销某待审批工单时，使用 `ops.approval.reject_plan(plan_id, reason?)` 将工单正式置为已拒绝，使系统状态与真实审批结果一致。该操作需要 `ops:write`；幂等——已成终态（REJECTED/APPROVED/SUCCEEDED/FAILED/EXPIRED 等）的计划直接返回当前状态，不产生副作用。普通只读查询/巡检不要误用该工具。
 
 ## 安全规则
 

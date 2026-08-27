@@ -1092,6 +1092,99 @@ def approval_execute_plan(args, ctx, db):
 
 
 # ──────────────────────────────────────────────────────────────
+# ops.approval.reject_plan — 拒绝执行计划
+# ──────────────────────────────────────────────────────────────
+
+@registry.register(
+    name="ops.approval.reject_plan",
+    title="拒绝执行计划",
+    description="将一条待审批（PENDING_APPROVAL）的执行计划正式标记为 REJECTED 终态，阻止其后续执行。用于审批链路中把被否决/放弃的工单同步为已拒绝。幂等：计划已处于终态时返回其当前状态，不产生副作用；仅 PENDING_APPROVAL 可被拒绝。需要 ops:write 权限并由调用方身份（rejected_by）记录审计。",
+    scopes=["ops:write"],
+    risk="medium",
+    category="approval_reject",
+    write=True,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "plan_id": {"type": "string", "description": "待拒绝的执行计划 ID"},
+            "reason": {"type": "string", "description": "拒绝原因（可选，落库为 failure_reason 以便审计）"},
+            "message_context": message_context_schema(),
+            "rejecter_matrix_id": {"type": "string", "description": "拒绝人的身份 ID（无 message_context 时使用，如 Matrix user ID / 用户名）"},
+            "room_id": {"type": "string", "description": "来源房间 ID（兼容 legacy Matrix 调用）"},
+            "request_event_id": {"type": "string", "description": "来源消息事件 ID（兼容 legacy Matrix 调用）"},
+        },
+        "required": ["plan_id"],
+        "additionalProperties": False,
+    },
+)
+def approval_reject_plan(args, ctx, db):
+    """拒绝一条待审批的执行计划（幂等），记录拒绝者并可附拒绝原因。"""
+    from app.db.models import ExecutionPlan
+
+    plan = db.query(ExecutionPlan).filter(ExecutionPlan.id == args["plan_id"]).first()
+    if not plan:
+        return {"ok": False, "error": "执行计划不存在", "plan_id": args["plan_id"]}
+
+    if plan.status != "PENDING_APPROVAL":
+        return {
+            "ok": True,
+            "plan_id": plan.id,
+            "status": plan.status,
+            "note": "计划已处于终态，无需重复拒绝",
+        }
+
+    rejecter = ""
+    reject_ctx = None
+    raw_ctx = args.get("message_context")
+    if raw_ctx:
+        try:
+            reject_ctx = normalize_message_context(raw_ctx)
+            rejecter = reject_ctx.sender_id
+        except ValueError:
+            reject_ctx = None
+    if not rejecter:
+        rejecter = (
+            args.get("rejecter_matrix_id")
+            or args.get("approver_matrix_id")
+            or getattr(ctx, "username", "")
+            or "system"
+        )
+
+    service = ExecutionPlanService(db)
+    plan = service.reject(
+        plan_id=args["plan_id"],
+        rejecter_matrix_id=rejecter,
+        rejection_context=reject_ctx,
+    )
+    if not plan:
+        current = (
+            db.query(ExecutionPlan).filter(ExecutionPlan.id == args["plan_id"]).first()
+        )
+        status = current.status if current else "unknown"
+        return {
+            "ok": False,
+            "error": f"拒绝失败：计划当前状态为 {status}，仅 PENDING_APPROVAL 可拒绝",
+            "plan_id": args["plan_id"],
+            "status": status,
+        }
+
+    reason = (args.get("reason") or "").strip()
+    if reason:
+        plan.failure_reason = reason
+        db.commit()
+        db.refresh(plan)
+
+    return {
+        "ok": True,
+        "plan_id": plan.id,
+        "status": plan.status,
+        "rejected_by": plan.rejected_by,
+        "rejected_at": plan.rejected_at.isoformat() if plan.rejected_at else None,
+        "reason": reason or None,
+    }
+
+
+# ──────────────────────────────────────────────────────────────
 # ops.approval.temporary_access — 临时自审批授权
 # ──────────────────────────────────────────────────────────────
 

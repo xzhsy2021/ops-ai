@@ -102,15 +102,7 @@ def _lookup_approvers(
         if sys_cfg:
             try:
                 sys_routing = _extract_routing(sys_cfg)
-                if service_name:
-                    for svc in sys_cfg.get("services", []) or []:
-                        if svc.get("name") == service_name:
-                            configured = list(
-                                _extract_approvers(sys_routing, _extract_routing(svc))
-                            )
-                            break
-                if not configured:
-                    configured = list(_extract_approvers(sys_routing))
+                configured = list(_extract_approvers(sys_routing))
             except ValueError as exc:
                 raise HTTPException(
                     status_code=403,

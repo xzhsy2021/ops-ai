@@ -31,6 +31,11 @@ _ACTION_VERBS: dict[str, str] = {
 _MAX_VERBS = 3  # 动作过多时截断，保持短语可读
 
 
+def fingerprint_of(digest: str) -> str:
+    """由 digest 派生 8 位十六进制大写指纹，供短语生成与校验对称复用。"""
+    return hashlib.sha256((digest or "").encode("utf-8")).hexdigest()[:8].upper()
+
+
 def build_approval_phrase(
     *,
     action_types: list[str] | tuple[str, ...] | None,
@@ -55,5 +60,5 @@ def build_approval_phrase(
 
     sys_name = (system_name or "").strip() or "-"
     env = (environment or "").strip() or "-"
-    fingerprint = hashlib.sha256((digest or "").encode("utf-8")).hexdigest()[:8].upper()
+    fingerprint = fingerprint_of(digest)
     return f"批准{'+'.join(verbs)} {sys_name}@{env} {fingerprint}"

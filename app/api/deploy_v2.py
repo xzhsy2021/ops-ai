@@ -466,10 +466,8 @@ def _normalize_api_service_routing(services: Any) -> List[Dict[str, Any]]:
             )
         item = dict(service)
         template_variables = dict(item.get("template_variables") or {})
-        if "message_routing" in template_variables:
-            template_variables["message_routing"] = _normalize_api_message_routing(
-                template_variables["message_routing"]
-            )
+        # 服务级 message_routing 已收敛到系统级，不再处理服务级路由
+        template_variables.pop("message_routing", None)
         item["template_variables"] = template_variables
         normalized.append(item)
     return normalized

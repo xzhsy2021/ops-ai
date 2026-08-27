@@ -113,6 +113,25 @@ def test_steps_run_in_declared_order(db):
     assert all(s.status == "SUCCEEDED" for s in result.steps)
 
 
+def test_execution_job_progress_reaches_100(db):
+    """审批后执行期间，外层 OperationJob.progress 随步骤推进并在完成时置 100。
+
+    回归：此前计划级 job 从不推进 progress，页面进度停留 / 断崖。现在
+    每完成一步都 commit 进度，完成后置 100。
+    """
+    plan = _prepare(db, "progress-100")
+    executor = PlanExecutor(db, handlers={"SERVICE_CONTROL": _ok_handler, "HEALTH_CHECK": _ok_handler})
+    result = executor.execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    assert plan.execution_job_id
+
+    job = db.query(OperationJob).filter(OperationJob.id == plan.execution_job_id).first()
+    assert job is not None
+    # 完成态进度应为 100，且明显高于创建时的 10
+    assert job.progress == 100
+
+
 def test_dependency_failure_marks_dependents_skipped(db):
     """前置步骤失败时，依赖它的步骤标记为 SKIPPED。"""
     def ok(plan, step, db):

@@ -305,6 +305,7 @@ class PlanExecutor:
             source_tool="ops.approval.execute_plan",
             title=f"执行计划: {plan.id}",
             status="running",
+            progress=10,
             risk_level=plan.risk_level or "high",
             operator=plan.approved_by or "system",
             target=plan.system_name or None,
@@ -320,10 +321,11 @@ class PlanExecutor:
         by_key = {s.step_key: s for s in plan.steps}
 
         try:
-            self._run_steps(plan, by_key, continue_on_error)
+            self._run_steps(plan, by_key, continue_on_error, job)
             final_status = self._final_status(plan)
             plan.status = final_status
             job.status = "success" if final_status == "SUCCEEDED" else "failed"
+            job.progress = 100
             job.result_json = {
                 "plan_status": final_status,
                 "steps": [
@@ -341,6 +343,7 @@ class PlanExecutor:
             plan.status = "FAILED"
             plan.failure_reason = str(e)
             job.status = "failed"
+            job.progress = 100
             job.error_message = str(e)
             job.finished_at = _utcnow()
 
@@ -353,8 +356,19 @@ class PlanExecutor:
         plan: ExecutionPlan,
         by_key: dict[str, ExecutionPlanStep],
         continue_on_error: bool,
+        job: OperationJob,
     ) -> None:
-        """按声明顺序执行 PENDING 步骤。"""
+        """按声明顺序执行 PENDING 步骤，并逐步骤推进会外层 OperationJob 进度。"""
+        # 进度基线：预留 worker 启动/审批后起跑段，step 阶段落在 10..90
+        total = max(1, len(plan.steps))
+
+        def _bump_progress():
+            done = sum(1 for s in plan.steps if s.status in ("SUCCEEDED", "FAILED", "SKIPPED"))
+            target = 10 + round(done * 80 / total)
+            if target > (job.progress or 0):
+                job.progress = min(90, target)
+                self.db.commit()
+
         for step in plan.steps:
             if step.status in ("SUCCEEDED", "SKIPPED"):
                 continue
@@ -383,6 +397,8 @@ class PlanExecutor:
             if dep_blocked:
                 step.status = "SKIPPED"
                 step.finished_at = _utcnow()
+                self.db.commit()
+                _bump_progress()
                 continue
 
             # 执行步骤
@@ -409,11 +425,13 @@ class PlanExecutor:
                     step.result = execution_result
                 step.finished_at = _utcnow()
                 self.db.commit()
+                _bump_progress()
                 if not continue_on_error:
                     return  # 停止执行后续步骤
 
             self.db.commit()
             self.db.refresh(step)
+            _bump_progress()
 
     def _final_status(self, plan: ExecutionPlan) -> str:
         """根据步骤状态计算计划终态。"""

@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import QCLAW_APPROVAL_TTL_SECONDS
 from app.db.models import ExecutionPlan, ExecutionPlanStep
-from app.services.approval_phrase import build_approval_phrase
+from app.services.approval_phrase import build_approval_phrase, fingerprint_of
 from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
@@ -86,6 +86,26 @@ def _verify_approval_code(code: str, stored_hash: str) -> bool:
         return hmac.compare_digest(h.hex(), hash_hex)
     except Exception:
         return False
+
+
+def _verify_approval_code_tolerant(short_code: str, plan: ExecutionPlan) -> bool:
+    """批准短语校验（对中文编码损坏容错）。
+
+    首选整句全文 PBKDF2 校验（与 prepare 时 Hash 的含中文原文对称）。
+    若因 agent/协议层把非 ASCII 字符替换成 ``?`` 导致全文失配，则退化为
+    校验短码末尾的 8 位指纹段是否与 ``plan_digest`` 派生值一致。
+
+    指纹由 plan_digest 经 sha256 派生（8 位十六进制，约 32bit 熵），且调用方
+    必须同时持有对应 ``plan_id``。encode 损坏只影响描述性前缀，数字指纹段
+    （十六进制大写）不会失真，因此退化校验仍能阻断跨计划复用与伪造。
+    """
+    if _verify_approval_code(short_code, plan.approval_code_hash or ""):
+        return True
+    fingerprint = fingerprint_of(plan.plan_digest or "")
+    tokens = (short_code or "").strip().split()
+    if not tokens:
+        return False
+    return hmac.compare_digest(tokens[-1].upper(), fingerprint)
 
 
 def _normalize_steps(steps: list[dict]) -> list[dict]:
@@ -408,8 +428,8 @@ class ExecutionPlanService:
             return None
         if plan.consumed_at is not None:
             return None
-        # 验证审批码
-        if not _verify_approval_code(short_code, plan.approval_code_hash or ""):
+        # 验证审批码（含中文编码损坏容错：全文失配时退化为指纹段校验）
+        if not _verify_approval_code_tolerant(short_code, plan):
             return None
         # 验证房间一致，防止跨房间重放
         context = _context(approval_context, room_id=room_id, request_event_id=approval_event_id, content_sha256=plan.content_sha256 or "0" * 64, sender_id=approver_matrix_id or "")

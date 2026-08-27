@@ -19,10 +19,6 @@ def normalize_message_routing_config(value: Any) -> Dict[str, Any]:
 
 def _service_row_to_dict(row) -> Dict[str, Any]:
     template_variables = dict(row.template_variables or {})
-    if "message_routing" in template_variables:
-        template_variables["message_routing"] = normalize_message_routing_config(
-            template_variables["message_routing"]
-        )
     return {
         "id": row.id,
         "name": row.name,
@@ -185,10 +181,8 @@ def save_system(name: str, system: Dict[str, Any]) -> bool:
                     row.template = payload.get("template") or None
                     row.pipeline_id = payload.get("pipeline_id") or None
                     template_variables = dict(payload.get("template_variables") or {})
-                    if "message_routing" in template_variables:
-                        template_variables["message_routing"] = normalize_message_routing_config(
-                            template_variables["message_routing"]
-                        )
+                    # 服务级 message_routing 已收敛到系统级，不再持久化
+                    template_variables.pop("message_routing", None)
                     row.template_variables = template_variables
                     row.servers = payload.get("servers") or []
 

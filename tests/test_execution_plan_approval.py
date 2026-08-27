@@ -260,3 +260,49 @@ def test_get_returns_none_for_nonexistent(db):
     """不存在的计划返回 None。"""
     service = ExecutionPlanService(db)
     assert service.get("nonexistent-id") is None
+
+
+def test_consume_tolerates_cjk_corruption_via_fingerprint(db):
+    """中文被协议层替换成 `?` 导致全文 PBKDF2 失配时，指纹段兜底校验仍通过。
+
+    回归：短码 `批准服务控制 payment@test <FINGERPRINT>` 的中文前缀损坏成
+    `??????` 后，只要末尾指纹段与 plan_digest 派生值一致即可消费。
+    """
+    service = ExecutionPlanService(db)
+    plan, short_code = _prepare(service, "cjk-corrupt")
+
+    # 模拟编码损坏：把非 ASCII 字符替换成 ?
+    corrupted = "".join("?" if ord(ch) > 127 else ch for ch in short_code)
+    assert corrupted != short_code
+
+    result = service.consume(
+        plan_id=plan.id,
+        short_code=corrupted,
+        approver_matrix_id="@alice:matrix.org",
+        room_id=_room("cjk-corrupt"),
+        approval_event_id=_event("cjk-corrupt"),
+    )
+    assert result is not None
+    assert result.status == "APPROVED"
+
+
+def test_consume_rejects_mismatched_fingerprint(db):
+    """指纹段与 plan_digest 不匹配时仍被拒绝，防止跨计划复用/伪造。"""
+    service = ExecutionPlanService(db)
+    plan, _ = _prepare(service, "bad-fingerprint")
+
+    # 正确的短码指纹被替换成另一个计划的指纹——应整体拒绝
+    other_fp = "AAAAAAAA" if not plan.plan_digest.endswith("a") else "BBBBBBBB"
+    bad_code = f"批准服务控制 payment@test {other_fp}"
+
+    result = service.consume(
+        plan_id=plan.id,
+        short_code=bad_code,
+        approver_matrix_id="@alice:matrix.org",
+        room_id=_room("bad-fingerprint"),
+        approval_event_id=_event("bad-fingerprint"),
+    )
+    assert result is None
+    db.refresh(plan)
+    assert plan.status == "PENDING_APPROVAL"
+    assert plan.consumed_at is None

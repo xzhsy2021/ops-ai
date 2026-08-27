@@ -164,31 +164,6 @@ def test_configured_approvers_without_valid_current_channel_fail_closed(monkeypa
     assert exc.value.status_code == 403
 
 
-def test_service_approvers_override_system_and_revision_is_order_independent():
-    a = _identity("wechat", "owner-a")
-    b = _identity("telegram", "owner-b")
-    systems = list(_systems([a]).values())
-    systems[0]["name"] = "crypto-trader"
-    systems[0]["services"] = [{
-        "name": "strategy",
-        "template_variables": {
-            "message_routing": {
-                "enabled": True,
-                "aliases": ["策略"],
-                "approvers": [b],
-            }
-        },
-    }]
-    decision = resolve_message_target("策略", systems)
-    assert decision.outcome == RoutingOutcome.RESOLVED
-    assert decision.approvers == (b,)
-
-    reordered = deepcopy(systems)
-    reordered[0]["message_routing"]["approvers"] = list(reversed([a, b]))
-    systems[0]["message_routing"]["approvers"] = [a, b]
-    assert compute_routing_revision(systems) == compute_routing_revision(reordered)
-
-
 def test_message_routing_api_model_normalizes_legacy_and_rejects_invalid_identity():
     config = approvals_api.MessageRoutingConfig(approvers=["@legacy:example.org"])
     assert config.model_dump()["approvers"] == [

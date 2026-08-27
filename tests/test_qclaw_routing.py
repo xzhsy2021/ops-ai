@@ -37,14 +37,6 @@ SYSTEMS = [
         "services": [
             {
                 "name": "trader-api",
-                "template_variables": {
-                    "message_routing": {
-                        "enabled": True,
-                        "aliases": ["交易接口"],
-                        "keywords": ["trader api"],
-                        "priority": 80,
-                    }
-                },
             }
         ],
     },
@@ -90,13 +82,13 @@ def test_exact_system_alias_resolves():
     assert decision.matched_by == "system_alias"
 
 
-def test_unique_service_alias_resolves_parent_system():
-    """唯一服务别名解析到父系统。"""
-    decision = resolve_message_target("交易接口", SYSTEMS)
+def test_unique_service_name_resolves_parent_system():
+    """唯一服务规范名解析到父系统。"""
+    decision = resolve_message_target("trader-api", SYSTEMS)
     assert decision.outcome == RoutingOutcome.RESOLVED
     assert decision.system_name == "crypto-trader"
     assert decision.service_name == "trader-api"
-    assert decision.matched_by == "service_alias"
+    assert decision.matched_by == "service_name"
 
 
 def test_unique_highest_priority_keyword_resolves():
@@ -269,32 +261,27 @@ def test_ticket_rejects_tampered_signature():
         ),
     ],
 )
-def test_disabled_service_routing_changes_revision_and_invalidates_ticket(
+def test_system_routing_change_invalidates_ticket(
     field, replacement
 ):
     systems = [{
         "name": "crypto-trader",
-        "message_routing": {"enabled": True},
-        "services": [{
-            "name": "strategy",
-            "template_variables": {
-                "message_routing": {
-                    "enabled": False,
-                    "aliases": ["策略服务"],
-                    "keywords": ["strategy deploy"],
-                    "priority": 50,
-                    "approvers": [{
-                        "channel": "wechat",
-                        "channel_account_id": "primary",
-                        "sender_id": "owner-1",
-                    }],
-                }
-            },
-        }],
+        "message_routing": {
+            "enabled": True,
+            "aliases": ["策略服务"],
+            "keywords": ["strategy deploy"],
+            "priority": 50,
+            "approvers": [{
+                "channel": "wechat",
+                "channel_account_id": "primary",
+                "sender_id": "owner-1",
+            }],
+        },
+        "services": [{"name": "strategy"}],
     }]
-    decision = resolve_message_target("策略服务", systems)
+    decision = resolve_message_target("strategy deploy", systems)
     assert decision.outcome == RoutingOutcome.RESOLVED
-    assert decision.service_name == "strategy"
+    assert decision.system_name == "crypto-trader"
 
     revision = compute_routing_revision(systems)
     context = _message_context("wechat")
@@ -305,7 +292,7 @@ def test_disabled_service_routing_changes_revision_and_invalidates_ticket(
         routing_config_revision=revision,
     )
     changed = deepcopy(systems)
-    changed[0]["services"][0]["template_variables"]["message_routing"][field] = replacement
+    changed[0]["message_routing"][field] = replacement
     changed_revision = compute_routing_revision(changed)
 
     assert changed_revision != revision

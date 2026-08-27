@@ -249,15 +249,7 @@ def list_routing_configs(
             "keywords": routing.get("keywords", []),
             "priority": routing.get("priority", 0),
             "approvers": routing.get("approvers", []),
-            "services": [
-                {
-                    "service_name": svc.get("name", ""),
-                    **_routing_summary(
-                        svc.get("template_variables", {}).get("message_routing", {})
-                    ),
-                }
-                for svc in cfg.get("services", [])
-            ],
+            "services": [svc.get("name", "") for svc in cfg.get("services", [])],
         })
     return {"total": len(result), "items": result}
 
@@ -277,30 +269,3 @@ def update_system_routing(
     if not save_system(system_name, sys_cfg):
         raise HTTPException(status_code=500, detail="保存系统消息路由配置失败")
     return {"ok": True, "system_name": system_name, "message_routing": config.model_dump()}
-
-
-@router.put("/routing/systems/{system_name}/services/{service_name}", summary="更新服务消息路由配置")
-def update_service_routing(
-    system_name: str,
-    service_name: str,
-    config: MessageRoutingConfig,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    require_admin(request, db)
-    sys_cfg = get_system_by_name(system_name)
-    if not sys_cfg:
-        raise HTTPException(status_code=404, detail=f"系统不存在: {system_name}")
-    # 找到对应服务
-    found = False
-    for svc in sys_cfg.get("services", []):
-        if svc.get("name") == service_name:
-            tv = svc.setdefault("template_variables", {})
-            tv["message_routing"] = config.model_dump()
-            found = True
-            break
-    if not found:
-        raise HTTPException(status_code=404, detail=f"服务不存在: {service_name}")
-    if not save_system(system_name, sys_cfg):
-        raise HTTPException(status_code=500, detail="保存服务消息路由配置失败")
-    return {"ok": True, "system_name": system_name, "service_name": service_name, "message_routing": config.model_dump()}

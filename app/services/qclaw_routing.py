@@ -70,16 +70,10 @@ def normalize_text(text: str) -> str:
 
 
 def _extract_routing(system_or_service: dict) -> dict:
-    """从系统或服务配置中提取 message_routing。"""
+    """从系统配置中提取 message_routing（仅系统级，服务级已收敛）。"""
     routing = system_or_service.get("message_routing")
     if isinstance(routing, dict):
         return routing
-    # 服务级路由在 template_variables.message_routing 下
-    tv = system_or_service.get("template_variables", {})
-    if isinstance(tv, dict):
-        routing = tv.get("message_routing")
-        if isinstance(routing, dict):
-            return routing
     return {}
 
 
@@ -228,22 +222,6 @@ def normalize_routing_config(systems: list[dict]) -> str:
                 key=_room_sort_key,
             ),
         }
-        services = []
-        # Resolver considers every service under an active system, even when
-        # the service-level message_routing.enabled flag is false or absent.
-        for svc in sys_cfg.get("services", []) or []:
-            svc_routing = _extract_routing(svc)
-            services.append({
-                "name": svc.get("name", ""),
-                "aliases": sorted(svc_routing.get("aliases", [])),
-                "keywords": sorted(svc_routing.get("keywords", [])),
-                "priority": svc_routing.get("priority", 0),
-                "approvers": sorted(
-                    _extract_approvers(routing, svc_routing),
-                    key=_approver_sort_key,
-                ),
-            })
-        entry["services"] = sorted(services, key=lambda item: item["name"])
         normalized.append(entry)
     normalized.sort(key=lambda item: item["name"])
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -261,25 +239,15 @@ def compute_routing_revision(systems: list[dict]) -> str:
 
 def _extract_approvers(
     routing: dict,
-    svc_routing: dict | None = None,
 ) -> tuple[dict[str, str], ...]:
-    """从路由配置提取授权审批人。
+    """从系统级路由配置提取授权审批人。
 
-    优先使用服务级 approvers（如果非空），否则回退到系统级 approvers。
+    服务级已收敛到系统级，只从系统级 approvers 解析。
     配置在边界统一规范化；无效身份会抛错并由调用方 fail closed。
     """
     if not isinstance(routing, dict):
         raise ValueError("system message_routing must be an object")
-    system_approvers = normalize_routing_approvers(routing.get("approvers", []))
-    if svc_routing is not None:
-        if not isinstance(svc_routing, dict):
-            raise ValueError("service message_routing must be an object")
-        service_approvers = normalize_routing_approvers(
-            svc_routing.get("approvers", [])
-        )
-        if service_approvers:
-            return tuple(service_approvers)
-    return tuple(system_approvers)
+    return tuple(normalize_routing_approvers(routing.get("approvers", [])))
 
 
 def _extract_rooms(routing: dict) -> tuple[dict[str, str], ...]:
@@ -366,32 +334,26 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
             routing_config_revision=revision,
         )
 
-    # 3. 唯一服务名或服务别名，返回其父系统
-    service_matches = []  # (system_name, service_name, matched_by, sys_routing, svc_routing)
+    # 3. 唯一服务名，返回其父系统
+    service_matches = []  # (system_name, service_name, matched_by, sys_routing)
     for sys_cfg, routing in active_systems:
         for svc in sys_cfg.get("services", []):
-            svc_routing = _extract_routing(svc)
             svc_name = svc.get("name", "")
             # 服务规范名
             if svc_name and normalize_text(svc_name) == normalized_msg:
-                service_matches.append((sys_cfg.get("name", ""), svc_name, "service_name", routing, svc_routing))
+                service_matches.append((sys_cfg.get("name", ""), svc_name, "service_name", routing))
                 continue
-            # 服务别名
-            for alias in svc_routing.get("aliases", []):
-                if alias and normalize_text(alias) == normalized_msg:
-                    service_matches.append((sys_cfg.get("name", ""), svc_name, "service_alias", routing, svc_routing))
-                    break
 
     service_matches.sort(key=lambda item: (item[0], item[1], item[2]))
     if len(service_matches) == 1:
-        sys_name, svc_name, matched_by, sys_routing, svc_routing = service_matches[0]
+        sys_name, svc_name, matched_by, sys_routing = service_matches[0]
         return RoutingDecision(
             outcome=RoutingOutcome.RESOLVED,
             system_name=sys_name,
             service_name=svc_name,
             matched_by=matched_by,
             routing_config_revision=revision,
-            approvers=_extract_approvers(sys_routing, svc_routing),
+            approvers=_extract_approvers(sys_routing),
         )
     if len(service_matches) > 1:
         candidates = tuple(sorted(f"{s}/{sv}" for s, sv, *_ in service_matches))
@@ -402,14 +364,12 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
         )
 
     # 4. 唯一最高优先级关键词匹配
-    keyword_matches = []  # (system_name, service_name, priority, matched_by, sys_routing, svc_routing)
+    keyword_matches = []  # (system_name, service_name, priority, matched_by, sys_routing)
     for sys_cfg, routing in active_systems:
         priority = routing.get("priority", 0)
         # 系统级关键词：取命中的最长关键词（更具体，避免 'trader' 抢在
-        # 'crypto-trader-web' 之前命中），若恰好等于某服务的规范名/别名则
-        # 提升为服务级匹配；否则「处理 crypto-trader-web 发布」会命中系统
-        # keywords 却签发 service_name=None 的系统级 ticket，与 prepare_plan
-        # 的服务级绑定校验（verify_ticket 硬比较 service_name）冲突。
+        # 'crypto-trader-web' 之前命中），若恰好等于某服务规范名则解析为
+        # 服务级 ticket；否则签发 service_name=None 的系统级 ticket。
         matched_kw = ""
         for keyword in routing.get("keywords", []):
             if keyword and normalize_text(keyword) in normalized_msg:
@@ -417,34 +377,19 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
                     matched_kw = keyword
         if matched_kw:
             kw_norm = normalize_text(matched_kw)
-            svc_hit: tuple | None = None
+            svc_name = ""
             for svc in sys_cfg.get("services", []):
-                svc_routing = _extract_routing(svc)
-                svc_name = svc.get("name", "")
-                if svc_name and normalize_text(svc_name) == kw_norm:
-                    svc_hit = (svc_name, svc_routing)
+                name = svc.get("name", "")
+                if name and normalize_text(name) == kw_norm:
+                    svc_name = name
                     break
-                for alias in svc_routing.get("aliases", []):
-                    if alias and normalize_text(alias) == kw_norm:
-                        svc_hit = (svc_name, svc_routing)
-                        break
-                if svc_hit:
-                    break
-            if svc_hit:
+            if svc_name:
                 keyword_matches.append(
-                    (sys_cfg.get("name", ""), svc_hit[0], priority,
-                     "system_keyword_service", routing, svc_hit[1])
+                    (sys_cfg.get("name", ""), svc_name, priority,
+                     "system_keyword_service", routing)
                 )
             else:
-                keyword_matches.append((sys_cfg.get("name", ""), None, priority, "system_keyword", routing, None))
-        # 服务级关键词
-        for svc in sys_cfg.get("services", []):
-            svc_routing = _extract_routing(svc)
-            svc_priority = svc_routing.get("priority", 0)
-            for keyword in svc_routing.get("keywords", []):
-                if keyword and normalize_text(keyword) in normalized_msg:
-                    keyword_matches.append((sys_cfg.get("name", ""), svc.get("name", ""), svc_priority, "service_keyword", routing, svc_routing))
-                    break
+                keyword_matches.append((sys_cfg.get("name", ""), None, priority, "system_keyword", routing))
 
     if not keyword_matches:
         return RoutingDecision(
@@ -460,14 +405,14 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
     )
 
     if len(top_matches) == 1:
-        sys_name, svc_name, _, matched_by, sys_routing, svc_routing = top_matches[0]
+        sys_name, svc_name, _, matched_by, sys_routing = top_matches[0]
         return RoutingDecision(
             outcome=RoutingOutcome.RESOLVED,
             system_name=sys_name,
             service_name=svc_name,
             matched_by=matched_by,
             routing_config_revision=revision,
-            approvers=_extract_approvers(sys_routing, svc_routing),
+            approvers=_extract_approvers(sys_routing),
         )
 
     # 同优先级多匹配 → AMBIGUOUS

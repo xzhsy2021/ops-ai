@@ -87,6 +87,16 @@ def _media_event(event_id="$abc", filename="crypto-frontend.tar.gz", sender="@al
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_scan_media_cache():
+    """scan 媒体缓存为模块级全局；测试之间必须隔离，避免旧结果串用。"""
+    import app.services.tool_adapters.matrix_tools as _mt
+
+    _mt._SCAN_MEDIA_CACHE.clear()
+    yield
+    _mt._SCAN_MEDIA_CACHE.clear()
+
+
 def _patch_matrix_client(monkeypatch, *, event=None, events=None, content=b"PKG", filename="crypto-frontend.tar.gz"):
     """Monkeypatch matrix_tools.MatrixClient with a fake configured client."""
     import app.services.tool_adapters.matrix_tools as mt
@@ -189,6 +199,36 @@ def test_scan_media_events_empty_includes_debug(monkeypatch, db):
     assert "debug" in result
     assert result["debug"]["msgtype_distribution"] == {"m.text": 1}
     assert "窗口内 0 条媒体" in result["summary"]
+
+
+def test_scan_media_events_cache_hits_within_ttl(monkeypatch, db):
+    """同参扫描在 30s TTL 内命中缓存；参数(limit)不同则视为不同 key。"""
+    mt = _patch_matrix_client(monkeypatch, event=_media_event())
+    from app.services.tool_adapters.matrix_tools import scan_media_events
+
+    calls = {"n": 0}
+    orig = mt._execute_media_scan
+
+    def _wrapped(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    monkeypatch.setattr(mt, "_execute_media_scan", _wrapped)
+    ctx = _ctx()
+
+    first = scan_media_events({"room_id": "!room:example.org", "sender": "@alice:example.org"}, ctx, db)
+    assert "cached" not in first
+    assert len(first["events"]) == 1
+
+    second = scan_media_events({"room_id": "!room:example.org", "sender": "@alice:example.org"}, ctx, db)
+    assert second["cached"] is True  # 命中 30s 缓存
+    assert calls["n"] == 1  # 底层扫描只真正执行了一次
+
+    third = scan_media_events(
+        {"room_id": "!room:example.org", "sender": "@alice:example.org", "limit": 20}, ctx, db
+    )
+    assert "cached" not in third  # 参数不同 → key 不同，不命中
+    assert calls["n"] == 2
 
 
 # ── pull_attachment ──

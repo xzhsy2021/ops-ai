@@ -13,9 +13,11 @@ E2EE：加密房间事件经 app/services/matrix_e2ee.py 解密（matrix-nio[e2e
 from __future__ import annotations
 
 import asyncio
+import atexit
 import io
 import os
 import re
+import time
 from typing import Any, Dict
 
 from fastapi import HTTPException
@@ -80,6 +82,101 @@ def _run_coroutine_sync(coroutine):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="matrix-sync-bridge") as pool:
         return pool.submit(_runner).result(timeout=180)
+
+
+# ── Matrix 网络 IO 独立受限线程池 ────────────────────────────────
+# scan / pull 这类"只读但联网秒级"的工具，若并发出现会打满 FastAPI 通用 worker
+# 线程，拖累任务中心轮询、审批确认等请求。将其网络段统一投到独立受限池并发执行，
+# 从而收敛慢 IO 的并发占用（最多 N 个），避免服务整体卡死。
+_MATRIX_IO_THREAD_PREFIX = "matrix-io"
+_MATRIX_IO_MAX_WORKERS = 4
+_MATRIX_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_MATRIX_IO_MAX_WORKERS, thread_name_prefix=_MATRIX_IO_THREAD_PREFIX
+)
+# 预热常驻池并避免进程退出时 join 空闲 worker 造成延迟
+atexit.register(_MATRIX_IO_EXECUTOR.shutdown, wait=False)
+
+
+def _in_matrix_io_pool() -> bool:
+    return threading.current_thread().name.startswith(_MATRIX_IO_THREAD_PREFIX)
+
+
+def matrix_run_io(fn):
+    """在独立受限 IO 池线程执行 fn；已在该池内则直接执行，避免自池内重提交死锁。"""
+    if _in_matrix_io_pool():
+        return fn()
+    return _MATRIX_IO_EXECUTOR.submit(fn).result()
+
+
+# ── scan 媒体事件短缓存（同参 30s TTL）────────────────────────────
+# 发版链路每次都会 scan 确认房间附件；同一房间/参数在短窗口内重复全量拉取是无用功，
+# 命中缓存可让后续 scan 帧级返回。缓存带与参数绑定，避免跨房间/跨窗口串数据。
+_SCAN_MEDIA_CACHE_TTL = 30.0
+_SCAN_MEDIA_CACHE_MAX = 512
+_SCAN_MEDIA_CACHE: dict[str, tuple[float, Dict[str, Any]]] = {}
+_SCAN_MEDIA_CACHE_LOCK = threading.Lock()
+_SCAN_DEFAULT_LIMIT = 50
+
+
+def _scan_cache_key(room_id: str, sender: str, minutes: int, filename: str, limit: int) -> str:
+    return "\x00".join((room_id, sender, str(minutes), filename, str(limit)))
+
+
+def _scan_cache_get(key: str):
+    with _SCAN_MEDIA_CACHE_LOCK:
+        item = _SCAN_MEDIA_CACHE.get(key)
+        if item is not None and item[0] > time.monotonic():
+            return item[1]
+        _SCAN_MEDIA_CACHE.pop(key, None)
+    return None
+
+
+def _scan_cache_set(key: str, value: Dict[str, Any]) -> None:
+    with _SCAN_MEDIA_CACHE_LOCK:
+        _SCAN_MEDIA_CACHE[key] = (time.monotonic() + _SCAN_MEDIA_CACHE_TTL, value)
+        if len(_SCAN_MEDIA_CACHE) > _SCAN_MEDIA_CACHE_MAX:
+            _SCAN_MEDIA_CACHE.clear()
+
+
+def _execute_media_scan(args: Dict[str, Any], room_id: str, sender: str,
+                        minutes: int, filename: str, limit: int) -> Dict[str, Any]:
+    """在 IO 池内执行一次完整扫描，返回结果 dict。"""
+    client = _matrix_client(args)
+    _conn_args(args)
+    decryptor = _try_build_decryptor(room_id)
+    if decryptor is not None:
+        events = _run_coroutine_sync(
+            client.list_media_events_async(
+                room_id, sender=sender, minutes=minutes,
+                filename_hint=filename, limit=limit, event_decryptor=decryptor,
+            )
+        )
+    else:
+        events = client.list_media_events(
+            room_id, sender=sender, minutes=minutes,
+            filename_hint=filename, limit=limit,
+        )
+    result: Dict[str, Any] = {
+        "room_id": room_id,
+        "window_minutes": minutes,
+        "limit": limit,
+        "media_msgtypes": list(client.media_msgtypes),
+        "events": [_event_to_dict(ev) for ev in events],
+        "e2ee": {"decryptor_active": decryptor is not None},
+        "summary": f"找到 {len(events)} 条匹配的媒体事件"
+        + (
+            "（窗口内 0 条媒体：若用户发了文件名，房间内大概率只有 m.text 而无 m.file，请提示真上传附件）"
+            if not events else ""
+        ),
+    }
+    if args.get("include_debug") or not events:
+        try:
+            result["debug"] = client.debug_recent_events(
+                room_id, sender=sender, minutes=minutes, limit=limit,
+            )
+        except MatrixClientError as exc:
+            result["debug"] = {"error": str(exc)}
+    return result
 
 
 def _try_build_decryptor(room_id: str) -> Any | None:
@@ -157,7 +254,7 @@ def _event_to_dict(event: MatrixMediaEvent) -> Dict[str, Any]:
             "sender": {"type": "string", "description": "限定发送者（Matrix user id），为空则不限"},
             "minutes": {"type": "integer", "description": f"回看窗口（分钟），默认 {MATRIX_MEDIA_WINDOW_MINUTES}"},
             "filename": {"type": "string", "description": "可选文件名匹配（content.body / filename）"},
-            "limit": {"type": "integer", "description": "拉取事件条数，默认 200（Matrix API 上限）"},
+            "limit": {"type": "integer", "description": f"拉取事件条数，默认 {_SCAN_DEFAULT_LIMIT}（Matrix API 上限 200）"},
             "include_debug": {"type": "boolean", "description": "是否额外返回房间事件诊断（msgtype 分布 / 文字含文件名提示），用于排查为什么没匹配到媒体"},
             "homeserver_url": {"type": "string", "description": "Matrix homeserver 地址（Agent 传入），如 https://matrix.example.org"},
             "access_token": {"type": "string", "description": "Matrix Bot/Service 账号 access token（Agent 传入）"},
@@ -171,56 +268,26 @@ def scan_media_events(args: Dict[str, Any], ctx, db) -> Dict[str, Any]:
     if not room_id:
         raise HTTPException(status_code=400, detail="room_id is required")
     _enforce_room_binding(ctx, room_id)
+    sender = str(args.get("sender") or "").strip()
     minutes = int(args.get("minutes") or MATRIX_MEDIA_WINDOW_MINUTES)
-    limit = int(args.get("limit") or 200)
-    client = _matrix_client(args)
-    conn = _conn_args(args)
-    decryptor = _try_build_decryptor(room_id)
+    filename = str(args.get("filename") or "").strip()
+    limit = int(args.get("limit") or _SCAN_DEFAULT_LIMIT)
+
+    key = _scan_cache_key(room_id, sender, minutes, filename, limit)
+    cached = _scan_cache_get(key)
+    if cached is not None:
+        cached = dict(cached)
+        cached["cached"] = True
+        return cached
+
     try:
-        if decryptor is not None:
-            events = _run_coroutine_sync(
-                client.list_media_events_async(
-                    room_id,
-                    sender=str(args.get("sender") or "").strip(),
-                    minutes=minutes,
-                    filename_hint=str(args.get("filename") or "").strip(),
-                    limit=limit,
-                    event_decryptor=decryptor,
-                )
-            )
-        else:
-            events = client.list_media_events(
-                room_id,
-                sender=str(args.get("sender") or "").strip(),
-                minutes=minutes,
-                filename_hint=str(args.get("filename") or "").strip(),
-                limit=limit,
-            )
+        result = matrix_run_io(
+            lambda: _execute_media_scan(args, room_id, sender, minutes, filename, limit)
+        )
     except MatrixClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    result: Dict[str, Any] = {
-        "room_id": room_id,
-        "window_minutes": minutes,
-        "limit": limit,
-        "media_msgtypes": list(client.media_msgtypes),
-        "events": [_event_to_dict(ev) for ev in events],
-        "e2ee": {"decryptor_active": decryptor is not None},
-        "summary": f"找到 {len(events)} 条匹配的媒体事件"
-        + (
-            "（窗口内 0 条媒体：若用户发了文件名，房间内大概率只有 m.text 而无 m.file，请提示真上传附件）"
-            if not events else ""
-        ),
-    }
-    if args.get("include_debug") or not events:
-        try:
-            result["debug"] = client.debug_recent_events(
-                room_id,
-                sender=str(args.get("sender") or "").strip(),
-                minutes=minutes,
-                limit=limit,
-            )
-        except MatrixClientError as exc:
-            result["debug"] = {"error": str(exc)}
+
+    _scan_cache_set(key, result)
     return result
 
 

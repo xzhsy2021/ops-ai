@@ -176,11 +176,20 @@ def _file_upload_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Sessi
     from app.services.approval_executor import ApprovalExecutor
 
     params = step.parameters or {}
+    action_parameters = dict(params.get("action_parameters") or {})
+    if action_parameters.pop("defer_package_from_dependency", False):
+        # 包来自前置 MATRIX_PULL 步骤，创建时未冻结，执行时从依赖结果回填 package_name
+        package_name = _dependency_package_name(plan, step)
+        if not package_name:
+            raise ValueError(
+                "FILE_UPLOAD 步骤依赖 MATRIX_PULL 未产生 package_name，无法执行上传"
+            )
+        action_parameters["package_name"] = package_name
     payload = {
         "system_name": params.get("system_name") or plan.system_name,
         "service_name": params.get("service_name") or plan.service_name,
         "targets": params.get("targets") or plan.targets or [],
-        "action_parameters": dict(params.get("action_parameters") or {}),
+        "action_parameters": action_parameters,
     }
     approval = SimpleNamespace(approved_by=plan.approved_by or "system")
     return ApprovalExecutor(db)._execute_file_upload(approval, payload)

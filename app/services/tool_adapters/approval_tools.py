@@ -452,18 +452,72 @@ def _freeze_file_upload_parameters(raw_parameters: dict, db, *, require_package_
     return action_parameters, filename, package_sha256, package_size_bytes, remote_path
 
 
+def _steps_fed_by_matrix_pull(steps: list[dict]) -> set[str]:
+    """返回依赖链上存在 MATRIX_PULL 步骤的 step_key 集合。
+
+    这些步骤的包来自审批后才执行的 MATRIX_PULL 入库，创建计划时包尚不存在，
+    不能冻结其 SHA256/大小，需延迟到执行时从前置步骤结果回填。
+    """
+    matrix_keys = {
+        step.get("step_key")
+        for step in steps
+        if str(step.get("action_type") or "").strip() == "MATRIX_PULL"
+    }
+    fed: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for step in steps:
+            key = step.get("step_key")
+            if key in fed:
+                continue
+            deps = [d for d in (step.get("dependencies") or [])]
+            if any(d in matrix_keys or d in fed for d in deps):
+                fed.add(key)
+                changed = True
+    return fed
+
+
+def _defer_matrix_pull_fed_upload(raw_parameters: dict) -> dict:
+    """为依赖 MATRIX_PULL 的 FILE_UPLOAD 步骤做仅静态字段冻结。
+
+    包名、SHA256、大小在审批执行后由 MATRIX_PULL 结果回填，这里只校验并保留
+    远端路径等与包无关的静态字段，标记 defer_package_from_dependency 供执行器识别。
+    """
+    remote_path = _remote_file_path(raw_parameters.get("remote_path"))
+    overwrite = bool(raw_parameters.get("overwrite", False))
+    confirm_path = str(raw_parameters.get("confirm_path") or "")
+    if overwrite and confirm_path != remote_path:
+        raise HTTPException(
+            status_code=400, detail="Overwriting requires confirm_path equal to remote_path"
+        )
+    deferred = {
+        "remote_path": remote_path,
+        "overwrite": overwrite,
+        "defer_package_from_dependency": True,
+    }
+    if confirm_path:
+        deferred["confirm_path"] = confirm_path
+    return deferred
+
+
 def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
     frozen_steps = []
+    fed_by_matrix = _steps_fed_by_matrix_pull(steps)
     for raw_step in steps:
         step = dict(raw_step)
         if str(step.get("action_type") or "").strip() == "FILE_UPLOAD":
             parameters = dict(step.get("parameters") or {})
-            action_parameters, _, _, _, _ = _freeze_file_upload_parameters(
-                parameters.get("action_parameters") or {},
-                db,
-                require_package_name=True,
-            )
-            parameters["action_parameters"] = action_parameters
+            action_parameters = dict(parameters.get("action_parameters") or {})
+            if step.get("step_key") in fed_by_matrix and not action_parameters.get("package_name"):
+                parameters["action_parameters"] = _defer_matrix_pull_fed_upload(action_parameters)
+            else:
+                action_parameters, _, _, _, _ = _freeze_file_upload_parameters(
+                    action_parameters,
+                    db,
+                    require_package_name=True,
+                )
+                parameters["action_parameters"] = action_parameters
             step["parameters"] = parameters
         frozen_steps.append(step)
     return frozen_steps

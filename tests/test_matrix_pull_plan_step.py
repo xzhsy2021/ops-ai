@@ -207,6 +207,75 @@ def test_release_explicit_package_name_wins_over_backfill(db, monkeypatch):
     assert by_key["release"].result.get("package") == f"explicit-{_RUN_ID}.bin"
 
 
+# ── MATRIX_PULL → FILE_UPLOAD：创建时不冻结包，执行时回填 ──
+
+
+def _freeze(*steps):
+    from app.services.tool_adapters.approval_tools import _freeze_file_upload_plan_steps
+
+    return _freeze_file_upload_plan_steps(list(steps), db=None)
+
+
+def test_matrix_pull_fed_file_upload_defers_freeze():
+    """包来自 MATRIX_PULL 的 FILE_UPLOAD 步骤在创建时不冻结包（不要求包已存在）。"""
+    frozen = _freeze(
+        {"step_key": "pull", "action_type": "MATRIX_PULL",
+         "parameters": {"room_id": "!r:x"}, "dependencies": []},
+        {"step_key": "upload", "action_type": "FILE_UPLOAD",
+         "parameters": {"action_parameters": {"remote_path": "/opt/pkg.tar.gz"}},
+         "dependencies": ["pull"]},
+    )
+    upload = next(s for s in frozen if s["step_key"] == "upload")
+    ap = upload["parameters"]["action_parameters"]
+    assert ap["defer_package_from_dependency"] is True
+    assert ap["remote_path"] == "/opt/pkg.tar.gz"
+    assert "package_name" not in ap
+    assert "expected_sha256" not in ap
+    assert "expected_size_bytes" not in ap
+
+
+def test_standalone_file_upload_still_demands_package():
+    """不依赖 MATRIX_PULL 的 FILE_UPLOAD 步骤仍要求引用已存在包并冻结校验。"""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
+        _freeze(
+            {"step_key": "up", "action_type": "FILE_UPLOAD",
+             "parameters": {"action_parameters": {"remote_path": "/tmp/x"}},
+             "dependencies": []},
+        )
+
+
+def test_pull_then_file_upload_resolves_package_from_dependency(db, monkeypatch):
+    """执行时 FILE_UPLOAD 从前置 MATRIX_PULL 结果回填 package_name 并上传。"""
+    import app.services.tool_adapters.matrix_tools as mt
+    from app.services.approval_executor import ApprovalExecutor
+
+    captured = {}
+
+    def fake_upload(self, approval, payload):
+        captured["payload"] = payload
+        return {"action": "FILE_UPLOAD", "ok": True, "message": "done"}
+
+    monkeypatch.setattr(mt, "pull_matrix_attachment_core",
+                        lambda db_, **kwargs: {"package_name": f"pulled-{_RUN_ID}.tar.gz", "sha256": "e" * 64})
+    monkeypatch.setattr(ApprovalExecutor, "_execute_file_upload", fake_upload)
+
+    steps = [
+        dict(_MATRIX_STEPS[0]),
+        {"step_key": "upload", "action_type": "FILE_UPLOAD",
+         "parameters": {"action_parameters": {"remote_path": "/opt/pkg.tar.gz", "defer_package_from_dependency": True}},
+         "dependencies": ["pull"]},
+    ]
+    plan = _prepare_approved(db, "pull-upload", steps)
+    result = PlanExecutor(db).execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    by_key = {s.step_key: s for s in result.steps}
+    assert by_key["upload"].status == "SUCCEEDED"
+    assert captured["payload"]["action_parameters"]["package_name"] == f"pulled-{_RUN_ID}.tar.gz"
+
+
 # ── 审批详情展示 ──
 
 

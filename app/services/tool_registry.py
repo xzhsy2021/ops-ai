@@ -237,6 +237,7 @@ DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.get_connection",
     "ops.list_ssh_keys",
     "ops.get_ssh_key",
+    "ops.routing.resolve_message_target",
 })
 
 

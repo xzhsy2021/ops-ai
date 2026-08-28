@@ -238,6 +238,12 @@ DAILY_OPS_TOOL_NAMES = frozenset({
     "ops.list_ssh_keys",
     "ops.get_ssh_key",
     "ops.routing.resolve_message_target",
+    # 只读查询 / 与既有白名单工具同类的日常接口补充（保持 daily_ops 精简 ≤80）：
+    "ops.wait_job",
+    "ops.inspection.run_security_daily",
+    "ops.log.find_patterns",
+    "ops.security_report.summarize",
+    "ops.security_report.get_daily_report",
 })
 
 

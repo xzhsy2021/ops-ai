@@ -20,6 +20,38 @@ logger = logging.getLogger(__name__)
 
 sftp_router = APIRouter(prefix="/api/v2/servers", tags=["SFTP文件"])
 
+_UTF8_REPLACEMENT_LOCK = False
+
+
+def _apply_tolerant_utf8_decode_patch(force: bool = False) -> None:
+    """Paramiko 4.0 将文件名解码改为严格 UTF-8（`util.u` → `s.decode('utf-8')`）。
+
+    当远程目录含非 UTF-8（如 GBK/GB18030 中文）文件名时，`listdir_attr` 内
+    `Message.get_text()` 直接抛 UnicodeDecodeError，导致“切换目录/列目录”报
+    `'utf-8' codec can't decode byte 0xe8 ...`。旧版 Paramiko 对这类字节使用
+    errors='replace'（乱码名显示为 �），本模块恢复该宽容行为——只影响 SFTP
+    字符串字段（文件名/path/错误文本）的解码，SSH 协议帧走 get_binary 不受影响。
+
+    函数可重复调用且幂等；测试可用 force 强制重打。
+    """
+    global _UTF8_REPLACEMENT_LOCK
+    if _UTF8_REPLACEMENT_LOCK and not force:
+        return
+    import paramiko.message as _pm
+
+    def _tolerant_u(s, encoding="utf8"):
+        if isinstance(s, bytes):
+            return s.decode(encoding, errors="replace")
+        if isinstance(s, str):
+            return s
+        raise TypeError(f"Expected unicode or bytes, got {type(s)}")
+
+    _pm.u = _tolerant_u
+    _UTF8_REPLACEMENT_LOCK = True
+
+
+_apply_tolerant_utf8_decode_patch()
+
 _MAX_FILE_SIZE = 200 * 1024 * 1024
 _MAX_TEXT_PREVIEW = 100 * 1024
 _MAX_TAIL_BYTES = 512 * 1024
@@ -182,6 +214,21 @@ def file_list(request: Request, name: str, path: str = "/", limit: int = 500, of
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     except PermissionError:
         raise HTTPException(status_code=403, detail=f"Permission denied: {path}")
+    except UnicodeDecodeError as e:
+        # 双保险：宽容解码补丁通常已生效；此处兜底非 UTF-8 文件名导致的解码失败，
+        # 返回空列表 + 提示，而不是 500。（原行为直接把该异常抛给前端）
+        logger.warning("SFTP listdir decode error at %s: %s", path, e)
+        return api_response(data={
+            "path": path,
+            "items": [],
+            "count": 0,
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "has_more": False,
+            "allowed_roots": _server_allowed_roots(srv),
+            "decode_warning": f"目录含无法按 UTF-8 解码的文件名，已跳过显示。原始字节错误：{str(e)}",
+        })
     except HTTPException:
         raise
     except Exception as e:

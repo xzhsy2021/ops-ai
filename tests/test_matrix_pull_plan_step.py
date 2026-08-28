@@ -130,6 +130,22 @@ def _prepare_approved(db, suffix, steps):
     return consumed
 
 
+def _release_scope_lock():
+    """模拟部署 worker 消费完成后释放内存锁。
+
+    execute_release 现在会入队 DeployTask 并获取部署锁；这些异步入队的用例里
+    worker 不会同步消费，锁会跨用例残留在同一进程内。结束时显式释放，避免
+    后续同 scope 发布用例因内存锁冲突而误失败。
+    """
+    from app.core.deploy_lock import DeployLock
+
+    for key in (
+        "payment:api:test",
+        "payment:api:test:server:s1",
+    ):
+        DeployLock.release(key)
+
+
 def test_matrix_pull_step_registered():
     assert "MATRIX_PULL" in STEP_HANDLERS
 
@@ -160,6 +176,7 @@ def test_pull_then_release_single_approval(db, monkeypatch):
     assert pulled_kwargs["minutes"] == 30
     # 计划步骤以审批人身份（actor_key）入库
     assert pulled_kwargs["uploaded_by"] == "matrix:default:@alice:matrix.org"
+    _release_scope_lock()
 
 
 def test_pull_failure_skips_release_and_fails_plan(db, monkeypatch):
@@ -205,6 +222,33 @@ def test_release_explicit_package_name_wins_over_backfill(db, monkeypatch):
     assert result.status == "SUCCEEDED"
     by_key = {s.step_key: s for s in result.steps}
     assert by_key["release"].result.get("package") == f"explicit-{_RUN_ID}.bin"
+    _release_scope_lock()
+
+
+def test_release_enqueues_deploy_task(db, monkeypatch):
+    """回归：execute_release 必须入队 DeployTask，否则部署 worker 无任务可拾取（任务卡在 pending）。"""
+    import app.services.tool_adapters.matrix_tools as mt
+
+    monkeypatch.setattr(
+        mt,
+        "pull_matrix_attachment_core",
+        lambda db_, **kwargs: {"package_name": f"enqueue-{_RUN_ID}.tar.gz", "sha256": "f" * 64, "size_bytes": 7},
+    )
+    plan = _prepare_approved(db, "enqueue-deploy", _MATRIX_STEPS)
+    result = PlanExecutor(db).execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    release = next(s for s in result.steps if s.step_key == "release")
+    deployment_id = (release.result or {}).get("deployment_id")
+    assert deployment_id
+    from sqlalchemy import text
+    row = db.execute(
+        text("SELECT id, deployment_id, status FROM deploy_tasks WHERE deployment_id = :d"),
+        {"d": deployment_id},
+    ).mappings().fetchone()
+    assert row is not None, "execute_release 必须创建 DeployTask，否则部署任务会永久卡在 pending"
+    assert row["deployment_id"] == deployment_id
+    _release_scope_lock()
 
 
 # ── MATRIX_PULL → FILE_UPLOAD：创建时不冻结包，执行时回填 ──

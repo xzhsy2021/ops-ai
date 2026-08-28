@@ -370,9 +370,25 @@ class ApprovalExecutor:
 
 
 def execute_release(db: Session, payload: dict, *, operator: str = "system", package_name: str = "") -> dict[str, Any]:
-    """执行发布操作：创建部署记录并触发后台部署 worker。"""
+    """执行发布操作：创建部署记录、入队 DeployTask 并由后台 worker 执行。
+
+    与 execute_deploy_plan 保持一致的入队链路（构建 request → 解析服务器名 →
+    派生步骤 → 获取发布锁 → 创建 DeployTask → 触发 worker），避免计划式发布
+    只建 deployment 记录却不入队导致任务卡在 pending。
+    """
+    import uuid
+    import json as _json
     from app.db.repository import DeploymentRepository
-    from app.api.deploy._shared import ensure_deploy_worker_running
+    from app.db import DeployTaskRepository
+    from app.api.deploy._shared import (
+        ensure_deploy_worker_running,
+        _default_release_steps,
+        _db_pipeline_steps,
+        _json_safe,
+    )
+    from app.deploy.locks import acquire_deployment_locks, release_deployment_locks
+    from app.deploy.schemas import DeployRequest
+    from app.config.servers import resolve_server
     from app.services.package_retention import ensure_releasable_artifact
 
     # 发版制品格式守卫：文件中心允许任意普通文件入库（如 Matrix 拉取），
@@ -380,10 +396,28 @@ def execute_release(db: Session, payload: dict, *, operator: str = "system", pac
     ensure_releasable_artifact(db, package_name)
 
     system_name = payload.get("system_name", "")
-    service_name = payload.get("service_name", "") or None
-    environment = payload.get("environment", "") or None
-    targets = payload.get("targets", [])
-    action_parameters = payload.get("action_parameters", {})
+    service_name = payload.get("service_name", "") or ""
+    environment = payload.get("environment", "") or ""
+    targets = [t for t in (payload.get("targets") or []) if t]
+    action_parameters = payload.get("action_parameters", {}) if isinstance(payload.get("action_parameters"), dict) else {}
+
+    # targets 可能是 host/IP，需解析成注册服务器名（部署 worker 仅按 name 匹配）。
+    # 解析失败的保留原值，让 worker 暴露明确的“服务器未找到”错误而非静默丢弃。
+    resolved_servers: list[str] = []
+    for target in targets:
+        srv = resolve_server(str(target), db=db)
+        resolved_servers.append(str(srv.get("name")) if srv else str(target))
+
+    req = DeployRequest(
+        system=system_name,
+        service=service_name,
+        environment=environment,
+        file_name=package_name or "",
+        version=package_name or "",
+        servers=resolved_servers,
+        pipeline_id=action_parameters.get("pipeline_id") or "",
+    )
+    steps = _db_pipeline_steps(db, req.pipeline_id) or _default_release_steps(req, db)
 
     repo = DeploymentRepository(db)
     deployment = repo.create(
@@ -391,82 +425,152 @@ def execute_release(db: Session, payload: dict, *, operator: str = "system", pac
         service=service_name,
         environment=environment,
         strategy="DIRECT",
-        servers=",".join(targets) if targets else "",
+        servers=",".join(resolved_servers) if resolved_servers else ",".join(targets),
         created_by=operator or "system",
         version=package_name or "",
         status="pending",
     )
     db.commit()
 
-    # 触发后台部署 worker（异步执行实际发布步骤）
+    task_id = uuid.uuid4().hex[:12]
+    try:
+        keys = acquire_deployment_locks(req, deployment.id, task_id, operator or "system", db)
+    except Exception:
+        DeploymentRepository(db).update_status(deployment.id, "failed", "Failed to acquire deployment locks")
+        raise
+
+    task_payload = {
+        "request": _json_safe(req.model_dump()),
+        "steps": _json_safe(steps),
+        "created_by": operator or "system",
+        "reason": action_parameters.get("reason")
+        or action_parameters.get("change_reason")
+        or payload.get("reason")
+        or "",
+        "precheck": {},
+    }
+    try:
+        DeployTaskRepository(db).create(
+            deployment_id=deployment.id,
+            task_id=task_id,
+            payload_json=_json.dumps(task_payload, ensure_ascii=False),
+            lock_key=",".join(keys),
+        )
+    except Exception:
+        release_deployment_locks(keys, db)
+        DeploymentRepository(db).update_status(deployment.id, "failed", "Failed to create deployment task")
+        raise
+    db.commit()
+
+    # 入队成功后才触发后台 worker
     try:
         ensure_deploy_worker_running()
     except Exception:
-        # worker 启动失败不阻塞审批完成，部署记录已在 DB 中
+        # worker 启动失败不阻塞审批完成，任务已在 DB 中排队
         pass
 
     return {
         "action": "RELEASE",
         "deployment_id": str(deployment.id),
+        "task_id": task_id,
         "system": system_name,
         "service": service_name,
         "environment": environment,
-        "servers": targets,
+        "servers": resolved_servers,
         "package": package_name,
-        "message": "部署记录已创建，部署 worker 将异步执行",
+        "message": "部署记录与发布任务已创建，部署 worker 将异步执行",
     }
 
 
 def execute_rollback(db: Session, payload: dict, *, operator: str = "system") -> dict[str, Any]:
-    """执行回滚操作：查找原部署记录并创建回滚部署记录。"""
+    """执行回滚操作：校验原部署后入队 rollback DeployTask 并由后台 worker 执行。
+
+    与 executions.py 的规范回滚保持一致——以【原部署】而非新建副本作为任务目标，
+    使用单把回滚锁，任务 payload 带 action=rollback 供 durable worker 识别；不再
+    只建 deployment 记录却不入队（否则 worker 无任务可拾取、回滚卡死）。
+    """
+    import uuid
+    import json as _json
     from app.db.repository import DeploymentRepository
-    from app.api.deploy._shared import ensure_deploy_worker_running
+    from app.db import DeployTaskRepository
+    from app.api.deploy._shared import (
+        ensure_deploy_worker_running,
+        _rollback_plan_for,
+        _rollback_precheck_for,
+        _merge_release_variables,
+    )
+    from app.deploy.locks import release_deployment_locks
+    from app.deploy.schemas import DeployRequest
+    from app.core.deploy_lock import DeployLock
 
     action_parameters = payload.get("action_parameters", {})
     deployment_id = action_parameters.get("deployment_id", "")
-    targets = payload.get("targets", [])
-
     if not deployment_id:
         raise ValueError("回滚操作需要指定 deployment_id")
 
     repo = DeploymentRepository(db)
     original = repo.get_by_id(deployment_id) if hasattr(repo, "get_by_id") else None
     if not original:
-        # 直接按原部署信息查找
         from app.db.models import Deployment
-        original = db.query(Deployment).filter(
-            Deployment.id == deployment_id
-        ).first()
-
+        original = db.query(Deployment).filter(Deployment.id == deployment_id).first()
     if not original:
         raise ValueError(f"原部署记录不存在: {deployment_id}")
+    if original.status != "success":
+        raise ValueError("只有成功状态的发布单可以自动回滚")
 
-    # 创建回滚部署记录
-    rollback = repo.create(
+    servers_for_check = [x.strip() for x in (original.servers or "").split(",") if x.strip()]
+    check_req = DeployRequest(
         system=original.system,
-        service=original.service,
-        environment=original.environment,
-        strategy="DIRECT",
-        servers=original.servers or ",".join(targets),
-        created_by=operator or "system",
+        service=original.service or "",
+        environment=original.environment or "",
         version=original.version or "",
-        status="pending",
+        servers=servers_for_check,
+        file_name=original.version or "",
+        variables={},
     )
-    db.commit()
+    check_variables = _merge_release_variables(check_req, db)
+    rollback_plan = _rollback_plan_for(
+        original.system, original.service or "", original.environment or "", servers_for_check, check_variables, db
+    )
+    check = _rollback_precheck_for(original, rollback_plan, db)
+    if check.get("blockers"):
+        raise ValueError("; ".join(check.get("blockers") or []))
 
+    lock_key = f"{original.system}:{original.service or 'default'}:rollback"
+    if not DeployLock.acquire(lock_key):
+        raise ValueError("同一服务已有回滚任务正在执行")
+
+    task_id = uuid.uuid4().hex[:12]
+    payload_json = _json.dumps({"action": "rollback", "lock_key": lock_key}, ensure_ascii=False)
+    try:
+        DeployTaskRepository(db).create(
+            deployment_id=original.id,
+            task_id=task_id,
+            payload_json=payload_json,
+            lock_key=lock_key,
+        )
+        db.commit()
+    except Exception:
+        release_deployment_locks([lock_key], db)
+        raise
+
+    # 入队成功后才触发后台 worker
     try:
         ensure_deploy_worker_running()
     except Exception:
+        # worker 启动失败不阻塞审批完成，任务已在 DB 中排队
         pass
 
     return {
         "action": "ROLLBACK",
-        "rollback_deployment_id": str(rollback.id),
+        "rollback_deployment_id": str(original.id),
         "original_deployment_id": deployment_id,
+        "task_id": task_id,
         "system": original.system,
+        "service": original.service,
         "environment": original.environment,
-        "targets": targets,
-        "message": "回滚部署记录已创建，部署 worker 将异步执行",
+        "servers": servers_for_check,
+        "message": "回滚任务已入队，部署 worker 将异步执行",
     }
 
 

@@ -292,6 +292,48 @@ def test_shared_execute_rollback_requires_deployment_id(db):
         execute_rollback(db, {"targets": ["s1"], "action_parameters": {}}, operator="admin")
 
 
+def test_execute_rollback_enqueues_rollback_task(db, monkeypatch):
+    """回归：execute_rollback 必须入队 action=rollback 的 DeployTask，否则回滚卡在 pending。"""
+    import json
+    from app.services.approval_executor import execute_rollback
+    from app.db.models import Deployment
+    from app.core.deploy_lock import DeployLock
+    from sqlalchemy import text
+
+    dep = Deployment(
+        id="rb-ori-1", system="svc-a", service="svc-b", environment="test",
+        servers="s1", version="v1", status="success", created_by="admin",
+    )
+    db.add(dep)
+    db.commit()
+
+    # 走安全回滚路径：回滚方案 safe、预检无阻塞、worker 不真的启动
+    monkeypatch.setattr("app.api.deploy._shared._rollback_precheck_for",
+                        lambda deployment, plan, db: {"blockers": [], "warnings": []})
+    monkeypatch.setattr("app.api.deploy._shared._rollback_plan_for",
+                        lambda *a, **k: {"mode": "script", "safe": True, "command": "cd /x && ./rollback.sh", "servers": ["s1"]})
+    monkeypatch.setattr("app.api.deploy._shared._merge_release_variables", lambda r, db: {})
+    monkeypatch.setattr("app.api.deploy._shared.ensure_deploy_worker_running", lambda: None)
+
+    result = execute_rollback(
+        db,
+        {"targets": ["s1"], "action_parameters": {"deployment_id": "rb-ori-1"}},
+        operator="admin",
+    )
+
+    row = db.execute(
+        text("SELECT id, deployment_id, lock_key, payload_json FROM deploy_tasks WHERE deployment_id='rb-ori-1'")
+    ).mappings().fetchone()
+    assert row is not None, "execute_rollback 必须创建回滚 DeployTask"
+    assert row["deployment_id"] == "rb-ori-1"
+    assert json.loads(row["payload_json"]).get("action") == "rollback"
+    assert row["lock_key"] == "svc-a:svc-b:rollback"
+    assert result["rollback_deployment_id"] == "rb-ori-1"
+
+    # 释放回滚内存锁，避免污染同进程后续用例
+    DeployLock.release("svc-a:svc-b:rollback")
+
+
 def test_shared_execute_dml_requires_sql(db):
     """共享 execute_dml 缺少 SQL 时抛错。"""
     from app.services.approval_executor import execute_dml

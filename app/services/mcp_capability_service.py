@@ -48,11 +48,16 @@ def _tools_payload_etag(payload: Dict[str, Any]) -> str:
         return ""
 
 
+# MCP tools/list 默认单页容量：ai_full 全量工具约 120 个，设 200 确保一次性全部
+# 返回，避免按字母排序落在分页边界上的工具（如 ops.routing.resolve_message_target）被截断。
+MCP_TOOLS_LIST_DEFAULT_LIMIT = 200
+
+
 def _tools_list_profile(mcp_tools_list_params: Dict[str, Any]) -> tuple:
     return (
         str(mcp_tools_list_params.get("profile") or "ai_full"),
         str(mcp_tools_list_params.get("category") or ""),
-        int(mcp_tools_list_params.get("limit") or 100),
+        int(mcp_tools_list_params.get("limit") or MCP_TOOLS_LIST_DEFAULT_LIMIT),
         int(mcp_tools_list_params.get("cursor") or 0),
         hashlib.sha256(
             json.dumps(list(MCP_TOOL_DESCRIPTION_OVERRIDES.items()), sort_keys=True).encode("utf-8")
@@ -376,9 +381,9 @@ def mcp_tools_list(db, ctx, params: Dict[str, Any] | None = None, description_ov
 
     register_builtin_tools()
     try:
-        limit = int(params.get("limit") or 100)
+        limit = int(params.get("limit") or MCP_TOOLS_LIST_DEFAULT_LIMIT)
     except Exception:
-        limit = 100
+        limit = MCP_TOOLS_LIST_DEFAULT_LIMIT
     try:
         cursor = int(params.get("cursor") or 0)
     except Exception:

@@ -80,7 +80,6 @@ def test_message_context_rejects_unsupported_channel(channel):
         "conversation_id",
         "message_id",
         "sender_id",
-        "content_sha256",
     ],
 )
 def test_message_context_rejects_missing_or_blank_stable_fields(field):
@@ -93,6 +92,22 @@ def test_message_context_rejects_missing_or_blank_stable_fields(field):
     blank[field] = "  "
     with pytest.raises(ValueError, match=field):
         MessageContext.from_dict(blank)
+
+
+def test_message_context_allows_missing_sha256_as_unbound_placeholder():
+    """缺 content_sha256 时以 UNBOUND 占位构造（resolve 工具自动补算路径）。
+
+    2026-09-01 契约变化：agent 无法可靠本地计算消息摘要（zeroclaw 发版
+    卡断），OPS 侧 resolve/prepare 改为自动补算或从票据反填。
+    """
+    raw = _message_context()
+    raw.pop("content_sha256")
+    ctx = MessageContext.from_dict(raw)
+    assert ctx.content_sha256 == "0" * 64
+
+    blank = _message_context()
+    blank["content_sha256"] = "  "
+    assert MessageContext.from_dict(blank).content_sha256 == "0" * 64
 
 
 @pytest.mark.parametrize(
@@ -211,14 +226,15 @@ def test_message_context_schema_is_closed_and_reusable():
     assert SUPPORTED_CHANNELS == frozenset({"matrix", "wechat", "telegram"})
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
+    # content_sha256 可省（resolve 自动补算 / prepare 从票据反填，2026-09-01）
     assert schema["required"] == [
         "channel",
         "channel_account_id",
         "conversation_id",
         "message_id",
         "sender_id",
-        "content_sha256",
     ]
+    assert "content_sha256" in schema["properties"]
     assert set(schema["properties"]["channel"]["enum"]) == SUPPORTED_CHANNELS
     account_schema = schema["properties"]["channel_account_id"]
     assert account_schema["pattern"] == "^[A-Za-z0-9._-]{1,128}$"

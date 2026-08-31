@@ -11,13 +11,14 @@ from typing import Any, Dict
 from fastapi import HTTPException
 
 from app.services.tool_registry import registry
-from app.services.message_context import MessageContext, message_context_schema, normalize_message_context
+from app.services.message_context import MessageContext, is_unbound_content_sha256, message_context_schema, normalize_message_context
 from app.services.tool_token import normalize_approver_identities
 from app.services.qclaw_routing import (
     resolve_message_target,
     issue_ticket,
     verify_ticket,
     compute_routing_revision,
+    _decode_ticket_payload,
     _extract_routing,
     _extract_approvers,
     _extract_rooms,
@@ -210,16 +211,27 @@ def routing_resolve_message_target(args, ctx, db):
                     "message_context cannot be combined with legacy Matrix fields"
                 )
             message_context = normalize_message_context(args["message_context"])
+            # 缺 content_sha256（或占位值）时自动按消息原文计算：
+            # 票据绑定的摘要即 OPS 实际路由的消息文本，agent 无需本地预计算
+            # SHA-256（多端 hex 大小写/编码差异是常见阻断源）。
+            if is_unbound_content_sha256(message_context.content_sha256):
+                message_context = MessageContext(
+                    channel=message_context.channel,
+                    channel_account_id=message_context.channel_account_id,
+                    conversation_id=message_context.conversation_id,
+                    message_id=message_context.message_id,
+                    sender_id=message_context.sender_id,
+                    content_sha256=hashlib.sha256(
+                        message_text.encode("utf-8")
+                    ).hexdigest(),
+                )
         else:
             legacy_context = {
                 key: args[key]
                 for key in legacy_fields
                 if key in args
             }
-            # 未显式传 content_sha256 时自动从消息原文计算：
-            # 票据绑定的摘要即 OPS 实际路由的消息文本，agent 无需本地预计算
-            # SHA-256（多端实现差异 / hex 大小写问题是常见阻断源）。
-            if "message_context" not in args and not legacy_context.get("content_sha256"):
+            if not legacy_context.get("content_sha256"):
                 legacy_context["content_sha256"] = hashlib.sha256(
                     message_text.encode("utf-8")
                 ).hexdigest()
@@ -465,6 +477,28 @@ def _validated_prepare_ticket(args, ctx):
     if not routing_ticket:
         raise HTTPException(status_code=400, detail="routing_ticket is required")
 
+    # 缺 content_sha256（占位值）时从签名票据 payload 反填：摘要来自服务端
+    # 签发的票据（比信任调用方传值更安全），票据校验随后仍按完整上下文硬比对。
+    if is_unbound_content_sha256(context.content_sha256):
+        ticket_payload = _decode_ticket_payload(routing_ticket)
+        ticket_context = (ticket_payload or {}).get("message_context") or {}
+        bound_digest = str(ticket_context.get("content_sha256") or "").strip()
+        if not bound_digest or is_unbound_content_sha256(bound_digest):
+            raise HTTPException(
+                status_code=400,
+                detail="message_context missing content_sha256 and routing ticket "
+                "does not carry a bound digest; call ops.routing.resolve_message_target "
+                "first and pass its returned message_context",
+            )
+        context = MessageContext(
+            channel=context.channel,
+            channel_account_id=context.channel_account_id,
+            conversation_id=context.conversation_id,
+            message_id=context.message_id,
+            sender_id=context.sender_id,
+            content_sha256=bound_digest,
+        )
+
     try:
         revision = compute_routing_revision(_routing_systems())
         # revision 仅作信息返回（routing_config_revision），不再作为票据有效性的
@@ -474,8 +508,7 @@ def _validated_prepare_ticket(args, ctx):
         if not expected_service_name:
             # 调用方未显式传服务名时，读取票据自身绑定的服务名作为期望值：
             # 服务级 ticket（如 crypto-trader-web）必须能被 prepare_plan 接受，
-            # 而不是与 None 硬比较失败。
-            from app.services.qclaw_routing import _decode_ticket_payload
+            # 而不是与 None 硬比较失败。（_decode_ticket_payload 已模块级导入）
             ticket_payload = _decode_ticket_payload(routing_ticket)
             if isinstance(ticket_payload, dict) and ticket_payload.get("service_name"):
                 expected_service_name = ticket_payload.get("service_name")

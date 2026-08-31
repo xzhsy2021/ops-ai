@@ -87,3 +87,94 @@ def test_resolve_explicit_content_sha256_still_wins(monkeypatch):
         None,
     )
     assert result["message_context"]["content_sha256"] == explicit
+
+
+def test_resolve_autocomputes_when_message_context_omits_sha256(monkeypatch):
+    """message_context 路径同样免 sha：缺 content_sha256 时自动按原文补算。
+
+    zeroclaw 实际场景（2026-09-01 卡断复现）：它按六字段 message_context
+    调用但无法提供摘要。修复后 resolve 应自动补算并签发票据。
+    """
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: _systems_kw([_identity("matrix", "@ops:example.org", account="default")]))
+    message_text = "智能助手AIbot 量化测试环境 使用附件 创建前端发版审批工单 使用ops能力操作"
+    result = approval_tools.routing_resolve_message_target(
+        {
+            "message_text": message_text,
+            "message_context": {
+                "channel": "matrix",
+                "channel_account_id": "default",
+                "conversation_id": "!room:hubtel.xyz",
+                "message_id": "$evt:hubtel.xyz",
+                "sender_id": "@jack.han:hubtel.xyz",
+                # 故意缺 content_sha256
+            },
+        },
+        _ctx(),
+        None,
+    )
+    expected = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+    assert result["outcome"] == "RESOLVED"
+    assert result["message_context"]["content_sha256"] == expected
+    assert result["ticket"]
+
+
+def test_prepare_plan_backfills_sha256_from_signed_ticket(monkeypatch, tmp_path):
+    """prepare_plan 消费端：缺 sha 的 context 从签名票据反填真实摘要。
+
+    agent 把 resolve 输出的 message_context 拷贝时丢掉摘要字段也能通过——
+    摘要以服务端签发票据为准（比信任调用方更安全），票据校验仍按完整
+    上下文硬比对。
+    """
+    from app.db.base import Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: _systems_kw([_identity("matrix", "@ops:example.org", account="default")]))
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools._routing_systems",
+        lambda: list(_systems_kw([_identity("matrix", "@ops:example.org", account="default")]).values()),
+    )
+    message_text = "智能助手AIbot 量化测试环境 部署"
+    resolved = approval_tools.routing_resolve_message_target(
+        {
+            "message_text": message_text,
+            "room_id": "!room:hubtel.xyz",
+            "event_id": "$evt:hubtel.xyz",
+            "sender_matrix_id": "@jack.han:hubtel.xyz",
+        },
+        _ctx(),
+        None,
+    )
+    assert resolved["ticket"]
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        # 丢失 content_sha256 的 message_context（模拟 agent 拷贝丢失）
+        ctx_dict = dict(resolved["message_context"])
+        ctx_dict.pop("content_sha256")
+        prepared = approval_tools.approval_prepare_plan(
+            args={
+                "message_context": ctx_dict,
+                "routing_ticket": resolved["ticket"],
+                "system_name": resolved["system_name"],
+                "service_name": resolved["service_name"],
+                "environment": "test",
+                "steps": [
+                    {
+                        "step_key": "health",
+                        "action_type": "HEALTH_CHECK",
+                        "parameters": {"targets": ["cc-test2"]},
+                    },
+                ],
+                "policy": {"continue_on_error": False},
+            },
+            ctx=_ctx(),
+            db=db,
+        )
+        assert prepared["plan_id"]
+        assert prepared["status"] == "PENDING_APPROVAL"
+    finally:
+        db.close()

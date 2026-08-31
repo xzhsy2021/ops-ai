@@ -23,6 +23,15 @@ _CHANNEL_ACCOUNT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"
 _CHANNEL_ACCOUNT_ID_RE = re.compile(_CHANNEL_ACCOUNT_ID_PATTERN)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
+# 未绑定消息摘要的占位值：ops.routing.resolve_message_target 允许调用方
+# 省略 content_sha256（由 OPS 按消息原文自动计算），构造 MessageContext 时
+# 先以占位值通过校验，随后由工具层覆写为真实摘要再签发票据。
+UNBOUND_CONTENT_SHA256 = "0" * 64
+
+
+def is_unbound_content_sha256(value: Any) -> bool:
+    return isinstance(value, str) and value.lower() == UNBOUND_CONTENT_SHA256
+
 
 def _required_text(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -96,8 +105,13 @@ class MessageContext:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "MessageContext":
+        data = dict(value)
+        # content_sha256 可省或空白（resolve 工具自动补算路径）：先以占位值
+        # 构造，由调用方工具层覆写为真实摘要后使用。
+        if not str(data.get("content_sha256") or "").strip():
+            data["content_sha256"] = UNBOUND_CONTENT_SHA256
         data = _closed_mapping(
-            value,
+            data,
             required=frozenset(_MESSAGE_FIELDS),
             name="message_context",
         )
@@ -132,9 +146,12 @@ def message_context_schema() -> Dict[str, Any]:
             "content_sha256": {
                 "type": "string",
                 "pattern": "^[0-9a-fA-F]{64}$",
+                "description": "消息正文 SHA-256（hex）。ops.routing.resolve_message_target 未传时自动按消息原文计算；prepare_* 消费票据时必须回传 resolve 输出的完整 message_context",
             },
         },
-        "required": list(_MESSAGE_FIELDS),
+        # content_sha256 可省：resolve 工具会自动补算（避免 agent 端本地
+        # 计算易错）。prepare_* 消费端因票据绑定仍要求完整字段。
+        "required": [f for f in _MESSAGE_FIELDS if f != "content_sha256"],
         "additionalProperties": False,
     }
 
@@ -165,7 +182,7 @@ def normalize_message_context(value: Any) -> MessageContext:
             "legacy message_context cannot contain both request_event_id and event_id"
         )
     event_field = "request_event_id" if "request_event_id" in fields else "event_id"
-    required = {"room_id", event_field, "sender_matrix_id", "content_sha256"}
+    required = {"room_id", event_field, "sender_matrix_id"}
     missing = required - fields
     if missing:
         raise ValueError(
@@ -177,7 +194,7 @@ def normalize_message_context(value: Any) -> MessageContext:
         conversation_id=value["room_id"],
         message_id=value[event_field],
         sender_id=value["sender_matrix_id"],
-        content_sha256=value["content_sha256"],
+        content_sha256=value.get("content_sha256") or UNBOUND_CONTENT_SHA256,
     )
 
 

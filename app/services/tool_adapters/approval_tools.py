@@ -324,6 +324,100 @@ def _common_prepare_schema() -> dict:
     }
 
 
+# 动作类型 → 中文动词（reply_template 步骤摘要用，与 approval_phrase 保持一致）
+_STEP_VERBS = {
+    "RELEASE": "发布",
+    "SERVICE_CONTROL": "服务控制",
+    "HEALTH_CHECK": "健康检查",
+    "FILE_UPLOAD": "上传制品",
+    "ROLLBACK": "回滚",
+    "DML": "SQL变更",
+    "PACKAGE_CLEANUP": "包清理",
+    "MATRIX_PULL": "拉取附件",
+}
+
+
+def _approval_reply_template(
+    *,
+    kind: str,
+    status: str,
+    object_id: str,
+    short_code: str,
+    system_name: str,
+    service_name: str,
+    environment: str,
+    targets,
+    expires_at,
+    steps=None,
+    approvers=None,
+    package_size_bytes=None,
+    package_sha256: str = "",
+) -> str:
+    """生成固定格式的中文 Markdown 审批回执（Agent 直接转发，禁止自由发挥）。
+
+    责任分配：OPS 是格式的唯一事实源——结构化字段供 Agent 程序化消费，
+    reply_template 供 Agent 原样展示到房间（Matrix msgtype=m.text 可直接使用）。
+    单独的可复制审批行（```text 批准 <短码>```）在消息末尾。
+    """
+    from datetime import datetime, timezone, timedelta
+
+    def _fmt_expiry(value) -> str:
+        if not value:
+            return "-"
+        try:
+            dt = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        except ValueError:
+            return str(value)
+        beijing = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+        beijing = beijing.astimezone(timezone(timedelta(hours=8)))
+        return beijing.strftime("%Y-%m-%d %H:%M:%S") + "（北京时间）"
+
+    steps = steps or []
+    if steps:
+        step_line = " → ".join(
+            _STEP_VERBS.get(str(s.get("action_type") or s.get("action_type")).strip().upper()
+                            if isinstance(s, dict) else str(getattr(s, "action_type", "")),
+                            str(getattr(s, "action_type", "")) if not isinstance(s, dict) else "")
+            for s in steps
+        )
+    else:
+        step_line = ""
+
+    noun = "执行计划" if kind == "plan" else "审批工单"
+    lines = [
+        f"OPS 审批{noun}已创建，当前状态：`{status}`",
+        "",
+        f"- {('计划' if kind == 'plan' else '工单')} ID：`{object_id}`",
+        f"- 确认短语：`{short_code}`",
+    ]
+    if approvers:
+        lines.append(f"- 指定审批人：`{'、'.join(approvers)}`")
+    if service_name:
+        lines.append(f"- 服务：`{service_name}`")
+    if system_name:
+        lines.append(f"- 系统：`{system_name}`")
+    if environment:
+        lines.append(f"- 环境：`{environment}`")
+    if targets:
+        lines.append(f"- 目标：`{', '.join(list(targets))}`")
+    if step_line:
+        lines.append(f"- 步骤：{step_line}")
+    if package_size_bytes:
+        lines.append(f"- 包大小：`{int(package_size_bytes):,} bytes`")
+    if package_sha256:
+        lines.append(f"- SHA256：`{package_sha256}`")
+    lines.append(f"- 有效期至：`{_fmt_expiry(expires_at)}`")
+    lines += [
+        "",
+        "请指定审批人回复：",
+        "",
+        "```text",
+        f"批准 {short_code}",
+        "```",
+    ]
+    return "\n".join(lines)
+
+
 def _routing_systems() -> list[dict]:
     return [
         {**system, "name": system.get("name") or name}
@@ -530,7 +624,7 @@ def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
 @registry.register(
     name="ops.approval.prepare_service_control",
     title="准备服务控制审批",
-    description="为服务控制操作（重启/停止/启动/更新）创建不可变审批工单，返回一次性确认短语（如「批准服务控制 crypto-trader@test A3F9C2D1」）。qclaw 将短语展示在 Element 房间，授权用户回复该短语来审批。",
+    description="为服务控制操作（重启/停止/启动/更新）创建不可变审批工单，返回一次性确认短语与固定格式回执 reply_template。Agent 应把 reply_template 原样发送到房间（中文 Markdown + 可复制审批行「批准 <短语>」），不要自由改写。",
     scopes=["ops:read"],
     risk="low",
     category="approval_prepare",
@@ -592,6 +686,19 @@ def approval_prepare_service_control(args, ctx, db):
             for sender_id in approvers
         ],
     )
+    reply_template = _approval_reply_template(
+        kind="action",
+        status=approval.status,
+        object_id=approval.id,
+        short_code=short_code,
+        system_name=args["system_name"],
+        service_name=args.get("service_name") or "",
+        environment=args["environment"],
+        targets=args["targets"],
+        expires_at=approval.expires_at,
+        steps=[{"action_type": "SERVICE_CONTROL"}],
+        approvers=approvers,
+    )
     return {
         "approval_id": approval.id,
         "short_code": short_code,
@@ -602,6 +709,8 @@ def approval_prepare_service_control(args, ctx, db):
         "action_label": action_label,
         "targets": args["targets"],
         "authorized_approvers": approvers,
+        # 固定格式回执模板：Agent 原样转发到房间，不要自由改写
+        "reply_template": reply_template,
     }
 
 
@@ -923,7 +1032,7 @@ def _plan_steps_schema() -> dict:
 @registry.register(
     name="ops.approval.prepare_plan",
     title="准备消息级执行计划审批",
-    description="为一条 Element 消息的完整执行流程创建不可变执行计划，返回一次性确认短语（如「批准发布+健康检查 crypto-trader@test A3F9C2D1」——动词=计划动作，目标=系统@环境，末尾为内容指纹）。授权人批准一次后，计划内所有步骤按顺序自动执行。相同计划内容（plan_digest）的待审批计划幂等复用，不生成新短语。",
+    description="为一条 Element 消息的完整执行流程创建不可变执行计划，返回一次性确认短语与固定格式回执 reply_template。Agent 应把 reply_template 原样发送到房间（Matrix msgtype=m.text，中文 Markdown：计划ID/确认短语/审批人/服务/环境/目标/步骤/包大小/SHA256/有效期 + 可复制审批行「批准 <短语>」），不要自由改写、截断或重排。授权人批准一次后，计划内所有步骤按顺序自动执行。相同计划内容（plan_digest）的待审批计划幂等复用，不生成新短语。",
     scopes=["ops:read"],
     risk="low",
     category="approval_prepare",
@@ -1024,6 +1133,34 @@ def approval_prepare_plan(args, ctx, db):
         temporary_grant_id=temporary_grant_id,
     )
 
+    # 提取制品信息（FILE_UPLOAD 冻结参数；MATRIX_PULL 回填步骤无冻结值则缺省）
+    package_size_bytes = None
+    package_sha256 = ""
+    for s in plan.steps:
+        if str(s.action_type or "").strip() == "FILE_UPLOAD":
+            ap = (s.parameters or {}).get("action_parameters") or {}
+            if ap.get("expected_size_bytes"):
+                package_size_bytes = int(ap["expected_size_bytes"])
+            if ap.get("expected_sha256"):
+                package_sha256 = str(ap["expected_sha256"]).lower()
+            break
+
+    reply_template = _approval_reply_template(
+        kind="plan",
+        status=plan.status,
+        object_id=plan.id,
+        short_code=short_code,
+        system_name=plan.system_name,
+        service_name=plan.service_name,
+        environment=plan.environment,
+        targets=plan.targets,
+        expires_at=plan.expires_at,
+        steps=plan.steps,
+        approvers=approvers,
+        package_size_bytes=package_size_bytes,
+        package_sha256=package_sha256,
+    )
+
     return {
         "plan_id": plan.id,
         "short_code": short_code,
@@ -1034,6 +1171,8 @@ def approval_prepare_plan(args, ctx, db):
         "service_name": plan.service_name,
         "environment": plan.environment,
         "targets": plan.targets,
+        "package_size_bytes": package_size_bytes,
+        "package_sha256": package_sha256,
         "step_count": len(plan.steps),
         "temporary_grant_id": plan.temporary_grant_id,
         "steps": [
@@ -1047,6 +1186,9 @@ def approval_prepare_plan(args, ctx, db):
             for s in plan.steps
         ],
         "authorized_approvers": approvers,
+        # 固定格式回执模板：Agent 应原样发送到房间（Matrix msgtype=m.text），
+        # 不要自由改写/截断/重排；如需自定义展示，使用上面的结构化字段自组。
+        "reply_template": reply_template,
     }
 
 

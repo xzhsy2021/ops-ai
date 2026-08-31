@@ -277,7 +277,9 @@ def test_system_api_round_trips_structured_system_and_service_approvers(monkeypa
     response = asyncio.run(deploy_v2.get_system_v2("crypto-trader", request))["data"]
 
     assert response["message_routing"]["approvers"] == [updated]
-    assert response["services"][0]["template_variables"]["message_routing"]["approvers"] == [service_approver]
+    # 服务级 message_routing 已收敛到系统级（4ee754b）：服务只保留名称，
+    # 服务级路由不再往返保留。
+    assert "message_routing" not in response["services"][0].get("template_variables", {})
 
 
 def test_system_alias_collision_is_ambiguous_and_order_independent():
@@ -306,7 +308,7 @@ def test_verify_ticket_rejects_signed_non_object_payload(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("endpoint", ["system", "service"])
+@pytest.mark.parametrize("endpoint", ["system"])
 def test_routing_update_returns_500_when_save_fails(monkeypatch, endpoint):
     system = {
         "message_routing": {},

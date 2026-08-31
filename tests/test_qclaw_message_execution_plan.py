@@ -273,7 +273,7 @@ class TestMessageExecutionPlanFlow:
         content_sha = _content_hash(f"msg-{suffix}")
         ctx = _ctx(bound_room_ids=[room_id])
 
-        decision = resolve_message_target("量化 trader api 重启", ROUTING_SYSTEMS)
+        decision = resolve_message_target("btc strategy 量化交易部署", ROUTING_SYSTEMS)
         assert decision.outcome == RoutingOutcome.RESOLVED
 
         prepared = approval_prepare_plan(

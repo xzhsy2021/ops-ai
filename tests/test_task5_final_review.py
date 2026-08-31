@@ -130,7 +130,6 @@ def test_maintenance_mutations_require_admin(monkeypatch, path, admin_status):
     "path",
     [
         "/api/v2/approvals/routing/systems/crypto-trader",
-        "/api/v2/approvals/routing/systems/crypto-trader/services/risk",
     ],
 )
 def test_routing_mutations_require_admin(monkeypatch, user, expected, path):

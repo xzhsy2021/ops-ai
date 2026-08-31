@@ -157,7 +157,7 @@ def _enforce_system_room(message_context: MessageContext, system_name: str) -> N
 @registry.register(
     name="ops.routing.resolve_message_target",
     title="解析 QClaw 消息路由目标",
-    description="将 QClaw 渠道消息确定性路由到 OPS 系统/服务，并签发绑定完整消息上下文的路由票据。",
+    description="将 QClaw 渠道消息确定性路由到 OPS 系统/服务，并签发绑定完整消息上下文的路由票据。未显式传 content_sha256 时自动按消息原文（UTF-8）计算，调用方无需本地预计算。",
     scopes=["ops:read"],
     risk="low",
     category="routing",
@@ -187,7 +187,7 @@ def _enforce_system_room(message_context: MessageContext, system_name: str) -> N
             },
             "content_sha256": {
                 "type": "string",
-                "description": "消息内容的 SHA-256，用于绑定票据",
+                "description": "消息内容的 SHA-256（hex 64 位）。可选：未传时 OPS 自动按 message_text 计算",
             },
         },
         "required": ["message_text"],
@@ -216,6 +216,13 @@ def routing_resolve_message_target(args, ctx, db):
                 for key in legacy_fields
                 if key in args
             }
+            # 未显式传 content_sha256 时自动从消息原文计算：
+            # 票据绑定的摘要即 OPS 实际路由的消息文本，agent 无需本地预计算
+            # SHA-256（多端实现差异 / hex 大小写问题是常见阻断源）。
+            if "message_context" not in args and not legacy_context.get("content_sha256"):
+                legacy_context["content_sha256"] = hashlib.sha256(
+                    message_text.encode("utf-8")
+                ).hexdigest()
             message_context = normalize_message_context(legacy_context)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

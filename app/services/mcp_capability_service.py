@@ -245,7 +245,7 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.inspection.profile.run': 'Run batched server inspection using a saved profile. Requires the RUN INSPECTION confirmation phrase from profile.preview. High risk. 中文: 执行巡检方案/批量巡检/按方案巡检.',
 
     # ── QClaw Message Routing ──
-    'ops.routing.resolve_message_target': 'Deterministically route a QClaw channel message to an OPS system/service and issue a routing ticket bound to the full message context. 中文: 解析消息路由/消息路由目标/路由解析.',
+    'ops.routing.resolve_message_target': 'Deterministically route a QClaw channel message to an OPS system/service and issue a routing ticket bound to the full message context. content_sha256 is auto-computed from the message text (UTF-8) when omitted. 中文: 解析消息路由/消息路由目标/路由解析.',
 }
 
 

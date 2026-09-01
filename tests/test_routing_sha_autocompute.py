@@ -118,13 +118,41 @@ def test_resolve_autocomputes_when_message_context_omits_sha256(monkeypatch):
     assert result["ticket"]
 
 
-def test_prepare_plan_backfills_sha256_from_signed_ticket(monkeypatch, tmp_path):
-    """prepare_plan 消费端：缺 sha 的 context 从签名票据反填真实摘要。
+def test_resolve_ignores_garbage_digest_and_autocomputes(monkeypatch):
+    """调用方误把附件路径/文件名当 content_sha256 传（zeroclaw 实测案例）：
+    OPS 忽略非法值并自动按原文补算，不再 400 卡断。"""
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: _systems_kw([_identity("matrix", "@ops:example.org", account="default")]))
+    message_text = "智能助手AIbot 量化测试环境 使用附件 创建前端发版审批工单 使用ops能力操作"
+    garbage = [
+        "D:\\zeroclaw\\workspace\\matrix_files\\xxx_crypto-trader-web.tar.gz",
+        "crypto-trader-web.tar.gz",
+        "f94140bbd39cfd9f",  # 截断的包校验值
+        "sha256:f94140bb",  # 带前缀
+    ]
+    for bad in garbage:
+        result = approval_tools.routing_resolve_message_target(
+            {
+                "message_text": message_text,
+                "message_context": {
+                    "channel": "matrix",
+                    "channel_account_id": "default",
+                    "conversation_id": "!room:hubtel.xyz",
+                    "message_id": "$evt:hubtel.xyz",
+                    "sender_id": "@jack.han:hubtel.xyz",
+                    "content_sha256": bad,  # 垃圾值
+                },
+            },
+            _ctx(),
+            None,
+        )
+        expected = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+        assert result["outcome"] == "RESOLVED", f"garbage digest broke resolve: {bad}"
+        assert result["message_context"]["content_sha256"] == expected
+        assert result["ticket"]
 
-    agent 把 resolve 输出的 message_context 拷贝时丢掉摘要字段也能通过——
-    摘要以服务端签发票据为准（比信任调用方更安全），票据校验仍按完整
-    上下文硬比对。
-    """
+
+def test_prepare_plan_ignores_garbage_digest_and_backfills_from_ticket(monkeypatch):
+    """prepare_plan 收到垃圾摘要同样忽略并从票据反填（端到端不卡断）。"""
     from app.db.base import Base
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
@@ -152,7 +180,65 @@ def test_prepare_plan_backfills_sha256_from_signed_ticket(monkeypatch, tmp_path)
     Session = sessionmaker(bind=engine)
     db = Session()
     try:
-        # 丢失 content_sha256 的 message_context（模拟 agent 拷贝丢失）
+        # 消息里带垃圾摘要（附件路径标识），模拟 zeroclaw 误传场景
+        ctx_dict = dict(resolved["message_context"])
+        ctx_dict["content_sha256"] = "D:\\zeroclaw\\workspace\\matrix_files\\abc.tar.gz"
+        prepared = approval_tools.approval_prepare_plan(
+            args={
+                "message_context": ctx_dict,
+                "routing_ticket": resolved["ticket"],
+                "system_name": resolved["system_name"],
+                "service_name": resolved["service_name"],
+                "environment": "test",
+                "steps": [
+                    {
+                        "step_key": "health",
+                        "action_type": "HEALTH_CHECK",
+                        "parameters": {"targets": ["cc-test2"]},
+                    },
+                ],
+                "policy": {"continue_on_error": False},
+            },
+            ctx=_ctx(),
+            db=db,
+        )
+        assert prepared["plan_id"]
+        assert prepared["status"] == "PENDING_APPROVAL"
+    finally:
+        db.close()
+
+
+def test_prepare_plan_backfills_missing_sha256_from_signed_ticket(monkeypatch):
+    """prepare_plan 消费端：缺 sha 的 context 从签名票据反填真实摘要。
+
+    agent 拷贝 resolve 输出时丢掉摘要字段也能通过——摘要以服务端签发票据
+    为准（比信任调用方更安全），票据校验仍按完整上下文硬比对。
+    """
+    from app.db.base import Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: _systems_kw([_identity("matrix", "@ops:example.org", account="default")]))
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools._routing_systems",
+        lambda: list(_systems_kw([_identity("matrix", "@ops:example.org", account="default")]).values()),
+    )
+    resolved = approval_tools.routing_resolve_message_target(
+        {
+            "message_text": "智能助手AIbot 量化测试环境 部署",
+            "room_id": "!room:hubtel.xyz",
+            "event_id": "$evt:hubtel.xyz",
+            "sender_matrix_id": "@jack.han:hubtel.xyz",
+        },
+        _ctx(),
+        None,
+    )
+    assert resolved["ticket"]
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
         ctx_dict = dict(resolved["message_context"])
         ctx_dict.pop("content_sha256")
         prepared = approval_tools.approval_prepare_plan(

@@ -33,6 +33,11 @@ def is_unbound_content_sha256(value: Any) -> bool:
     return isinstance(value, str) and value.lower() == UNBOUND_CONTENT_SHA256
 
 
+def is_valid_content_sha256(value: Any) -> bool:
+    """合法的消息摘要：64 位十六进制（大小写均可，忽略首尾空白）。"""
+    return isinstance(value, str) and bool(_SHA256_RE.fullmatch(value.strip()))
+
+
 def _required_text(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-blank string")

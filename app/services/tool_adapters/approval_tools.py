@@ -11,7 +11,7 @@ from typing import Any, Dict
 from fastapi import HTTPException
 
 from app.services.tool_registry import registry
-from app.services.message_context import MessageContext, is_unbound_content_sha256, message_context_schema, normalize_message_context
+from app.services.message_context import MessageContext, is_unbound_content_sha256, is_valid_content_sha256, message_context_schema, normalize_message_context
 from app.services.tool_token import normalize_approver_identities
 from app.services.qclaw_routing import (
     resolve_message_target,
@@ -210,7 +210,14 @@ def routing_resolve_message_target(args, ctx, db):
                 raise ValueError(
                     "message_context cannot be combined with legacy Matrix fields"
                 )
-            message_context = normalize_message_context(args["message_context"])
+            # 非法摘要先剔除再规范化：调用方可能误把附件路径/文件名/包校验值
+            # 当作 content_sha256 传入（zeroclaw 2026-09-01 实测案例），旧规则
+            # 下的这种请求不应被 400 卡断——忽略垃圾值，走自动补算。
+            raw_context = dict(args["message_context"])
+            raw_digest = str(raw_context.get("content_sha256") or "").strip()
+            if raw_digest and not is_valid_content_sha256(raw_digest):
+                raw_context.pop("content_sha256", None)
+            message_context = normalize_message_context(raw_context)
             # 缺 content_sha256（或占位值）时自动按消息原文计算：
             # 票据绑定的摘要即 OPS 实际路由的消息文本，agent 无需本地预计算
             # SHA-256（多端 hex 大小写/编码差异是常见阻断源）。
@@ -231,6 +238,10 @@ def routing_resolve_message_target(args, ctx, db):
                 for key in legacy_fields
                 if key in args
             }
+            # 同上：顶层兼容字段的垃圾摘要直接忽略，走自动补算
+            legacy_digest = str(legacy_context.get("content_sha256") or "").strip()
+            if legacy_digest and not is_valid_content_sha256(legacy_digest):
+                legacy_context.pop("content_sha256", None)
             if not legacy_context.get("content_sha256"):
                 legacy_context["content_sha256"] = hashlib.sha256(
                     message_text.encode("utf-8")
@@ -465,11 +476,18 @@ def _validated_prepare_ticket(args, ctx):
                 raise ValueError(
                     "message_context cannot be combined with legacy Matrix fields"
                 )
-            context = MessageContext.from_dict(args["message_context"])
+            # 非法摘要（附件路径/文件名等误传）剔除后再构造，走票据反填
+            raw_context = dict(args["message_context"])
+            raw_digest = str(raw_context.get("content_sha256") or "").strip()
+            if raw_digest and not is_valid_content_sha256(raw_digest):
+                raw_context.pop("content_sha256", None)
+            context = MessageContext.from_dict(raw_context)
         else:
-            context = normalize_message_context(
-                {key: args[key] for key in legacy_fields if key in args}
-            )
+            legacy_context = {key: args[key] for key in legacy_fields if key in args}
+            legacy_digest = str(legacy_context.get("content_sha256") or "").strip()
+            if legacy_digest and not is_valid_content_sha256(legacy_digest):
+                legacy_context.pop("content_sha256", None)
+            context = normalize_message_context(legacy_context)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -477,8 +495,9 @@ def _validated_prepare_ticket(args, ctx):
     if not routing_ticket:
         raise HTTPException(status_code=400, detail="routing_ticket is required")
 
-    # 缺 content_sha256（占位值）时从签名票据 payload 反填：摘要来自服务端
+    # 缺 content_sha256（或占位值）时从签名票据 payload 反填：摘要来自服务端
     # 签发的票据（比信任调用方传值更安全），票据校验随后仍按完整上下文硬比对。
+    # 非法摘要（路径/文件名误传）已在构造前剔除，同样落到这里走反填。
     if is_unbound_content_sha256(context.content_sha256):
         ticket_payload = _decode_ticket_payload(routing_ticket)
         ticket_context = (ticket_payload or {}).get("message_context") or {}

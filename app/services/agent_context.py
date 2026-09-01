@@ -116,10 +116,12 @@ LESSONS: list[dict[str, Any]] = [
 # ──────────────────────────────────────────────────────────────
 
 FLOW_GUIDES: dict[str, dict[str, Any]] = {
+FLOW_GUIDES: dict[str, dict[str, Any]] = {
     "frontend-release": {
         "flow_id": "frontend-release",
         "title": "前端发版（Matrix 附件）",
         "trigger": "同一消息内：附件（crypto-trader-web.tar.gz）+ @agent + 含'发版/前端/量化'关键词",
+        "verified": "2026-09-01 zeroclaw 元指令版端到端验证通过（完整链路：pack → flow guide → resolve → prepare_plan → 批准 → execute_plan → 上传 SHA 一致 + www.sh 执行成功）",
         "atomic": True,
         "steps": [
             {

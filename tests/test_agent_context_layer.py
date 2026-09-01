@@ -195,6 +195,15 @@ def test_flow_guide_listings_match_titles():
             assert step["n"] == i, (flow_id, step["n"])
 
 
+def test_frontend_release_flow_verified_end_to_end(env, ctx):
+    """前端发版流程经端到端验证（2026-09-01 zeroclaw 元指令版全链路成功），
+    verified 字段随 flow 进入 revision——流程定义任何变更（含验证状态）
+    都会改变 flow_revision，缓存协议自动传播。"""
+    r = _call(env, "ops.integration.get_flow_guide", {"flow_id": "frontend-release"}, ctx)
+    assert "2026-09-01" in r.get("verified", ""), "发版流程应标注端到端验证日期"
+    assert r["atomic"] is True
+
+
 # ──────────────────────────────────────────────────────────────
 # MCP annotations 映射（补充①）
 # ──────────────────────────────────────────────────────────────

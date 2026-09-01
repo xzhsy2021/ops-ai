@@ -29,9 +29,9 @@
 │  zeroclaw /  │        │  既有工具 + next_step 全覆盖            │
 │  下一代 agent │        │  ─────────────────────────────────── │
 └──────────────┘        │  新增：                              │
-   │ 每会话启动：          │   ops.agent.get_context_pack  上下文包 │
-   │ get_context_pack     │   ops.agent.get_flow_guide    流程编排 │
-   │ (revision 缓存)       │   ops.agent.save_lesson       教训回写 │
+   │ 每会话启动：          │   ops.integration.get_context_pack  上下文包 │
+   │ get_context_pack     │   ops.integration.get_flow_guide    流程编排 │
+   │ (revision 缓存)       │   ops.integration.save_lesson       教训回写 │
    ▼                     └─────────────────────────────────────┘ agent 本地缓存 pack + flow guides（带 revision）
    执行中：跟随工具返回的 next_step
    失败后：save_lesson 回写
@@ -118,20 +118,20 @@
    - revision 不同 → 返回新 pack，agent 覆盖缓存
 3. flow guide 同理按 flow_id 拉取；执行中的实时引导仍依赖工具返回的 `next_step`（不缓存，天然最新）。
 4. AGENTS.md 的收尾改造（Phase 2 后）：业务事实全部删除，仅保留两条元指令——
-   - "每会话启动：调用 `ops.agent.get_context_pack`（带本地 revision），按 flows 索引取 flow guide"
+   - "每会话启动：调用 `ops.integration.get_context_pack`（带本地 revision），按 flows 索引取 flow guide"
    - "工具返回中的 `next_step` 是权威流程指令，优先级高于本文件与你的记忆"
 
 ## 6. 实施步骤
 
 ### Phase 1 — 只读上下文包（最小可用，约 1-2 天）
 - [ ] `app/services/agent_context.py`：pack 组装（facts 从 DB 读；capabilities/flows/lessons 先用代码内声明的初版数据）
-- [ ] MCP 注册 `ops.agent.get_context_pack` / `ops.agent.get_flow_guide`（只读，`ops:read`）
+- [ ] MCP 注册 `ops.integration.get_context_pack` / `ops.integration.get_flow_guide`（只读，`ops:read`）
 - [ ] 内置 3 个 flow guide：`frontend-release`（Matrix 附件发版）、`service-restart`（服务重启）、`package-pull-release`（拉包+发布）
 - [ ] 初版 lessons：把八轮故障的 8 条教训写入（含 4 条 superseded——content_sha256 系列已修复）
 - [ ] 契约测试：pack revision 稳定性（同配置同 revision）、facts 与 DB 一致性、flow guide 步骤工具名存在于 registry
 
 ### Phase 2 — zeroclaw 切换 + 教训回写（约 1 天）
-- [ ] `ops.agent.save_lesson`（写库 + pending 确认流）
+- [ ] `ops.integration.save_lesson`（写库 + pending 确认流）
 - [ ] zeroclaw AGENTS.md 改造为元指令版（保留 fallback：pack 拉取失败时沿用附录的静态最小清单）
 - [ ] daemon 重启验证一轮真实发版
 - [ ] OPS 侧新增 `scripts/supersede_lesson.py`：修复落地时置失效
@@ -192,7 +192,7 @@
 2. **peer_groups 多 agent 协作**：`peer_groups.matrix_hubtel_default` 表明同房多 agent 共存。当前 pack 按 `agent_name` 组装，未定义多 agent 同时接入时的分工/去重（两个 agent 都看到发版消息都去建计划 → 幂等已兜底 plan_digest，但用户会收到两份回执）。
    → **补充 3.1**：pack 增加 `peer_awareness` 区块（同房其他 agent 清单 + 建议分工），OPS 侧 prepare_plan 的 plan_digest 幂等已天然防重——回执去重靠 pack 明示"谁在建计划"。
 3. **gateway 主动推送**：`/webhook` POST 端点 + paired token 已存在。八轮故障全是"agent 拉模式"下的信息滞后；OPS 修复落地、审批到期、执行完成这类事件可反向推。
-   → **补充 3.2（Phase 4 后）**：新增 `ops.agent.notify` 事件出口（审批结果/计划终态/教训 superseded），OPS 侧配置 gateway webhook 目标；revision 协议从"agent 轮询感知"升级为"事件驱动 + 轮询兜底"。
+   → **补充 3.2（Phase 4 后）**：新增 `ops.integration.notify` 事件出口（审批结果/计划终态/教训 superseded），OPS 侧配置 gateway webhook 目标；revision 协议从"agent 轮询感知"升级为"事件驱动 + 轮询兜底"。
 4. **extensions 生态**：openclaw 通过 `config/extensions/` 装 MCP 桥（本地见 wechat-access 等）。OPS 的 MCP HTTP 端点已可直接挂载，无需改造——但 pack 文档应说明**标准挂载方式**（transport=http、url、Bearer），让任何 openclaw 发行版零成本接入。
    → **补充 3.3**：pack 增加 `mount` 区块（MCP 端点 + 认证方式 + token 申请指引），AGENTS.md 元指令版引用之。
 
@@ -203,7 +203,7 @@
 | Phase 1 | capabilities 增加 MCP annotations 映射（补充①）；pack 增加 `mount` 区块（补充③） |
 | Phase 2 | zeroclaw 切换时同步清理 qclaw 残留 workspace 事实（换 agent 教训落地）；AGENTS.md 改造即符合 AGENTS.md 开放标准 |
 | Phase 3 | 契约自动化增加：MCP annotations 与 registry risk/write 字段的同步校验（补充①的 CI 化） |
-| Phase 4 | 多 agent 配额 + `heartbeat_ops`/`peer_awareness` 区块（补充 3.0/3.1）+ `ops.agent.notify` 事件出口（补充 3.2）+ Agent Card（补充②，可延后） |
+| Phase 4 | 多 agent 配额 + `heartbeat_ops`/`peer_awareness` 区块（补充 3.0/3.1）+ `ops.integration.notify` 事件出口（补充 3.2）+ Agent Card（补充②，可延后） |
 
 ### 10.4 优先级建议
 

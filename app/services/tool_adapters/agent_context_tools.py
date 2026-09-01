@@ -168,3 +168,36 @@ def agent_save_lesson(args, ctx, db):
         "下次会话 get_context_pack 的 lessons 区块会带上确认后的条目。"
     )
     return result
+
+
+@registry.register(
+    name="ops.integration.get_heartbeat_ops",
+    title="获取定时巡检面（审批催办/异常摘要）",
+    description="返回待审批/即将超时/已过期计划清单（含 plan_id/room_id/剩余分钟）与巡检异常摘要，附催办指令。供宿主 agent 的 HEARTBEAT.md / cron 定时任务周期调用：expiring_soon 的计划应在对应房间 @ 审批人催办；没有待审批计划时保持沉默。中文: 审批催办/待审批提醒/超时提醒/巡检摘要。",
+    scopes=["ops:read"],
+    risk="low",
+    category="routing",
+    write=False,
+    input_schema={
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    },
+)
+def agent_get_heartbeat_ops(args, ctx, db):
+    ops = agent_context._assemble_heartbeat_ops(db)
+    pending_n = len(ops["approval_reminders"]["pending"])
+    expiring_n = len(ops["approval_reminders"]["expiring_soon"])
+    expired_n = len(ops["approval_reminders"]["expired"])
+    if pending_n == 0 and expiring_n == 0 and expired_n == 0 and not ops["inspection_alerts"]:
+        return {
+            "has_work": False,
+            "generated_at": ops["generated_at"],
+            "next_step": "无待审批计划、无巡检异常——本次心跳保持沉默，不要向房间发消息。",
+        }
+    return {
+        "has_work": True,
+        **ops,
+        "next_step": ops["instructions"],
+    }

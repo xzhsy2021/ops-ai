@@ -523,6 +523,8 @@ def build_context_pack(db, ctx, *, agent_name: str = "default", channel: str = "
         "flows": flows,
         "lessons": _assemble_lessons(db),
     }
+    if channel == "heartbeat":
+        pack["heartbeat_ops"] = _assemble_heartbeat_ops(db)
     pack["pack_revision"] = _sha256_of(
         {k: v for k, v in pack.items() if k != "pack_revision"}
     )
@@ -651,3 +653,103 @@ def _annotation_for(tool: dict[str, Any]) -> dict[str, bool]:
         "destructiveHint": str(tool.get("risk", "")) == "high",
         "idempotentHint": str(tool.get("risk", "")) == "low",
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 4：heartbeat_ops——审批催办闭环（openclaw 家族 HEARTBEAT.md/cron 消费）
+# ──────────────────────────────────────────────────────────────
+
+
+def _assemble_heartbeat_ops(db, *, approver_sender_ids: list[str] | None = None) -> dict[str, Any]:
+    """组装定时巡检面数据：待审批/即将超时计划 + 巡检异常摘要。
+
+    agent 把本区块写进宿主 HEARTBEAT.md / cron 任务，周期拉取后在需要时
+    向房间催办——审批不再静默过期（15 分钟 TTL 一过就没人记得）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.models import ExecutionPlan
+
+    now = datetime.now(timezone.utc)
+    pending_rows = (
+        db.query(ExecutionPlan)
+        .filter(ExecutionPlan.status == "PENDING_APPROVAL")
+        .order_by(ExecutionPlan.created_at)
+        .all()
+    )
+    items: list[dict[str, Any]] = []
+    for plan in pending_rows:
+        expires = plan.expires_at
+        minutes_left = None
+        if expires is not None:
+            try:
+                exp = expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)
+                minutes_left = int((exp - now).total_seconds() // 60)
+            except Exception:
+                minutes_left = None
+        created = plan.created_at
+        try:
+            age_minutes = int(
+                (now - (created if created.tzinfo else created.replace(tzinfo=timezone.utc))).total_seconds() // 60
+            )
+        except Exception:
+            age_minutes = None
+        item = {
+            "plan_id": plan.id,
+            "system_name": plan.system_name,
+            "service_name": plan.service_name,
+            "environment": plan.environment,
+            "room_id": plan.room_id,
+            "age_minutes": age_minutes,
+            "expires_at": expires.isoformat() if expires else None,
+            "minutes_left": minutes_left,
+        }
+        if minutes_left is not None and minutes_left <= 0:
+            item["state"] = "expired"
+        elif minutes_left is not None and minutes_left <= 5:
+            item["state"] = "expiring"
+        else:
+            item["state"] = "pending"
+        if approver_sender_ids and plan.request_sender_id:
+            item["requested_by"] = plan.request_sender_id
+        items.append(item)
+
+    pending = [i for i in items if i["state"] == "pending"]
+    expiring = [i for i in items if i["state"] == "expiring"]
+    expired = [i for i in items if i["state"] == "expired"]
+
+    ops: dict[str, Any] = {
+        "approval_reminders": {
+            "pending": pending,
+            "expiring_soon": expiring,
+            "expired": expired,
+        },
+        "generated_at": now.isoformat(),
+        "instructions": (
+            "催办动作：在 plan 的 room_id 房间发一条提醒（@ 审批人 + 短语前8位 + 剩余分钟），"
+            "expiring_soon 优先；expired 的计划不再催办（终态，等用户重新触发）。"
+            "没有待审批计划时保持沉默——不要发空消息。"
+        ),
+    }
+    try:
+        from app.db.models import InspectionIssue
+
+        critical_issues = (
+            db.query(InspectionIssue)
+            .filter(InspectionIssue.status.in_(["open", "acknowledged"]))
+            .order_by(InspectionIssue.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        ops["inspection_alerts"] = [
+            {
+                "issue_id": issue.id,
+                "title": (issue.title or issue.description or "")[:80],
+                "severity": issue.severity,
+                "status": issue.status,
+            }
+            for issue in critical_issues
+        ]
+    except Exception:
+        ops["inspection_alerts"] = []
+    return ops

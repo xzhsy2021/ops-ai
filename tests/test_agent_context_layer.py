@@ -448,3 +448,75 @@ def test_execute_plan_next_step_guides_by_status():
     assert "PARTIAL_FAILED" in src and "save_lesson" in src
     assert "失败计划是终态" in src
     assert "不要重新执行" in src or "不能重试 execute_plan" in src
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 4：heartbeat_ops（审批催办闭环）
+# ──────────────────────────────────────────────────────────────
+
+
+def _mk_pending_plan(db, *, expires_in_minutes, age_minutes=0):
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.models import ExecutionPlan
+
+    now = datetime.now(timezone.utc)
+    plan = ExecutionPlan(
+        id=f"hb-{expires_in_minutes}-{age_minutes}",
+        plan_digest=f"digest-{expires_in_minutes}-{age_minutes}",
+        system_name="crypto-trader",
+        service_name="crypto-trader-web",
+        environment="test",
+        channel="matrix",
+        channel_account_id="default",
+        room_id="!hb-room:hubtel.xyz",
+        request_event_id="$hb-evt",
+        request_sender_id="@requester:hubtel.xyz",
+        status="PENDING_APPROVAL",
+        created_at=now - timedelta(minutes=age_minutes),
+        expires_at=now + timedelta(minutes=expires_in_minutes),
+    )
+    db.add(plan)
+    db.commit()
+    return plan
+
+
+def test_heartbeat_ops_state_machine(env, ctx):
+    """待审批计划按剩余时间分派 pending/expiring/expired 三态。"""
+    _mk_pending_plan(env, expires_in_minutes=30, age_minutes=5)   # pending
+    _mk_pending_plan(env, expires_in_minutes=3, age_minutes=12)    # expiring
+    _mk_pending_plan(env, expires_in_minutes=-2, age_minutes=17)   # expired
+
+    r = _call(env, "ops.integration.get_heartbeat_ops", {}, ctx)
+    assert r["has_work"] is True
+    rem = r["approval_reminders"]
+    assert len(rem["pending"]) == 1 and rem["pending"][0]["state"] == "pending"
+    assert len(rem["expiring_soon"]) == 1 and rem["expiring_soon"][0]["state"] == "expiring"
+    assert len(rem["expired"]) == 1 and rem["expired"][0]["state"] == "expired"
+    plan = rem["expiring_soon"][0]
+    assert plan["room_id"] == "!hb-room:hubtel.xyz"
+    assert plan["minutes_left"] <= 5
+    assert "审批人" in r["instructions"] and "沉默" in r["instructions"]
+    assert r["next_step"] == r["instructions"]
+
+
+def test_heartbeat_ops_silent_when_clean(env, ctx):
+    """无待审批、无异常 → has_work=False + 明确沉默指令（不发空消息）。"""
+    r = _call(env, "ops.integration.get_heartbeat_ops", {}, ctx)
+    assert r["has_work"] is False
+    assert "沉默" in r["next_step"]
+
+
+def test_pack_heartbeat_channel_carries_ops(env, ctx):
+    """channel=heartbeat 的 pack 附带 heartbeat_ops 区块；普通渠道不带
+    （控制 pack 体积）。"""
+    _mk_pending_plan(env, expires_in_minutes=10, age_minutes=5)
+    hb_pack = _call(
+        env, "ops.integration.get_context_pack", {"agent_name": "t", "channel": "heartbeat"}, ctx
+    )
+    assert "heartbeat_ops" in hb_pack
+    assert hb_pack["heartbeat_ops"]["approval_reminders"]["pending"], "待审批计划应出现"
+    plain = _call(env, "ops.integration.get_context_pack", {"agent_name": "t2", "channel": "matrix"}, ctx)
+    assert "heartbeat_ops" not in plain
+    # 渠道不同 → revision 不同
+    assert hb_pack["pack_revision"] != plain["pack_revision"]

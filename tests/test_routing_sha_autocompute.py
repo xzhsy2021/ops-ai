@@ -69,6 +69,9 @@ def test_resolve_autocomputes_content_sha256_from_message_text(monkeypatch):
     # 票据必须已签发（绑定自动计算的摘要）
     assert result["ticket"]
     assert result["ticket_digest"]
+    # 自引导字段：告诉 agent 下一步同一轮内立即 prepare_plan
+    assert "prepare_plan" in result["next_step"]
+    assert "message_context" in result["next_step"]
 
 
 def test_resolve_explicit_content_sha256_still_wins(monkeypatch):

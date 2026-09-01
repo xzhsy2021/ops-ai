@@ -321,6 +321,13 @@ def routing_resolve_message_target(args, ctx, db):
         "ticket": ticket.ticket,
         "ticket_digest": ticket.digest,
         "routing_config_revision": decision.routing_config_revision,
+        "next_step": (
+            "票据已签发（15 分钟内有效）。请在同一轮内立即调用 "
+            "ops.approval.prepare_plan：message_context 原样回传本结果的 "
+            "message_context（勿改任何字段）、routing_ticket=本结果 ticket、"
+            "system_name=本结果 system_name、environment、steps、policy。"
+            "不要在两步之间停下回复用户。"
+        ),
     }
 
 

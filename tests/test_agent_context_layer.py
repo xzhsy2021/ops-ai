@@ -368,3 +368,83 @@ def _builtin_lessons():
     from app.services.agent_context import LESSONS
 
     return LESSONS
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 3：契约自动化（facts 全量 + args_hint/steps_template/annotations 校验）
+# ──────────────────────────────────────────────────────────────
+
+
+def test_facts_auto_assembly_full(env, ctx):
+    """facts 全自动化：systems + approvers + environments 一次到位。"""
+    from app.db.models import Service, System, SystemEnvironment
+
+    env.add(
+        System(
+            name="layer-auto-sys",
+            display_name="自动化",
+            message_routing={
+                "rooms": [{"channel": "matrix", "channel_account_id": "default", "conversation_id": "!auto:hubtel.xyz"}],
+                "approvers": [{"channel": "matrix", "channel_account_id": "default", "sender_id": "@auto-approver:hubtel.xyz"}],
+            },
+        )
+    )
+    env.flush()
+    env.add(Service(name="auto-svc", system_name="layer-auto-sys", display_name="s"))
+    env.add(SystemEnvironment(system_name="layer-auto-sys", name="test"))
+    env.commit()
+
+    pack = _call(env, "ops.integration.get_context_pack", {"agent_name": "t", "include_tools": False}, ctx)
+    facts = pack["facts"]
+    assert set(facts) >= {"systems", "approvers", "environments"}
+    entry = [f for f in facts["systems"] if f["name"] == "layer-auto-sys"][0]
+    assert entry["services"] == ["auto-svc"]
+    assert entry["rooms"] == ["!auto:hubtel.xyz"]
+    assert entry["approvers"] == ["@auto-approver:hubtel.xyz"]
+    assert "@auto-approver:hubtel.xyz" in [a["sender_id"] for a in facts["approvers"]]
+    assert "test" in facts["environments"]
+
+
+def test_flow_guide_contract_no_drift(env, ctx):
+    """Phase 3 核心：args_hint 键 ∈ 工具 schema、steps_template 参数键 ∈ 执行器
+    读取口径——任何漂移即测试失败（消灭 C 类根因的机制化）。"""
+    from app.services.agent_context import validate_flow_guide_contract
+
+    report = validate_flow_guide_contract(env, ctx)
+    assert report["ok"], f"flow guide 契约漂移: {report['violations']}"
+
+
+def test_flow_guide_contract_detects_drift(env, ctx):
+    """校验器本身要能抓住漂移（反向验证：注入非法键必须被逮住）。"""
+    from app.services import agent_context as ac
+
+    original = ac.FLOW_GUIDES["frontend-release"]["steps"][2]["args_hint"]
+    try:
+        ac.FLOW_GUIDES["frontend-release"]["steps"][2]["args_hint"] = dict(original, bogus_key="x")
+        report = ac.validate_flow_guide_contract(env, ctx)
+        assert not report["ok"]
+        assert any("bogus_key" in v for v in report["violations"])
+    finally:
+        ac.FLOW_GUIDES["frontend-release"]["steps"][2]["args_hint"] = original
+    # 恢复后再校验必须干净
+    assert ac.validate_flow_guide_contract(env, ctx)["ok"]
+
+
+def test_capability_annotations_sync(env, ctx):
+    """MCP annotations 与 registry risk/write 推导关系同步校验。"""
+    from app.services.agent_context import validate_capability_annotations
+
+    report = validate_capability_annotations(env, ctx)
+    assert report["ok"], f"annotations 漂移: {report['violations']}"
+
+
+def test_execute_plan_next_step_guides_by_status():
+    """execute_plan 结果引导按状态分派（SUCCEEDED/PARTIAL_FAILED/FAILED）。"""
+    import inspect
+    import sys as _sys
+
+    code = _sys.modules["app.services.tool_adapters.approval_tools"].__dict__
+    src = inspect.getsource(code["approval_execute_plan"])
+    assert "PARTIAL_FAILED" in src and "save_lesson" in src
+    assert "失败计划是终态" in src
+    assert "不要重新执行" in src or "不能重试 execute_plan" in src

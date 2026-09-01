@@ -1414,6 +1414,28 @@ def approval_execute_plan(args, ctx, db):
             else f"执行计划状态: {plan.status}"
         ),
     }
+    if plan.status == "SUCCEEDED":
+        result["next_step"] = (
+            f"计划 {plan.id} 全部步骤成功。向房间回报执行结果摘要（各步骤 status/result），"
+            "不要重新执行或创建后续计划。"
+        )
+    elif plan.status == "PARTIAL_FAILED":
+        failed_keys = [s.step_key for s in plan.steps if s.status == "FAILED"]
+        succeeded_keys = [s.step_key for s in plan.steps if s.status == "SUCCEEDED"]
+        result["next_step"] = (
+            f"计划 {plan.id} 部分失败（成功: {succeeded_keys or '无'}；失败: {failed_keys}）。"
+            "失败计划是终态：不能重试 execute_plan、不能用旧短语创建新计划。"
+            "正确动作：①把失败步骤的 error_message 原样告知用户；②调用 ops.integration.save_lesson "
+            "回写踩坑（pattern/guidance/evidence 带计划ID）；③请用户重新触发完整流程（附件+消息同一条）获得新审批。"
+        )
+    elif plan.status == "FAILED":
+        result["next_step"] = (
+            f"计划 {plan.id} 执行失败：{plan.failure_reason or '见失败步骤 error_message'}。"
+            "失败计划是终态：请用户重新触发完整流程；踩坑先 save_lesson 回写再回报。"
+        )
+    else:
+        result["next_step"] = f"计划 {plan.id} 状态 {plan.status}：等待执行完成或人工介入。"
+    return result
 
 
 # ──────────────────────────────────────────────────────────────

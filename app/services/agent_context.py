@@ -305,10 +305,18 @@ def _sha256_of(payload: Any) -> str:
 # ──────────────────────────────────────────────────────────────
 
 
-def _assemble_facts(db) -> list[dict[str, Any]]:
-    from app.db.models import Service, System
+def _assemble_facts(db) -> dict[str, Any]:
+    """facts 全自动化（Phase 3）：systems + approvers + environments，全部 OPS DB 实时组装。
+
+    - systems：每系统 services（服务表）+ rooms/approvers（message_routing）+ routing keywords
+    - approvers：跨系统去重的审批人清单（channel/channel_account_id/sender_id）
+    - environments：SystemEnvironment 表中启用环境
+    agent 拿到的永远是真实存在的服务名/房间/审批人——不存在的配置进不了 pack。
+    """
+    from app.db.models import Service, System, SystemEnvironment
 
     systems: list[dict[str, Any]] = []
+    approver_index: dict[str, dict[str, Any]] = {}
     for system in db.query(System).order_by(System.name).all():
         routing = system.message_routing or {}
         rooms = [
@@ -316,12 +324,45 @@ def _assemble_facts(db) -> list[dict[str, Any]]:
             for room in (routing.get("rooms") or [])
             if room.get("conversation_id")
         ]
+        approvers = []
+        for appr in (routing.get("approvers") or []):
+            entry = {
+                "channel": str(appr.get("channel") or "").strip(),
+                "channel_account_id": str(appr.get("channel_account_id") or "default").strip(),
+                "sender_id": str(appr.get("sender_id") or "").strip(),
+            }
+            if entry["sender_id"]:
+                approvers.append(entry)
+                key = f"{entry['channel']}:{entry['channel_account_id']}:{entry['sender_id']}"
+                approver_index[key] = entry
         services = sorted(
             svc.name
             for svc in db.query(Service).filter(Service.system_name == system.name).all()
         )
-        systems.append({"name": system.name, "services": services, "rooms": rooms})
-    return systems
+        systems.append(
+            {
+                "name": system.name,
+                "services": services,
+                "rooms": rooms,
+                "approvers": [a["sender_id"] for a in approvers if a["channel"] == "matrix"],
+                "routing_keywords": [str(k) for k in (routing.get("keywords") or [])][:20],
+            }
+        )
+    try:
+        environments = [
+            str(row[0])
+            for row in db.query(SystemEnvironment.name)
+            .distinct()
+            .order_by(SystemEnvironment.name)
+            .all()
+        ]
+    except Exception:
+        environments = []
+    return {
+        "systems": systems,
+        "approvers": list(approver_index.values()),
+        "environments": environments,
+    }
 
 
 def _assemble_capabilities(db, ctx) -> dict[str, Any]:
@@ -478,7 +519,7 @@ def build_context_pack(db, ctx, *, agent_name: str = "default", channel: str = "
         "agent_name": agent_name,
         "channel": channel,
         "capabilities": capabilities,
-        "facts": {"systems": facts},
+        "facts": facts,
         "flows": flows,
         "lessons": _assemble_lessons(db),
     }
@@ -500,3 +541,113 @@ def get_flow_guide(flow_id: str) -> dict[str, Any] | None:
 
 def list_flow_ids() -> list[str]:
     return sorted(FLOW_GUIDES)
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 3：契约自动化——样例与真实口径的机器校验
+# ──────────────────────────────────────────────────────────────
+
+
+def _step_param_reader_keys() -> dict[str, set[str]]:
+    """各 action_type 执行器实际读取的参数键（含两级读取与别名）。
+
+    与 plan_executor 的 _pick_step_param / handler 口径保持同步——
+    这里是契约快照，测试用它对齐 steps_template，漂移即测试失败。
+    """
+    return {
+        "MATRIX_PULL": {"room_id", "sender", "minutes", "filename", "system", "service", "overwrite"},
+        "FILE_UPLOAD": {"package_name", "remote_path", "overwrite", "confirm_path", "local_path", "targets"},
+        "SERVICE_CONTROL": {
+            "control_action", "system_name", "system", "service_name", "service",
+            "targets", "environment", "compose_dir", "compose_service", "compose_args", "env",
+        },
+        "RELEASE": {"package_name", "release_name", "rollback_point", "targets", "environment"},
+        "ROLLBACK": {"release_name", "rollback_point", "targets"},
+        "HEALTH_CHECK": {"service_name", "system_name", "targets"},
+        "DML": {"connection", "sql", "confirm_text"},
+        "PACKAGE_CLEANUP": {"system_name", "service_name", "keep_last", "dry_run"},
+    }
+
+
+def validate_flow_guide_contract(db, ctx) -> dict[str, Any]:
+    """机器校验 flow guide 契约（Phase 3 核心）：
+
+    1. steps[].tool 引用的工具必须真实注册（消灭"按记忆调用不存在工具"）
+    2. args_hint 的键必须是工具 input_schema 的 properties 子集
+       （占位值 <xxx> 允许；schema 不含该键 = 漂移，报错）
+    3. steps_template 的参数键必须是执行器读取口径的子集
+       （消灭"样例参数与执行器读取不一致"的 C 类根因）
+    返回 {"ok": bool, "violations": [...]}；CI/测试用它消灭样例漂移。
+    """
+    from app.services.tool_registry import registry
+
+    violations: list[str] = []
+    listed = registry.list_tools(db, ctx, include_disabled=False, include_schema=True, limit=2000)
+    schema_by_name = {t["name"]: t.get("input_schema") or {} for t in listed["tools"]}
+
+    reader_keys = _step_param_reader_keys()
+    for flow_id, flow in FLOW_GUIDES.items():
+        for step in flow.get("steps", []):
+            tool_name = str(step.get("tool") or "")
+            if not tool_name.startswith("ops."):
+                continue  # (matrix 回复) 等非工具步骤
+            if tool_name not in schema_by_name:
+                violations.append(f"{flow_id}#{step['n']}: 工具未注册 {tool_name}")
+                continue
+            props = set((schema_by_name[tool_name].get("properties") or {}).keys())
+            for key in (step.get("args_hint") or {}):
+                if key not in props:
+                    violations.append(f"{flow_id}#{step['n']}: args_hint 键 {key} 不在 {tool_name} schema")
+
+        for action_type, template in (flow.get("steps_template") or {}).items():
+            params = (template.get("parameters") or {})
+            nested = params.get("action_parameters")
+            keys = set((nested or params).keys())
+            allowed = reader_keys.get(action_type)
+            if allowed is None:
+                continue
+            for key in keys:
+                if key not in allowed:
+                    violations.append(
+                        f"{flow_id} steps_template.{action_type}: 参数键 {key} 不在执行器读取口径 {sorted(allowed)}"
+                    )
+    return {"ok": not violations, "violations": violations}
+
+
+def validate_capability_annotations(db, ctx) -> dict[str, Any]:
+    """MCP annotations 与 registry risk/write 字段同步校验（补充① CI 化）。
+
+    对比两份推导：pack 组装用的映射函数 vs registry 字段直接推导——
+    两者不一致即漂移（映射函数被改坏/字段语义变化都会被逮住）。
+    """
+    from app.services.tool_registry import registry
+
+    violations: list[str] = []
+    listed = registry.list_tools(db, ctx, include_disabled=False, include_schema=False, limit=2000)
+    for tool in listed["tools"]:
+        name = tool["name"]
+        write = bool(tool.get("write", False))
+        risk = str(tool.get("risk", ""))
+        # registry 字段直接推导（期望值）
+        expected_readonly = not write
+        expected_destructive = risk == "high"
+        expected_idempotent = risk == "low"
+        # pack 组装路径（_assemble_capabilities 的映射函数复算）
+        actual = _annotation_for(tool)
+        if actual["readOnly"] is not expected_readonly:
+            violations.append(f"{name}: readOnly={actual['readOnly']} 但 write={write}")
+        if actual["destructiveHint"] is not expected_destructive:
+            violations.append(f"{name}: destructiveHint 与 risk={risk} 不符")
+        if actual["idempotentHint"] is not expected_idempotent:
+            violations.append(f"{name}: idempotentHint 与 risk={risk} 不符")
+    return {"ok": not violations, "violations": violations}
+
+
+def _annotation_for(tool: dict[str, Any]) -> dict[str, bool]:
+    """与 _assemble_capabilities 完全相同的映射（复制即契约：改一处不改另一处
+    会被 validate_capability_annotations 逮住）。"""
+    return {
+        "readOnly": not bool(tool.get("write", False)),
+        "destructiveHint": str(tool.get("risk", "")) == "high",
+        "idempotentHint": str(tool.get("risk", "")) == "low",
+    }

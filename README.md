@@ -126,6 +126,8 @@ python -c "import main"
 
 ## Documentation
 
+- **Swapping / onboarding AI agents (operator runbook): `docs/agent-swap-runbook.md`** — MCP mount, meta-instruction AGENTS.md template, host approval-gate allowlist, verification checklist, and troubleshooting. OPS holds no agent-specific business facts; the Agent Context Layer (`ops.integration.get_context_pack` and friends) serves them to any MCP client.
+- Agent Context Layer design and implementation record: `docs/agent-integration-abstraction-layer.md`
 - Runtime routes and API mounts: `docs/plans/2026-05-01-runtime-source-of-truth.md`
 - MCP/HTTP tool matrix: `docs/runbooks/mcp-capability-matrix.md`
 - Current plans index: `docs/plans/README.md`

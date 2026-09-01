@@ -246,4 +246,18 @@ zeroclaw 消费端：cron 任务 306f8d8b（*/5 * * * *，--prompt --agent eggs 
 - 教训管理：`venv\Scripts\python.exe scripts\lesson_admin.py list/activate/supersede/add`
 - cron 管理：`zeroclaw.exe cron list / pause <ID> / update <ID> --expression ...`
 - pack revision 缓存：agent 传 cached_revision 命中返回轻量 unchanged；配置变更自动失效
-- 契约校验已进回归（tests/test_agent_context_layer.py 20+ 用例）：改执行器参数口径或工具 schema 而不同步 flow guide → 测试红
+- 契约校验已进回归（tests/test_agent_context_layer.py 25 用例）：改执行器参数口径或工具 schema 而不同步 flow guide → 测试红
+
+### 11.4 可移植性审计与 flow guide 参数化（2026-09-01 追加）
+
+审计结论（详见会话记录）：核心链路（票据链/channel 抽象/MCP 面/安全模型/E2EE/教训库）
+全部 agent 无关；真实耦合仅 4 处——指令文件（每 agent 一份属必然）、宿主审批门
+白名单（L009 已机制化）、flow guide 系统特定值（本轮消除）、命名遗留（纯观感）。
+
+flow guide 参数化落地（commit c0dbb85）：
+- frontend-release 改语义模板（<SYSTEM>/<SERVICE>/<TARGETS>/<DEPLOY_PATH>/
+  <FRONTEND_PACKAGE>），get_flow_guide 传 system_name 按 OPS DB 实时渲染
+- 未传 system → default_system=crypto-trader（zeroclaw 现行调用零变化）
+- 系统无前端服务 → 占位符保留 + render_warning（不臆测）
+- 换 agent/换系统成本清单：MCP 挂载（分钟级）+ 元指令模板文件 + auto_approve
+  一行 + 拉 pack 自动对齐——业务事实零迁移

@@ -455,3 +455,78 @@ def test_prepare_plan_normalizes_matrix_pull_parameters():
     assert "action_parameters" not in pull_params
     # 非 MATRIX_PULL 步骤不动
     assert normalized[1]["parameters"] == {"action_parameters": {"control_action": "update"}}
+
+
+def test_service_control_reads_nested_and_plan_level_params(db, monkeypatch):
+    """SERVICE_CONTROL 参数两级读取 + 计划级补全（plan fab55b7a case）。
+
+    agent 把 targets/compose_dir 嵌在 action_parameters、service_name 完全
+    没传——prepare 用计划级 args 补全 system_name；执行时两级读取。
+    """
+    captured = {}
+
+    class _FakeExecutor:
+        def __init__(self, db):
+            pass
+
+        def _control_single_server(self, server, system, service, action, ctx, **kw):
+            captured.update(dict(server=server, system=system, service=service, action=action))
+            return {"server": server, "ok": True}
+
+    import app.services.approval_executor as ae
+    monkeypatch.setattr(ae, "ApprovalExecutor", _FakeExecutor)
+
+    steps = [
+        {
+            "step_key": "update",
+            "action_type": "SERVICE_CONTROL",
+            "parameters": {
+                "action_parameters": {
+                    "control_action": "update",
+                    "targets": ["203.0.113.10"],
+                    "compose_dir": "/data/web",
+                }
+            },
+            "dependencies": [],
+        },
+    ]
+    plan = _prepare_approved(db, "svc-ctrl", steps)
+    # 计划级服务名存在时 handler 应使用
+    plan.service_name = "crypto-trader-web"
+    result = PlanExecutor(db).execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    assert captured["system"] == "payment"
+    assert captured["service"] == "crypto-trader-web"
+    assert captured["action"] == "update"
+    # 步骤参数里的 targets（嵌套在 action_parameters）优先于计划级 targets
+    assert captured["server"] == "203.0.113.10"
+
+
+def test_normalize_service_control_backfills_plan_level_args():
+    """prepare 规范化：SERVICE_CONTROL 缺 system_name/service_name 时从
+    计划级 args 补全（agent 只传了 environment/system_name 到顶层）。"""
+    from app.services.tool_adapters.approval_tools import _normalize_matrix_pull_steps
+    from app.services.message_context import MessageContext
+
+    mctx = MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id="!ctx-room:hubtel.xyz",
+        message_id="$ctx-evt:hubtel.xyz",
+        sender_id="@ctx-sender:hubtel.xyz",
+        content_sha256="2" * 64,
+    )
+    steps = [
+        {
+            "step_key": "step-2-update",
+            "action_type": "SERVICE_CONTROL",
+            "parameters": {"action_parameters": {"control_action": "update", "targets": ["203.0.113.10"]}},
+            "dependencies": ["step-1-pull"],
+        },
+    ]
+    args = {"system_name": "crypto-trader", "service_name": "crypto-trader-web", "environment": "test"}
+    normalized = _normalize_matrix_pull_steps(steps, mctx, args)
+    svc_params = normalized[0]["parameters"]
+    assert svc_params["system_name"] == "crypto-trader"
+    assert svc_params["service_name"] == "crypto-trader-web"

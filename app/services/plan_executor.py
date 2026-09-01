@@ -31,23 +31,94 @@ def _utcnow() -> datetime:
 StepHandler = Callable[[ExecutionPlan, ExecutionPlanStep, Session], dict[str, Any]]
 
 
+def _pick_step_param(params: dict, key: str, *aliases: str):
+    """步骤参数两级读取：顶层 → action_parameters（2026-09-01）。
+
+    agent 常按其他步骤惯例把业务参数嵌在 action_parameters 里（实测
+    plan fab55b7a：system_name/service_name 嵌套导致执行失败）。
+    """
+    if not isinstance(params, dict):
+        return None
+    action_parameters = params.get("action_parameters")
+    if not isinstance(action_parameters, dict):
+        action_parameters = {}
+    for source in (params, action_parameters):
+        value = source.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        for alias in aliases:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                value = source.get(alias)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            return value
+    return None
+
+
+def _infer_service_from_steps(plan: ExecutionPlan, steps, db: Session) -> str:
+    """系统级计划（service_name=None）按包名/文件名前缀匹配系统服务。
+
+    例：包 crypto-trader-web.tar.gz → 服务 crypto-trader-web。推断只在
+    OPS 配置（services 表）内匹配——配置里不存在则返回空（宁可失败也不
+    臆测）。前提：MATRIX_PULL/FILE_UPLOAD 的 filename/package_name 常与
+    服务同名（frontend 构建产物命名惯例）。
+    """
+    try:
+        from app.db.models import Service
+
+        candidates = set()
+        for step in steps:
+            params = getattr(step, "parameters", None) or {}
+            for key in ("filename", "package_name"):
+                value = _pick_step_param(params, key)
+                if value:
+                    candidates.add(str(value))
+        if not candidates:
+            return ""
+        names = {
+            s.name
+            for s in db.query(Service).filter(Service.system_name == plan.system_name).all()
+        }
+        for raw in sorted(candidates):
+            stem = str(raw)
+            for suffix in (".tar.gz", ".tgz", ".zip", ".tar", ".gz"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            if stem in names:
+                return stem
+            # 包名带系统前缀：crypto-trader-web → 也可能匹配全名服务
+            for name in names:
+                if stem == name or stem.startswith(name):
+                    return name
+        return ""
+    except Exception:
+        return ""
+
+
 def _service_control_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:
     """服务控制（重启/停止/启动/更新）。复用 approval_executor 的 SSH 执行逻辑。"""
     from app.services.approval_executor import ApprovalExecutor
 
     params = step.parameters or {}
-    control_action = params.get("control_action", "restart")
-    system_name = params.get("system_name") or plan.system_name
-    service_name = params.get("service_name") or plan.service_name
-    targets = params.get("targets") or plan.targets or []
-    compose_service = params.get("compose_service", "")
-    env = params.get("env")
-    compose_args = params.get("compose_args")
+    control_action = _pick_step_param(params, "control_action") or "restart"
+    system_name = _pick_step_param(params, "system_name", "system") or plan.system_name
+    service_name = _pick_step_param(params, "service_name", "service") or plan.service_name
+    if not service_name:
+        # 系统级计划（resolve 未命中服务级路由）时按包名前缀推断服务，
+        # 推断仅在 OPS 配置内的服务名中匹配（不臆测）
+        service_name = _infer_service_from_steps(plan, plan.steps, db)
+    targets = _pick_step_param(params, "targets") or plan.targets or []
+    compose_service = _pick_step_param(params, "compose_service") or ""
+    env = _pick_step_param(params, "env")
+    compose_args = _pick_step_param(params, "compose_args")
 
     if not targets:
         raise ValueError("服务控制步骤需要指定目标服务器列表")
     if not system_name or not service_name:
-        raise ValueError("服务控制步骤需要指定 system_name 和 service_name")
+        raise ValueError(
+            f"服务控制步骤需要 system_name 和 service_name（plan system={plan.system_name}, "
+            f"service={plan.service_name}, 推断={service_name or '无'}）"
+        )
 
     executor = ApprovalExecutor(db)
     results = []

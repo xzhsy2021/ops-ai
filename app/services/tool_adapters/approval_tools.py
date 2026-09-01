@@ -661,31 +661,55 @@ def _defer_matrix_pull_fed_upload(raw_parameters: dict) -> dict:
     return deferred
 
 
-def _normalize_matrix_pull_steps(steps: list[dict], message_context) -> list[dict]:
-    """MATRIX_PULL 步骤参数规范化（2026-09-01）。
+def _normalize_matrix_pull_steps(steps: list[dict], message_context, args: dict | None = None) -> list[dict]:
+    """计划步骤参数规范化（2026-09-01，两级）。
 
-    agent 常按其他步骤惯例把业务参数嵌在 action_parameters 里（实测
-    plan 5e8f3551 因 room_id/sender 嵌在 action_parameters 而执行失败，
-    执行器从顶层读取拿到空值）。这里在计划创建时就把参数提升到顶层，
-    并用计划请求上下文补全缺失的 room_id/sender——MATRIX_PULL 的语义
-    就是"拉取触发本次工单的那条消息的附件"，房间与发送者即计划自身
-    的 conversation_id/request_sender_id。
+    agent 常按步骤惯例把业务参数嵌在 action_parameters 里（实测
+    plan 5e8f3551 的 MATRIX_PULL room_id/sender 与 plan fab55b7a 的
+    SERVICE_CONTROL system_name/service_name 均因嵌套而执行失败，
+    执行器历史版本只从顶层读取）。这里在计划创建时统一处理：
+
+    - MATRIX_PULL：参数提升到顶层 + 用计划请求上下文补全 room_id/sender
+      ——它的语义就是"拉取触发本次工单的那条消息的附件"
+    - SERVICE_CONTROL：system_name/service_name 补全（顶层 args →
+      action_parameters → 计划级 args），让系统级计划（service=None）
+      的服务控制在创建时就有明确服务名，而不是执行时才炸
     """
     normalized = []
     for raw_step in steps:
         step = dict(raw_step)
-        if str(step.get("action_type") or "").strip() != "MATRIX_PULL":
-            normalized.append(step)
-            continue
-        parameters = dict(step.get("parameters") or {})
-        action_parameters = dict(parameters.get("action_parameters") or {})
-        merged = {**action_parameters, **{k: v for k, v in parameters.items() if k != "action_parameters"}}
-        if not str(merged.get("room_id") or "").strip():
-            merged["room_id"] = message_context.conversation_id
-        if not str(merged.get("sender") or "").strip():
-            merged["sender"] = message_context.sender_id
-        parameters = {k: v for k, v in merged.items() if k != "action_parameters"}
-        step["parameters"] = parameters
+        action_type = str(step.get("action_type") or "").strip()
+        if action_type == "MATRIX_PULL":
+            parameters = dict(step.get("parameters") or {})
+            action_parameters = dict(parameters.get("action_parameters") or {})
+            merged = {**action_parameters, **{k: v for k, v in parameters.items() if k != "action_parameters"}}
+            if not str(merged.get("room_id") or "").strip():
+                merged["room_id"] = message_context.conversation_id
+            if not str(merged.get("sender") or "").strip():
+                merged["sender"] = message_context.sender_id
+            parameters = {k: v for k, v in merged.items() if k != "action_parameters"}
+            step["parameters"] = parameters
+        elif action_type == "SERVICE_CONTROL":
+            parameters = dict(step.get("parameters") or {})
+            action_parameters = dict(parameters.get("action_parameters") or {})
+            plan_level = args or {}
+            for key, aliases in (
+                ("system_name", ("system",)),
+                ("service_name", ("service",)),
+                ("environment", ()),
+                ("targets", ()),
+            ):
+                value = parameters.get(key)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    value = action_parameters.get(key)
+                for alias in aliases:
+                    if value is None or (isinstance(value, str) and not value.strip()):
+                        value = parameters.get(alias) or action_parameters.get(alias)
+                if (value is None or (isinstance(value, str) and not value.strip())) and plan_level.get(key):
+                    value = plan_level[key]
+                if value is not None and not (isinstance(value, str) and not value.strip()):
+                    parameters[key] = value
+            step["parameters"] = parameters
         normalized.append(step)
     return normalized
 
@@ -1179,7 +1203,7 @@ def approval_prepare_plan(args, ctx, db):
         channel_account_id=message_context.channel_account_id,
     )
     steps = _freeze_file_upload_plan_steps(
-        _normalize_matrix_pull_steps(args["steps"], message_context), db
+        _normalize_matrix_pull_steps(args["steps"], message_context, args), db
     )
     service = ExecutionPlanService(db)
 

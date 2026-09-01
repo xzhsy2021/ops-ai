@@ -482,17 +482,29 @@ def _mk_pending_plan(db, *, expires_in_minutes, age_minutes=0):
 
 
 def test_heartbeat_ops_state_machine(env, ctx):
-    """待审批计划按剩余时间分派 pending/expiring/expired 三态。"""
+    """待审批计划按剩余时间分派 pending/expiring/expired 三态。
+
+    附数据卫生：组装时先跑 expire_stale——expired 计划转 EXPIRED 终态，
+    不再进入催办清单（pending/expiring 才是催办对象）。"""
     _mk_pending_plan(env, expires_in_minutes=30, age_minutes=5)   # pending
     _mk_pending_plan(env, expires_in_minutes=3, age_minutes=12)    # expiring
-    _mk_pending_plan(env, expires_in_minutes=-2, age_minutes=17)   # expired
+    _mk_pending_plan(env, expires_in_minutes=-2, age_minutes=17)   # expired → 组装时转终态
 
     r = _call(env, "ops.integration.get_heartbeat_ops", {}, ctx)
     assert r["has_work"] is True
     rem = r["approval_reminders"]
     assert len(rem["pending"]) == 1 and rem["pending"][0]["state"] == "pending"
     assert len(rem["expiring_soon"]) == 1 and rem["expiring_soon"][0]["state"] == "expiring"
-    assert len(rem["expired"]) == 1 and rem["expired"][0]["state"] == "expired"
+    # expired 已被 expire_stale 转终态，不再出现在催办清单
+    assert rem["expired"] == [], "expired 应转 EXPIRED 终态而非继续催办"
+    from app.db.models import ExecutionPlan
+
+    assert (
+        env.query(ExecutionPlan).filter(
+            ExecutionPlan.id == f"hb--2-17", ExecutionPlan.status == "EXPIRED"
+        ).count()
+        == 1
+    ), "过期计划应已落 EXPIRED 终态"
     plan = rem["expiring_soon"][0]
     assert plan["room_id"] == "!hb-room:hubtel.xyz"
     assert plan["minutes_left"] <= 5

@@ -670,6 +670,15 @@ def _assemble_heartbeat_ops(db, *, approver_sender_ids: list[str] | None = None)
 
     from app.db.models import ExecutionPlan
 
+    # 数据卫生：先把过期未批的计划转终态 EXPIRED（expire_stale 幂等，无人
+    # 周期调用时历史计划会一直挂在 PENDING_APPROVAL 里污染催办数据）
+    try:
+        from app.services.execution_plan import ExecutionPlanService
+
+        ExecutionPlanService(db).expire_stale()
+    except Exception:
+        pass
+
     now = datetime.now(timezone.utc)
     pending_rows = (
         db.query(ExecutionPlan)

@@ -16,6 +16,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+try:  # Windows GBK 控制台兜底
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from app.db.base import SessionLocal  # noqa: E402
 from app.db.models import AgentLesson  # noqa: E402

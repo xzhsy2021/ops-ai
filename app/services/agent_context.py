@@ -102,6 +102,13 @@ LESSONS: list[dict[str, Any]] = [
         "status": "active",
         "severity": "warning",
     },
+    {
+        "id": "L009",
+        "pattern": "宿主 agent 自身的工具审批门弹出 [XXXXXX] approve 短码拦截 ops.integration.* 调用",
+        "guidance": "宿主审批门（如 zeroclaw/openclaw 的 auto_approve 配置）需把接入层工具加入白名单并重启 daemon；[短码] 是宿主工具审批，与 OPS 发版审批（中文完整短语「批准 <动作> <system>@<env> <指纹8>」）是两套体系，不要拿宿主短码去映射 OPS 计划",
+        "status": "active",
+        "severity": "warning",
+    },
 ]
 
 # ──────────────────────────────────────────────────────────────

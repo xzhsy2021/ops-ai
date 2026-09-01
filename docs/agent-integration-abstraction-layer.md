@@ -171,3 +171,44 @@
 | 踩坑记录（实现时必读） | — | ① `list_tools` 需传位置参数 `(db, ctx)`，返回 `{"tools": […]}` 而非裸列表；② `System.config` 字段不存在，房间绑定在 `System.message_routing.rooms`；③ 工具名常量比较时注意引号编码 |
 
 结论：Phase 1 全部数据源与接口已实测可用，无阻塞项。
+
+## 10. 其他 Agent / 通用规范接入评估（2026-09-01 补充）
+
+### 10.1 接入面盘点：openclaw 家族与通用规范
+
+| 接入方 | 关键事实（实测/核实） | 对本层的要求 |
+|---|---|---|
+| **openclaw**（qclaw/zeroclaw 同族上游，本地 QClaw 即其发行版：`resources/openclaw` + node 运行时） | workspace 文件机制（AGENTS.md 每会话必读、MEMORY.md 自动注入、SOUL.md/TOOLS.md/HEARTBEAT.md 分工）；risk_profile（locked_down 禁 shell）+ runtime_profile（unbounded）；`peer_groups` 原生多 agent 分组；gateway REST/WS（`/webhook`、`/ws/chat`、paired tokens）；extensions 目录可装 MCP 桥 | 本层 Phase 1-2 已覆盖其核心；**补充**：gateway `/webhook` 可作为 OPS 主动推送通道（见 10.3） |
+| **zeroclaw**（当前在用） | 同 openclaw + daemon 常驻（本会话八轮调试全在此环境） | 已覆盖 |
+| **qclaw**（前代，已替换） | 同族机制，旧 MEMORY.md 规则残留曾误导 zeroclaw（教训：**换 agent 时旧 workspace 事实必须清并重导**） | 教训库 superseded 机制正是为此设计 |
+| **AGENTS.md 开放标准**（agents.md，60k+ 项目） | 约定 workspace 根的 AGENTS.md 作为 agent 指令入口——与 openclaw 家族的 AGENTS.md 机制同名同位 | 元指令版 AGENTS.md 天然符合该标准；pack 协议对其透明 |
+| **MCP 规范**（Model Context Protocol） | 工具注释（readOnly/destructiveHint 等 hints）、结构化结果、能力发现（tools/list）是官方语义 | **补充 ①**：pack capabilities 应从 registry 的 risk/write 字段映射 MCP annotations（`readOnly=!write`、`destructiveHint=risk=high`），让 MCP 原生客户端也能正确展示风险 |
+| **A2A 协议**（Google agent2agent） | Agent Card 自描述 + agent 间任务委托 | **补充 ②**：OPS 可暴露极简 Agent Card（`/.well-known/agent-card.json` 或 pack 内嵌），把 pack_revision/flows 声明为能力——未来 agent 间互调 OPS 有标准握手面 |
+
+### 10.2 openclaw 家族特有、当前方案未覆盖的四点
+
+1. **HEARTBEAT.md 定时任务面**：openclaw 支持周期性检查任务（本地文件为空=禁用）。OPS 侧已有巡检/审批超时/计划过期等定时语义但 agent 无法消费。
+   → **补充 3.0**：pack 增加 `heartbeat_ops` 区块（如"列出 >15min 未审批计划"、"巡检异常摘要"），flow guide 增加 `periodic` 类型——agent 把它写进 HEARTBEAT.md 即获得定时提醒能力，形成"审批催办"闭环。
+2. **peer_groups 多 agent 协作**：`peer_groups.matrix_hubtel_default` 表明同房多 agent 共存。当前 pack 按 `agent_name` 组装，未定义多 agent 同时接入时的分工/去重（两个 agent 都看到发版消息都去建计划 → 幂等已兜底 plan_digest，但用户会收到两份回执）。
+   → **补充 3.1**：pack 增加 `peer_awareness` 区块（同房其他 agent 清单 + 建议分工），OPS 侧 prepare_plan 的 plan_digest 幂等已天然防重——回执去重靠 pack 明示"谁在建计划"。
+3. **gateway 主动推送**：`/webhook` POST 端点 + paired token 已存在。八轮故障全是"agent 拉模式"下的信息滞后；OPS 修复落地、审批到期、执行完成这类事件可反向推。
+   → **补充 3.2（Phase 4 后）**：新增 `ops.agent.notify` 事件出口（审批结果/计划终态/教训 superseded），OPS 侧配置 gateway webhook 目标；revision 协议从"agent 轮询感知"升级为"事件驱动 + 轮询兜底"。
+4. **extensions 生态**：openclaw 通过 `config/extensions/` 装 MCP 桥（本地见 wechat-access 等）。OPS 的 MCP HTTP 端点已可直接挂载，无需改造——但 pack 文档应说明**标准挂载方式**（transport=http、url、Bearer），让任何 openclaw 发行版零成本接入。
+   → **补充 3.3**：pack 增加 `mount` 区块（MCP 端点 + 认证方式 + token 申请指引），AGENTS.md 元指令版引用之。
+
+### 10.3 对既有四阶段的修订
+
+| 阶段 | 修订 |
+|---|---|
+| Phase 1 | capabilities 增加 MCP annotations 映射（补充①）；pack 增加 `mount` 区块（补充③） |
+| Phase 2 | zeroclaw 切换时同步清理 qclaw 残留 workspace 事实（换 agent 教训落地）；AGENTS.md 改造即符合 AGENTS.md 开放标准 |
+| Phase 3 | 契约自动化增加：MCP annotations 与 registry risk/write 字段的同步校验（补充①的 CI 化） |
+| Phase 4 | 多 agent 配额 + `heartbeat_ops`/`peer_awareness` 区块（补充 3.0/3.1）+ `ops.agent.notify` 事件出口（补充 3.2）+ Agent Card（补充②，可延后） |
+
+### 10.4 优先级建议
+
+按"消除下一轮接入故障"的边际收益排序：
+1. **MCP annotations 映射**（半天）——标准化即零成本，MCP 原生客户端立即受益
+2. **mount 区块 + 元指令版 AGENTS.md**（Phase 2 内）——任何 openclaw 发行版接入的"最后一公里"
+3. **heartbeat_ops**（1 天）——审批催办闭环，用户感知最强
+4. **peer_awareness / notify 事件出口 / Agent Card**（按需）——多 agent 与推送场景出现时再做

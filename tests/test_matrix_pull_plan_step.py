@@ -333,3 +333,125 @@ def test_matrix_pull_step_approval_details():
     assert details["filename_hint"] == "pkg.tar.gz"
     assert details["minutes"] == 20
     assert "package_name" in details["note"]
+
+
+# ── 参数层级兼容 + 计划上下文回填（2026-09-01，plan 5e8f3551 case）──
+
+
+def test_matrix_pull_handler_accepts_nested_action_parameters(db, monkeypatch):
+    """agent 把 room_id/sender 嵌在 action_parameters 里（实测惯例）：
+    执行器必须能读到，不再报'room_id 与 sender 参数未传入'。"""
+    import app.services.tool_adapters.matrix_tools as mt
+
+    pulled_kwargs = {}
+
+    def fake_core(db_, **kwargs):
+        pulled_kwargs.update(kwargs)
+        return {"package_name": f"nested-{_RUN_ID}.tar.gz", "sha256": "f" * 64}
+
+    monkeypatch.setattr(mt, "pull_matrix_attachment_core", fake_core)
+
+    nested_steps = [
+        {
+            "step_key": "pull",
+            "action_type": "MATRIX_PULL",
+            "parameters": {
+                "action_parameters": {
+                    "room_id": "!nested:hubtel.xyz",
+                    "sender": "@nested:hubtel.xyz",
+                    "filename": "crypto-trader-web.tar.gz",
+                    "minutes": 15,
+                    "overwrite": True,
+                    "system": "crypto-trader",
+                    "service": "crypto-frontend",
+                }
+            },
+            "dependencies": [],
+        },
+    ]
+    plan = _prepare_approved(db, "nested-pull", nested_steps)
+    result = PlanExecutor(db).execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    assert pulled_kwargs["room_id"] == "!nested:hubtel.xyz"
+    assert pulled_kwargs["sender"] == "@nested:hubtel.xyz"
+    assert pulled_kwargs["filename_hint"] == "crypto-trader-web.tar.gz"
+    assert pulled_kwargs["minutes"] == 15
+    assert pulled_kwargs["overwrite"] is True
+
+
+def test_matrix_pull_handler_backfills_from_plan_context(db, monkeypatch):
+    """room_id/sender 完全缺失时回退计划请求上下文——MATRIX_PULL 语义即
+    '拉取触发本次工单的那条消息的附件'，计划本身携带房间与发送者。"""
+    import app.services.tool_adapters.matrix_tools as mt
+
+    pulled_kwargs = {}
+
+    def fake_core(db_, **kwargs):
+        pulled_kwargs.update(kwargs)
+        return {"package_name": f"ctx-{_RUN_ID}.tar.gz", "sha256": "a" * 64}
+
+    monkeypatch.setattr(mt, "pull_matrix_attachment_core", fake_core)
+
+    bare_steps = [
+        {
+            "step_key": "pull",
+            "action_type": "MATRIX_PULL",
+            "parameters": {"minutes": 20},
+            "dependencies": [],
+        },
+    ]
+    plan = _prepare_approved(db, "ctx-pull", bare_steps)
+    result = PlanExecutor(db).execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    # 房间与发送者来自计划冻结的请求上下文
+    assert pulled_kwargs["room_id"] == _room("ctx-pull")
+    assert pulled_kwargs["sender"]  # 非空即可（计划 request_sender_id）
+
+
+def test_prepare_plan_normalizes_matrix_pull_parameters():
+    """prepare_plan 阶段就把 action_parameters 里的 room_id/sender 提升到
+    顶层并用请求上下文补全缺失值——避免批准后执行时才失败。"""
+    from app.services.tool_adapters.approval_tools import _normalize_matrix_pull_steps
+    from app.services.message_context import MessageContext
+
+    mctx = MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id="!ctx-room:hubtel.xyz",
+        message_id="$ctx-evt:hubtel.xyz",
+        sender_id="@ctx-sender:hubtel.xyz",
+        content_sha256="1" * 64,
+    )
+    steps = [
+        {
+            "step_key": "step-1-pull",
+            "action_type": "MATRIX_PULL",
+            "parameters": {
+                "action_parameters": {
+                    "filename": "crypto-trader-web.tar.gz",
+                    "minutes": 15,
+                    "room_id": "!explicit:hubtel.xyz",
+                }
+            },
+            "dependencies": [],
+        },
+        {
+            "step_key": "step-2-update",
+            "action_type": "SERVICE_CONTROL",
+            "parameters": {"action_parameters": {"control_action": "update"}},
+            "dependencies": ["step-1-pull"],
+        },
+    ]
+    normalized = _normalize_matrix_pull_steps(steps, mctx)
+
+    pull_params = normalized[0]["parameters"]
+    # 显式 room_id 保留；sender 从计划上下文补全；其余 action_parameters 提升
+    assert pull_params["room_id"] == "!explicit:hubtel.xyz"
+    assert pull_params["sender"] == "@ctx-sender:hubtel.xyz"
+    assert pull_params["filename"] == "crypto-trader-web.tar.gz"
+    assert pull_params["minutes"] == 15
+    assert "action_parameters" not in pull_params
+    # 非 MATRIX_PULL 步骤不动
+    assert normalized[1]["parameters"] == {"action_parameters": {"control_action": "update"}}

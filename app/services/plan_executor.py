@@ -201,22 +201,49 @@ def _matrix_pull_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Sessi
     复用 MCP 工具同一核心实现（pull_matrix_attachment_core），计划审批
     已覆盖本步骤，无需再次 confirm_text。结果中的 package_name / sha256
     供后续 RELEASE 步骤通过依赖回填使用。
+
+    参数层级兼容（2026-09-01）：agent 常按其他步骤惯例把业务参数嵌在
+    action_parameters 里传（实测 plan 5e8f3551 case），而 MATRIX_PULL 的
+    语义就是"拉取触发本次工单的那条消息的附件"——因此 room_id/sender
+    缺省时回退到计划自身的请求上下文（conversation_id/request_sender_id）。
     """
     from app.services.tool_adapters.matrix_tools import pull_matrix_attachment_core
 
     params = step.parameters or {}
+    action_parameters = params.get("action_parameters") or {}
+    if not isinstance(action_parameters, dict):
+        action_parameters = {}
+
+    def _pick(key: str, *fallbacks: str) -> str:
+        # 顶层 → action_parameters → 显式 fallback 键 → 计划请求上下文
+        value = str(params.get(key) or "").strip()
+        if not value:
+            value = str(action_parameters.get(key) or "").strip()
+        for fallback in fallbacks:
+            if not value:
+                value = str(params.get(fallback) or "").strip()
+            if not value:
+                value = str(action_parameters.get(fallback) or "").strip()
+        return value
+
+    room_id = _pick("room_id")
+    if not room_id:
+        room_id = str(plan.conversation_id or "").strip()
+    sender = _pick("sender", "sender_matrix_id", "sender_id")
+    if not sender:
+        sender = str(plan.request_sender_id or "").strip()
     return pull_matrix_attachment_core(
         db,
-        room_id=str(params.get("room_id") or ""),
-        sender=str(params.get("sender") or ""),
-        minutes=params.get("minutes"),
-        filename_hint=str(params.get("filename") or ""),
-        system=str(params.get("system_name") or params.get("system") or plan.system_name or ""),
-        service=str(params.get("service_name") or params.get("service") or plan.service_name or ""),
-        overwrite=bool(params.get("overwrite", False)),
+        room_id=room_id,
+        sender=sender,
+        minutes=params.get("minutes", action_parameters.get("minutes")),
+        filename_hint=_pick("filename", "filename_hint"),
+        system=_pick("system_name", "system") or str(plan.system_name or ""),
+        service=_pick("service_name", "service") or str(plan.service_name or ""),
+        overwrite=bool(params.get("overwrite", action_parameters.get("overwrite", False))),
         uploaded_by=plan.approved_by or "system",
-        homeserver_url=str(params.get("homeserver_url") or ""),
-        access_token=str(params.get("access_token") or ""),
+        homeserver_url=_pick("homeserver_url"),
+        access_token=_pick("access_token"),
     )
 
 

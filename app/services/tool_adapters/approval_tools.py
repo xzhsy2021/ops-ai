@@ -1255,6 +1255,14 @@ def approval_prepare_plan(args, ctx, db):
         # 固定格式回执模板：Agent 应原样发送到房间（Matrix msgtype=m.text），
         # 不要自由改写/截断/重排；如需自定义展示，使用上面的结构化字段自组。
         "reply_template": reply_template,
+        "next_step": (
+            "把 reply_template 原样发到房间等待审批。当审批人在同一房间回复"
+            f"「批准 {short_code}」后，立即调用 ops.approval.execute_plan："
+            "plan_id=本结果 plan_id、short_code=审批消息里的完整短语、"
+            "room_id=审批消息所在房间、approver_matrix_id=审批人 Matrix ID。"
+            "不要因'缺少上下文'而停止——房间与审批人就是审批消息本身携带的，"
+            "直接调用即可。"
+        ),
     }
 
 

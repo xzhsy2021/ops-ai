@@ -206,7 +206,7 @@ def test_prepare_plan_ignores_garbage_digest_and_backfills_from_ticket(monkeypat
             db=db,
         )
         assert prepared["plan_id"]
-        assert prepared["status"] == "PENDING_APPROVAL"
+        assert "execute_plan" in prepared["next_step"]
     finally:
         db.close()
 

@@ -246,3 +246,116 @@ def test_pack_next_step_present(env, ctx):
     assert "get_flow_guide" in r["next_step"]
     g = _call(env, "ops.integration.get_flow_guide", {"flow_id": "service-restart"}, ctx)
     assert "atomic" in g["next_step"]
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 2：教训回写（save_lesson）
+# ──────────────────────────────────────────────────────────────
+
+
+def test_save_lesson_pending_idempotent_and_pack_merge(env, ctx):
+    """回写默认 pending + 同 pattern 幂等更新 + 管理端确认后入 pack 正文。
+
+    pending 不入 pack 正文（防污染）；激活后出现且 DB 记录优先于内置同 pattern。
+    """
+    from app.db.models import AgentLesson
+
+    r1 = _call(
+        env,
+        "ops.integration.save_lesson",
+        {
+            "pattern": "目标服务器磁盘只读导致上传失败",
+            "guidance": "先检查挂载与磁盘余量再重试上传",
+            "evidence": "plan=dbg, step-1-upload FAILED",
+            "severity": "warning",
+            "agent_name": "zeroclaw",
+        },
+        ctx,
+    )
+    assert r1["status"] == "pending" and not r1["updated"]
+    lesson_id = r1["lesson_id"]
+
+    # 幂等：同 pattern 再回写 → 更新而非新增
+    r2 = _call(
+        env,
+        "ops.integration.save_lesson",
+        {"pattern": "目标服务器磁盘只读导致上传失败", "guidance": "先修复磁盘再重试"},
+        ctx,
+    )
+    assert r2["updated"] is True and r2["lesson_id"] == lesson_id
+    assert (
+        env.query(AgentLesson)
+        .filter(AgentLesson.pattern == "目标服务器磁盘只读导致上传失败", AgentLesson.status == "pending")
+        .count()
+        == 1
+    )
+
+    # pending 不入 pack 正文
+    pack = _call(env, "ops.integration.get_context_pack", {"agent_name": "t"}, ctx)
+    assert not any("磁盘只读" in l["pattern"] for l in pack["lessons"])
+
+    # 管理端确认 → active → 入 pack 正文且 revision 变化
+    row = env.get(AgentLesson, lesson_id)
+    row.status = "active"
+    env.commit()
+    pack2 = _call(env, "ops.integration.get_context_pack", {"agent_name": "t"}, ctx)
+    merged = [l for l in pack2["lessons"] if "磁盘只读" in l["pattern"]]
+    assert merged and merged[0]["origin"] == "agent" and merged[0]["status"] == "active"
+    assert pack2["pack_revision"] != pack["pack_revision"]
+
+
+def test_save_lesson_validation_and_severity_default(env, ctx):
+    """缺 pattern/guidance 业务校验拒绝；非法 severity 落回 info。"""
+    from app.services import agent_context as ac
+
+    try:
+        ac.save_lesson(env, pattern="   ", guidance="x")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+    r = _call(
+        env,
+        "ops.integration.save_lesson",
+        {"pattern": "验证 severity 兜底", "guidance": "ok", "severity": "bogus"},
+        ctx,
+    )
+    assert r["status"] == "pending"
+    from app.db.models import AgentLesson
+
+    row = env.get(AgentLesson, r["lesson_id"])
+    assert row.severity == "info"
+    assert row.origin == "agent"
+
+
+def test_db_superseded_overrides_builtin_lesson(env, ctx):
+    """DB 中同 pattern 的 superseded 记录优先于内置教训——管理端可把内置
+    条目置失效（Phase 2 supersede 工作流的机制验证）。"""
+    from datetime import datetime, timezone
+
+    from app.db.models import AgentLesson
+
+    builtin = next(l for l in _builtin_lessons() if l["status"] == "active")
+    env.add(
+        AgentLesson(
+            id="Mtest01",
+            pattern=builtin["pattern"],
+            guidance=builtin["guidance"],
+            status="superseded",
+            origin="manual",
+            superseded_note="测试：人工置失效",
+            created_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+    )
+    env.commit()
+    pack = _call(env, "ops.integration.get_context_pack", {"agent_name": "t"}, ctx)
+    hits = [l for l in pack["lessons"] if l["pattern"] == builtin["pattern"]]
+    assert len(hits) == 1, "同 pattern 不应出现内置+DB 双条"
+    assert hits[0]["status"] == "superseded" and hits[0]["origin"] == "manual"
+
+
+def _builtin_lessons():
+    from app.services.agent_context import LESSONS
+
+    return LESSONS

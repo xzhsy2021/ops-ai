@@ -344,6 +344,115 @@ def _assemble_capabilities(db, ctx) -> dict[str, Any]:
     }
 
 
+def _assemble_lessons(db) -> list[dict[str, Any]]:
+    """教训库：DB（agent 回写 + 人工录入）优先，静态内置兜底合并。
+
+    - DB active/superseded 记录取正文；pending 只计数不入正文（防污染）
+    - 内置教训始终在场（代码演进的一部分）；DB 中存在同 pattern 的
+      active/superseded 记录时以 DB 为准（内置项可被人工 supersede 覆盖）
+    """
+    lessons: list[dict[str, Any]] = []
+    seen_patterns: set[str] = set()
+    try:
+        from app.db.models import AgentLesson
+
+        rows = (
+            db.query(AgentLesson)
+            .filter(AgentLesson.status.in_(["active", "superseded"]))
+            .order_by(AgentLesson.created_at)
+            .all()
+        )
+        for row in rows:
+            item = {
+                "id": row.id,
+                "pattern": row.pattern,
+                "guidance": row.guidance,
+                "status": row.status,
+                "severity": row.severity or "info",
+                "origin": row.origin,
+            }
+            if row.status == "superseded":
+                item["superseded_note"] = row.superseded_note or ""
+            lessons.append(item)
+            seen_patterns.add(row.pattern.strip())
+    except Exception:
+        lessons = []
+    for builtin in LESSONS:
+        if builtin["pattern"].strip() in seen_patterns:
+            continue  # DB 同 pattern 记录优先
+        lessons.append(dict(builtin))
+    return lessons
+
+
+def save_lesson(
+    db,
+    *,
+    pattern: str,
+    guidance: str,
+    evidence: str = "",
+    severity: str = "info",
+    agent_name: str = "unknown",
+) -> dict[str, Any]:
+    """agent 回写教训：默认 pending（管理端确认后 active 对所有 agent 生效）。
+
+    幂等：同 pattern 的 pending/active 记录存在时更新而非新增。
+    ID 分配：查 DB 与内置教训的最大 L 序号 + 1。
+    """
+    from datetime import datetime, timezone
+
+    from app.db.models import AgentLesson
+
+    pattern_clean = (pattern or "").strip()
+    guidance_clean = (guidance or "").strip()
+    if not pattern_clean or not guidance_clean:
+        raise ValueError("pattern 与 guidance 均不能为空")
+
+    existing = (
+        db.query(AgentLesson)
+        .filter(AgentLesson.pattern == pattern_clean, AgentLesson.status.in_(["pending", "active"]))
+        .order_by(AgentLesson.created_at.desc())
+        .first()
+    )
+    if existing:
+        existing.guidance = guidance_clean
+        existing.evidence = (evidence or "").strip() or existing.evidence
+        existing.severity = severity if severity in {"info", "warning"} else existing.severity
+        existing.agent_name = agent_name
+        existing.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"lesson_id": existing.id, "updated": True, "status": existing.status}
+
+    max_num = 0
+    for row in db.query(AgentLesson.id).all():
+        raw = str(row[0] or "")
+        if raw.startswith("L") and raw[1:].isdigit():
+            max_num = max(max_num, int(raw[1:]))
+    for builtin in LESSONS:
+        raw = str(builtin.get("id") or "")
+        if raw.startswith("L") and raw[1:].isdigit():
+            max_num = max(max_num, int(raw[1:]))
+    new_id = f"L{max_num + 1:03d}"
+
+    row = AgentLesson(
+        id=new_id,
+        pattern=pattern_clean,
+        guidance=guidance_clean,
+        evidence=(evidence or "").strip() or None,
+        severity=severity if severity in {"info", "warning"} else "info",
+        status="pending",
+        origin="agent",
+        agent_name=agent_name,
+    )
+    db.add(row)
+    db.commit()
+    return {
+        "lesson_id": new_id,
+        "updated": False,
+        "status": "pending",
+        "note": "已入待确认队列（pending）；管理端确认后进入 active 对所有 agent 生效",
+    }
+
+
 def build_context_pack(db, ctx, *, agent_name: str = "default", channel: str = "matrix") -> dict[str, Any]:
     """组装 AgentContextPack。revision = 全内容哈希，缓存协议的键。"""
     facts = _assemble_facts(db)
@@ -363,7 +472,7 @@ def build_context_pack(db, ctx, *, agent_name: str = "default", channel: str = "
         "capabilities": capabilities,
         "facts": {"systems": facts},
         "flows": flows,
-        "lessons": LESSONS,
+        "lessons": _assemble_lessons(db),
     }
     pack["pack_revision"] = _sha256_of(
         {k: v for k, v in pack.items() if k != "pack_revision"}

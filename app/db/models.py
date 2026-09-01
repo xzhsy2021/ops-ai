@@ -1358,3 +1358,27 @@ class InspectionCascadePolicy(Base):
     last_triggered_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow, index=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class AgentLesson(Base):
+    """Agent Context Layer 教训库（docs/agent-integration-abstraction-layer.md 4.3）。
+
+    跨 agent 共享的失败教训/经验：pattern=什么情况，guidance=怎么办。
+    agent 回写默认 status=pending（防污染：管理端确认后才进 active）；
+    OPS 侧修复落地时将相关教训置 superseded 并附 superseded_note——
+    旧结论失效信息本身就是对 agent 的纠偏。
+    """
+
+    __tablename__ = "agent_lessons"
+
+    id = Column(String(16), primary_key=True)
+    pattern = Column(Text, nullable=False)
+    guidance = Column(Text, nullable=False)
+    evidence = Column(Text, nullable=True)          # 回写时附的失败证据（计划ID/错误消息）
+    severity = Column(String(16), default="info")   # info | warning
+    status = Column(String(16), default="pending", index=True)  # pending | active | superseded
+    origin = Column(String(16), default="agent")    # agent 回写 | manual 人工录入
+    agent_name = Column(String(64), nullable=True)  # 来源 agent 标识
+    superseded_note = Column(Text, nullable=True)   # 失效说明（修复 commit/原因）
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)

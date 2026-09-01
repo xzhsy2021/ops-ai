@@ -115,3 +115,56 @@ def agent_get_flow_guide(args, ctx, db):
         "atomic=true 的流程必须一轮推进到'等待审批'，禁止中途停下回报状态。"
     )
     return guide
+
+
+@registry.register(
+    name="ops.integration.save_lesson",
+    title="回写接入教训",
+    description="把接入/执行中发现的教训回写 OPS 共享教训库（pattern=什么情况，guidance=怎么办，evidence=证据如计划ID/错误消息）。默认进 pending 待确认队列，管理端确认后对所有 agent 生效；同 pattern 幂等更新。失败/踩坑后调用，不要静默吞掉。中文: 回写教训/记录教训/共享经验。",
+    scopes=["ops:write"],
+    risk="low",
+    category="routing",
+    write=True,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "什么情况下会遇到此问题（一句话，可被其他 agent 检索匹配）",
+            },
+            "guidance": {
+                "type": "string",
+                "description": "应该怎么办（具体可执行的动作）",
+            },
+            "evidence": {
+                "type": "string",
+                "description": "证据：失败计划 ID / 错误消息 / 轮次编号（可选但强烈建议）",
+            },
+            "severity": {
+                "type": "string",
+                "enum": ["info", "warning"],
+                "description": "info=经验提示，warning=会导致流程失败的坑，默认 info",
+            },
+            "agent_name": {
+                "type": "string",
+                "description": "回写方 agent 标识（如 zeroclaw），便于追溯",
+            },
+        },
+        "required": ["pattern", "guidance"],
+        "additionalProperties": False,
+    },
+)
+def agent_save_lesson(args, ctx, db):
+    result = agent_context.save_lesson(
+        db,
+        pattern=str(args.get("pattern") or ""),
+        guidance=str(args.get("guidance") or ""),
+        evidence=str(args.get("evidence") or ""),
+        severity=str(args.get("severity") or "info"),
+        agent_name=str(args.get("agent_name") or ctx.username or "unknown"),
+    )
+    result["next_step"] = (
+        "教训已入库；继续当前流程（pending 不阻塞执行）。"
+        "下次会话 get_context_pack 的 lessons 区块会带上确认后的条目。"
+    )
+    return result

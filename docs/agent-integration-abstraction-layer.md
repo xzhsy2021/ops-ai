@@ -212,3 +212,38 @@
 2. **mount 区块 + 元指令版 AGENTS.md**（Phase 2 内）——任何 openclaw 发行版接入的"最后一公里"
 3. **heartbeat_ops**（1 天）——审批催办闭环，用户感知最强
 4. **peer_awareness / notify 事件出口 / Agent Card**（按需）——多 agent 与推送场景出现时再做
+
+## 11. 实施记录与剩余项评估（2026-09-01 收尾）
+
+### 11.1 已落地（Phase 1-4a，commit aa457df → a70cc53）
+
+| 能力 | 状态 |
+|---|---|
+| get_context_pack（能力+facts+flows+lessons，revision 缓存协议） | ✅ 端到端验证 |
+| get_flow_guide（3 流程机器可读编排，verified 标注） | ✅ 端到端验证 |
+| save_lesson 回写（pending 确认流 + lesson_admin CLI） | ✅ 上线 |
+| zeroclaw 元指令版 AGENTS.md + auto_approve 白名单 | ✅ 九轮攻坚后全链路绿灯 |
+| 契约自动化（args_hint/steps_template/annotations 校验器） | ✅ 509 回归 |
+| execute_plan 结果引导（PARTIAL_FAILED 后明确不可重试） | ✅ |
+| heartbeat_ops 审批催办（含 expire_stale 数据卫生） | ✅ cron 每 5 分钟实测两轮 ok |
+
+zeroclaw 消费端：cron 任务 306f8d8b（*/5 * * * *，--prompt --agent eggs --tz Asia/Shanghai），
+两轮实测 last=ok（38.9s/29.4s）；HEARTBEAT.md 同步记录任务语义。
+
+### 11.2 剩余项价值评估（结论：暂缓，观察期后再定）
+
+| 项目 | 触发条件 | 评估 |
+|---|---|---|
+| **peer_awareness（多 agent 分工）** | 同房间接入第 2 个 agent | 暂缓。当前单 agent（eggs）运行稳定；plan_digest 幂等已防重复建计划，回执重复的痛点只有在真实双 agent 并存时才出现。届时 pack facts 加 peer 清单即可（半天工作量，无沉没成本） |
+| **ops.integration.notify（事件推送）** | 出现"拉模式延迟造成实际损失"案例 | 暂缓。heartbeat cron（5 分钟）+ next_step 已覆盖当前时效需求；gateway /webhook 推送是架构升级，等 push 类痛点（如审批过期无人知、执行完成无人晓）真实发生再上——届时 OPS 侧 webhook 目标配置表 + 事件发射点约 2 天 |
+| **Agent Card（A2A 握手）** | 出现 agent 间互调 OPS 场景 | 暂缓。当前所有 agent 都直接连 OPS MCP，无 agent→agent 委托需求；A2A 生态在运维场景尚无真实消费者。pack 已是自描述载体，补 /.well-known/agent-card.json 只是薄封装（数小时） |
+| **多 agent 配额/视图裁剪** | 不同 agent 需要不同系统可见性 | 暂缓。单 agent 阶段无隔离需求；pack 的 agent_name 参数已预留按 agent 定制视图的挂钩（build_context_pack 的 agent_name 只影响 revision，裁剪逻辑加一层过滤即可） |
+
+**决策依据**：抽象层四类根因（能力感知/流程编排/契约漂移/经验孤岛）已全部机制化解决并通过九轮实测检验；剩余四项都是"场景未出现"的预防性建设，符合方案第 8 章"按需"定位。当前进入观察期——下一次换 agent（qclaw→第三代）或接入新渠道时，用真实痛点驱动后续项。
+
+### 11.3 运维备忘
+
+- 教训管理：`venv\Scripts\python.exe scripts\lesson_admin.py list/activate/supersede/add`
+- cron 管理：`zeroclaw.exe cron list / pause <ID> / update <ID> --expression ...`
+- pack revision 缓存：agent 传 cached_revision 命中返回轻量 unchanged；配置变更自动失效
+- 契约校验已进回归（tests/test_agent_context_layer.py 20+ 用例）：改执行器参数口径或工具 schema 而不同步 flow guide → 测试红

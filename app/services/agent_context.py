@@ -116,7 +116,6 @@ LESSONS: list[dict[str, Any]] = [
 # ──────────────────────────────────────────────────────────────
 
 FLOW_GUIDES: dict[str, dict[str, Any]] = {
-FLOW_GUIDES: dict[str, dict[str, Any]] = {
     "frontend-release": {
         "flow_id": "frontend-release",
         "title": "前端发版（Matrix 附件）",

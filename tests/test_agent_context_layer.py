@@ -28,8 +28,20 @@ def env(tmp_path):
     engine, Session = _sqlite_session(tmp_path)
     db = Session()
     try:
+        from app.db.models import Service, System
         from app.services.tool_registry import register_builtin_tools
 
+        # 种子：crypto-trader 前端发版实例（渲染测试依赖；真实生产配置同构）
+        db.add(System(name="crypto-trader", display_name="量化"))
+        db.flush()
+        db.add(Service(
+            name="crypto-trader-web",
+            system_name="crypto-trader",
+            display_name="前端",
+            template_variables={"deploy_path": "/data/web", "update_script": "./www.sh"},
+            servers=["203.0.113.10"],
+        ))
+        db.commit()
         register_builtin_tools()
         yield db
     finally:
@@ -164,13 +176,60 @@ def test_flow_guide_tools_exist_in_registry(env, ctx):
 
 
 def test_flow_guide_steps_template_carries_real_service(env, ctx):
-    """steps_template 的 SERVICE_CONTROL 带真实服务名（crypto-trader-web，
-    不是历史错误的 crypto-frontend）——L007 教训的机制化落地。"""
+    """steps_template 参数化（Phase 4b）：默认渲染 crypto-trader 实例
+    （zeroclaw 现行调用向后兼容），SERVICE_CONTROL 带真实服务名。"""
     r = _call(env, "ops.integration.get_flow_guide", {"flow_id": "frontend-release"}, ctx)
     svc = r["steps_template"]["SERVICE_CONTROL"]["parameters"]["action_parameters"]
+    assert r.get("rendered_for_system") == "crypto-trader"
     assert svc["service_name"] == "crypto-trader-web"
     assert svc["system_name"] == "crypto-trader"
     assert svc["targets"] == ["203.0.113.10"]
+    upload = r["steps_template"]["FILE_UPLOAD"]["parameters"]["action_parameters"]
+    assert upload["package_name"] == "crypto-trader-web.tar.gz"
+    assert upload["remote_path"].startswith("/data/web/")
+
+
+def test_flow_guide_render_for_other_system(env, ctx):
+    """参数化实例化：给其他系统建前端服务+环境后，同一 flow 渲染出该系统
+    的真实配置——换系统零代码改动。"""
+    from app.db.models import Service, System, SystemEnvironment
+
+    env.add(System(name="layer-cms", display_name="CMS"))
+    env.flush()
+    env.add(Service(
+        name="cms-frontend",
+        system_name="layer-cms",
+        display_name="前端",
+        template_variables={"deploy_path": "/opt/cms", "update_script": "./deploy.sh"},
+    ))
+    env.add(SystemEnvironment(system_name="layer-cms", name="test", servers=[{"id": "cms-srv-1"}]))
+    env.commit()
+
+    r = _call(env, "ops.integration.get_flow_guide", {"flow_id": "frontend-release", "system_name": "layer-cms"}, ctx)
+    assert r["rendered_for_system"] == "layer-cms"
+    svc = r["steps_template"]["SERVICE_CONTROL"]["parameters"]["action_parameters"]
+    assert svc["system_name"] == "layer-cms"
+    assert svc["service_name"] == "cms-frontend"
+    assert svc["targets"] == ["cms-srv-1"]
+    assert svc["compose_dir"] == "/opt/cms"
+    upload = r["steps_template"]["FILE_UPLOAD"]["parameters"]["action_parameters"]
+    assert upload["package_name"] == "cms-frontend.tar.gz"
+    assert upload["remote_path"] == "/opt/cms/cms-frontend.tar.gz"
+    # flow_revision 只对模板计算：同一 flow 不同系统实例 revision 相同
+    default_r = _call(env, "ops.integration.get_flow_guide", {"flow_id": "frontend-release"}, ctx)
+    assert r["flow_revision"] == default_r["flow_revision"]
+
+
+def test_flow_guide_render_unknown_system_keeps_placeholders(env, ctx):
+    """未知系统：占位符原样保留 + render_warning 提示——不臆测配置。"""
+    r = _call(
+        env, "ops.integration.get_flow_guide",
+        {"flow_id": "frontend-release", "system_name": "no-such-system"}, ctx,
+    )
+    svc = r["steps_template"]["SERVICE_CONTROL"]["parameters"]["action_parameters"]
+    assert "<SYSTEM>" in svc["system_name"] or svc["system_name"] == "no-such-system"
+    assert svc["service_name"] == "<SERVICE>"
+    assert "render_warning" in r and "no-such-system" in r["render_warning"]
 
 
 def test_flow_guide_unknown_id_returns_index(env, ctx):

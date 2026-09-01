@@ -14,8 +14,10 @@ OPS 唯一事实源；revision 未变走轻量 unchanged 响应。
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import re
 from typing import Any
 
 # ──────────────────────────────────────────────────────────────
@@ -119,15 +121,17 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
     "frontend-release": {
         "flow_id": "frontend-release",
         "title": "前端发版（Matrix 附件）",
-        "trigger": "同一消息内：附件（crypto-trader-web.tar.gz）+ @agent + 含'发版/前端/量化'关键词",
+        "trigger": "同一消息内：附件（<FRONTEND_PACKAGE>）+ @agent + 含'发版/前端/更新'或系统路由关键词",
         "verified": "2026-09-01 zeroclaw 元指令版端到端验证通过（完整链路：pack → flow guide → resolve → prepare_plan → 批准 → execute_plan → 上传 SHA 一致 + www.sh 执行成功）",
         "atomic": True,
+        "parameterized": True,
+        "default_system": "crypto-trader",
         "steps": [
             {
                 "n": 1,
                 "tool": "ops.list_packages",
                 "purpose": "确认文件中心是否已有同名包（避免重复上传）",
-                "args_hint": {"system": "crypto-trader", "service": "crypto-trader-web"},
+                "args_hint": {"system": "<SYSTEM>", "service": "<SERVICE>"},
                 "on_skip": "包存在且 sha256 与附件一致 → 跳过上传直接进入第 2 步",
             },
             {
@@ -176,10 +180,10 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
                 "action_type": "FILE_UPLOAD",
                 "parameters": {
                     "action_parameters": {
-                        "package_name": "crypto-trader-web.tar.gz",
-                        "remote_path": "/data/web/crypto-trader-web.tar.gz",
+                        "package_name": "<FRONTEND_PACKAGE>",
+                        "remote_path": "<DEPLOY_PATH>/<FRONTEND_PACKAGE>",
                         "overwrite": True,
-                        "confirm_path": "/data/web/crypto-trader-web.tar.gz",
+                        "confirm_path": "<DEPLOY_PATH>/<FRONTEND_PACKAGE>",
                     }
                 },
             },
@@ -189,10 +193,10 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
                 "parameters": {
                     "action_parameters": {
                         "control_action": "update",
-                        "system_name": "crypto-trader",
-                        "service_name": "crypto-trader-web",
-                        "targets": ["203.0.113.10"],
-                        "compose_dir": "/data/web",
+                        "system_name": "<SYSTEM>",
+                        "service_name": "<SERVICE>",
+                        "targets": "<TARGETS>",
+                        "compose_dir": "<DEPLOY_PATH>",
                     }
                 },
                 "dependencies": ["step-1-upload"],
@@ -207,7 +211,7 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
     "service-restart": {
         "flow_id": "service-restart",
         "title": "服务重启（单动作）",
-        "trigger": "消息含系统关键词（如'量化'/'crypto-trader'）+ 重启意图",
+        "trigger": "消息含系统路由关键词（见 facts.routing_keywords）+ 重启意图",
         "atomic": True,
         "steps": [
             {
@@ -531,8 +535,134 @@ def build_context_pack(db, ctx, *, agent_name: str = "default", channel: str = "
     return pack
 
 
+_PLACEHOLDER_PATTERN = re.compile(r"<(SYSTEM|SERVICE|FRONTEND_PACKAGE|TARGETS|DEPLOY_PATH)>")
+
+
+def _flow_binding_values(db, system_name: str) -> dict[str, Any]:
+    """按系统从 DB 解析占位符实值——服务名/部署路径/目标服务器全部实时读取，
+    agent 永远拿不到 DB 里不存在的配置（与 facts 同一防线）。"""
+    from app.db.models import Service, System, SystemEnvironment
+
+    values: dict[str, Any] = {"SYSTEM": system_name, "SERVICE": "", "DEPLOY_PATH": "", "TARGETS": []}
+    system = db.query(System).filter(System.name == system_name).first()
+    if system is None:
+        return values
+    # SERVICE：系统内 name 含 "web"/"frontend"/"前端" 的服务，否则取 display_name
+    # 含"前端"者；再退而取首个服务（模板流程的主目标）
+    services = db.query(Service).filter(Service.system_name == system_name).order_by(Service.name).all()
+    frontend = None
+    for svc in services:
+        if any(tag in svc.name.lower() for tag in ("web", "frontend")):
+            frontend = svc
+            break
+    if frontend is None:
+        for svc in services:
+            if "前端" in (svc.display_name or ""):
+                frontend = svc
+                break
+    if frontend is None and services:
+        frontend = services[0]
+    if frontend is not None:
+        values["SERVICE"] = frontend.name
+        template_vars = getattr(frontend, "template_variables", None) or {}
+        if not isinstance(template_vars, dict):
+            template_vars = {}
+        values["DEPLOY_PATH"] = str(template_vars.get("deploy_path") or "").rstrip("/")
+        values["FRONTEND_PACKAGE"] = f"{frontend.name}.tar.gz"
+        # TARGETS 优先读服务自身 servers（真实清单），空则退系统环境 servers
+        servers = getattr(frontend, "servers", None) or []
+        if isinstance(servers, list):
+            ids: list[str] = []
+            for s in servers:
+                if isinstance(s, dict):
+                    sid = str(s.get("id") or s.get("name") or "").strip()
+                elif isinstance(s, str):
+                    sid = s.strip()
+                else:
+                    sid = ""
+                if sid:
+                    ids.append(sid)
+            values["TARGETS"] = ids
+    if not values["TARGETS"]:
+        env_row = (
+            db.query(SystemEnvironment)
+            .filter(SystemEnvironment.system_name == system_name, SystemEnvironment.name == "test")
+            .first()
+        )
+        if env_row is not None:
+            servers = env_row.servers or []
+            values["TARGETS"] = [
+                str(s.get("id") or s.get("name") or "").strip() for s in servers if isinstance(s, dict)
+            ]
+            values["TARGETS"] = [t for t in values["TARGETS"] if t]
+    return values
+
+
+def render_flow_guide(db, flow_id: str, system_name: str = "") -> dict[str, Any] | None:
+    """返回 flow guide 并按 system_name 实例化占位符。
+
+    - 未传 system_name → 用 flow 的 default_system（向后兼容：zeroclaw 现行
+      调用拿到的仍是 crypto-trader 实例）
+    - 占位符全部从 DB 实时解析；系统不存在时占位符原样保留并附 hint
+    - flow_revision 只对模板计算（实例化值不进 revision——配置变更由
+      pack_revision 的 facts 区块感知）
+    """
+    guide = FLOW_GUIDES.get(flow_id)
+    if guide is None:
+        return None
+    result = copy.deepcopy(guide)
+    system_name = (system_name or guide.get("default_system") or "").strip()
+    rendered_system = bool(system_name)
+    if not result.get("parameterized"):
+        # 无占位符的流程（service-restart/package-pull-release）原样返回
+        result["flow_revision"] = _sha256_of(guide)
+        return result
+
+    values = _flow_binding_values(db, system_name) if system_name else {}
+    missing = not values.get("SERVICE")
+    resolved_system = system_name if rendered_system and values.get("SERVICE") else ""
+
+    def _sub(obj: Any) -> Any:
+        if isinstance(obj, str):
+            def _replace(m: "re.Match[str]") -> str:
+                key = m.group(1)
+                if key in values and values[key] not in ("", []):
+                    if key == "TARGETS":
+                        return json.dumps(values[key], ensure_ascii=False)
+                    return str(values[key])
+                return m.group(0)  # 未解析的占位符原样保留
+            return _PLACEHOLDER_PATTERN.sub(_replace, obj)
+        if isinstance(obj, list):
+            return [_sub(x) for x in obj]
+        if isinstance(obj, dict):
+            return {k: _sub(v) for k, v in obj.items()}
+        return obj
+
+    result = _sub(result)
+    # TARGETS 占位符是字符串，渲染后需要还原成 JSON 数组
+    template = result.get("steps_template") or {}
+    svc_ctrl = template.get("SERVICE_CONTROL")
+    if svc_ctrl:
+        params = svc_ctrl.get("parameters") or {}
+        nested = params.get("action_parameters")
+        if isinstance(nested, dict) and isinstance(nested.get("targets"), str):
+            try:
+                nested["targets"] = json.loads(nested["targets"])
+            except (ValueError, TypeError):
+                pass
+    if resolved_system:
+        result["rendered_for_system"] = resolved_system
+    elif system_name:
+        result["render_warning"] = (
+            f"系统 {system_name} 未找到可发版的前端服务（服务表内无匹配），"
+            "占位符原样保留——请核对 pack facts 区块的服务清单后重试。"
+        )
+    result["flow_revision"] = _sha256_of(guide)
+    return result
+
+
 def get_flow_guide(flow_id: str) -> dict[str, Any] | None:
-    """返回流程编排定义；不存在返回 None。"""
+    """返回流程编排定义（模板，未实例化）；不存在返回 None。"""
     guide = FLOW_GUIDES.get(flow_id)
     if guide is None:
         return None

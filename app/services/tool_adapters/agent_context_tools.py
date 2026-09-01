@@ -71,7 +71,7 @@ def agent_get_context_pack(args, ctx, db):
 @registry.register(
     name="ops.integration.get_flow_guide",
     title="获取流程编排指南",
-    description="返回指定流程的机器可读分步编排：步骤顺序、每步工具与参数样例（args_hint）、步骤模板（steps_template）、硬规则（hard_rules）、atomic 声明（禁止中途停顿回报状态）。内置流程：frontend-release（Matrix 附件发版）/ service-restart（服务重启）/ package-pull-release（拉包+发布）。中文: 获取流程指南/流程编排/操作流程。",
+    description="返回指定流程的机器可读分步编排：步骤顺序、每步工具与参数样例（args_hint）、步骤模板（steps_template，可按 system_name 用 OPS 真实配置实例化）、硬规则（hard_rules）、atomic 声明（禁止中途停顿回报状态）。内置流程：frontend-release（Matrix 附件发版，参数化支持任意系统）/ service-restart（服务重启）/ package-pull-release（拉包+发布）。传 system_name 后 steps_template 里的 <SYSTEM>/<SERVICE>/<TARGETS> 等占位符替换为该系统在 OPS DB 中的真实服务名/部署路径/目标服务器。中文: 获取流程指南/流程编排/操作流程。",
     scopes=["ops:read"],
     risk="low",
     category="routing",
@@ -82,6 +82,10 @@ def agent_get_context_pack(args, ctx, db):
             "flow_id": {
                 "type": "string",
                 "description": "流程 ID，如 frontend-release / service-restart / package-pull-release",
+            },
+            "system_name": {
+                "type": "string",
+                "description": "实例化系统名（如 crypto-trader）——参数化流程的占位符替换为该系统真实配置；不传则用流程默认系统",
             },
             "list_only": {
                 "type": "boolean",
@@ -104,7 +108,8 @@ def agent_get_flow_guide(args, ctx, db):
             "flow_ids": agent_context.list_flow_ids(),
             "hint": "未指定 flow_id，已返回可用索引；传 flow_id 获取完整编排",
         }
-    guide = agent_context.get_flow_guide(flow_id)
+    system_name = str(args.get("system_name") or "").strip()
+    guide = agent_context.render_flow_guide(db, flow_id, system_name)
     if guide is None:
         return {
             "error": f"flow not found: {flow_id}",

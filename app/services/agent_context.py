@@ -111,6 +111,20 @@ LESSONS: list[dict[str, Any]] = [
         "status": "active",
         "severity": "warning",
     },
+    {
+        "id": "L010",
+        "pattern": "消息附件与文件中心已有包是否同一个——靠文件名猜测（同名不同版本会误判）",
+        "guidance": "scan_media_events 返回 already_in_file_center + file_center_package（按事件指纹 source_message_key 精确匹配，非文件名）；list_packages 也输出 source_message_key。附件已入库时直接建不含 MATRIX_PULL 的计划引用既有包；同名但 already_in_file_center=false 的是新附件，必须拉取",
+        "status": "active",
+        "severity": "warning",
+    },
+    {
+        "id": "L011",
+        "pattern": "测试环境受益人计划含 MATRIX_PULL 时 temporary_grant_id 为 null，无法自审批整链",
+        "guidance": "MATRIX_PULL 已纳入临时自审批动作集（2026-09-02 commit 6bdeeba）；授权 request 时 allowed_actions 需含 MATRIX_PULL 才覆盖全链。旧授权（动作集不含 MATRIX_PULL）仍有效但只覆盖不含拉取的计划——或者先确认包已在文件中心（见 L010）走无拉取计划",
+        "status": "active",
+        "severity": "info",
+    },
 ]
 
 # ──────────────────────────────────────────────────────────────
@@ -129,10 +143,10 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
         "steps": [
             {
                 "n": 1,
-                "tool": "ops.list_packages",
-                "purpose": "确认文件中心是否已有同名包（避免重复上传）",
-                "args_hint": {"system": "<SYSTEM>", "service": "<SERVICE>"},
-                "on_skip": "包存在且 sha256 与附件一致 → 跳过上传直接进入第 2 步",
+                "tool": "ops.matrix.scan_media_events",
+                "purpose": "确认附件事件是否已入库（already_in_file_center 字段按事件指纹精确判定，非文件名——见 L010）",
+                "args_hint": {"room_id": "<消息所在房间>", "sender": "<发送者>", "filename": "<FRONTEND_PACKAGE>"},
+                "on_skip": "already_in_file_center=true 且 file_center_package.sha256 非空 → 附件已入库，建不含 MATRIX_PULL 的计划直接引用既有包（见 L011 两条路径）；false → 新附件，计划需含 MATRIX_PULL 步骤",
             },
             {
                 "n": 2,

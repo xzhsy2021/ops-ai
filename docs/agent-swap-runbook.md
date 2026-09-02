@@ -183,13 +183,20 @@ zeroclaw.exe cron add '*/5 * * * *' \
 | 催办 cron 无消息 | has_work=false 正常沉默 | 有待审批计划时自然触发；可人为建测试计划验证 |
 | file_write 被拒（报告附件发不出） | file_write/file_edit 不在白名单 | 加入白名单（仍受 workspace_only/forbidden_paths 约束） |
 
-## 附：当前生产环境基准（2026-09-01）
+## 附：当前生产环境基准（2026-09-01 更新）
 
-- OPS：port 8000，Agent Context Layer 全量上线（Phase 1-4）
+- OPS：port 8000，Agent Context Layer 全量上线（Phase 1-4 + flow guide 参数化）
 - 接入层工具：`ops.integration.get_context_pack / get_flow_guide /
   get_heartbeat_ops / save_lesson`
-- 在用 agent：zeroclaw（workspace `D:\zeroclaw\workspace`，daemon
-  `zeroclaw.exe daemon --log-level debug`），cron 306f8d8b 审批催办 */5min
+- **在用 agent：QClaw 桌面版 v0.2.37.630**（workspace
+  `C:\Users\admin\.qclaw\workspace`，gateway :49167）——2026-09-01 从
+  zeroclaw 切回。切换仅三步：停旧 daemon（同 Matrix 账号 `@han:hubtel.xyz`
+  必须避免双在线）→ workspace 指令文件换元指令版（本文 §2 模板）→ 实测
+  验证。切换当天端到端验证通过：安全日报巡检 + HTML 附件报告全链路正常。
+- zeroclaw 已停用（LLM 提供商 cc.mtgame.club 间歇性空响应致会话反复中断；
+  workspace `D:\zeroclaw\workspace` 保留，cron 306f8d8b 不再运行）
+- QClaw 审批门差异：无 auto_approve 列表，工具审批走桌面 UI；LLM 走
+  `qclaw/pool-deepseek-v4-flash` 池化路由（不经 cc.mtgame.club）
 - 流程：frontend-release（参数化，default_system=crypto-trader）/
   service-restart / package-pull-release
 - 教训库：内置 9 条 + 生产库回写通道（`scripts/lesson_admin.py` 管理）

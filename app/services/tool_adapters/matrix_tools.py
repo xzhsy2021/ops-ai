@@ -18,7 +18,7 @@ import io
 import os
 import re
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import HTTPException
 
@@ -237,10 +237,56 @@ def _event_to_dict(event: MatrixMediaEvent) -> Dict[str, Any]:
     }
 
 
+def _annotate_file_center_matches(db, events: List[Dict[str, Any]], room_id: str) -> None:
+    """为扫描到的事件标注文件中心入库状态（source_message_key 精确匹配）。
+
+    每个 event 增补：
+    - already_in_file_center: 该 Matrix 事件是否已拉取入库（bool）
+    - file_center_package: 命中包的 {package_name, sha256, size_bytes} 或 null
+    判定键 = pull 入库时写入的 source_message_key（matrix:default:{room}:{event_id}），
+    同一事件必然同一包——不靠文件名猜测。
+    """
+    from app.db.models import DeployPackage
+
+    if db is None or not events:
+        for ev in events:
+            ev.setdefault("already_in_file_center", False)
+            ev.setdefault("file_center_package", None)
+        return
+    keys = {
+        f"matrix:default:{room_id}:{ev.get('event_id') or ''}": ev
+        for ev in events
+        if ev.get("event_id")
+    }
+    if not keys:
+        return
+    rows = (
+        db.query(DeployPackage)
+        .filter(
+            DeployPackage.source_message_key.in_(list(keys.keys())),
+            DeployPackage.deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    for row in rows:
+        ev = keys.get(row.source_message_key or "")
+        if ev is None:
+            continue
+        ev["already_in_file_center"] = True
+        ev["file_center_package"] = {
+            "package_name": row.package_name,
+            "sha256": row.sha256 or "",
+            "size_bytes": int(row.size_bytes or 0),
+        }
+    for ev in events:
+        ev.setdefault("already_in_file_center", False)
+        ev.setdefault("file_center_package", None)
+
+
 @registry.register(
     name="ops.matrix.scan_media_events",
     title="Scan Matrix room media events",
-    description="预览 Matrix 房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 可选文件名），不下载、不发布。返回匹配事件的 event_id、文件名、mxc 地址与是否加密。任意文件类型均可见（部署包或 .txt/.pdf 等普通文件）。中文: 查看Matrix房间媒体/扫描房间附件/房间发了什么文件.",
+    description="预览 Matrix 房间内匹配的媒体事件（sender / msgtype / 时间窗口 / 可选文件名），不下载、不发布。返回匹配事件的 event_id、文件名、mxc 地址与是否加密；并标注 already_in_file_center / file_center_package（该事件是否已拉取入库及对应包 sha256——判定键为事件指纹 source_message_key，非文件名猜测）。任意文件类型均可见（部署包或 .txt/.pdf 等普通文件）。中文: 查看Matrix房间媒体/扫描房间附件/房间发了什么文件.",
     scopes=["ops:read"],
     risk="low",
     category="package_read",
@@ -286,6 +332,9 @@ def scan_media_events(args: Dict[str, Any], ctx, db) -> Dict[str, Any]:
         )
     except MatrixClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+    # 标注文件中心入库状态（source_message_key 精确匹配，不靠文件名猜）
+    _annotate_file_center_matches(db, result.get("events") or [], room_id)
 
     _scan_cache_set(key, result)
     return result

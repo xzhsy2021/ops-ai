@@ -187,6 +187,62 @@ def test_scan_media_events_room_binding_blocks(monkeypatch, db):
     assert exc.value.status_code == 403
 
 
+def test_scan_media_events_marks_already_in_file_center(monkeypatch, db):
+    """已拉取入库的事件标 already_in_file_center=true + 包 sha256；未入库的标 false。
+    判定键是 source_message_key（事件指纹），不是文件名。"""
+    from app.db.models import DeployPackage
+    from app.services.tool_adapters.matrix_tools import scan_media_events
+
+    db.add(DeployPackage(
+        package_name="crypto-frontend.tar.gz",
+        file_path="unused",
+        sha256="b" * 64,
+        size_bytes=1024,
+        source_message_key="matrix:default:!room:example.org:$abc",
+    ))
+    db.commit()
+
+    mt = _patch_matrix_client(monkeypatch, events=[
+        _media_event(event_id="$abc", filename="crypto-frontend.tar.gz"),
+        _media_event(event_id="$new", filename="crypto-frontend.tar.gz"),
+    ])
+    result = scan_media_events({"room_id": "!room:example.org", "sender": "@alice:example.org"}, _ctx(), db)
+    pulled, fresh = result["events"]
+    # $abc 已入库：精确命中（同文件名的 $new 不算）
+    assert pulled["already_in_file_center"] is True
+    assert pulled["file_center_package"]["sha256"] == "b" * 64
+    assert pulled["file_center_package"]["package_name"] == "crypto-frontend.tar.gz"
+    # $new 未入库：即使文件名相同也标 false——同名不同事件不是同一个包
+    assert fresh["already_in_file_center"] is False
+    assert fresh["file_center_package"] is None
+    # 清理：避免污染 module 级共享 db
+    db.query(DeployPackage).filter(DeployPackage.package_name == "crypto-frontend.tar.gz").delete()
+    db.commit()
+
+
+def test_list_packages_exposes_source_message_key(db):
+    """文件中心查询返回 source_message_key/source_context——
+    Agent 拿它与 scan 的 event_id 对上，判定"消息附件=文件中心包"。"""
+    from app.db.models import DeployPackage
+    from app.services.package_retention import package_to_dict
+
+    row = DeployPackage(
+        package_name="probe.tar.gz",
+        file_path="unused",
+        sha256="c" * 64,
+        size_bytes=10,
+        source_message_key="matrix:default:!room:example.org:$evt1",
+        source_context={"channel": "matrix", "message_id": "$evt1"},
+    )
+    db.add(row)
+    db.commit()
+    data = package_to_dict(row)
+    assert data["source_message_key"] == "matrix:default:!room:example.org:$evt1"
+    assert data["source_context"]["message_id"] == "$evt1"
+    db.query(DeployPackage).filter(DeployPackage.package_name == "probe.tar.gz").delete()
+    db.commit()
+
+
 def test_scan_media_events_empty_includes_debug(monkeypatch, db):
     """scan 工具在 events 为空时返回 debug 信息便于 Agent 诊断。"""
     mt = _patch_matrix_client(monkeypatch, events=[])  # 显式传空 list

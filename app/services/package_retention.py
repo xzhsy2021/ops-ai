@@ -615,6 +615,8 @@ def package_to_dict(row: DeployPackage, *, include_retention: bool = True, prote
         "deleted_at": _iso_utc(row.deleted_at),
         "delete_reason": row.delete_reason or "",
         "modified": _iso_utc(modified_naive),
+        "source_message_key": row.source_message_key or "",
+        "source_context": row.source_context or {},
     }
     if include_retention:
         reasons = []

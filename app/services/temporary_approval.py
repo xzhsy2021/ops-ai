@@ -18,6 +18,7 @@ from app.services.message_context import MessageContext, normalize_identity, nor
 
 
 TEMPORARY_SELF_APPROVAL_ACTIONS = frozenset({
+    "MATRIX_PULL",
     "FILE_UPLOAD",
     "RELEASE",
     "SERVICE_CONTROL",

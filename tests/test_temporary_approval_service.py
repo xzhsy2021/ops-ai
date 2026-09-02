@@ -317,8 +317,34 @@ def test_expired_active_grant_is_not_returned_without_background_worker(tmp_path
 def test_allowlist_is_fixed_and_cannot_be_empty_or_include_forbidden_actions(tmp_path):
     _, session, service_cls = _service(tmp_path)
     service = service_cls(session)
-    assert TEMPORARY_SELF_APPROVAL_ACTIONS == {"FILE_UPLOAD", "RELEASE", "SERVICE_CONTROL", "HEALTH_CHECK"}
+    assert TEMPORARY_SELF_APPROVAL_ACTIONS == {
+        "MATRIX_PULL", "FILE_UPLOAD", "RELEASE", "SERVICE_CONTROL", "HEALTH_CHECK",
+    }
     with pytest.raises(ValueError, match="allowed actions"):
         _request(service, _context(message="empty"), allowed_actions=[])
     with pytest.raises(ValueError, match="not allowed"):
         _request(service, _context(message="rollback"), allowed_actions=["ROLLBACK"])
+
+
+def test_matrix_pull_is_self_approvable_for_full_chain_grant(tmp_path):
+    """MATRIX_PULL 纳入测试环境自审批动作集：拉取+上传+部署+健康检查
+    全链计划在测试环境可由受益人自审批（此前含 MATRIX_PULL 的计划
+    temporary_grant_id 为 null，受益人无法自批）。"""
+    _, session, service_cls = _service(tmp_path)
+    service = service_cls(session)
+    request_context = _context(message="pull-chain", sender="user-a")
+    grant, code = _request(
+        service, request_context,
+        allowed_actions=["MATRIX_PULL", "FILE_UPLOAD", "SERVICE_CONTROL", "HEALTH_CHECK"],
+    )
+    assert set(grant.allowed_actions) == {"MATRIX_PULL", "FILE_UPLOAD", "SERVICE_CONTROL", "HEALTH_CHECK"}
+    confirmation = _context(message="confirm-pull", sender="owner")
+    confirmed = service.confirm(grant.id, code, actor_key=confirmation.actor_key, message_context=confirmation)
+    assert confirmed is not None
+    active = service.get_active_grant(
+        actor_key=request_context.actor_key,
+        system_name="crypto-trader",
+        environment_name="test",
+        message_context=request_context,
+    )
+    assert "MATRIX_PULL" in (active.allowed_actions or [])

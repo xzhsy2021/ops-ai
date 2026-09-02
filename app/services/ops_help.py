@@ -111,7 +111,7 @@ _TOPIC_EXAMPLES: dict[str, list[dict[str, Any]]] = {
                 "duration_value": 1,
                 "duration_unit": "week",
             },
-            "note": "仅测试环境可用；动作限 FILE_UPLOAD/RELEASE/SERVICE_CONTROL/HEALTH_CHECK；受益人为固定 actor key。",
+            "note": "仅测试环境可用；动作限 MATRIX_PULL/FILE_UPLOAD/RELEASE/SERVICE_CONTROL/HEALTH_CHECK；受益人为固定 actor key。",
         },
         {
             "message": "帮我在测试环境给 @Leo 开两天包上传和健康检查权限，理由是联调验证",

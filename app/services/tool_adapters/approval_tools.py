@@ -1557,7 +1557,7 @@ def approval_reject_plan(args, ctx, db):
             "allowed_actions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "允许的自审批动作集（request 必填）：FILE_UPLOAD / RELEASE / SERVICE_CONTROL / HEALTH_CHECK",
+                "description": "允许的自审批动作集（request 必填）：MATRIX_PULL / FILE_UPLOAD / RELEASE / SERVICE_CONTROL / HEALTH_CHECK",
             },
             "reason": {"type": "string", "description": "授权理由（request 必填）"},
             "duration_value": {"type": "integer", "description": "授权时长数值（request 可选，默认 1）"},

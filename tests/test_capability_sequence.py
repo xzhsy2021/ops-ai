@@ -262,3 +262,69 @@ def test_validate_sequence_dependency_dangling(monkeypatch):
         assert any("no-such-step" in v for v in report["violations"])
     finally:
         db.close()
+
+
+def test_pipeline_flow_guide_ids_valid():
+    """层5：pipelines.flow_guide_id 合法性（fixture 库内自建数据验证）。
+
+    生产库回填验证见 scripts/backfill_pipeline_flow_guide.py 的 live probe；
+    契约层只测校验逻辑本身。
+    """
+    from app.db.base import SessionLocal
+    from app.db.models import Pipeline
+    from app.services.agent_context import FLOW_GUIDES, validate_capability_sequence
+
+    db, ctx = _live_registry_env()  # registry ctx；db 用 fixture 库
+    # _live_registry_env 返回的 db 也是 fixture 库（同 DATABASE_URL）——直接用
+    try:
+        # 干净库：无 pipeline → 层5 不违规
+        report = validate_capability_sequence(db, ctx)
+        assert report["ok"], report["violations"]
+        # 插入合法关联 → 仍绿
+        db.add(Pipeline(id="t-pipe-1", name="t-前端", system_name="crypto-trader",
+                        flow_guide_id="frontend-release"))
+        db.commit()
+        report = validate_capability_sequence(db, ctx)
+        assert report["ok"], report["violations"]
+        # 乱指 → 层5 违规
+        p = db.query(Pipeline).filter(Pipeline.id == "t-pipe-1").first()
+        p.flow_guide_id = "no-such-flow"
+        db.commit()
+        report = validate_capability_sequence(db, ctx)
+        assert not report["ok"]
+        assert any("no-such-flow" in v for v in report["violations"])
+    finally:
+        db.query(Pipeline).filter(Pipeline.id == "t-pipe-1").delete()
+        db.commit()
+        db.close()
+
+
+def test_pipeline_flow_guide_id_dangling_detected(monkeypatch):
+    """层5：flow_guide_id 指向不存在的 flow → 违规暴露（软引用完整性）。"""
+    from app.services import agent_context as ac
+
+    class _FakePipeline:
+        name = "dangling-pipeline"
+        flow_guide_id = "no-such-flow"
+
+    class _FakeQuery:
+        def all(self):
+            return [_FakePipeline()]
+
+    class _FakeDB:
+        def query(self, model):
+            return _FakeQuery()
+
+    flow = {
+        "steps": [{"n": 1, "tool": "ops.approval.prepare_plan"},
+                  {"n": 2, "tool": "(matrix 回复)"},
+                  {"n": 3, "tool": "ops.approval.execute_plan"}],
+    }
+    monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
+    db, ctx = _live_registry_env()
+    try:
+        report = ac.validate_capability_sequence(_FakeDB(), ctx)
+        assert not report["ok"]
+        assert any("no-such-flow" in v for v in report["violations"])
+    finally:
+        db.close()

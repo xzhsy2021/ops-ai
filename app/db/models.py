@@ -206,6 +206,11 @@ class Pipeline(Base):
     system_name = Column(String(64), nullable=False, index=True)
     description = Column(Text, nullable=True)
     strategy = Column(String(32), default="DIRECT")
+    # 流程 ↔ MCP 能力序关联（2026-09-03）：指向 FLOW_GUIDES 的 flow_id，
+    # 让流程管理 UI 条目可跳转到机器可读的 capability_sequence。
+    # 非 FK 硬约束（FLOW_GUIDES 在代码里，DB 外键管不了代码常量）——
+    # 合法性由 validate_capability_sequence 的层5校验把关。
+    flow_guide_id = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

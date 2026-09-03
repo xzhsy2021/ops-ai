@@ -1413,6 +1413,13 @@ MIGRATIONS: List[Dict[str, str]] = [
         "name": "Create source message key index",
         "sql": "CREATE INDEX IF NOT EXISTS ix_deploy_packages_source_message_key ON deploy_packages(source_message_key)",
     },
+    {
+        "version": "084_018_pipeline_flow_guide_id",
+        "name": "Add flow_guide_id to pipelines (flow ↔ capability sequence link)",
+        "table": "pipelines",
+        "column": "flow_guide_id",
+        "sql": "ALTER TABLE pipelines ADD COLUMN flow_guide_id VARCHAR(64)",
+    },
 ]
 
 

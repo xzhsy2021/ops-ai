@@ -1104,6 +1104,19 @@ def validate_capability_sequence(db, ctx) -> dict[str, Any]:
             for dep in spec.get("dependencies", []):
                 if dep not in known_keys:
                     violations.append(f"{fid}.{key}: 依赖 {dep} 不在模板 step_key 集合 {sorted(known_keys)}")
+    # 5 流程管理 DB 关联：pipelines.flow_guide_id 必须 ∈ FLOW_GUIDES
+    #    （软引用完整性——flow 被删/改名后 DB 残留指向会在这里暴露）
+    try:
+        from app.db.models import Pipeline
+
+        for p in db.query(Pipeline).all():
+            fgid = (p.flow_guide_id or "").strip()
+            if not fgid:
+                continue  # 未关联不违规（老数据可空），但关联了就必须合法
+            if fgid not in FLOW_GUIDES:
+                violations.append(f"pipeline[{p.name}]: flow_guide_id={fgid} 不在 FLOW_GUIDES")
+    except Exception:
+        pass  # Pipeline 表不存在（全新库首启前）时跳过
     return {"ok": not violations, "violations": violations, "flows_checked": len(FLOW_GUIDES)}
 
 

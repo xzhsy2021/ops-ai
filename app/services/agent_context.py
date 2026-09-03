@@ -1044,6 +1044,69 @@ def _annotation_for(tool: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def validate_capability_sequence(db, ctx) -> dict[str, Any]:
+    """流程 ↔ MCP 能力序关联全面校验（设计 ③ CI 化）。
+
+    四层校验，任何一层漂移都会被逮住：
+    1. 名称 join：全部 FLOW_GUIDES 步骤工具名必须在 registry——
+       新增/改名工具后忘更新 flow 会在这里暴露
+    2. 能力一致性：capability_sequence 的 write/risk 与 registry 复算
+       一致（build_capability_sequence 直接 join，此处独立复算防映射函数被改坏）
+    3. 审批门唯一：每条 flow 恰好一个 approval_gate（(matrix 步骤）——
+       多门=审批链断裂（agent 卡在中间），零门=风险未把关
+    4. 动作层合法：steps_template 的 action_type 必须在 plan_executor
+       STEP_HANDLERS 注册表内；依赖引用的 step_key 必须存在于模板内
+    """
+    from app.services.plan_executor import STEP_HANDLERS
+    from app.services.tool_registry import registry
+
+    listed = registry.list_tools(db, ctx, include_disabled=False, include_schema=False, limit=2000)
+    tool_map = {t["name"]: t for t in listed["tools"]}
+
+    violations: list[str] = []
+    for fid, flow in FLOW_GUIDES.items():
+        # 1+2 名称 join 与能力一致性
+        seq = build_capability_sequence(flow, tool_map)
+        gates = 0
+        for s in seq:
+            tool = s.get("tool", "")
+            # 3 审批门计数（在 continue 之前——(matrix 步骤不查 registry）
+            if s.get("approval_gate"):
+                gates += 1
+            if s.get("drift"):
+                violations.append(f"{fid}#{s.get('n')}: 工具 {tool} 不在 registry")
+                continue
+            if not tool or tool.startswith("("):
+                continue
+            t = tool_map.get(tool)
+            if t is None:
+                continue
+            if s.get("write") is not None and s.get("write") != bool(t.get("write", False)):
+                violations.append(f"{fid}#{s.get('n')}: write={s.get('write')} 与 registry {t.get('write')} 不符")
+            if s.get("risk") is not None and s.get("risk") != str(t.get("risk", "")):
+                violations.append(f"{fid}#{s.get('n')}: risk={s.get('risk')} 与 registry {t.get('risk')} 不符")
+        # 3 审批门唯一性
+        if gates != 1:
+            violations.append(f"{fid}: 审批门数量 {gates}（应为 1——零门=风险未把关，多门=审批链断裂）")
+        # 4 动作层合法性
+        tmpl = flow.get("steps_template") or {}
+        known_keys = set()
+        for key, spec in tmpl.items():
+            if not isinstance(spec, dict):
+                continue
+            known_keys.add(spec.get("step_key") or key)
+        for key, spec in tmpl.items():
+            if not isinstance(spec, dict):
+                continue
+            at = spec.get("action_type", key)
+            if at not in STEP_HANDLERS:
+                violations.append(f"{fid}.{key}: action_type {at} 不在 STEP_HANDLERS")
+            for dep in spec.get("dependencies", []):
+                if dep not in known_keys:
+                    violations.append(f"{fid}.{key}: 依赖 {dep} 不在模板 step_key 集合 {sorted(known_keys)}")
+    return {"ok": not violations, "violations": violations, "flows_checked": len(FLOW_GUIDES)}
+
+
 # ──────────────────────────────────────────────────────────────
 # Phase 4：heartbeat_ops——审批催办闭环（openclaw 家族 HEARTBEAT.md/cron 消费）
 # ──────────────────────────────────────────────────────────────

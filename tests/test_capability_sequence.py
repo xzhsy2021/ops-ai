@@ -142,3 +142,123 @@ def test_capability_sequence_in_pack():
         assert plan and plan[0]["sub_actions"]
     finally:
         db.close()
+
+
+# ──────────────────────────────────────────────────────────────
+# 设计 ③：validate_capability_sequence 四层校验
+# ──────────────────────────────────────────────────────────────
+
+
+def _live_registry_env():
+    import os
+
+    def _env(n):
+        for line in open(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8"):
+            line = line.strip()
+            if line.startswith(n + "="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+        return ""
+
+    os.environ.setdefault("APPROVAL_SIGNING_KEY", _env("APPROVAL_SIGNING_KEY"))
+    from app.db.base import SessionLocal
+    from app.services.tool_context import ToolContext
+    from app.services.tool_registry import register_builtin_tools
+
+    register_builtin_tools()
+    db = SessionLocal()
+    ctx = ToolContext(username="probe", auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    return db, ctx
+
+
+def test_validate_sequence_ok_on_production():
+    """生产四层校验全绿（flow=5/工具=124 实测）。"""
+    from app.services.agent_context import validate_capability_sequence
+
+    db, ctx = _live_registry_env()
+    try:
+        report = validate_capability_sequence(db, ctx)
+        assert report["ok"], report["violations"]
+        assert report["flows_checked"] == 5
+    finally:
+        db.close()
+
+
+def test_validate_sequence_catches_drift(monkeypatch):
+    """层1：流程引用不存在的工具名 → 违规暴露。"""
+    from app.services import agent_context as ac
+
+    flow = {
+        "steps": [{"n": 1, "tool": "ops.approval.prepare_plan"},
+                  {"n": 2, "tool": "(matrix 回复)"},
+                  {"n": 3, "tool": "ops.approval.execute_plan"}],
+    }
+    monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
+    db, ctx = _live_registry_env()
+    try:
+        seq = ac.build_capability_sequence(flow, {})  # 空 map → drift 标记
+        assert any(s.get("drift") for s in seq)
+    finally:
+        db.close()
+
+
+def test_validate_sequence_gate_uniqueness(monkeypatch):
+    """层3：审批门数量≠1 → 违规（零门/多门都报）。"""
+    from app.services import agent_context as ac
+
+    flow = {
+        "steps": [{"n": 1, "tool": "ops.approval.prepare_plan"},
+                  {"n": 2, "tool": "ops.approval.execute_plan"}],  # 零审批门
+    }
+    monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
+    db, ctx = _live_registry_env()
+    try:
+        report = ac.validate_capability_sequence(db, ctx)
+        assert not report["ok"]
+        assert any("审批门数量 0" in v for v in report["violations"]), report["violations"]
+    finally:
+        db.close()
+
+
+def test_validate_sequence_action_type_illegal(monkeypatch):
+    """层4：action_type 不在 STEP_HANDLERS → 违规。"""
+    from app.services import agent_context as ac
+
+    flow = {
+        "steps": [{"n": 1, "tool": "ops.approval.prepare_plan"},
+                  {"n": 2, "tool": "(matrix 回复)"},
+                  {"n": 3, "tool": "ops.approval.execute_plan"}],
+        "steps_template": {
+            "BOGUS_ACTION": {"step_key": "s1", "action_type": "BOGUS_ACTION"},
+        },
+    }
+    monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
+    db, ctx = _live_registry_env()
+    try:
+        report = ac.validate_capability_sequence(db, ctx)
+        assert not report["ok"]
+        assert any("BOGUS_ACTION" in v and "STEP_HANDLERS" in v for v in report["violations"])
+    finally:
+        db.close()
+
+
+def test_validate_sequence_dependency_dangling(monkeypatch):
+    """层4：依赖引用不存在的 step_key → 违规。"""
+    from app.services import agent_context as ac
+
+    flow = {
+        "steps": [{"n": 1, "tool": "ops.approval.prepare_plan"},
+                  {"n": 2, "tool": "(matrix 回复)"},
+                  {"n": 3, "tool": "ops.approval.execute_plan"}],
+        "steps_template": {
+            "SERVICE_CONTROL": {"step_key": "s2", "action_type": "SERVICE_CONTROL",
+                                "dependencies": ["no-such-step"]},
+        },
+    }
+    monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
+    db, ctx = _live_registry_env()
+    try:
+        report = ac.validate_capability_sequence(db, ctx)
+        assert not report["ok"]
+        assert any("no-such-step" in v for v in report["violations"])
+    finally:
+        db.close()

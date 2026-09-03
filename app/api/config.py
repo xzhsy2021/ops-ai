@@ -135,6 +135,33 @@ def _config_import_diff(data: dict, db: Session) -> dict:
 
 
 
+@admin_ops_router.get("/contract-health")
+def contract_health(request: Request, db: Session = Depends(get_db)):
+    """流程 ↔ MCP 能力序关联 + annotations 契约健康检查（设计 ③）。
+
+    四层校验结果合并暴露给管理端/CI：
+    - validate_capability_sequence：flow 工具名 join registry、能力一致性、
+      审批门唯一、动作层 STEP_HANDLERS 合法 + 依赖引用闭合
+    - validate_capability_annotations：MCP annotations 与 registry 字段同步
+    两者任一 not ok → overall not ok（CI/巡检可直接消费）。
+    """
+    require_admin(request, db)
+    from app.services.agent_context import (
+        validate_capability_annotations,
+        validate_capability_sequence,
+    )
+    from app.services.tool_context import ToolContext
+
+    ctx = ToolContext(username=request.headers.get("x-ops-user", "admin"), auth_type="session", is_admin=True, scopes=["*"], allow_write=True)
+    seq_report = validate_capability_sequence(db, ctx)
+    ann_report = validate_capability_annotations(db, ctx)
+    return api_response(data={
+        "ok": bool(seq_report.get("ok") and ann_report.get("ok")),
+        "capability_sequence": seq_report,
+        "capability_annotations": ann_report,
+    })
+
+
 @admin_ops_router.get("/schema-version")
 def schema_version(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)

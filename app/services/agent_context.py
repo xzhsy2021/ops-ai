@@ -700,12 +700,15 @@ def build_context_pack(db, ctx, *, agent_name: str = "default", channel: str = "
     """组装 AgentContextPack。revision = 全内容哈希，缓存协议的键。"""
     facts = _assemble_facts(db)
     capabilities = _assemble_capabilities(db, ctx)
+    # 工具名 → 能力映射（capability_sequence join 用）
+    tool_map = {t["name"]: t for t in capabilities["tools"]}
     flows = [
         {
             "flow_id": flow["flow_id"],
             "title": flow["title"],
             "trigger": flow["trigger"],
             "flow_revision": _sha256_of(flow),
+            "capability_sequence": build_capability_sequence(flow, tool_map),
         }
         for flow in FLOW_GUIDES.values()
     ]
@@ -859,6 +862,72 @@ def get_flow_guide(flow_id: str) -> dict[str, Any] | None:
     result = dict(guide)
     result["flow_revision"] = _sha256_of(guide)
     return result
+
+
+# ──────────────────────────────────────────────────────────────
+# 流程 ↔ MCP 能力序关联（2026-09-03 设计 ①②）
+# ──────────────────────────────────────────────────────────────
+
+
+def build_capability_sequence(flow: dict[str, Any], tool_map: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 flow 的步骤序与 registry 工具能力 join 成结构化能力序。
+
+    设计原则：
+    - 能力属性（write/risk/scopes）全部从 tool_map 实时取，绝不手工
+      标注进 flow 定义——杜绝映射漂移（工具属性变化由 pack_revision 感知）
+    - flow 定义只承载语义信息（phase/on_fail/auto_approve_class），这些
+      是工具属性推导不出来的业务事实
+    - 审批门自动识别：tool 以 "(matrix" 开头的步骤即人工审批门
+    - 两层表达：本序描述 agent 每轮的工具调用层；计划动作层（真正的
+      风险所在）由 sub_actions 携带，风险由审批短语+自审批动作集决定
+    """
+    seq: list[dict[str, Any]] = []
+    for s in flow.get("steps", []):
+        tool = str(s.get("tool") or "")
+        entry: dict[str, Any] = {"n": s.get("n"), "tool": tool}
+        if tool and not tool.startswith("("):
+            t = tool_map.get(tool)
+            if t is not None:
+                entry["write"] = bool(t.get("write", False))
+                entry["risk"] = t.get("risk", "")
+                scopes = t.get("scopes") or []
+                if scopes:
+                    entry["scopes"] = scopes
+            else:
+                # 工具名不在 registry——标记漂移，CI 校验会逮住
+                entry["drift"] = "tool not in registry"
+        if s.get("phase"):
+            entry["phase"] = s.get("phase")
+        if s.get("on_fail"):
+            entry["on_fail"] = s.get("on_fail")
+        if tool.startswith("(matrix"):
+            entry["approval_gate"] = True
+            entry["note"] = "人工审批门：OPS 侧审批，非工具调用"
+        if s.get("auto_approve_class"):
+            entry["auto_approve_class"] = s.get("auto_approve_class")
+        if seq:
+            seq[-1].setdefault("next", s.get("n"))
+        seq.append(entry)
+    # 计划动作层（steps_template 的 action_type 序 + 依赖链）
+    tmpl = flow.get("steps_template") or {}
+    if tmpl:
+        action_order = []
+        for key, spec in tmpl.items():
+            if not isinstance(spec, dict):
+                continue
+            action_order.append({
+                "step_key": spec.get("step_key") or key,  # 依赖引用 spec 顶层 step_key
+                "action_type": spec.get("action_type", key),
+                "depends_on": spec.get("dependencies", []),
+            })
+        entry = {
+            "n": "plan",
+            "tool": "(execution_plan)",
+            "note": "审批计划动作层：风险所在，由审批短语+自审批动作集把关",
+            "sub_actions": action_order,
+        }
+        seq.append(entry)
+    return seq
 
 
 def list_flow_ids() -> list[str]:

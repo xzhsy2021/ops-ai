@@ -401,6 +401,7 @@ export default function PipelinePage() {
   const [pendingRiskDelete, setPendingRiskDelete] = useState<any | null>(null)
   const [riskConfirmValue, setRiskConfirmValue] = useState('')
   const [creatingNew, setCreatingNew] = useState(false)
+  const [activeTab, setActiveTab] = useState<'list' | 'templates'>('list')
 
   useEffect(() => {
     loadPipelines()
@@ -830,14 +831,24 @@ export default function PipelinePage() {
     <div style={{ display: 'grid', gap: '20px' }}>
       <PageHeader
         title="流程管理"
-        description={`共 ${pipelines.length} 条流水线`}
+        description={`流水线 ${pipelines.length} 条 · 模板 ${templates.length} 个`}
         breadcrumbs={[
           { label: '配置管理', href: '/pipeline' },
           { label: '流程列表' },
         ]}
       />
+      <div className="file-tab-bar" role="tablist">
+        <button className={activeTab === 'list' ? 'is-active' : ''} onClick={() => setActiveTab('list')}>
+          流水线列表 ({pipelines.length})
+        </button>
+        <button className={activeTab === 'templates' ? 'is-active' : ''} onClick={() => setActiveTab('templates')}>
+          流水线模板 ({templates.length})
+        </button>
+      </div>
+
+      {activeTab === 'list' && (
+      <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-        <h2 style={{ margin: 0 }}>流程管理 ({pipelines.length})</h2>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
           {batchMode ? (
             <>
@@ -902,7 +913,7 @@ export default function PipelinePage() {
         </div>
       </div>
 
-      {batchLoading && (
+      {activeTab === 'list' && batchLoading && (
         <div style={{
           padding: '10px 16px', background: 'var(--warning-surface)', borderRadius: '8px',
           display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--warning)',
@@ -935,13 +946,21 @@ export default function PipelinePage() {
         onDuplicate={(p) => handleDuplicate(p.id, p.name)}
         loading={false}
       />
+      </>
+      )}
 
-      {templates.length > 0 && (
-        <PipelineTemplatePanel
-          templates={templates}
-          onImport={(tpl) => createFromTemplate(tpl.id)}
-          onExport={() => {}}
-        />
+      {activeTab === 'templates' && (
+        templates.length > 0 ? (
+          <PipelineTemplatePanel
+            templates={templates}
+            onImport={(tpl) => { createFromTemplate(tpl.id); setActiveTab('list') }}
+            onExport={() => {}}
+          />
+        ) : (
+          <div className="card" style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            暂无模板 —— 从模板创建流程后，模板会出现在这里
+          </div>
+        )
       )}
 
       {showBatchEdit && selectedIds.size > 0 && (

@@ -309,6 +309,182 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
             "禁止为拉取单独创建第二个计划",
         ],
     },
+    "dovo-bg-release": {
+        "flow_id": "dovo-bg-release",
+        "title": "Dovo 后台蓝绿发版（区域轮换）",
+        "trigger": "dovo + 区域词（pak/bgd/tha/idn/ind/印度/孟加拉/泰国）+ 更新/发版/后台/server.zip 附件",
+        "verified": "2026-09-03 设计落地（六段式：探测→上传→binupdate→pm2 验证→portupdate 切换→复验+自动回滚）",
+        "atomic": True,
+        "parameterized": True,
+        "default_system": "dovo",
+        "steps": [
+            {
+                "n": 1,
+                "tool": "ops.matrix.scan_media_events",
+                "purpose": "附件 server.zip 是否已在文件中心（already_in_file_center 事件指纹判定，见 L010）",
+                "args_hint": {"room_id": "<消息所在房间>", "sender": "<发送者>", "filename": "<包名>"},
+                "on_skip": "already_in_file_center=true → 计划不含 MATRIX_PULL；false → 需含 MATRIX_PULL",
+            },
+            {
+                "n": 2,
+                "tool": "ops.routing.resolve_message_target",
+                "purpose": "签发路由票据（区域词路由到 dovo-{region}）",
+                "args_hint": {
+                    "message_text": "<触发消息原文>",
+                    "message_context": "五字段（channel=matrix/channel_account_id=default/conversation_id=<房间>/message_id=<消息ID>/sender_id=<发送者>）",
+                },
+                "must_follow": "同一轮内立即 prepare_plan，禁止停下回报",
+            },
+            {
+                "n": 3,
+                "tool": "ops.approval.prepare_plan",
+                "purpose": "一次审批覆盖全链（拉取入库 + 逐台蓝绿更新）",
+                "args_hint": {
+                    "message_context": "<resolve 返回>",
+                    "routing_ticket": "<resolve 返回 ticket>",
+                    "system_name": "dovo",
+                    "service_name": "dovo-<REGION>",
+                    "environment": "test",
+                    "steps": "见 steps_template",
+                },
+            },
+            {
+                "n": 4,
+                "tool": "(matrix 回复)",
+                "purpose": "reply_template 原样发房间，等审批人批准",
+            },
+            {
+                "n": 5,
+                "tool": "ops.approval.execute_plan",
+                "purpose": "批准后执行：每台独立六段式，汇报切换结果",
+                "args_hint": {
+                    "plan_id": "<prepare 返回>",
+                    "short_code": "<审批消息完整短语>",
+                    "room_id": "<审批消息所在房间>",
+                    "approver_matrix_id": "<审批人>",
+                },
+            },
+        ],
+        "steps_template": {
+            "MATRIX_PULL": {
+                "step_key": "step-1-pull",
+                "action_type": "MATRIX_PULL",
+                "parameters": {"minutes": 15, "filename": "<包名>"},
+            },
+            "SERVICE_CONTROL": {
+                "step_key": "step-2-bg-update",
+                "action_type": "SERVICE_CONTROL",
+                "parameters": {
+                    "action_parameters": {
+                        "control_action": "bg-update",
+                        "system_name": "dovo",
+                        "service_name": "dovo-<REGION>",
+                        "targets": "<resolve 返回 targets（组内全部服务器）>",
+                    }
+                },
+                "dependencies": ["step-1-pull"],
+            },
+        },
+        "hard_rules": [
+            "SERVICE_CONTROL 的 control_action 固定为 bg-update（六段式蓝绿，不要用普通 update）",
+            "<REGION> 从触发消息的区域词映射（pak/bgd/tha/idn/ind/印度→孟加拉/泰国等），service_name 必须是 pack facts 列出的 dovo-* 服务之一（L007：不臆测服务名）",
+            "包名固定 server.zip（binupdate.sh 就地处理）；文件中心入库后 package_name 自动回填",
+            "targets 用 resolve 返回的组内全部服务器（含 bak 服务器）",
+            "执行器运行时现探 active/standby——计划参数绝不写死目录角色",
+        ],
+    },
+    "dovo-frontend-release": {
+        "flow_id": "dovo-frontend-release",
+        "title": "Dovo 前端发版（dist.zip + www.sh）",
+        "trigger": "dovo + 前端/dist.zip 附件 + 更新/发版",
+        "verified": "复用 generic_frontend 既有链路（与 crypto-trader-web 同构，2026-09-01 验证）",
+        "atomic": True,
+        "parameterized": True,
+        "default_system": "dovo",
+        "steps": [
+            {
+                "n": 1,
+                "tool": "ops.matrix.scan_media_events",
+                "purpose": "dist.zip 附件是否已在文件中心（L010 事件指纹判定）",
+                "args_hint": {"room_id": "<房间>", "sender": "<发送者>", "filename": "<包名>"},
+            },
+            {
+                "n": 2,
+                "tool": "ops.routing.resolve_message_target",
+                "purpose": "签发路由票据（路由到 dovo-web）",
+                "args_hint": {
+                    "message_text": "<触发消息原文>",
+                    "message_context": "五字段",
+                },
+            },
+            {
+                "n": 3,
+                "tool": "ops.approval.prepare_plan",
+                "purpose": "一次审批覆盖全链（拉取 + 上传 /data/www + www.sh 执行）",
+                "args_hint": {
+                    "message_context": "<resolve 返回>",
+                    "routing_ticket": "<resolve ticket>",
+                    "system_name": "dovo",
+                    "service_name": "dovo-web",
+                    "environment": "test",
+                    "steps": "与 frontend-release flow 的 FILE_UPLOAD + SERVICE_CONTROL(update) 同构",
+                },
+            },
+            {
+                "n": 4,
+                "tool": "(matrix 回复)",
+                "purpose": "reply_template 原样发房间，等批准",
+            },
+            {
+                "n": 5,
+                "tool": "ops.approval.execute_plan",
+                "purpose": "批准后执行，汇报 www.sh 结果与 front_version",
+                "args_hint": {
+                    "plan_id": "<prepare 返回>",
+                    "short_code": "<审批短语>",
+                    "room_id": "<房间>",
+                    "approver_matrix_id": "<审批人>",
+                },
+            },
+        ],
+        "steps_template": {
+            "MATRIX_PULL": {
+                "step_key": "step-1-pull",
+                "action_type": "MATRIX_PULL",
+                "parameters": {"minutes": 15, "filename": "<包名>"},
+            },
+            "FILE_UPLOAD": {
+                "step_key": "step-2-upload",
+                "action_type": "FILE_UPLOAD",
+                "parameters": {
+                    "action_parameters": {
+                        "package_name": "<包名>",
+                        "remote_path": "/data/www/dist.zip",
+                        "overwrite": True,
+                        "confirm_path": "/data/www/dist.zip",
+                    }
+                },
+                "dependencies": ["step-1-pull"],
+            },
+            "SERVICE_CONTROL": {
+                "step_key": "step-3-www",
+                "action_type": "SERVICE_CONTROL",
+                "parameters": {
+                    "action_parameters": {
+                        "control_action": "update",
+                        "system_name": "dovo",
+                        "service_name": "dovo-web",
+                        "targets": "<resolve 返回 targets>",
+                    }
+                },
+                "dependencies": ["step-2-upload"],
+            },
+        },
+        "hard_rules": [
+            "remote_path 固定 /data/www/dist.zip（www.sh 就地处理固定名）",
+            "front_version 由 www.sh 内部维护（14 位时间戳），执行器无需处理",
+        ],
+    },
 }
 
 

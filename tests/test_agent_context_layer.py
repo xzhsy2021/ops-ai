@@ -240,6 +240,8 @@ def test_flow_guide_unknown_id_returns_index(env, ctx):
         "frontend-release",
         "package-pull-release",
         "service-restart",
+        "dovo-bg-release",
+        "dovo-frontend-release",
     }
 
 

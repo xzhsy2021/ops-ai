@@ -120,6 +120,11 @@ def _service_control_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: S
             f"service={plan.service_name}, 推断={service_name or '无'}）"
         )
 
+    # 蓝绿更新走专用六段式执行器（dovo 2026-09-03 设计）：
+    # 探测→上传→binupdate→pm2/日志验证→portupdate 切换→复验+失败自动回滚
+    if control_action == "bg-update":
+        return _bg_update_handler(plan, step, db, system_name, service_name, targets)
+
     executor = ApprovalExecutor(db)
     results = []
     for server_name in targets:
@@ -149,6 +154,64 @@ def _service_control_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: S
         "success_count": success_count,
         "fail_count": len(results) - success_count,
     }
+
+
+def _bg_update_handler(
+    plan: ExecutionPlan, step: ExecutionPlanStep, db: Session,
+    system_name: str, service_name: str, targets: list[str],
+) -> dict[str, Any]:
+    """蓝绿更新步骤：每台独立六段式（探测→上传→更新→验证→切换→复验/回滚）。
+
+    包定位：优先步骤参数 package_name（文件中心），由 package_path 解析为
+    OPS 本机路径；无包时 skip_upload（假定 standby 目录已有 server.zip）。
+    """
+    from app.services.blue_green import execute_blue_green_update
+    from app.services.package_retention import package_path
+
+    params = step.parameters or {}
+    package_name = _pick_step_param(params, "package_name") or plan.package_name or ""
+    local_package = None
+    if package_name:
+        local_package = package_path(package_name)
+
+    ctx = _approver_ctx(plan)
+    results = []
+    for server_name in targets:
+        try:
+            r = execute_blue_green_update(
+                db, server_name, system_name, service_name, local_package, ctx,
+            )
+            results.append({
+                "server": r.server,
+                "ok": r.ok,
+                "switched_to": r.switched_to,
+                "rolled_back": r.rolled_back,
+                "steps": r.steps,
+                "error": r.error,
+            })
+        except Exception as e:  # noqa: BLE001
+            results.append({"server": server_name, "ok": False, "error": str(e)})
+
+    success_count = sum(1 for r in results if r.get("ok"))
+    rolled = [r.get("server") for r in results if r.get("rolled_back")]
+    detail = {
+        "action": "SERVICE_CONTROL",
+        "control_action": "bg-update",
+        "system": system_name,
+        "service": service_name,
+        "package_name": package_name or "(standby 已有包)",
+        "targets": targets,
+        "results": results,
+        "success_count": success_count,
+        "fail_count": len(results) - success_count,
+        "rolled_back_servers": rolled,
+    }
+    if success_count != len(results):
+        raise RuntimeError(
+            f"蓝绿更新未全部成功: {success_count}/{len(results)}"
+            + (f"，已自动回滚 {len(rolled)} 台（{rolled}）" if rolled else "")
+        )
+    return detail
 
 
 def _approver_ctx(plan: ExecutionPlan):

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { pipeline, pipelineBinding, resource } from '../api'
 import { RiskConfirmDialog, PageHeader } from '../components/ui'
 import { useNotificationStore } from '../store'
@@ -409,6 +409,24 @@ export default function PipelinePage() {
     resource.systems().then((res: any) => setSystems(res.data || [])).catch(() => {})
   }, [])
 
+  // 弹窗打开时锁定背景滚动 + ESC 关闭（有未保存改动时不误关）
+  const editorOpen = Boolean((selectedId || steps.length > 0 || creatingNew) && !batchMode)
+  useEffect(() => {
+    if (!editorOpen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (!dirty || window.confirm('有未保存的修改，确定关闭编辑吗？')) resetFormRef.current?.()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = prev
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [editorOpen, dirty])
+
   useEffect(() => {
     if (!systemName) {
       setSystemVars({})
@@ -483,6 +501,7 @@ export default function PipelinePage() {
     }
   }
 
+  const resetFormRef = useRef<(() => void) | null>(null)
   const resetForm = () => {
     setSelectedId(null)
     setPipelineName('')
@@ -496,6 +515,7 @@ export default function PipelinePage() {
     setFieldBoundVars({})
     setCreatingNew(false)
   }
+  resetFormRef.current = resetForm
 
   const handleCreateNew = () => {
     setSelectedId(null)
@@ -509,10 +529,6 @@ export default function PipelinePage() {
     setFieldModes({})
     setFieldBoundVars({})
     setCreatingNew(true)
-    setTimeout(() => {
-      const el = document.getElementById('pipeline-editor-anchor')
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }, 100)
   }
 
   const getBindingInfo = (stepIndex: number, fieldKey: string) => {
@@ -544,10 +560,6 @@ export default function PipelinePage() {
     setFieldModes({})
     setFieldBoundVars({})
     addMessage('已从模板填充发布流程，请编辑后保存', 'success')
-    setTimeout(() => {
-      const el = document.getElementById('pipeline-editor-anchor')
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }, 100)
   }
 
   const addStep = (type: string) => {
@@ -996,7 +1008,12 @@ export default function PipelinePage() {
 
       <div id="pipeline-editor-anchor" />
       {(selectedId || steps.length > 0 || creatingNew) && !batchMode && (
-        <div className="card">
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 1000,
+          padding: '40px 16px', overflowY: 'auto',
+        }} onClick={(e) => { if (e.target === e.currentTarget) resetForm() }}>
+          <div className="card" style={{ width: '920px', maxWidth: '100%', margin: '0 auto' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
             <h2 style={{ margin: 0 }}>
               {selectedId ? `编辑 Pipeline: ${pipelineName}` : '新建 Pipeline'}
@@ -1004,7 +1021,7 @@ export default function PipelinePage() {
             </h2>
             <button className="btn" onClick={resetForm}
               style={{ padding: '4px 12px', fontSize: '13px', background: 'var(--border-strong)', color: 'var(--text-secondary)' }}>
-              关闭编辑
+              ✕ 关闭
             </button>
           </div>
           <div className="responsive-grid-3" style={{ gap: '12px', marginBottom: '16px' }}>
@@ -1200,9 +1217,14 @@ export default function PipelinePage() {
               <button className="btn btn-success" onClick={handleSave} disabled={saving}>
                 {saving ? '保存中...' : (selectedId ? '更新 Pipeline' : '创建 Pipeline')}
               </button>
+              <button className="btn" onClick={resetForm}
+                style={{ padding: '8px 16px', background: 'var(--border-strong)', color: 'var(--text-primary)' }}>
+                取消
+              </button>
               {message && <span style={{ color: message.includes('失败') ? 'var(--danger-solid)' : 'var(--success-solid)', fontSize: '14px' }}>{message}</span>}
             </div>
           )}
+          </div>
         </div>
       )}
 

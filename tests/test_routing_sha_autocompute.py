@@ -55,9 +55,9 @@ def test_resolve_autocomputes_content_sha256_from_message_text(monkeypatch):
     result = approval_tools.routing_resolve_message_target(
         {
             "message_text": message_text,
-            "room_id": "!room:hubtel.xyz",
-            "event_id": "$evt:hubtel.xyz",
-            "sender_matrix_id": "@jack.han:hubtel.xyz",
+            "room_id": "!room:example.com",
+            "event_id": "$evt:example.com",
+            "sender_matrix_id": "@approver:example.com",
             # 故意不传 content_sha256
         },
         _ctx(),
@@ -106,9 +106,9 @@ def test_resolve_autocomputes_when_message_context_omits_sha256(monkeypatch):
             "message_context": {
                 "channel": "matrix",
                 "channel_account_id": "default",
-                "conversation_id": "!room:hubtel.xyz",
-                "message_id": "$evt:hubtel.xyz",
-                "sender_id": "@jack.han:hubtel.xyz",
+                "conversation_id": "!room:example.com",
+                "message_id": "$evt:example.com",
+                "sender_id": "@approver:example.com",
                 # 故意缺 content_sha256
             },
         },
@@ -139,9 +139,9 @@ def test_resolve_ignores_garbage_digest_and_autocomputes(monkeypatch):
                 "message_context": {
                     "channel": "matrix",
                     "channel_account_id": "default",
-                    "conversation_id": "!room:hubtel.xyz",
-                    "message_id": "$evt:hubtel.xyz",
-                    "sender_id": "@jack.han:hubtel.xyz",
+                    "conversation_id": "!room:example.com",
+                    "message_id": "$evt:example.com",
+                    "sender_id": "@approver:example.com",
                     "content_sha256": bad,  # 垃圾值
                 },
             },
@@ -169,9 +169,9 @@ def test_prepare_plan_ignores_garbage_digest_and_backfills_from_ticket(monkeypat
     resolved = approval_tools.routing_resolve_message_target(
         {
             "message_text": message_text,
-            "room_id": "!room:hubtel.xyz",
-            "event_id": "$evt:hubtel.xyz",
-            "sender_matrix_id": "@jack.han:hubtel.xyz",
+            "room_id": "!room:example.com",
+            "event_id": "$evt:example.com",
+            "sender_matrix_id": "@approver:example.com",
         },
         _ctx(),
         None,
@@ -229,9 +229,9 @@ def test_prepare_plan_backfills_missing_sha256_from_signed_ticket(monkeypatch):
     resolved = approval_tools.routing_resolve_message_target(
         {
             "message_text": "智能助手AIbot 量化测试环境 部署",
-            "room_id": "!room:hubtel.xyz",
-            "event_id": "$evt:hubtel.xyz",
-            "sender_matrix_id": "@jack.han:hubtel.xyz",
+            "room_id": "!room:example.com",
+            "event_id": "$evt:example.com",
+            "sender_matrix_id": "@approver:example.com",
         },
         _ctx(),
         None,

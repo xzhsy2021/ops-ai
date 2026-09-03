@@ -134,7 +134,7 @@ def test_get_session_refuses_dynamic_credentials(monkeypatch):
 
     async def _run():
         return await get_e2ee_session(
-            homeserver_url="https://matrix.hubtel.xyz",
+            homeserver_url="https://matrix.example.com",
             access_token="syt_live_qclaw_token",
         )
 

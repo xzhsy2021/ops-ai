@@ -57,9 +57,9 @@
   },
   "facts": {                            // 来自 OPS DB 的真实配置（C 类根因的解）
     "systems": [{"name": "crypto-trader", "services": ["crypto-trader-web", "exchange", "…"],
-                  "rooms": ["!LXnIFCTfJIqeErqyaf:hubtel.xyz", "!room-alpha:example.com"]}],
+                  "rooms": ["!room-gamma:example.com", "!room-alpha:example.com"]}],
     "environments": ["test", "prod"],
-    "approvers": [{"matrix": "@jack.han:hubtel.xyz"}]
+    "approvers": [{"matrix": "@approver:example.com"}]
   },
   "flows": [                            // 流程模板索引（B 类根因的解）
     {"flow_id": "frontend-release", "title": "前端发版（Matrix 附件）",

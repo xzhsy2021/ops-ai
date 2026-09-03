@@ -2,7 +2,7 @@
 
 ## 背景
 
-jack.han 通过 Matrix 要求：量化测试环境 test2（203.0.113.20）拉取
+demo-approver 通过 Matrix 要求：量化测试环境 test2（203.0.113.20）拉取
 system / supplier 镜像并部署。使用 2026-08-07 上线的多服务一次审批流程
 （`ops.approval.prepare_plan` / `ops.approval.execute_plan`）。
 
@@ -11,7 +11,7 @@ system / supplier 镜像并部署。使用 2026-08-07 上线的多服务一次�
 ### 第一轮：F6353B54（部署未实际执行）
 
 - 10:14 创建计划 `8b555ecd...`（2 步骤：system → supplier，短码 F6353B54）
-- 10:16 jack.han 批准 → `execute_plan` 返回 SUCCEEDED
+- 10:16 demo-approver 批准 → `execute_plan` 返回 SUCCEEDED
 - **但实际部署失败**：两步骤 result 均 `ok=false`，
   error = `ApprovalExecutor._control_single_server() got an unexpected keyword argument 'env'`
 - 容器 CreatedAt 仍为 08-07（未重建），确认部署未执行

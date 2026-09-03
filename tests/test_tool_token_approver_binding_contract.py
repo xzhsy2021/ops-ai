@@ -162,7 +162,7 @@ def test_lookup_approvers_prefers_system_config_over_token(monkeypatch):
         {
             "channel": "matrix",
             "channel_account_id": "default",
-            "sender_id": "@jack.han:matrix.org",
+            "sender_id": "@demo-approver:matrix.org",
         },
         {
             "channel": "matrix",
@@ -191,7 +191,7 @@ def test_lookup_approvers_no_system_config_returns_empty(monkeypatch):
         {
             "channel": "matrix",
             "channel_account_id": "default",
-            "sender_id": "@jack.han:matrix.org",
+            "sender_id": "@demo-approver:matrix.org",
         },
         {
             "channel": "matrix",
@@ -277,7 +277,7 @@ def test_consume_enforces_token_whitelist_via_prepare(tmp_path):
             action_parameters={"control_action": "restart"},
             routing_config_revision="rev1",
             routing_ticket_digest="ticket123",
-            authorized_matrix_users=["@jack.han:matrix.org"],
+            authorized_matrix_users=["@demo-approver:matrix.org"],
         )
 
         # Non-whitelisted approver -> rejected (None), 请求状态不被改变
@@ -307,18 +307,18 @@ def test_consume_enforces_token_whitelist_via_prepare(tmp_path):
             action_parameters={"control_action": "restart"},
             routing_config_revision="rev1",
             routing_ticket_digest="ticket456",
-            authorized_matrix_users=["@jack.han:matrix.org"],
+            authorized_matrix_users=["@demo-approver:matrix.org"],
         )
         accepted = service.consume(
             approval_id=approval2.id,
             short_code=short_code2,
-            approver_matrix_id="@jack.han:matrix.org",
+            approver_matrix_id="@demo-approver:matrix.org",
             room_id="!ops:matrix.org",
             approval_event_id="$approval2:matrix.org",
         )
         assert accepted is not None
         assert accepted.status == "EXECUTING"
-        assert accepted.approved_by == "matrix:default:@jack.han:matrix.org"
+        assert accepted.approved_by == "matrix:default:@demo-approver:matrix.org"
     finally:
         db.close()
         engine.dispose()

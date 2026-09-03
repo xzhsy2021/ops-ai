@@ -27,7 +27,7 @@ def test_reply_template_contains_required_fields():
         targets=["203.0.113.10"],
         expires_at="2026-08-27T10:56:49+00:00",
         steps=[_Step("MATRIX_PULL"), _Step("FILE_UPLOAD"), _Step("RELEASE")],
-        approvers=["@jack.han:hubtel.xyz"],
+        approvers=["@approver:example.com"],
         package_size_bytes=1686218,
         package_sha256="f94140bbd39cfd9fde5b3162c0dbe3d9ac7d2c00f97d2a71b154c397544e3728",
     )
@@ -36,7 +36,7 @@ def test_reply_template_contains_required_fields():
     assert "当前状态：`PENDING_APPROVAL`" in tpl
     assert "计划 ID：`d62c065a674043d4b47b9a155c317a81`" in tpl
     assert "确认短语：`批准拉取附件+上传+发布 crypto-trader@test 2A65AB7E`" in tpl
-    assert "指定审批人：`@jack.han:hubtel.xyz`" in tpl
+    assert "指定审批人：`@approver:example.com`" in tpl
     assert "服务：`crypto-trader-web`" in tpl
     assert "环境：`test`" in tpl
     assert "目标：`203.0.113.10`" in tpl

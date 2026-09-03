@@ -87,8 +87,8 @@ _MATRIX_STEPS = [
         "step_key": "pull",
         "action_type": "MATRIX_PULL",
         "parameters": {
-            "room_id": "!dep:hubtel.xyz",
-            "sender": "@han:hubtel.xyz",
+            "room_id": "!dep:example.com",
+            "sender": "@agent:example.com",
             "minutes": 30,
         },
         "dependencies": [],
@@ -171,8 +171,8 @@ def test_pull_then_release_single_approval(db, monkeypatch):
     assert by_key["release"].status == "SUCCEEDED"
     # package_name 从 pull 步骤结果回填到 release（execute_release 的 package 字段）
     assert by_key["release"].result.get("package") == f"matrix-pkg-{_RUN_ID}.tar.gz"
-    assert pulled_kwargs["room_id"] == "!dep:hubtel.xyz"
-    assert pulled_kwargs["sender"] == "@han:hubtel.xyz"
+    assert pulled_kwargs["room_id"] == "!dep:example.com"
+    assert pulled_kwargs["sender"] == "@agent:example.com"
     assert pulled_kwargs["minutes"] == 30
     # 计划步骤以审批人身份（actor_key）入库
     assert pulled_kwargs["uploaded_by"] == "matrix:default:@alice:matrix.org"
@@ -326,10 +326,10 @@ def test_pull_then_file_upload_resolves_package_from_dependency(db, monkeypatch)
 def test_matrix_pull_step_approval_details():
     details = step_approval_details(
         "MATRIX_PULL",
-        {"room_id": "!dep:hubtel.xyz", "sender": "@han:hubtel.xyz", "filename": "pkg.tar.gz", "minutes": 20},
+        {"room_id": "!dep:example.com", "sender": "@agent:example.com", "filename": "pkg.tar.gz", "minutes": 20},
     )
-    assert details["room_id"] == "!dep:hubtel.xyz"
-    assert details["sender"] == "@han:hubtel.xyz"
+    assert details["room_id"] == "!dep:example.com"
+    assert details["sender"] == "@agent:example.com"
     assert details["filename_hint"] == "pkg.tar.gz"
     assert details["minutes"] == 20
     assert "package_name" in details["note"]
@@ -357,8 +357,8 @@ def test_matrix_pull_handler_accepts_nested_action_parameters(db, monkeypatch):
             "action_type": "MATRIX_PULL",
             "parameters": {
                 "action_parameters": {
-                    "room_id": "!nested:hubtel.xyz",
-                    "sender": "@nested:hubtel.xyz",
+                    "room_id": "!nested:example.com",
+                    "sender": "@nested:example.com",
                     "filename": "crypto-trader-web.tar.gz",
                     "minutes": 15,
                     "overwrite": True,
@@ -373,8 +373,8 @@ def test_matrix_pull_handler_accepts_nested_action_parameters(db, monkeypatch):
     result = PlanExecutor(db).execute(plan.id)
 
     assert result.status == "SUCCEEDED"
-    assert pulled_kwargs["room_id"] == "!nested:hubtel.xyz"
-    assert pulled_kwargs["sender"] == "@nested:hubtel.xyz"
+    assert pulled_kwargs["room_id"] == "!nested:example.com"
+    assert pulled_kwargs["sender"] == "@nested:example.com"
     assert pulled_kwargs["filename_hint"] == "crypto-trader-web.tar.gz"
     assert pulled_kwargs["minutes"] == 15
     assert pulled_kwargs["overwrite"] is True
@@ -419,9 +419,9 @@ def test_prepare_plan_normalizes_matrix_pull_parameters():
     mctx = MessageContext(
         channel="matrix",
         channel_account_id="default",
-        conversation_id="!ctx-room:hubtel.xyz",
-        message_id="$ctx-evt:hubtel.xyz",
-        sender_id="@ctx-sender:hubtel.xyz",
+        conversation_id="!ctx-room:example.com",
+        message_id="$ctx-evt:example.com",
+        sender_id="@ctx-sender:example.com",
         content_sha256="1" * 64,
     )
     steps = [
@@ -432,7 +432,7 @@ def test_prepare_plan_normalizes_matrix_pull_parameters():
                 "action_parameters": {
                     "filename": "crypto-trader-web.tar.gz",
                     "minutes": 15,
-                    "room_id": "!explicit:hubtel.xyz",
+                    "room_id": "!explicit:example.com",
                 }
             },
             "dependencies": [],
@@ -448,8 +448,8 @@ def test_prepare_plan_normalizes_matrix_pull_parameters():
 
     pull_params = normalized[0]["parameters"]
     # 显式 room_id 保留；sender 从计划上下文补全；其余 action_parameters 提升
-    assert pull_params["room_id"] == "!explicit:hubtel.xyz"
-    assert pull_params["sender"] == "@ctx-sender:hubtel.xyz"
+    assert pull_params["room_id"] == "!explicit:example.com"
+    assert pull_params["sender"] == "@ctx-sender:example.com"
     assert pull_params["filename"] == "crypto-trader-web.tar.gz"
     assert pull_params["minutes"] == 15
     assert "action_parameters" not in pull_params
@@ -512,9 +512,9 @@ def test_normalize_service_control_backfills_plan_level_args():
     mctx = MessageContext(
         channel="matrix",
         channel_account_id="default",
-        conversation_id="!ctx-room:hubtel.xyz",
-        message_id="$ctx-evt:hubtel.xyz",
-        sender_id="@ctx-sender:hubtel.xyz",
+        conversation_id="!ctx-room:example.com",
+        message_id="$ctx-evt:example.com",
+        sender_id="@ctx-sender:example.com",
         content_sha256="2" * 64,
     )
     steps = [

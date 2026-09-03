@@ -55,9 +55,9 @@ Bot 设备密钥与 room keys 持久化在 crypto store（默认 `data/matrix/cr
     "out_of_window": 0,
     "window_minutes": 30,
     "msgtype_distribution": {"m.text": 7, "m.file": 0, "m.image": 0},
-    "sender_distribution": {"@jack.han:hubtel.xyz": 8},
+    "sender_distribution": {"@approver:example.com": 8},
     "text_with_filename_hint": [
-      {"event_id": "$x", "sender": "@jack.han:hubtel.xyz", "body": "crypto-trader-web.tar.gz"}
+      {"event_id": "$x", "sender": "@approver:example.com", "body": "crypto-trader-web.tar.gz"}
     ],
     "hint": "若 m.file / m.image / m.video / m.audio 计数为 0，说明用户在房间只发送了文字（m.text），并未真上传 Matrix 附件；请提示用户拖拽文件上传或使用附件按钮。"
   }

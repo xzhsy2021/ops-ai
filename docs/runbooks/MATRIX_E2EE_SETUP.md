@@ -67,7 +67,7 @@ device_id 配置给 OPS 启用 E2EE。** 两端共用同一设备会：
 `MATRIX_E2EE_ALLOW_ANY_DEVICE=true`（自担风险）。
 
 当前部署实况（2026-08-22 已完成方案 A）：OPS 专用设备 **`OPS-AI-BOT`**
-已登录 @han:hubtel.xyz @ matrix.hubtel.xyz（token 与开关已写入 `.env`，
+已登录 @agent:example.com @ matrix.example.com（token 与开关已写入 `.env`，
 E2EE 已开启）。端到端自检通过：私密加密房间内 Megolm 加密发送 →
 `/messages` 拉取密文 → `decrypt_room_event` 解密回读一致。
 qclaw 设备 `XHBNAXVZFQ` 全程未受影响。

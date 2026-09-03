@@ -89,3 +89,7 @@ scripts/hardening_crypto.sh
 # 本次 MCP 审计的临时脚本(诊断探针/描述 dump)
 mcp-capability-discovery-audit/_*.py
 mcp-capability-discovery-audit/_shared/
+
+docs/servers_inventory.md
+
+docs/servers_inventory.local.md

@@ -133,7 +133,7 @@ def test_facts_reflect_db_systems_services_rooms(env, ctx):
     system = System(
         name="layer-test-sys",
         display_name="分层测试",
-        message_routing={"rooms": [{"conversation_id": "!layer-room:hubtel.xyz"}]},
+        message_routing={"rooms": [{"conversation_id": "!layer-room:example.com"}]},
     )
     env.add(system)
     env.flush()
@@ -144,7 +144,7 @@ def test_facts_reflect_db_systems_services_rooms(env, ctx):
     entry = [f for f in r["facts"]["systems"] if f["name"] == "layer-test-sys"]
     assert entry, "新增系统应出现在 facts"
     assert entry[0]["services"] == ["layer-test-svc"]
-    assert entry[0]["rooms"] == ["!layer-room:hubtel.xyz"]
+    assert entry[0]["rooms"] == ["!layer-room:example.com"]
 
     env.rollback()
 
@@ -443,8 +443,8 @@ def test_facts_auto_assembly_full(env, ctx):
             name="layer-auto-sys",
             display_name="自动化",
             message_routing={
-                "rooms": [{"channel": "matrix", "channel_account_id": "default", "conversation_id": "!auto:hubtel.xyz"}],
-                "approvers": [{"channel": "matrix", "channel_account_id": "default", "sender_id": "@auto-approver:hubtel.xyz"}],
+                "rooms": [{"channel": "matrix", "channel_account_id": "default", "conversation_id": "!auto:example.com"}],
+                "approvers": [{"channel": "matrix", "channel_account_id": "default", "sender_id": "@auto-approver:example.com"}],
             },
         )
     )
@@ -458,9 +458,9 @@ def test_facts_auto_assembly_full(env, ctx):
     assert set(facts) >= {"systems", "approvers", "environments"}
     entry = [f for f in facts["systems"] if f["name"] == "layer-auto-sys"][0]
     assert entry["services"] == ["auto-svc"]
-    assert entry["rooms"] == ["!auto:hubtel.xyz"]
-    assert entry["approvers"] == ["@auto-approver:hubtel.xyz"]
-    assert "@auto-approver:hubtel.xyz" in [a["sender_id"] for a in facts["approvers"]]
+    assert entry["rooms"] == ["!auto:example.com"]
+    assert entry["approvers"] == ["@auto-approver:example.com"]
+    assert "@auto-approver:example.com" in [a["sender_id"] for a in facts["approvers"]]
     assert "test" in facts["environments"]
 
 
@@ -528,9 +528,9 @@ def _mk_pending_plan(db, *, expires_in_minutes, age_minutes=0):
         environment="test",
         channel="matrix",
         channel_account_id="default",
-        room_id="!hb-room:hubtel.xyz",
+        room_id="!hb-room:example.com",
         request_event_id="$hb-evt",
-        request_sender_id="@requester:hubtel.xyz",
+        request_sender_id="@requester:example.com",
         status="PENDING_APPROVAL",
         created_at=now - timedelta(minutes=age_minutes),
         expires_at=now + timedelta(minutes=expires_in_minutes),
@@ -565,7 +565,7 @@ def test_heartbeat_ops_state_machine(env, ctx):
         == 1
     ), "过期计划应已落 EXPIRED 终态"
     plan = rem["expiring_soon"][0]
-    assert plan["room_id"] == "!hb-room:hubtel.xyz"
+    assert plan["room_id"] == "!hb-room:example.com"
     assert plan["minutes_left"] <= 5
     assert "审批人" in r["instructions"] and "沉默" in r["instructions"]
     assert r["next_step"] == r["instructions"]

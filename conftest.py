@@ -40,7 +40,7 @@ def _isolated_test_db():
 # 三个环境类别，让既有测试专注于它们各自的面（审批链路/执行器/路由）。
 _TEST_SERVER_POOL = [
     # 直调 prepare 的测试所用的全部 targets 形态（16 文件盘点 2026-09-04）
-    "s1", "s2", "s3", "cc-test2", "q1", "server-1", "server1", "server2",
+    "s1", "s2", "s3", "cc-test2", "cc-test3", "q1", "server-1", "server1", "server2",
     "203.0.113.10",
 ] + [f"server{i}" for i in range(10)]
 

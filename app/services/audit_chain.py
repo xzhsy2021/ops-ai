@@ -30,6 +30,28 @@ from app.db.models import (
 SCHEMA_VERSION = "iter38.audit-chain.v1"
 
 
+def _display_actor(value: Any) -> str:
+    """通道身份 → 人名展示（matrix:default:@jun:hubtel.xyz → Jun（@jun:hubtel.xyz））。
+
+    与 approval_tools._display_approver 同规则；完整 ID 保留括注不丢证据。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    mx = raw
+    if mx.startswith("matrix:"):
+        parts = mx.split(":", 2)
+        if len(parts) == 3:
+            mx = parts[2]
+    if not (mx.startswith("@") and ":" in mx):
+        return raw
+    local = mx[1:].split(":", 1)[0]
+    if not local:
+        return raw
+    human = local.replace(".", " ").replace("_", " ").strip().capitalize()
+    return f"{human}（{mx}）"
+
+
 def _iso(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -516,8 +538,10 @@ def build_operation_chain(
             "targets": ep.targets or [],
             "package_sha256": ep.package_sha256,
             "package_size_bytes": ep.package_size_bytes,
-            "approved_by": ep.approved_by,
-            "requested_by": ep.requested_by,
+            "approved_by": _display_actor(ep.approved_by),
+            "approved_by_raw": ep.approved_by,
+            "requested_by": _display_actor(ep.requested_by),
+            "requested_by_raw": ep.requested_by,
             "failure_reason": ep.failure_reason,
             "created_at": _iso(ep.created_at),
             "approved_at": _iso(ep.approved_at),
@@ -525,10 +549,9 @@ def build_operation_chain(
         nodes.append(_node(nid, "execution_plan", f"执行计划 {scope}", status=ep.status, risk_level=ep.risk_level, created_at=_iso(ep.created_at), data=ep_data))
         timeline.append(_event(ep.created_at, "execution_plan_created", f"计划创建 {scope}", f"风险 {ep.risk_level or '-'} · {len(ep.steps or [])} 步骤", nid, ep.status, ep.risk_level, ep_data))
         if ep.approved_at:
-            approver = (ep.approved_by or "").split(":")[-1] or ep.approved_by or "-"
-            timeline.append(_event(ep.approved_at, "execution_plan_approved", "计划批准", f"审批人 {approver}", nid, ep.status, ep.risk_level))
+            timeline.append(_event(ep.approved_at, "execution_plan_approved", "计划批准", f"审批人 {_display_actor(ep.approved_by)}", nid, ep.status, ep.risk_level))
         if ep.rejected_at:
-            timeline.append(_event(ep.rejected_at, "execution_plan_rejected", "计划拒绝", f"拒绝人 {ep.rejected_by or '-'}", nid, ep.status, ep.risk_level))
+            timeline.append(_event(ep.rejected_at, "execution_plan_rejected", "计划拒绝", f"拒绝人 {_display_actor(ep.rejected_by)}", nid, ep.status, ep.risk_level))
         if ep.execution_job_id:
             edges.append({"from": nid, "to": f"job:{ep.execution_job_id}", "relation": "executed_by_job"})
     for step in execution_steps:
@@ -592,7 +615,8 @@ def build_operation_chain(
         "root_id": root.get("id"),
         "status": _max_status(statuses),
         "risk_level": _max_risk(risks),
-        "operator": operator or "-",
+        "operator": _display_actor(operator) if operator else "-",
+        "operator_raw": operator or "",
         "node_count": len(nodes),
         "edge_count": len(edges),
         "timeline_count": len(timeline),
@@ -622,7 +646,8 @@ def build_operation_chain(
                     "id": x.id, "status": x.status, "risk_level": x.risk_level,
                     "system_name": x.system_name, "service_name": x.service_name,
                     "environment": x.environment, "targets": x.targets or [],
-                    "approved_by": x.approved_by, "requested_by": x.requested_by,
+                    "approved_by": _display_actor(x.approved_by), "approved_by_raw": x.approved_by,
+                    "requested_by": _display_actor(x.requested_by), "requested_by_raw": x.requested_by,
                     "failure_reason": x.failure_reason,
                     "created_at": _iso(x.created_at), "approved_at": _iso(x.approved_at),
                     "steps": [
@@ -734,7 +759,8 @@ def list_operation_chains(db: Session, *, limit: int = 50, kind: str = "", statu
                 "title": f"执行计划 {scope}" + (f"（{ep.environment}）" if ep.environment else ""),
                 "status": ep.status,
                 "risk_level": ep.risk_level,
-                "operator": ep.requested_by or ep.approved_by or "-",
+                "operator": _display_actor(ep.requested_by or ep.approved_by),
+                "operator_raw": ep.requested_by or ep.approved_by or "",
                 "target": f"{ep.system_name or '-'}@{ep.environment or '-'} " + ", ".join(str(t) for t in (ep.targets or [])[:3]),
                 "created_at": _iso(ep.created_at),
                 "related_plan_id": ep.id,

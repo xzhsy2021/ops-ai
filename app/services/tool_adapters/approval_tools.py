@@ -455,6 +455,32 @@ def _approval_reply_template(
     return "\n".join(lines)
 
 
+def _display_approver(value: str) -> str:
+    """通道身份 → 人名展示。
+
+    matrix:default:@jun:hubtel.xyz → Jun（@jun:hubtel.xyz）
+    @jack.han:hubtel.xyz            → Jack.han（@jack.han:hubtel.xyz）
+    admin / matrix:default:u-1     → 原样（无 Matrix 格式可解析）
+    保留完整 ID 括注——审计场景人名与身份都可见，不丢证据。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    # 剥通道前缀 matrix:default:
+    mx = raw
+    if mx.startswith("matrix:"):
+        parts = mx.split(":", 2)
+        if len(parts) == 3:
+            mx = parts[2]
+    if not (mx.startswith("@") and ":" in mx):
+        return raw  # 非标准 Matrix 身份——原样
+    local = mx[1:].split(":", 1)[0]
+    if not local:
+        return raw
+    human = local.replace(".", " ").replace("_", " ").strip().capitalize()
+    return f"{human}（{mx}）"
+
+
 def _execution_reply_template(plan, *, grant_hint: str = "") -> str:
     """执行完成后的固定格式回执（Agent 原样转发，禁止自由发挥/重复播报过程）。
 
@@ -505,7 +531,7 @@ def _execution_reply_template(plan, *, grant_hint: str = "") -> str:
         "",
         *step_lines,
         "",
-        f"审批人：`{plan.approved_by or '-'}`{'（' + grant_hint + '）' if grant_hint else ''}｜审计 ID {plan.id}",
+        f"审批人：{_display_approver(plan.approved_by or '')}{'（' + grant_hint + '）' if grant_hint else ''}｜审计 ID {plan.id}",
     ]
     if plan.system_name:
         scope = f"{plan.system_name}"

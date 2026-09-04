@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { resource } from '../api'
+import { resource, serverManagement } from '../api'
 import { useNotificationStore } from '../store'
 import KeyValueEditor from '../components/KeyValueEditor'
 import { ApproverEditor, RoomEditor } from '../components/BindingEditors'
@@ -60,6 +60,9 @@ export default function SystemEditPage() {
   const [envVars, setEnvVars] = useState<Record<string, any>>({})
   const [envServers, setEnvServers] = useState('')
   const [envSaving, setEnvSaving] = useState(false)
+  // 服务器管理库（可选清单来源）
+  const [serverOptions, setServerOptions] = useState<Array<{ name: string; host?: string; group?: string; enabled?: boolean }>>([])
+  const [serverPickerQuery, setServerPickerQuery] = useState('')
 
   useEffect(() => {
     if (!name) return
@@ -100,6 +103,17 @@ export default function SystemEditPage() {
       }
     }).catch(() => {})
   }, [name])
+
+  // 服务器管理库：环境清单的可选池（不强制——仍可手动补行）
+  useEffect(() => {
+    serverManagement.list(false).then((res: any) => {
+      const list = Array.isArray(res.data) ? res.data : []
+      setServerOptions(list
+        .filter((s: any) => s?.name)
+        .map((s: any) => ({ name: s.name, host: s.host, group: s.group, enabled: s.enabled !== false }))
+        .sort((a: any, b: any) => a.name.localeCompare(b.name)))
+    }).catch(() => {})
+  }, [])
 
   // 启用路由时，若关键词为空，自动填充当前系统已配置的服务名
   const handleToggleEnabled = (checked: boolean) => {
@@ -420,11 +434,133 @@ export default function SystemEditPage() {
                     }
                     return null
                   })()}
+
+                  {/* 服务器管理库选择器：勾选 ⇄ 加入/移出清单 */}
+                  {(() => {
+                    const listed = new Set(envServers.split('\n').map((s) => s.trim()).filter(Boolean))
+                    const q = serverPickerQuery.trim().toLowerCase()
+                    const candidates = serverOptions.filter((s) =>
+                      !listed.has(s.name) && (!q || s.name.toLowerCase().includes(q) || (s.host || '').toLowerCase().includes(q) || (s.group || '').toLowerCase().includes(q))
+                    ).slice(0, 60)
+                    const inPool = serverOptions.filter((s) => listed.has(s.name))
+                    const orphans = listed.size > inPool.length
+                      ? [...listed].filter((n) => !serverOptions.some((s) => s.name === n))
+                      : []
+                    const toggleServer = (serverName: string) => {
+                      setEnvServers((prev) => {
+                        const cur = new Set(prev.split('\n').map((s) => s.trim()).filter(Boolean))
+                        if (cur.has(serverName)) cur.delete(serverName)
+                        else cur.add(serverName)
+                        return [...cur].join('\n')
+                      })
+                    }
+                    return (
+                      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                        <div style={{ flex: '1 1 320px', minWidth: '260px' }}>
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                            从服务器管理选择（{inPool.length}/{serverOptions.length} 已选）
+                          </div>
+                          <input
+                            style={{ ...inputStyle, marginBottom: '6px' }}
+                            value={serverPickerQuery}
+                            onChange={(e) => setServerPickerQuery(e.target.value)}
+                            placeholder="搜索名称 / IP / 分组..."
+                          />
+                          <div style={{
+                            maxHeight: '180px', overflowY: 'auto',
+                            border: '1px solid var(--border)', borderRadius: '6px',
+                          }}>
+                            {candidates.length === 0 ? (
+                              <div style={{ padding: '10px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                                {q ? '无匹配服务器' : '服务器管理库为空或全部已选'}
+                              </div>
+                            ) : candidates.map((s) => (
+                              <div key={s.name} style={{
+                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                padding: '6px 10px', borderBottom: '1px solid var(--border)',
+                                fontSize: '12px',
+                              }}>
+                                <button
+                                  type="button"
+                                  style={{
+                                    background: 'none', border: 'none', cursor: 'pointer',
+                                    padding: 0, textAlign: 'left', color: 'inherit',
+                                    display: 'flex', flexDirection: 'column', gap: '2px',
+                                  }}
+                                  onClick={() => toggleServer(s.name)}
+                                  title="点击加入/移出清单"
+                                >
+                                  <span style={{ fontFamily: 'monospace' }}>
+                                    {s.enabled === false ? '⏸ ' : '+ '}{s.name}
+                                  </span>
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                                    {[s.host, s.group].filter(Boolean).join(' · ') || '无分组'}
+                                  </span>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div style={{ flex: '1 1 260px', minWidth: '220px' }}>
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                            当前清单（{listed.size} 台）
+                          </div>
+                          <div style={{
+                            maxHeight: '212px', overflowY: 'auto',
+                            border: '1px solid var(--border)', borderRadius: '6px',
+                          }}>
+                            {listed.size === 0 ? (
+                              <div style={{ padding: '10px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                                空
+                              </div>
+                            ) : [...listed].map((n) => {
+                              const known = serverOptions.find((s) => s.name === n)
+                              return (
+                                <div key={n} style={{
+                                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                  padding: '6px 10px', borderBottom: '1px solid var(--border)',
+                                  fontSize: '12px',
+                                }}>
+                                  <span style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                    <span style={{ fontFamily: 'monospace' }}>{n}</span>
+                                    {known && known.group ? (
+                                      <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>{known.group}</span>
+                                    ) : !known ? (
+                                      <span style={{ color: 'var(--warning, #b26a00)', fontSize: '11px' }}>
+                                        不在服务器管理库（手动条目）
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleServer(n)}
+                                    style={{
+                                      background: 'none', border: 'none', cursor: 'pointer',
+                                      color: 'var(--danger, #c62828)', fontSize: '14px', padding: '2px 6px',
+                                    }}
+                                    title="移出清单"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                          {orphans.length > 0 && (
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                              其中 {orphans.length} 台为手动条目（不在服务器管理库，仍会保存生效）
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })()}
+
                   <textarea
-                    style={{ ...inputStyle, minHeight: '84px', fontFamily: 'monospace', fontSize: '12px' }}
+                    style={{ ...inputStyle, minHeight: '64px', fontFamily: 'monospace', fontSize: '12px' }}
                     value={envServers}
                     onChange={(e) => setEnvServers(e.target.value)}
-                    placeholder={'每行一台服务器，如\n47.84.58.154-量化测试\n43.106.8.111-量化测试 - 2'}
+                    placeholder={'也可手动编辑（每行一台服务器）\n47.84.58.154-量化测试'}
                   />
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
                     {envServers.split('\n').map((s) => s.trim()).filter(Boolean).length} 台 · 与服务绑定的服务器名一致（servers 列口径）

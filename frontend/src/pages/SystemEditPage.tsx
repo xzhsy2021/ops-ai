@@ -55,11 +55,13 @@ export default function SystemEditPage() {
   const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
   const [aliasInput, setAliasInput] = useState('')
   const [keywordInput, setKeywordInput] = useState('')
-  const [environments, setEnvironments] = useState<Array<{ name: string; display_name?: string; category?: string; variables: Record<string, any>; servers?: any[] }>>([])
+  const [environments, setEnvironments] = useState<Array<{ name: string; display_name?: string; category?: string; variables: Record<string, any>; servers?: any[]; service_overrides?: Record<string, any> }>>([])
   const [activeEnv, setActiveEnv] = useState('')
   const [envVars, setEnvVars] = useState<Record<string, any>>({})
   const [envServers, setEnvServers] = useState('')
   const [envSaving, setEnvSaving] = useState(false)
+  // 环境级服务覆盖（服务×环境差异化：template/servers）
+  const [envServiceOverrides, setEnvServiceOverrides] = useState<Record<string, any>>({})
   // 服务器管理库（可选清单来源）
   const [serverOptions, setServerOptions] = useState<Array<{ name: string; host?: string; group?: string; enabled?: boolean }>>([])
   const [serverPickerQuery, setServerPickerQuery] = useState('')
@@ -100,6 +102,7 @@ export default function SystemEditPage() {
         setActiveEnv(list[0].name)
         setEnvVars(stripEnvMetaKeys(list[0].variables || {}))
         setEnvServers(normalizeEnvServers(list[0].servers))
+        setEnvServiceOverrides(JSON.parse(JSON.stringify(list[0].service_overrides || {})))
       }
     }).catch(() => {})
   }, [name])
@@ -208,6 +211,7 @@ export default function SystemEditPage() {
     setActiveEnv(envName)
     setEnvVars(stripEnvMetaKeys(env?.variables || {}))
     setEnvServers(normalizeEnvServers(env?.servers))
+    setEnvServiceOverrides(JSON.parse(JSON.stringify(env?.service_overrides || {})))
   }
 
   const handleEnvSave = async () => {
@@ -225,10 +229,11 @@ export default function SystemEditPage() {
         category: env?.category || 'custom',
         servers,
         variables: envVars,
+        service_overrides: envServiceOverrides,
       })
       notify(`环境 ${activeEnv} 已保存（${servers.length} 台服务器）`, 'success')
       setEnvironments((prev) => prev.map((e) =>
-        e.name === activeEnv ? { ...e, variables: { ...envVars, environment: activeEnv }, servers: servers.map((id) => ({ id })) } : e
+        e.name === activeEnv ? { ...e, variables: { ...envVars, environment: activeEnv }, servers: servers.map((id) => ({ id })), service_overrides: JSON.parse(JSON.stringify(envServiceOverrides)) } : e
       ))
     } catch (e: any) {
       const msg = typeof e === 'string' ? e : (e?.message || '保存失败')
@@ -565,6 +570,73 @@ export default function SystemEditPage() {
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
                     {envServers.split('\n').map((s) => s.trim()).filter(Boolean).length} 台 · 与服务绑定的服务器名一致（servers 列口径）
                   </div>
+                </div>
+
+                {/* 环境级服务差异化（service_overrides） */}
+                <div style={{
+                  marginBottom: '16px', padding: '12px',
+                  border: '1px solid var(--border)', borderRadius: '8px',
+                }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
+                    服务差异化（按环境覆盖）
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                    同一服务在不同环境可用不同部署模板与服务器——如线上二进制包（generic_backend_direct）、测试 docker compose。
+                    覆盖优先于服务默认值；不填则用服务自身配置。
+                  </div>
+                  {services.length === 0 ? (
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>系统暂无服务</div>
+                  ) : services.map((svc: any) => {
+                    const ov = envServiceOverrides[svc.name] || {}
+                    const hasOverride = !!envServiceOverrides[svc.name]
+                    const updateOverride = (patch: Record<string, any>) => {
+                      setEnvServiceOverrides((prev) => {
+                        const cur = { ...prev }
+                        const merged = { ...(cur[svc.name] || {}), ...patch }
+                        // 清空态：无实质覆盖字段时删除条目
+                        const meaningful = Object.entries(merged).some(([, v]) =>
+                          Array.isArray(v) ? v.length > 0 : (v !== undefined && v !== null && String(v) !== ''))
+                        if (meaningful) cur[svc.name] = merged
+                        else delete cur[svc.name]
+                        return cur
+                      })
+                    }
+                    return (
+                      <div key={svc.name} style={{
+                        display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap',
+                        padding: '8px 10px', marginBottom: '6px',
+                        border: '1px solid var(--border)', borderRadius: '6px',
+                        background: hasOverride ? 'var(--action-bg)' : 'transparent',
+                      }}>
+                        <span style={{ fontSize: '13px', fontWeight: hasOverride ? 600 : 400, minWidth: '140px' }}>
+                          {svc.display_name || svc.name}
+                        </span>
+                        <select
+                          style={{ ...inputStyle, width: 'auto', minWidth: '180px', fontSize: '12px', padding: '4px 8px' }}
+                          value={ov.template ?? ''}
+                          onChange={(e) => updateOverride({ template: e.target.value })}
+                        >
+                          <option value="">部署模板：跟随服务默认</option>
+                          <option value="generic_backend_direct">generic_backend_direct（二进制直推）</option>
+                          <option value="generic_frontend">generic_frontend（前端静态）</option>
+                          <option value="docker_compose">docker_compose（容器编排）</option>
+                          <option value="crypto_docker_compose">crypto_docker_compose（量化容器）</option>
+                        </select>
+                        <input
+                          style={{ ...inputStyle, flex: '1 1 240px', fontSize: '12px', padding: '4px 8px', fontFamily: 'monospace' }}
+                          value={(ov.servers || []).join(', ')}
+                          onChange={(e) => updateOverride({ servers: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
+                          placeholder="覆盖服务器（逗号分隔，空=跟随服务默认）"
+                        />
+                        {hasOverride && (
+                          <button type="button" className="btn" style={{ fontSize: '12px', padding: '4px 10px' }}
+                            onClick={() => setEnvServiceOverrides((prev) => { const c = { ...prev }; delete c[svc.name]; return c })}>
+                            清除覆盖
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
 
                 <KeyValueEditor

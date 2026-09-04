@@ -31,6 +31,10 @@ export default function ServiceEditPage() {
     servers: [] as string[],
     template_variables: {} as Record<string, any>,
   })
+  // 服务 × 环境服务器分配（template_variables.servers_by_env）
+  const [systemEnvs, setSystemEnvs] = useState<Array<{ name: string; display_name?: string; category?: string; servers?: any[] }>>([])
+  const [serversByEnv, setServersByEnv] = useState<Record<string, string[]>>({})
+  const [envServerSearch, setEnvServerSearch] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (serverSearchTimer.current) clearTimeout(serverSearchTimer.current)
@@ -49,6 +53,15 @@ export default function ServiceEditPage() {
     }).catch(() => {})
   }, [])
 
+  // 系统环境列表（服务×环境分配的目标环境）
+  useEffect(() => {
+    if (!systemName) return
+    resource.environments(systemName).then((res: any) => {
+      const list = Array.isArray(res.data) ? res.data.filter((e: any) => e?.name && e?.type === 'system') : []
+      setSystemEnvs(list)
+    }).catch(() => {})
+  }, [systemName])
+
   useEffect(() => {
     if (!systemName || !serviceName) return
     setLoading(true)
@@ -64,6 +77,15 @@ export default function ServiceEditPage() {
           servers: svc.servers || [],
           template_variables: svc.template_variables || {},
         })
+        const sbe = (svc.template_variables || {}).servers_by_env
+        if (sbe && typeof sbe === 'object') {
+          const normalized: Record<string, string[]> = {}
+          for (const [env, val] of Object.entries(sbe)) {
+            if (Array.isArray(val)) normalized[env] = val.map(String)
+            else if (typeof val === 'string' && val.trim()) normalized[env] = val.split(',').map((s) => s.trim()).filter(Boolean)
+          }
+          setServersByEnv(normalized)
+        }
       } else {
         notify('服务不存在', 'error')
       }
@@ -78,13 +100,21 @@ export default function ServiceEditPage() {
     if (!systemName) return
     const name = form.name.trim()
     if (!name) return notify('请输入服务名', 'error')
+    // servers_by_env 并入模板变量（发布链路 _service_servers_for_environment 消费）
+    const template_variables = { ...form.template_variables }
+    const hasEnvAlloc = Object.values(serversByEnv).some((v) => (v || []).length > 0)
+    if (hasEnvAlloc) {
+      template_variables.servers_by_env = serversByEnv
+    } else {
+      delete template_variables.servers_by_env
+    }
     const payload = {
       name,
       display_name: form.display_name.trim() || name,
       template: form.template || 'generic_backend_direct',
       repo: form.repo.trim(),
       servers: form.servers || [],
-      template_variables: form.template_variables,
+      template_variables,
     }
     setSaving(true)
     try {
@@ -304,6 +334,111 @@ export default function ServiceEditPage() {
               </div>
             )}
           </div>
+          {systemEnvs.length > 0 && (
+            <div style={{ gridColumn: '1 / -1', marginTop: '8px', padding: '12px', border: '1px solid var(--border)', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                <label style={{ margin: 0, fontWeight: 600 }}>按环境分配服务器</label>
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  发布时按环境取对应清单（优先于默认服务器）；不配则回退默认
+                </span>
+              </div>
+              {systemEnvs.map((env) => {
+                const selected = serversByEnv[env.name] || []
+                const q = (envServerSearch[env.name] || '').trim().toLowerCase()
+                const candidates = (q
+                  ? allServers.filter((s) => s.toLowerCase().includes(q))
+                  : allServers
+                ).filter((s) => !selected.includes(s)).slice(0, 50)
+                const isTest = env.category === 'test'
+                const isProd = env.category === 'prod'
+                const envServerIds = new Set((env.servers || []).map((s: any) => (typeof s === 'string' ? s : (s?.id ?? s?.name ?? ''))).filter(Boolean))
+                const toggle = (srv: string) => {
+                  setServersByEnv((prev) => {
+                    const cur = prev[env.name] || []
+                    const next = cur.includes(srv) ? cur.filter((x) => x !== srv) : [...cur, srv]
+                    return { ...prev, [env.name]: next }
+                  })
+                }
+                return (
+                  <div key={env.name} style={{
+                    border: '1px solid var(--border)', borderRadius: '6px',
+                    padding: '10px', marginBottom: '10px',
+                  }}>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '6px' }}>
+                      <span style={{ fontWeight: 600, fontSize: '13px' }}>
+                        {env.display_name || env.name}
+                      </span>
+                      {env.category && (
+                        <span style={{
+                          fontSize: '11px', padding: '1px 8px', borderRadius: '10px',
+                          background: isTest ? 'var(--success-surface, #e8f5e9)' : isProd ? 'var(--danger-surface, #fce8e8)' : 'var(--bg-secondary)',
+                          color: isTest ? 'var(--success, #2e7d32)' : isProd ? 'var(--danger, #c62828)' : 'var(--text-secondary)',
+                          fontWeight: 600,
+                        }}>{env.category}</span>
+                      )}
+                      <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                        {selected.length} 台
+                      </span>
+                    </div>
+                    {selected.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+                        {selected.map((srv) => {
+                          const outside = envServerIds.size > 0 && !envServerIds.has(srv)
+                          return (
+                            <span key={srv} title={outside ? '不在环境权威清单内——发布时会被环境隔离闸拦截' : '点击 × 移除'}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: '6px',
+                                padding: '2px 8px', borderRadius: '4px', fontSize: '12px', fontFamily: 'monospace',
+                                background: outside ? 'var(--warning-surface, #fff8e1)' : 'var(--action-bg)',
+                                border: outside ? '1px solid var(--warning, #ffb300)' : '1px solid transparent',
+                                color: outside ? 'var(--warning, #b26a00)' : 'var(--text-primary)',
+                              }}>
+                              {srv}{outside && '⚠'}
+                              <button type="button" onClick={() => toggle(srv)} aria-label={`移除 ${srv}`}
+                                style={{ cursor: 'pointer', border: 'none', background: 'transparent', color: 'inherit', fontSize: '12px', padding: 0, lineHeight: 1 }}>×</button>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <input
+                        style={{ ...inputStyle, flex: '0 1 220px', fontSize: '12px', padding: '5px 10px' }}
+                        placeholder="搜索添加服务器..."
+                        value={envServerSearch[env.name] || ''}
+                        onChange={(e) => setEnvServerSearch((prev) => ({ ...prev, [env.name]: e.target.value }))}
+                      />
+                      <div style={{
+                        flex: 1, maxHeight: '110px', overflowY: 'auto',
+                        border: '1px solid var(--border)', borderRadius: '6px', fontSize: '12px',
+                      }}>
+                        {candidates.length === 0 ? (
+                          <div style={{ padding: '8px 10px', color: 'var(--text-muted)' }}>
+                            {q ? '无匹配' : '全部已选或无候选'}
+                          </div>
+                        ) : candidates.map((srv) => {
+                          const outside = envServerIds.size > 0 && !envServerIds.has(srv)
+                          return (
+                            <button key={srv} type="button" onClick={() => toggle(srv)}
+                              title={outside ? '该服务器不在环境权威清单内' : '点击加入'}
+                              style={{
+                                display: 'flex', justifyContent: 'space-between', width: '100%',
+                                padding: '5px 10px', background: 'transparent', border: 'none',
+                                borderBottom: '1px solid var(--border)', cursor: 'pointer',
+                                color: outside ? 'var(--warning, #b26a00)' : 'var(--text-primary)',
+                                fontFamily: 'monospace', fontSize: '12px', textAlign: 'left',
+                              }}>
+                              <span>{outside ? '⚠ ' : '+ '}{srv}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
           <div style={{ gridColumn: '1 / -1' }}>
             <label style={{ display: 'block', marginBottom: '8px' }}>模板变量</label>
             <KeyValueEditor

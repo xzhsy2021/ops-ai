@@ -84,6 +84,11 @@ class SystemEnvironmentPayload(BaseModel):
     base_path: str = ""
     servers: List[str] = Field(default_factory=list)
     variables: Dict[str, Any] = Field(default_factory=dict)
+    # 环境级服务覆盖（服务×环境差异化）：
+    # {服务名: {"template": "...", "servers": [...], "template_variables": {...}}}
+    # resolve_system_config 在环境态用它覆盖服务属性——
+    # 同一服务可在线上用二进制模板、测试用 docker compose。
+    service_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SystemGroupPayload(BaseModel):

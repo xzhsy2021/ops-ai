@@ -9,6 +9,7 @@ import asyncio
 import logging
 import time
 import threading
+import copy
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
@@ -812,6 +813,7 @@ def _env_response(env_name: str, env_cfg: Dict[str, Any], source_type: str) -> D
         "description": (env_cfg.get("description") if isinstance(env_cfg, dict) else "") or "",
         "variables": variables,
         "servers": env_cfg.get("servers", []) if isinstance(env_cfg, dict) else [],
+        "service_overrides": env_cfg.get("service_overrides", {}) if isinstance(env_cfg, dict) else {},
         "deploy_path": env_cfg.get("base_path", env_cfg.get("deploy_path", "")) if isinstance(env_cfg, dict) else "",
         "health_url": variables.get("health_url", "") if isinstance(variables, dict) else "",
     }
@@ -887,6 +889,7 @@ async def list_environments_v2(system: str = "", db: Session = Depends(get_db)):
             "base_path": row.base_path,
             "servers": row.servers or [],
             "variables": row.variables or {},
+            "service_overrides": row.service_overrides or {},
         }, "system"))
 
     if system:
@@ -930,6 +933,18 @@ def _normalize_environment_payload(payload: SystemEnvironmentPayload, existing: 
     variables["category"] = category
     if payload.display_name.strip():
         variables["display_name"] = payload.display_name.strip()
+    # 环境级服务覆盖：未显式传入时保留存量（细粒度字段合并语义）；
+    # 显式传入（哪怕空 dict）即整体替换——与 variables 同款约定。
+    sent_fields = payload.model_dump(exclude_unset=True)
+    if "service_overrides" in sent_fields:
+        raw_overrides = payload.service_overrides or {}
+    else:
+        raw_overrides = (existing or {}).get("service_overrides", {}) if isinstance(existing, dict) else {}
+    service_overrides: Dict[str, Any] = {}
+    for svc_name, override in (raw_overrides or {}).items():
+        if not isinstance(override, dict):
+            continue
+        service_overrides[str(svc_name).strip()] = copy.deepcopy(override)
     return {
         "display_name": payload.display_name.strip() or payload.name.strip(),
         "category": category,
@@ -937,6 +952,7 @@ def _normalize_environment_payload(payload: SystemEnvironmentPayload, existing: 
         "base_path": payload.base_path.strip() or (existing or {}).get("base_path", ""),
         "servers": [str(x).strip() for x in (payload.servers or []) if str(x).strip()],
         "variables": variables,
+        "service_overrides": service_overrides,
     }
 
 
@@ -963,6 +979,7 @@ async def create_system_environment_v2(system_name: str, payload: SystemEnvironm
         base_path=env_cfg["base_path"],
         servers=env_cfg["servers"],
         variables=env_cfg["variables"],
+        service_overrides=env_cfg["service_overrides"],
     )
     db.commit()
     audit("system.environment.create", "environment", f"{system_name}/{env_name}", getattr(request.state, "username", ""))
@@ -993,6 +1010,7 @@ async def update_system_environment_v2(system_name: str, env_name: str, payload:
         "base_path": existing_row.base_path,
         "servers": existing_row.servers or [],
         "variables": existing_row.variables or {},
+        "service_overrides": existing_row.service_overrides or {},
     }
     sent_fields = payload.model_dump(exclude_unset=True)
     env_cfg = _normalize_environment_payload(
@@ -1005,6 +1023,7 @@ async def update_system_environment_v2(system_name: str, env_name: str, payload:
     existing_row.base_path = env_cfg["base_path"]
     existing_row.servers = env_cfg["servers"]
     existing_row.variables = env_cfg["variables"]
+    existing_row.service_overrides = env_cfg["service_overrides"]
     db.commit()
     audit("system.environment.update", "environment", f"{system_name}/{current_name}->{new_name}", getattr(request.state, "username", ""))
     return api_response(data=_env_response(new_name, env_cfg, "system"), message="Environment updated")

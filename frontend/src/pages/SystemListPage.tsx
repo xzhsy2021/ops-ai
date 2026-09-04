@@ -361,7 +361,7 @@ export default function SystemListPage() {
                     <th style={{ padding: '8px 12px', color: 'var(--text-muted)', fontWeight: '600' }}>名称</th>
                     <th style={{ padding: '8px 12px', color: 'var(--text-muted)', fontWeight: '600' }}>显示名</th>
                     <th style={{ padding: '8px 12px', color: 'var(--text-muted)', fontWeight: '600' }}>模板</th>
-                    <th style={{ padding: '8px 12px', color: 'var(--text-muted)', fontWeight: '600' }}>默认服务器</th>
+                    <th style={{ padding: '8px 12px', color: 'var(--text-muted)', fontWeight: '600' }}>按环境分配</th>
                     {isAdmin && <th style={{ padding: '8px 12px', width: '80px' }}></th>}
                   </tr>
                 </thead>
@@ -376,8 +376,14 @@ export default function SystemListPage() {
                       <td style={{ padding: '8px 12px', color: 'var(--brand)', fontSize: '12px' }}>
                         {TEMPLATE_LABELS[svc.template] || svc.template || '-'}
                       </td>
-                      <td style={{ padding: '8px 12px', color: 'var(--text-muted)' }}>
-                        {(svc.servers || []).join(', ') || '-'}
+                      <td style={{ padding: '8px 12px', color: 'var(--text-muted)', fontSize: '12px' }}>
+                        {(() => {
+                          const sbe = ((svc.template_variables || {}).servers_by_env) || {}
+                          const parts = Object.entries(sbe)
+                            .filter(([, v]: any) => Array.isArray(v) ? v.length > 0 : !!v)
+                            .map(([k, v]: any) => `${k}:${Array.isArray(v) ? v.length : String(v).split(',').filter(Boolean).length}台`)
+                          return parts.length > 0 ? parts.join(' · ') : '-'
+                        })()}
                       </td>
                       {isAdmin && (
                         <td style={{ padding: '8px 12px', display: 'flex', gap: '4px' }}>

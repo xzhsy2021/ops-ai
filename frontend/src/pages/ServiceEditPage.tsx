@@ -25,7 +25,6 @@ export default function ServiceEditPage() {
     display_name: '',
     template: 'generic_backend_direct',
     repo: '',
-    servers: [] as string[], // 存量兜底清单（只读展示语义：无按环境配置时发布回退用）
     template_variables: {} as Record<string, any>,
   })
   // 服务 × 环境服务器分配（template_variables.servers_by_env）
@@ -64,7 +63,6 @@ export default function ServiceEditPage() {
           display_name: svc.display_name || '',
           template: svc.template || 'generic_backend_direct',
           repo: svc.repo || '',
-          servers: svc.servers || [],
           template_variables: tv,
         })
         if (sbe && typeof sbe === 'object') {
@@ -102,7 +100,7 @@ export default function ServiceEditPage() {
       display_name: form.display_name.trim() || name,
       template: form.template || 'generic_backend_direct',
       repo: form.repo.trim(),
-      servers: form.servers || [],
+      servers: [], // 服务级默认服务器已退役——统一按环境分配（servers_by_env）；空数组清存量
       template_variables,
     }
     setSaving(true)

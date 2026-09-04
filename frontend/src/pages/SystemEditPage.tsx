@@ -49,7 +49,6 @@ export default function SystemEditPage() {
     strategy: 'DIRECT',
     description: '',
     variables: {} as Record<string, any>,
-    servers: '',
   })
   const [services, setServices] = useState<Array<{ name: string }>>([])
   const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
@@ -77,7 +76,6 @@ export default function SystemEditPage() {
         strategy: s.strategy || 'DIRECT',
         description: s.description || '',
         variables: s.variables || {},
-        servers: (s.servers || []).join(', '),
       })
       setServices(Array.isArray(s.services) ? s.services : [])
       const r = s.message_routing || {}
@@ -246,14 +244,13 @@ export default function SystemEditPage() {
   const handleSubmit = async () => {
     const sysName = form.name.trim()
     if (!sysName) return notify('请输入系统名', 'error')
-    const servers = form.servers.split(',').map((s: string) => s.trim()).filter(Boolean)
     const payload = {
       name: sysName,
       display_name: form.display_name.trim() || sysName,
       strategy: form.strategy || 'DIRECT',
       description: form.description.trim(),
       variables: form.variables,
-      servers,
+      servers: [], // 系统级默认服务器已退役（环境清单+服务按环境分配取代）；空数组保持 API 兼容并清存量
       message_routing: withStructuredApprovers(routing),
     }
     setSaving(true)
@@ -338,15 +335,6 @@ export default function SystemEditPage() {
                 <option key={k} value={k}>{v}</option>
               ))}
             </select>
-          </div>
-          <div>
-            <label>默认服务器 (逗号分隔)</label>
-            <input
-              style={inputStyle}
-              value={form.servers}
-              onChange={(e) => setForm({ ...form, servers: e.target.value })}
-              placeholder="prod-1, prod-2"
-            />
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
             <label>描述</label>

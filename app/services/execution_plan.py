@@ -302,6 +302,10 @@ def validate_targets_in_environment(
 class ExecutionPlanService:
     """执行计划生命周期管理。"""
 
+    # 最近一次 consume() 失败的具体原因（供调用方生成可行动回复；
+    # 成功时为空）。单实例单线程语义：每次 consume 前重置。
+    last_consume_error: str = ""
+
     def __init__(self, db: Session):
         self.db = db
 
@@ -487,24 +491,35 @@ class ExecutionPlanService:
     ) -> ExecutionPlan | None:
         """原子消费审批码。成功返回 plan（状态 APPROVED），失败返回 None。
 
+        失败时把具体原因写入 self.last_consume_error（供调用方生成可行动的
+        回复，而不是笼统的'无效'）：区分 短语不匹配/计划已终态/已消费/房间
+        不匹配/非授权审批人/过期/manifest 变化/环境隔离拒绝/并发竞争。
         使用 WHERE status='PENDING_APPROVAL' AND consumed_at IS NULL 确保原子性。
         消费前校验：审批码、房间、内容摘要、授权审批人、过期时间、存储 manifest 完整性。
         """
+        self.last_consume_error = ""
         plan = self.db.query(ExecutionPlan).filter(
             ExecutionPlan.id == plan_id
         ).first()
         if not plan:
+            self.last_consume_error = f"计划 {plan_id[:8]}... 不存在"
             return None
         if plan.status != "PENDING_APPROVAL":
+            self.last_consume_error = (
+                f"短语对应的计划 {plan.id[:8]}... 已处于终态 {plan.status}（不再接受执行）"
+            )
             return None
         if plan.consumed_at is not None:
+            self.last_consume_error = f"计划 {plan.id[:8]}... 的确认短语已被消费过"
             return None
         # 验证审批码（含中文编码损坏容错：全文失配时退化为指纹段校验）
         if not _verify_approval_code_tolerant(short_code, plan):
+            self.last_consume_error = "确认短语与计划不匹配"
             return None
         # 验证房间一致，防止跨房间重放
         context = _context(approval_context, room_id=room_id, request_event_id=approval_event_id, content_sha256=plan.content_sha256 or "0" * 64, sender_id=approver_matrix_id or "")
         if (plan.channel, plan.channel_account_id, plan.conversation_id) != (context.channel, context.channel_account_id, context.conversation_id):
+            self.last_consume_error = "批准消息所在房间与计划绑定的房间不一致（防跨房间重放）"
             return None
         # 验证授权审批人
         authorized_keys = {
@@ -527,6 +542,7 @@ class ExecutionPlanService:
                     action_types=[step.action_type for step in plan.steps],
                     message_context=context,
                 ):
+                    self.last_consume_error = "临时自审批授权已失效或不含此动作（需原始审批人重新授权）"
                     return None
                 if grant_service.get_active_grant(
                     actor_key=context.actor_key,
@@ -534,27 +550,34 @@ class ExecutionPlanService:
                     environment_name=plan.environment or "",
                     message_context=context,
                 ) is None:
+                    self.last_consume_error = "临时自审批授权已过期或被撤销"
                     return None
             elif context.actor_key in authorized_keys:
                 pass
             else:
+                self.last_consume_error = "批准人不在该计划的授权审批人列表（申请人不能自批，除非有临时授权）"
                 return None
         elif not plan.authorized_identities:
             if not (plan.manifest or {}).get("legacy_matrix_compat"):
+                self.last_consume_error = "计划未配置授权审批人且无 legacy 兼容标记"
                 return None
         elif context.actor_key not in authorized_keys:
+            self.last_consume_error = "批准人不在该计划的授权审批人列表"
             return None
         if digest is not None and digest != plan.plan_digest:
+            self.last_consume_error = "计划内容指纹变化（manifest 漂移），需重新审批"
             return None
         # 验证是否过期
         if plan.expires_at and _utcnow() > plan.expires_at:
             plan.status = "EXPIRED"
             self.db.commit()
+            self.last_consume_error = f"确认短语已过期（有效期至 {plan.expires_at:%Y-%m-%d %H:%M}）"
             return None
         # 验证存储 manifest 未发生实质变化
         if not self._verify_stored_manifest(plan):
             plan.failure_reason = "plan manifest digest mismatch; re-approval required"
             self.db.commit()
+            self.last_consume_error = "计划内容与审批时不一致（完整性校验失败），需重新发起"
             return None
 
         # 环境隔离硬闸（闸3）：执行前二次复核 targets ⊆ 环境权威清单。
@@ -570,6 +593,7 @@ class ExecutionPlanService:
             plan.status = "REJECTED"
             plan.failure_reason = f"environment isolation: {exc}"
             self.db.commit()
+            self.last_consume_error = f"环境隔离拒绝：{exc}"
             return None
 
         # 原子消费：WHERE 条件确保只有一个调用者成功
@@ -592,6 +616,7 @@ class ExecutionPlanService:
         )
         self.db.commit()
         if result == 0:
+            self.last_consume_error = "确认短语已被并发消费（另一会话先一步执行）"
             return None
         self.db.refresh(plan)
         return plan

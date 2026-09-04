@@ -26,6 +26,7 @@ from app.services.qclaw_routing import (
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
+from app.db.models import ExecutionPlan
 from app.services.execution_plan import ExecutionPlanService, step_approval_details
 from app.services.package_intake import intake_package, list_staging_packages
 from app.config.systems import get_all_systems
@@ -481,12 +482,14 @@ def _display_approver(value: str) -> str:
     return f"{human}（{mx}）"
 
 
-def _execution_reply_template(plan, *, grant_hint: str = "") -> str:
+def _execution_reply_template(plan) -> str:
     """执行完成后的固定格式回执（Agent 原样转发，禁止自由发挥/重复播报过程）。
 
     与 prepare 的 _approval_reply_template 同一责任分配：OPS 是格式唯一事实源。
     内容收敛原则：只报结果态（每步骤一行 ✅/❌），不报过程流水（中间轮询/
     重试/房间扫描等由 Agent 自行消化，不进房间消息）。
+    自审批授权由模板自行标注（临时自审批授权），Agent 不得再改写人名或
+    附加自己的标注。
     """
     steps = plan.steps or []
     step_lines = []
@@ -524,6 +527,9 @@ def _execution_reply_template(plan, *, grant_hint: str = "") -> str:
         step_lines.append(line)
 
     status_emoji = {"SUCCEEDED": "✅", "FAILED": "❌", "PARTIAL_FAILED": "⚠️"}.get(plan.status, "⏳")
+    approver_display = _display_approver(plan.approved_by or "")
+    if plan.temporary_grant_id:
+        approver_display += "（临时自审批授权）"
     lines = [
         f"{status_emoji} 执行{'成功完成' if plan.status == 'SUCCEEDED' else '已结束'}",
         "",
@@ -531,7 +537,7 @@ def _execution_reply_template(plan, *, grant_hint: str = "") -> str:
         "",
         *step_lines,
         "",
-        f"审批人：{_display_approver(plan.approved_by or '')}{'（' + grant_hint + '）' if grant_hint else ''}｜审计 ID {plan.id}",
+        f"审批人：{approver_display}｜审计 ID {plan.id}",
     ]
     if plan.system_name:
         scope = f"{plan.system_name}"
@@ -1457,10 +1463,29 @@ def approval_execute_plan(args, ctx, db):
         approval_context=approval_context,
     )
     if not plan:
+        # consume 失败的具体原因（短语碰撞/旧计划终态/过期/人不对/隔离拒绝…），
+        # 供 Agent 生成一条准确、可行动的房间回复，而不是自由发挥长篇解释。
+        reason = getattr(service, "last_consume_error", "") or "确认短语无效、已过期、已被消费、房间不匹配或计划内容已变化"
+        old_plan = db.query(ExecutionPlan).filter(ExecutionPlan.id == args["plan_id"]).first()
+        stale_hint = ""
+        if old_plan and old_plan.status != "PENDING_APPROVAL":
+            stale_hint = (
+                f"该短语对应计划 {old_plan.id[:8]}... 当前状态 {old_plan.status}（终态，不会重复执行）。"
+                "若用户意图是新一次部署：新附件+新请求会生成新计划与新短语，"
+                "请用户回复新回执里的「批准 …」行即可，不要用旧短语。"
+            )
         return {
             "ok": False,
-            "error": "确认短语无效、已过期、已被消费、房间不匹配或计划内容已变化",
+            "error": reason,
+            "error_code": "consume_failed",
             "plan_id": args["plan_id"],
+            "plan_status": old_plan.status if old_plan else None,
+            "stale_plan_hint": stale_hint,
+            "next_step": (
+                f"向房间回复一条简短说明（≤3 行）：短语消费失败原因={reason}。"
+                + (f" {stale_hint}" if stale_hint else "")
+                + "不要展开复述执行过程或历史计划细节。"
+            ),
         }
 
     # 同步执行计划内全部步骤
@@ -1513,9 +1538,12 @@ def approval_execute_plan(args, ctx, db):
     }
     if plan.status == "SUCCEEDED":
         result["next_step"] = (
-            "把 reply_template 原样发送到房间作为唯一回报——这是本次执行的完整结果，"
-            "不要追加执行过程复述、步骤流水、扫描/轮询细节或重复回执"
-            "（用户已通过审批短语知情流程，房间消息只需要最终结果态）。"
+            f"把 reply_template 原样发送到房间作为唯一回报——这是本次执行的完整结果，"
+            "一个字都不要改：不改写审批人名（模板已含 Jun（@jun:hubtel.xyz）形态与"
+            "自审批标注），不追加过程复述、步骤流水、扫描/轮询细节、历史计划说明或"
+            f"重复回执。旧短语撞上新计划等碰撞场景：房间只发本回执，额外加一句"
+            f"「本次执行的是计划 {plan.id[:8]}...（新短语），旧短语对应的计划未重复执行」"
+            "即可，不要展开叙述判定过程。"
         )
     elif plan.status == "PARTIAL_FAILED":
         failed_keys = [s.step_key for s in plan.steps if s.status == "FAILED"]

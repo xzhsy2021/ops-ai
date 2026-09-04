@@ -333,7 +333,9 @@ def test_execute_plan_wrong_code_fails(db):
         db=db,
     )
     assert result["ok"] is False
-    assert "无效" in result["error"] or "过期" in result["error"]
+    # 具体失败原因（短语不匹配/终态/过期等），不再是笼统'无效'
+    assert result["error"]
+    assert result.get("error_code") == "consume_failed"
 
 
 def test_prepare_plan_returns_step_summary(db):

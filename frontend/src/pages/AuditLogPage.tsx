@@ -136,6 +136,7 @@ export default function AuditLogPage() {
   const [chainLoading, setChainLoading] = useState(false)
   const [selectedChain, setSelectedChain] = useState<any>(null)
   const [chainKind, setChainKind] = useState('')
+  const [chainRisk, setChainRisk] = useState('')
   const [chainError, setChainError] = useState('')
 
   // 清理策略
@@ -182,7 +183,7 @@ export default function AuditLogPage() {
     setChainLoading(true)
     setChainError('')
     try {
-      const res: any = await auditLog.operationChains({ limit: 80, kind: chainKind || undefined })
+      const res: any = await auditLog.operationChains({ limit: 80, kind: chainKind || undefined, risk: chainRisk || undefined })
       setChains(res.data?.items || [])
     } catch (e: any) {
       setChainError(e?.message || String(e))
@@ -239,6 +240,7 @@ export default function AuditLogPage() {
   // 初始加载
   useEffect(() => { loadRetention(); loadOperationChains() }, [])
   useEffect(() => { load() }, [offset, pageSize, effAction])
+  useEffect(() => { loadOperationChains() }, [chainKind, chainRisk])
 
   // URL action 同步（外部跳转带 ?action= 进来）
   useEffect(() => {
@@ -429,7 +431,15 @@ export default function AuditLogPage() {
                 <option value="tool_call">工具调用</option>
                 <option value="job">任务</option>
                 <option value="plan">计划</option>
-                <option value="deployment">发布</option>
+                <option value="execution_plan">发布（执行计划）</option>
+                <option value="deployment">发布（旧记录）</option>
+              </select>
+              <select value={chainRisk} onChange={(e) => setChainRisk(e.target.value)}>
+                <option value="">全部风险</option>
+                <option value="low">低风险</option>
+                <option value="medium">中风险</option>
+                <option value="high">高风险</option>
+                <option value="critical">严重</option>
               </select>
               <button className="btn" onClick={loadOperationChains} disabled={chainLoading}>{chainLoading ? '加载中...' : '刷新链路'}</button>
             </div>

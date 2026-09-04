@@ -267,7 +267,7 @@ def test_audit_log_api_and_client_expose_offset_without_delete_endpoint():
     assert "async def list_audit(request: Request, response: Response, limit: int = 200, offset: int = 0" in backend
     assert "rows = rows[offset:offset + limit]" in backend
     assert "list: (params?: { limit?: number; offset?: number; action?: string })" in api
-    assert "auditLog.list({ limit: pageSize, offset, action: action || undefined })" in page
+    assert "auditLog.list({ limit: pageSize, offset, action: effAction || undefined })" in page
     assert "deleteMany" not in api.split("export const auditLog = {", 1)[1].split("export const capabilityTools", 1)[0]
 
 

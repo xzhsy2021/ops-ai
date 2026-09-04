@@ -29,6 +29,26 @@ def _engine(tmp_path, *, migrate=True):
     Base.metadata.create_all(engine)
     if migrate:
         run_schema_migrations(engine)
+        # 环境隔离闸（2026-09-04）：prepare 需要 targets ⊆ 环境服务器清单。
+        # 本文件聚焦渠道兼容契约，环境绑定用固定种子满足闸门即可。
+        from app.db.models import System, SystemEnvironment
+
+        with engine.begin() as conn:
+            import sqlalchemy as sa
+
+            if not conn.execute(sa.text("SELECT 1 FROM systems WHERE name='payment'")).fetchone():
+                conn.execute(sa.insert(System).values(name="payment", display_name="payment"))
+            for env_name in ("test", "prod", "staging"):
+                exists = conn.execute(
+                    sa.text("SELECT 1 FROM system_environments WHERE system_name='payment' AND name=:n"),
+                    {"n": env_name},
+                ).fetchone()
+                if not exists:
+                    conn.execute(sa.insert(SystemEnvironment).values(
+                        system_name="payment", name=env_name,
+                        category="test" if env_name != "prod" else "prod",
+                        servers=[{"id": "s1"}, {"id": "s2"}],
+                    ))
     return engine
 
 

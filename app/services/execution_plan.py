@@ -235,6 +235,70 @@ def build_plan_manifest(
     }
 
 
+class EnvironmentTargetViolation(ValueError):
+    """targets 越界（含非本环境服务器）——环境隔离闸的专用异常。"""
+
+
+def _environment_server_ids(db, system_name: str, environment_name: str) -> set[str]:
+    """环境权威服务器集合（SystemEnvironment.servers 实时读取）。"""
+    from app.db.models import SystemEnvironment
+
+    env = db.query(SystemEnvironment).filter(
+        SystemEnvironment.system_name == (system_name or "").strip(),
+        SystemEnvironment.name == (environment_name or "").strip(),
+    ).first()
+    if env is None:
+        return set()
+    ids: set[str] = set()
+    for s in env.servers or []:
+        if isinstance(s, dict):
+            sid = str(s.get("id") or s.get("name") or "").strip()
+        elif isinstance(s, str):
+            sid = s.strip()
+        else:
+            sid = ""
+        if sid:
+            ids.add(sid)
+    return ids
+
+
+def validate_targets_in_environment(
+    db, system_name: str, environment: str, targets: list[str], *, phase: str = "prepare",
+) -> None:
+    """环境隔离硬闸（2026-09-04 设计确认）。
+
+    targets 必须 ⊆ SystemEnvironment.servers（环境权威清单）。
+    - 环境未配置或清单为空 → fail-closed（任何 targets 都拒绝——
+      防止"环境标签存在但没绑服务器"的配置真空期放行生产机）
+    - 越界即抛 EnvironmentTargetViolation，错误信息明确指出越界机器
+
+    phase 仅供错误信息区分（prepare 拒绝 / execute 复核）。
+    """
+    env_name = (environment or "").strip()
+    if not env_name:
+        # 无环境标签的计划（历史兼容）：targets 校验跳过？
+        # 不跳过——无环境=无授权面，fail-closed。
+        raise EnvironmentTargetViolation(
+            "计划缺少 environment 标签：环境隔离要求显式声明环境"
+            f"（{'创建' if phase == 'prepare' else '执行'}被拒绝）"
+        )
+    allowed = _environment_server_ids(db, system_name, env_name)
+    if not allowed:
+        raise EnvironmentTargetViolation(
+            f"环境 {system_name}@{env_name} 未绑定服务器清单（fail-closed）："
+            "请先在系统环境配置中录入该环境的服务器，再"
+            f"{'创建' if phase == 'prepare' else '执行'}计划"
+        )
+    tgt = [str(t).strip() for t in (targets or []) if str(t).strip()]
+    stray = [t for t in tgt if t not in allowed]
+    if stray:
+        raise EnvironmentTargetViolation(
+            f"targets 越界：{sorted(stray)} 不属于环境 {system_name}@{env_name} "
+            f"（合法服务器 {sorted(allowed)}）——测试计划不得引用其他环境机器"
+            f"（{'创建' if phase == 'prepare' else '执行'}被拒绝）"
+        )
+
+
 class ExecutionPlanService:
     """执行计划生命周期管理。"""
 
@@ -293,6 +357,13 @@ class ExecutionPlanService:
             room_id, request_event_id, content_sha256,
             system_name, service_name, environment, targets,
             steps, policy, routing_config_revision, routing_ticket_digest, message_context=context,
+        )
+
+        # 环境隔离硬闸（闸2）：targets 必须 ⊆ 环境权威清单。
+        # 幂等复用前也校验——环境绑定在计划创建后可能收紧，老 PENDING
+        # 计划若已越界，复用时同样拒绝（不静默放行历史计划）。
+        validate_targets_in_environment(
+            self.db, system_name, environment, targets or [], phase="prepare",
         )
 
         # 幂等：相同 digest 的 PENDING_APPROVAL 计划已存在则直接返回
@@ -483,6 +554,21 @@ class ExecutionPlanService:
         # 验证存储 manifest 未发生实质变化
         if not self._verify_stored_manifest(plan):
             plan.failure_reason = "plan manifest digest mismatch; re-approval required"
+            self.db.commit()
+            return None
+
+        # 环境隔离硬闸（闸3）：执行前二次复核 targets ⊆ 环境权威清单。
+        # 审批窗口期内环境绑定可能收紧（新增服务器/调整归属），此时
+        # 已批准的计划若引用了越界机器，执行时拒绝——审批人批准的是
+        # 当时合法的目标面，配置漂移后不应静默放行。
+        try:
+            validate_targets_in_environment(
+                self.db, plan.system_name or "", plan.environment or "",
+                plan.targets or [], phase="execute",
+            )
+        except EnvironmentTargetViolation as exc:
+            plan.status = "REJECTED"
+            plan.failure_reason = f"environment isolation: {exc}"
             self.db.commit()
             return None
 

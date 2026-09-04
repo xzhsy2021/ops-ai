@@ -22,6 +22,7 @@ def _isolated_test_db():
     from app.db.base import init_db
 
     init_db()
+    _seed_test_environments()
     yield
     for suffix in ("", "-wal", "-shm"):
         try:
@@ -30,3 +31,46 @@ def _isolated_test_db():
                 p.unlink()
         except OSError:
             pass
+
+
+# ── 环境隔离闸（2026-09-04）的测试种子 ──
+# validate_targets_in_environment 要求 targets ⊆ SystemEnvironment.servers，
+# 全套审批/executor 测试直接调 ExecutionPlanService.prepare()，未种环境会被
+# fail-closed 卡死。这里把测试用到的所有服务器名批量绑定到 test/prod/staging
+# 三个环境类别，让既有测试专注于它们各自的面（审批链路/执行器/路由）。
+_TEST_SERVER_POOL = [
+    # 直调 prepare 的测试所用的全部 targets 形态（16 文件盘点 2026-09-04）
+    "s1", "s2", "s3", "cc-test2", "q1", "server-1", "server1", "server2",
+    "203.0.113.10",
+] + [f"server{i}" for i in range(10)]
+
+
+def _seed_test_environments():
+    """为测试系统批量绑定环境服务器清单（幂等，session 级一次）。"""
+    from app.db.base import SessionLocal
+    from app.db.models import System, SystemEnvironment
+
+    db = SessionLocal()
+    try:
+        systems = ["payment", "crypto-trader", "test-system", "quant",
+                   "crypto", "dovo", "shop"]
+        for name in systems:
+            if not db.query(System).filter(System.name == name).first():
+                db.add(System(name=name, display_name=name))
+        db.flush()
+        for sys_name in systems:
+            for env_name, category in (("test", "test"), ("prod", "prod"), ("staging", "test")):
+                row = db.query(SystemEnvironment).filter(
+                    SystemEnvironment.system_name == sys_name,
+                    SystemEnvironment.name == env_name,
+                ).first()
+                if row is None:
+                    db.add(SystemEnvironment(
+                        system_name=sys_name, name=env_name, category=category,
+                        servers=[{"id": sid} for sid in _TEST_SERVER_POOL],
+                    ))
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()

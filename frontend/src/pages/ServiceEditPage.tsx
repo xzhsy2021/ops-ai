@@ -69,15 +69,17 @@ export default function ServiceEditPage() {
       const system = res.data || {}
       const svc = (system.services || []).find((s: any) => s.name === serviceName)
       if (svc) {
+        const tv = { ...(svc.template_variables || {}) }
+        const sbe = tv.servers_by_env
+        delete tv.servers_by_env // 服务器分配由上方专用区管理，不暴露原始键
         setForm({
           name: svc.name || '',
           display_name: svc.display_name || '',
           template: svc.template || 'generic_backend_direct',
           repo: svc.repo || '',
           servers: svc.servers || [],
-          template_variables: svc.template_variables || {},
+          template_variables: tv,
         })
-        const sbe = (svc.template_variables || {}).servers_by_env
         if (sbe && typeof sbe === 'object') {
           const normalized: Record<string, string[]> = {}
           for (const [env, val] of Object.entries(sbe)) {
@@ -223,10 +225,13 @@ export default function ServiceEditPage() {
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-              <label style={{ margin: 0 }}>默认服务器 (从资产中选择)</label>
+              <label style={{ margin: 0 }}>服务器分配（本服务的唯一服务器配置点）</label>
               <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                共 {allServers.length} 台，已选 {(form.servers || []).length} 台
+                共 {allServers.length} 台可选，默认 {(form.servers || []).length} 台
               </span>
+            </div>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+              默认服务器：未按环境细分时发布的兜底清单。下方按环境行优先生效（发布时按环境取对应清单）。
             </div>
             <input
               style={{ ...inputStyle, marginBottom: '6px' }}
@@ -337,9 +342,9 @@ export default function ServiceEditPage() {
           {systemEnvs.length > 0 && (
             <div style={{ gridColumn: '1 / -1', marginTop: '8px', padding: '12px', border: '1px solid var(--border)', borderRadius: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                <label style={{ margin: 0, fontWeight: 600 }}>按环境分配服务器</label>
+                <label style={{ margin: 0, fontWeight: 600 }}>按环境分配</label>
                 <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                  发布时按环境取对应清单（优先于默认服务器）；不配则回退默认
+                  发布时按环境取对应清单（优先于上方默认）；未配置的环境回退默认；⚠ 表示超出该环境权威清单（系统编辑页配置），发布会被隔离闸拦截
                 </span>
               </div>
               {systemEnvs.map((env) => {

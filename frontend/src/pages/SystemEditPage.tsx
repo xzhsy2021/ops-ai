@@ -417,10 +417,11 @@ export default function SystemEditPage() {
                   border: '1px solid var(--border)', borderRadius: '8px',
                 }}>
                   <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
-                    环境服务器清单（权威）
+                    环境服务器清单（安全边界）
                   </div>
                   <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
-                    该环境下执行计划的 targets 必须在此清单内（环境隔离硬闸）；跨环境引用会在创建/执行时被拒绝。
+                    定义该环境允许触达的服务器范围（环境隔离闸的唯一数据源）——测试计划的 targets 必须全部在此清单内。
+                    具体某个服务在哪些服务器上，请在服务编辑页「服务器分配」配置，此处不重复。
                   </div>
                   {(() => {
                     const env = environments.find((e) => e.name === activeEnv)
@@ -572,17 +573,17 @@ export default function SystemEditPage() {
                   </div>
                 </div>
 
-                {/* 环境级服务差异化（service_overrides） */}
+                {/* 环境级服务差异化（service_overrides）——只管部署方式；服务器分配统一在服务编辑页 */}
                 <div style={{
                   marginBottom: '16px', padding: '12px',
                   border: '1px solid var(--border)', borderRadius: '8px',
                 }}>
                   <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
-                    服务差异化（按环境覆盖）
+                    部署方式差异化（按环境覆盖模板）
                   </div>
                   <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
-                    同一服务在不同环境可用不同部署模板与服务器——如线上二进制包（generic_backend_direct）、测试 docker compose。
-                    覆盖优先于服务默认值；不填则用服务自身配置。
+                    同一服务在不同环境用不同部署模板——如线上二进制包、测试 docker compose。
+                    服务器的分配统一在系统列表 → 服务编辑「服务器分配」，此处不重复配置。
                   </div>
                   {services.length === 0 ? (
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>系统暂无服务</div>
@@ -593,7 +594,6 @@ export default function SystemEditPage() {
                       setEnvServiceOverrides((prev) => {
                         const cur = { ...prev }
                         const merged = { ...(cur[svc.name] || {}), ...patch }
-                        // 清空态：无实质覆盖字段时删除条目
                         const meaningful = Object.entries(merged).some(([, v]) =>
                           Array.isArray(v) ? v.length > 0 : (v !== undefined && v !== null && String(v) !== ''))
                         if (meaningful) cur[svc.name] = merged
@@ -612,22 +612,16 @@ export default function SystemEditPage() {
                           {svc.display_name || svc.name}
                         </span>
                         <select
-                          style={{ ...inputStyle, width: 'auto', minWidth: '180px', fontSize: '12px', padding: '4px 8px' }}
+                          style={{ ...inputStyle, width: 'auto', minWidth: '260px', fontSize: '12px', padding: '4px 8px' }}
                           value={ov.template ?? ''}
                           onChange={(e) => updateOverride({ template: e.target.value })}
                         >
-                          <option value="">部署模板：跟随服务默认</option>
+                          <option value="">跟随服务默认模板</option>
                           <option value="generic_backend_direct">generic_backend_direct（二进制直推）</option>
                           <option value="generic_frontend">generic_frontend（前端静态）</option>
                           <option value="docker_compose">docker_compose（容器编排）</option>
                           <option value="crypto_docker_compose">crypto_docker_compose（量化容器）</option>
                         </select>
-                        <input
-                          style={{ ...inputStyle, flex: '1 1 240px', fontSize: '12px', padding: '4px 8px', fontFamily: 'monospace' }}
-                          value={(ov.servers || []).join(', ')}
-                          onChange={(e) => updateOverride({ servers: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
-                          placeholder="覆盖服务器（逗号分隔，空=跟随服务默认）"
-                        />
                         {hasOverride && (
                           <button type="button" className="btn" style={{ fontSize: '12px', padding: '4px 10px' }}
                             onClick={() => setEnvServiceOverrides((prev) => { const c = { ...prev }; delete c[svc.name]; return c })}>

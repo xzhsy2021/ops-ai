@@ -63,7 +63,10 @@ class InventoryReadService:
                 env = SystemEnvironmentRepository(db).get_by_name(system_name, environment)
                 override = (env.service_overrides or {}).get(row.name, {}) if env else {}
                 if isinstance(override, dict):
-                    for key in ("display_name", "repo", "build_cmd", "start_cmd", "template", "pipeline_id", "servers"):
+                    # 环境级覆盖白名单（2026-09-04 收敛）：servers 已从覆盖面
+                    # 移除——服务器分配统一走服务编辑页（servers / servers_by_env），
+                    # 避免"环境覆盖 servers"与"服务×环境分配"双路径混淆。
+                    for key in ("display_name", "repo", "build_cmd", "start_cmd", "template", "pipeline_id"):
                         if key in override:
                             payload[key] = override[key]
                     payload["template_variables"].update(override.get("template_variables") or {})

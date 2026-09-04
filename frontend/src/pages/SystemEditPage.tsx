@@ -55,9 +55,10 @@ export default function SystemEditPage() {
   const [routing, setRouting] = useState<MessageRouting>(DEFAULT_ROUTING)
   const [aliasInput, setAliasInput] = useState('')
   const [keywordInput, setKeywordInput] = useState('')
-  const [environments, setEnvironments] = useState<Array<{ name: string; display_name?: string; category?: string; variables: Record<string, any> }>>([])
+  const [environments, setEnvironments] = useState<Array<{ name: string; display_name?: string; category?: string; variables: Record<string, any>; servers?: any[] }>>([])
   const [activeEnv, setActiveEnv] = useState('')
   const [envVars, setEnvVars] = useState<Record<string, any>>({})
+  const [envServers, setEnvServers] = useState('')
   const [envSaving, setEnvSaving] = useState(false)
 
   useEffect(() => {
@@ -90,11 +91,12 @@ export default function SystemEditPage() {
     })
 
     resource.environments(name).then((res: any) => {
-      const list = Array.isArray(res.data) ? res.data.filter((e: any) => e?.name) : []
+      const list = Array.isArray(res.data) ? res.data.filter((e: any) => e?.name && e?.type === 'system') : []
       setEnvironments(list)
       if (list.length > 0) {
         setActiveEnv(list[0].name)
         setEnvVars(stripEnvMetaKeys(list[0].variables || {}))
+        setEnvServers(normalizeEnvServers(list[0].servers))
       }
     }).catch(() => {})
   }, [name])
@@ -154,6 +156,15 @@ export default function SystemEditPage() {
     return rest
   }
 
+  // 环境权威服务器清单 → 文本域行（dict {id} 或纯字符串均兼容）
+  const normalizeEnvServers = (servers: any): string => {
+    if (!Array.isArray(servers)) return ''
+    return servers
+      .map((s) => (typeof s === 'string' ? s : (s?.id ?? s?.name ?? '')))
+      .filter(Boolean)
+      .join('\n')
+  }
+
   // 规范化系统级 message_routing.rooms（渠道会话绑定），无效项忽略
   const normalizeRooms = (value: unknown): ConversationBinding[] => {
     if (!Array.isArray(value)) return []
@@ -182,22 +193,28 @@ export default function SystemEditPage() {
     const env = environments.find((e) => e.name === envName)
     setActiveEnv(envName)
     setEnvVars(stripEnvMetaKeys(env?.variables || {}))
+    setEnvServers(normalizeEnvServers(env?.servers))
   }
 
   const handleEnvSave = async () => {
     if (!name || !activeEnv) return
     const env = environments.find((e) => e.name === activeEnv)
+    const servers = envServers.split('\n').map((s) => s.trim()).filter(Boolean)
+    if ((env?.category === 'test' || env?.category === 'prod') && servers.length === 0) {
+      if (!window.confirm(`环境 ${activeEnv} 的服务器清单为空——空清单下该环境的所有执行计划都会被拒绝（fail-closed）。确认保存？`)) return
+    }
     setEnvSaving(true)
     try {
       await resource.systemEnvironments.update(name, activeEnv, {
         name: activeEnv,
         display_name: env?.display_name || '',
         category: env?.category || 'custom',
+        servers,
         variables: envVars,
       })
-      notify(`环境 ${activeEnv} 变量已保存`, 'success')
+      notify(`环境 ${activeEnv} 已保存（${servers.length} 台服务器）`, 'success')
       setEnvironments((prev) => prev.map((e) =>
-        e.name === activeEnv ? { ...e, variables: { ...envVars, environment: activeEnv } } : e
+        e.name === activeEnv ? { ...e, variables: { ...envVars, environment: activeEnv }, servers: servers.map((id) => ({ id })) } : e
       ))
     } catch (e: any) {
       const msg = typeof e === 'string' ? e : (e?.message || '保存失败')
@@ -342,7 +359,7 @@ export default function SystemEditPage() {
             </div>
             {environments.length > 0 ? (
               <>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px' }}>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
                   <select
                     style={{ ...inputStyle, maxWidth: '240px' }}
                     value={activeEnv}
@@ -354,10 +371,66 @@ export default function SystemEditPage() {
                       </option>
                     ))}
                   </select>
+                  {(() => {
+                    const env = environments.find((e) => e.name === activeEnv)
+                    if (!env?.category) return null
+                    const isTest = env.category === 'test'
+                    const isProd = env.category === 'prod'
+                    return (
+                      <span style={{
+                        fontSize: '11px', padding: '2px 8px', borderRadius: '10px',
+                        background: isTest ? 'var(--success-surface, #e8f5e9)' : isProd ? 'var(--danger-surface, #fce8e8)' : 'var(--bg-secondary)',
+                        color: isTest ? 'var(--success, #2e7d32)' : isProd ? 'var(--danger, #c62828)' : 'var(--text-secondary)',
+                        fontWeight: 600,
+                      }}>
+                        {env.category}
+                      </span>
+                    )
+                  })()}
                   <button className="btn" onClick={handleEnvSave} disabled={envSaving}>
-                    {envSaving ? '保存中...' : `保存 ${activeEnv} 环境变量`}
+                    {envSaving ? '保存中...' : `保存 ${activeEnv} 环境`}
                   </button>
                 </div>
+
+                {/* 环境权威服务器清单（环境隔离闸） */}
+                <div style={{
+                  marginBottom: '16px', padding: '12px',
+                  border: '1px solid var(--border)', borderRadius: '8px',
+                }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
+                    环境服务器清单（权威）
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                    该环境下执行计划的 targets 必须在此清单内（环境隔离硬闸）；跨环境引用会在创建/执行时被拒绝。
+                  </div>
+                  {(() => {
+                    const env = environments.find((e) => e.name === activeEnv)
+                    const listed = envServers.split('\n').map((s) => s.trim()).filter(Boolean)
+                    const isGated = env?.category === 'test' || env?.category === 'prod'
+                    if (isGated && listed.length === 0) {
+                      return (
+                        <div style={{
+                          fontSize: '12px', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
+                          background: 'var(--warning-surface, #fff8e1)', color: 'var(--warning, #b26a00)',
+                          border: '1px solid var(--warning, #ffb300)',
+                        }}>
+                          ⚠ 清单为空（fail-closed）：该环境的所有执行计划都会被拒绝——录入服务器后放行
+                        </div>
+                      )
+                    }
+                    return null
+                  })()}
+                  <textarea
+                    style={{ ...inputStyle, minHeight: '84px', fontFamily: 'monospace', fontSize: '12px' }}
+                    value={envServers}
+                    onChange={(e) => setEnvServers(e.target.value)}
+                    placeholder={'每行一台服务器，如\n47.84.58.154-量化测试\n43.106.8.111-量化测试 - 2'}
+                  />
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    {envServers.split('\n').map((s) => s.trim()).filter(Boolean).length} 台 · 与服务绑定的服务器名一致（servers 列口径）
+                  </div>
+                </div>
+
                 <KeyValueEditor
                   value={envVars}
                   onChange={setEnvVars}

@@ -138,6 +138,7 @@ export default function AuditLogPage() {
   const [chainKind, setChainKind] = useState('')
   const [chainRisk, setChainRisk] = useState('')
   const [chainError, setChainError] = useState('')
+  const [chainReplaying, setChainReplaying] = useState('')
 
   // 清理策略
   const [retention, setRetention] = useState<any>({})
@@ -194,11 +195,14 @@ export default function AuditLogPage() {
 
   async function openOperationChain(chainId: string) {
     setChainError('')
+    setChainReplaying(chainId)
     try {
       const res: any = await auditLog.operationChain(chainId)
       setSelectedChain(res.data)
     } catch (e: any) {
       setChainError(e?.message || String(e))
+    } finally {
+      setChainReplaying('')
     }
   }
 
@@ -241,6 +245,14 @@ export default function AuditLogPage() {
   useEffect(() => { loadRetention(); loadOperationChains() }, [])
   useEffect(() => { load() }, [offset, pageSize, effAction])
   useEffect(() => { loadOperationChains() }, [chainKind, chainRisk])
+  // ESC 关闭链路回放面板（与日志详情弹窗一致的手势）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedChain) setSelectedChain(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selectedChain])
 
   // URL action 同步（外部跳转带 ?action= 进来）
   useEffect(() => {
@@ -450,16 +462,24 @@ export default function AuditLogPage() {
               <table className="data-table">
                 <thead><tr><th style={{ width: 140 }}>时间</th><th style={{ minWidth: 220 }}>链路</th><th style={{ width: 80 }}>状态</th><th style={{ width: 80 }}>风险</th><th style={{ minWidth: 180 }}>目标</th><th style={{ width: 80 }}>操作</th></tr></thead>
                 <tbody>
-                  {chains.map((chain) => (
-                    <tr key={chain.chain_id} style={{ cursor: 'pointer' }} onClick={() => openOperationChain(chain.chain_id)}>
-                      <td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(chain.created_at)}>{formatTime(chain.created_at)}</span></td>
-                      <td><div className="ellipsis" style={{ fontWeight: 700, maxWidth: 300 }} title={chain.title}>{chain.title}</div><div style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }} className="ellipsis">{chain.chain_id}</div></td>
-                      <td>{chain.status || '-'}</td>
-                      <td><span className={`badge ${['high', 'critical'].includes(chain.risk_level) ? 'danger' : chain.risk_level === 'medium' ? 'warning' : ''}`}>{chain.risk_level || 'low'}</span></td>
-                      <td><span className="ellipsis" style={{ maxWidth: 240 }} title={chain.target || '-'}>{chain.target || '-'}</span></td>
-                      <td><button className="btn small" onClick={(e) => { e.stopPropagation(); openOperationChain(chain.chain_id) }}>回放</button></td>
-                    </tr>
-                  ))}
+                  {chains.map((chain) => {
+                    const isActive = selectedChain?.chain_id === chain.chain_id
+                    const isFetching = chainReplaying === chain.chain_id
+                    return (
+                      <tr key={chain.chain_id} style={{
+                        cursor: 'pointer',
+                        background: isActive ? 'var(--action-bg)' : isFetching ? 'var(--bg-page)' : undefined,
+                        opacity: isFetching ? 0.6 : 1,
+                      }} onClick={() => openOperationChain(chain.chain_id)}>
+                        <td><span className="ellipsis" style={{ maxWidth: 130 }} title={formatTime(chain.created_at)}>{formatTime(chain.created_at)}</span></td>
+                        <td><div className="ellipsis" style={{ fontWeight: 700, maxWidth: 300 }} title={chain.title}>{chain.title}</div><div style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono, monospace)' }} className="ellipsis">{chain.chain_id}</div></td>
+                        <td>{chain.status || '-'}</td>
+                        <td><span className={`badge ${['high', 'critical'].includes(chain.risk_level) ? 'danger' : chain.risk_level === 'medium' ? 'warning' : ''}`}>{chain.risk_level || 'low'}</span></td>
+                        <td><span className="ellipsis" style={{ maxWidth: 240 }} title={chain.target || '-'}>{chain.target || '-'}</span></td>
+                        <td><button className="btn small" disabled={!!chainReplaying} onClick={(e) => { e.stopPropagation(); openOperationChain(chain.chain_id) }}>{isFetching ? '回放中…' : '回放'}</button></td>
+                      </tr>
+                    )
+                  })}
                   {!chains.length && !chainLoading && <tr><td colSpan={6} style={{ color: 'var(--text-muted)' }}>暂无操作链路</td></tr>}
                 </tbody>
               </table>
@@ -471,7 +491,11 @@ export default function AuditLogPage() {
                     <div style={{ fontWeight: 800 }}>链路回放：{selectedChain.chain_id}</div>
                     <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>节点 {selectedChain.summary?.node_count || 0} · 时间线 {selectedChain.summary?.timeline_count || 0} · 操作人 {selectedChain.summary?.operator || '-'}</div>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><a className="btn small" href={reports.operationChainExportUrl(selectedChain.chain_id, 'json')} target="_blank" rel="noreferrer">导出报告</a><button className="btn small" onClick={() => navigator.clipboard?.writeText(JSON.stringify(selectedChain, null, 2))}>复制 JSON</button></div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <a className="btn small" href={reports.operationChainExportUrl(selectedChain.chain_id, 'json')} target="_blank" rel="noreferrer">导出报告</a>
+                    <button className="btn small" onClick={() => navigator.clipboard?.writeText(JSON.stringify(selectedChain, null, 2))}>复制 JSON</button>
+                    <button className="btn small" onClick={() => setSelectedChain(null)}>✕ 关闭</button>
+                  </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8, marginBottom: 12 }}>
                   <div className="mini-card"><div className="muted">状态</div><strong>{selectedChain.summary?.status || '-'}</strong></div>

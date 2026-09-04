@@ -455,6 +455,72 @@ def _approval_reply_template(
     return "\n".join(lines)
 
 
+def _execution_reply_template(plan, *, grant_hint: str = "") -> str:
+    """执行完成后的固定格式回执（Agent 原样转发，禁止自由发挥/重复播报过程）。
+
+    与 prepare 的 _approval_reply_template 同一责任分配：OPS 是格式唯一事实源。
+    内容收敛原则：只报结果态（每步骤一行 ✅/❌），不报过程流水（中间轮询/
+    重试/房间扫描等由 Agent 自行消化，不进房间消息）。
+    """
+    steps = plan.steps or []
+    step_lines = []
+    for s in steps:
+        verb = _STEP_VERBS.get(str(s.action_type or "").strip().upper(), s.action_type or "步骤")
+        mark = "✅" if s.status == "SUCCEEDED" else ("❌" if s.status in ("FAILED", "SKIPPED") else "⏳")
+        line = f"- {verb} {mark} `{s.status}`"
+        # 结果摘要取第一行且截断——完整 result 在结构化字段里，房间消息不刷屏
+        result_text = ""
+        try:
+            import json as _json
+            raw = s.result
+            if isinstance(raw, str):
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    pass
+            if isinstance(raw, dict):
+                for key in ("summary", "message", "detail", "error", "output"):
+                    v = raw.get(key)
+                    if v:
+                        result_text = str(v)
+                        break
+                if not result_text:
+                    result_text = _json.dumps(raw, ensure_ascii=False)
+            elif raw is not None:
+                result_text = str(raw)
+        except Exception:
+            result_text = ""
+        if s.error_message:
+            result_text = s.error_message
+        if result_text:
+            one_line = result_text.strip().splitlines()[0][:120]
+            line += f"：{one_line}"
+        step_lines.append(line)
+
+    status_emoji = {"SUCCEEDED": "✅", "FAILED": "❌", "PARTIAL_FAILED": "⚠️"}.get(plan.status, "⏳")
+    lines = [
+        f"{status_emoji} 执行{'成功完成' if plan.status == 'SUCCEEDED' else '已结束'}",
+        "",
+        f"计划 `{plan.id[:8]}...` {plan.status}（{len(steps)} 步骤）",
+        "",
+        *step_lines,
+        "",
+        f"审批人：`{plan.approved_by or '-'}`{'（' + grant_hint + '）' if grant_hint else ''}｜审计 ID {plan.id}",
+    ]
+    if plan.system_name:
+        scope = f"{plan.system_name}"
+        if plan.service_name:
+            scope += f"/{plan.service_name}"
+        if plan.environment:
+            scope += f"（{plan.environment}）"
+        lines.append(f"对象：`{scope}`")
+    if plan.failure_reason:
+        lines.append(f"失败原因：`{plan.failure_reason[:200]}`")
+    lines.append("")
+    lines.append("（过程细节已收敛，如需完整证据链：审计页 → 操作链路回放）")
+    return "\n".join(lines)
+
+
 def _routing_systems() -> list[dict]:
     return [
         {**system, "name": system.get("name") or name}
@@ -1311,7 +1377,9 @@ def approval_prepare_plan(args, ctx, db):
         # 不要自由改写/截断/重排；如需自定义展示，使用上面的结构化字段自组。
         "reply_template": reply_template,
         "next_step": (
-            "把 reply_template 原样发到房间等待审批。当审批人在同一房间回复"
+            "把 reply_template 原样发到房间等待审批——这是唯一需要播报的消息；"
+            "扫描房间/读事件/核对附件等中间动作静默执行，不要把过程复述到房间。"
+            "当审批人在同一房间回复"
             f"「批准 {short_code}」后，立即调用 ops.approval.execute_plan："
             "plan_id=本结果 plan_id、short_code=审批消息里的完整短语、"
             "room_id=审批消息所在房间、approver_matrix_id=审批人 Matrix ID。"
@@ -1381,7 +1449,7 @@ def approval_execute_plan(args, ctx, db):
             "plan_id": args["plan_id"],
         }
 
-    return {
+    result = {
         "ok": plan.status == "SUCCEEDED",
         "plan_id": plan.id,
         "message_context": {
@@ -1408,6 +1476,9 @@ def approval_execute_plan(args, ctx, db):
             }
             for s in plan.steps
         ],
+        # 固定格式回执模板：Agent 把它原样发送到房间作为唯一回报——
+        # 不要再自行复述执行过程/步骤流水/中间轮询（会造成过程刷屏）。
+        "reply_template": _execution_reply_template(plan),
         "message": (
             f"执行计划已完成: {plan.status}"
             if plan.status in ("SUCCEEDED", "FAILED", "PARTIAL_FAILED")
@@ -1416,8 +1487,9 @@ def approval_execute_plan(args, ctx, db):
     }
     if plan.status == "SUCCEEDED":
         result["next_step"] = (
-            f"计划 {plan.id} 全部步骤成功。向房间回报执行结果摘要（各步骤 status/result），"
-            "不要重新执行或创建后续计划。"
+            "把 reply_template 原样发送到房间作为唯一回报——这是本次执行的完整结果，"
+            "不要追加执行过程复述、步骤流水、扫描/轮询细节或重复回执"
+            "（用户已通过审批短语知情流程，房间消息只需要最终结果态）。"
         )
     elif plan.status == "PARTIAL_FAILED":
         failed_keys = [s.step_key for s in plan.steps if s.status == "FAILED"]
@@ -1425,13 +1497,16 @@ def approval_execute_plan(args, ctx, db):
         result["next_step"] = (
             f"计划 {plan.id} 部分失败（成功: {succeeded_keys or '无'}；失败: {failed_keys}）。"
             "失败计划是终态：不能重试 execute_plan、不能用旧短语创建新计划。"
-            "正确动作：①把失败步骤的 error_message 原样告知用户；②调用 ops.integration.save_lesson "
-            "回写踩坑（pattern/guidance/evidence 带计划ID）；③请用户重新触发完整流程（附件+消息同一条）获得新审批。"
+            "正确动作：①把 reply_template 原样发到房间（含失败步骤摘要）；"
+            "②调用 ops.integration.save_lesson 回写踩坑"
+            "（pattern/guidance/evidence 带计划ID）；③请用户重新触发完整流程"
+            "（附件+消息同一条）获得新审批。"
         )
     elif plan.status == "FAILED":
         result["next_step"] = (
             f"计划 {plan.id} 执行失败：{plan.failure_reason or '见失败步骤 error_message'}。"
-            "失败计划是终态：请用户重新触发完整流程；踩坑先 save_lesson 回写再回报。"
+            "失败计划是终态：把 reply_template 原样发到房间；踩坑先 save_lesson 回写再回报；"
+            "请用户重新触发完整流程。"
         )
     else:
         result["next_step"] = f"计划 {plan.id} 状态 {plan.status}：等待执行完成或人工介入。"

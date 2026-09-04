@@ -18,12 +18,6 @@ interface SystemInfo {
   servers: string[]
 }
 
-const STRATEGY_LABELS: Record<string, string> = {
-  DIRECT: 'Direct 直推',
-  DOVO: 'Dovo 蓝绿',
-  WORKFLOW: 'Workflow',
-}
-
 const TEMPLATE_LABELS: Record<string, string> = {
   generic_backend_direct: '后端 Direct',
   generic_frontend: '前端',
@@ -277,12 +271,6 @@ export default function SystemListPage() {
     border: '1px solid var(--border-strong)',
   }
 
-  const badgeStyle = (type: string): React.CSSProperties => ({
-    padding: '2px 8px', borderRadius: '4px', fontSize: '12px',
-    background: type === 'DIRECT' ? 'var(--action-bg)' : 'rgba(16,185,129,.12)',
-    color: type === 'DIRECT' ? 'var(--action-text)' : '#059669',
-  })
-
   return (
     <div style={{ display: 'grid', gap: '20px' }}>
       {/* Header */}
@@ -305,7 +293,6 @@ export default function SystemListPage() {
                 <h3 style={{ margin: 0, fontSize: '18px' }}>{s.display_name || s.name}</h3>
                 <div style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '4px' }}>{s.name}</div>
               </div>
-              <span style={badgeStyle(s.strategy)}>{STRATEGY_LABELS[s.strategy] || s.strategy}</span>
             </div>
             <div style={{ display: 'flex', gap: '16px', marginTop: '12px', fontSize: '13px', color: 'var(--text-secondary)' }}>
               <span>{s.service_count || 0} 服务</span>
@@ -338,7 +325,6 @@ export default function SystemListPage() {
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h3 style={{ margin: 0 }}>{detail.display_name} ({detail.name})</h3>
-                <span style={badgeStyle(detail.strategy)}>{STRATEGY_LABELS[detail.strategy] || detail.strategy}</span>
               </div>
               {detail.description && (
                 <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '8px' }}>{detail.description}</div>

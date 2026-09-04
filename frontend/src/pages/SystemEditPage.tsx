@@ -11,12 +11,6 @@ import {
 } from '../utils/approverIdentities.js'
 import type { ApproverIdentity } from '../utils/approverIdentities.js'
 
-const STRATEGY_LABELS: Record<string, string> = {
-  DIRECT: 'Direct 直推',
-  DOVO: 'Dovo 蓝绿',
-  WORKFLOW: 'Workflow',
-}
-
 interface MessageRouting {
   enabled: boolean
   aliases: string[]
@@ -46,7 +40,6 @@ export default function SystemEditPage() {
   const [form, setForm] = useState({
     name: '',
     display_name: '',
-    strategy: 'DIRECT',
     description: '',
     variables: {} as Record<string, any>,
   })
@@ -73,7 +66,6 @@ export default function SystemEditPage() {
       setForm({
         name: s.name || name,
         display_name: s.display_name || '',
-        strategy: s.strategy || 'DIRECT',
         description: s.description || '',
         variables: s.variables || {},
       })
@@ -247,10 +239,11 @@ export default function SystemEditPage() {
     const payload = {
       name: sysName,
       display_name: form.display_name.trim() || sysName,
-      strategy: form.strategy || 'DIRECT',
       description: form.description.trim(),
       variables: form.variables,
       servers: [], // 系统级默认服务器已退役（环境清单+服务按环境分配取代）；空数组保持 API 兼容并清存量
+      // strategy 不再提交——发布方式由 pipeline 决定（2026-09-04 收敛）；
+      // 不传时后端保留存量值，API 兼容不破坏
       message_routing: withStructuredApprovers(routing),
     }
     setSaving(true)
@@ -323,18 +316,6 @@ export default function SystemEditPage() {
               onChange={(e) => setForm({ ...form, display_name: e.target.value })}
               placeholder="Crypto Trader 量化"
             />
-          </div>
-          <div>
-            <label>发布策略</label>
-            <select
-              style={inputStyle}
-              value={form.strategy}
-              onChange={(e) => setForm({ ...form, strategy: e.target.value })}
-            >
-              {Object.entries(STRATEGY_LABELS).map(([k, v]) => (
-                <option key={k} value={k}>{v}</option>
-              ))}
-            </select>
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
             <label>描述</label>

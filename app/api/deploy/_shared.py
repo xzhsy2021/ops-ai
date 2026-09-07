@@ -1204,6 +1204,7 @@ def _default_release_steps(req: DeployRequest, db: Session) -> List[Dict[str, An
             "config": {
                 "compose_dir": compose_dir or deploy_path or "/data/crypto-trader",
                 "compose_file": compose_file,
+                "env_file": tv.get("env_file", ""),
                 "wait_after_up": tv.get("wait_after_up", 10),
                 "log_tail_lines": tv.get("log_tail_lines", 30),
             },

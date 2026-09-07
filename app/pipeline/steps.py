@@ -527,6 +527,8 @@ class DockerComposeUpdateStep(Step):
         if not compose_dir:
             raise RuntimeError("compose_dir is required")
         compose_file = _first_non_empty(config.get("compose_file"), ctx.variables.get("compose_file"), default="docker-compose.yml")
+        env_file = _first_non_empty(config.get("env_file"), ctx.variables.get("env_file"))
+        ef_arg = f"--env-file {_shell_quote(env_file)} " if env_file else ""
         timeout = int(config.get("timeout", 600))
 
         ctx.log("info", f"Docker Compose 发布: {compose_dir}", "docker_compose_update")
@@ -540,7 +542,7 @@ class DockerComposeUpdateStep(Step):
         # 拉取最新镜像
         await _run_required(
             ctx,
-            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} pull 2>&1",
+            f"cd {_shell_quote(compose_dir)} && docker compose {ef_arg}-f {_shell_quote(compose_file)} pull 2>&1",
             "拉取最新镜像",
             timeout=timeout,
         )
@@ -548,7 +550,7 @@ class DockerComposeUpdateStep(Step):
         # 启动/重启容器
         await _run_required(
             ctx,
-            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} up -d --remove-orphans 2>&1",
+            f"cd {_shell_quote(compose_dir)} && docker compose {ef_arg}-f {_shell_quote(compose_file)} up -d --remove-orphans 2>&1",
             "启动容器",
             timeout=timeout,
         )
@@ -562,7 +564,7 @@ class DockerComposeUpdateStep(Step):
         # 检查容器状态
         await _run_required(
             ctx,
-            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} ps 2>&1",
+            f"cd {_shell_quote(compose_dir)} && docker compose {ef_arg}-f {_shell_quote(compose_file)} ps 2>&1",
             "容器状态",
             timeout=30,
         )
@@ -571,7 +573,7 @@ class DockerComposeUpdateStep(Step):
         log_lines = int(config.get("log_tail_lines", 30))
         await _run_required(
             ctx,
-            f"cd {_shell_quote(compose_dir)} && docker compose -f {_shell_quote(compose_file)} logs --tail={log_lines} 2>&1",
+            f"cd {_shell_quote(compose_dir)} && docker compose {ef_arg}-f {_shell_quote(compose_file)} logs --tail={log_lines} 2>&1",
             "容器日志",
             timeout=60,
         )

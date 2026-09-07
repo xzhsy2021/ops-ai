@@ -517,17 +517,21 @@ def _resolve_service_control_command(
 
     if template in ("docker_compose", "crypto_docker_compose") or compose_dir:
         compose_file = tv.get("compose_file", "docker-compose.yml")
+        # --env-file：compose 项目变量独立于默认 .env 时（如 env.puller），
+        # 所有子命令必须带 --env-file，否则 up/pull 读错环境变量
+        env_file = tv.get("env_file", "")
+        ef_arg = f"--env-file {shlex.quote(env_file)} " if env_file else ""
         prefix = _env_prefix(env)
         if action == "restart":
-            return f"{prefix}docker compose -f {shlex.quote(compose_file)} restart {svc_arg}{extra}".strip()
+            return f"{prefix}docker compose {ef_arg}-f {shlex.quote(compose_file)} restart {svc_arg}{extra}".strip()
         elif action == "stop":
-            return f"{prefix}docker compose -f {shlex.quote(compose_file)} stop {svc_arg}".strip()
+            return f"{prefix}docker compose {ef_arg}-f {shlex.quote(compose_file)} stop {svc_arg}".strip()
         elif action == "start":
-            return f"{prefix}docker compose -f {shlex.quote(compose_file)} up -d {svc_arg}{extra}".strip()
+            return f"{prefix}docker compose {ef_arg}-f {shlex.quote(compose_file)} up -d {svc_arg}{extra}".strip()
         elif action == "update":
             # 拉取最新镜像并重建容器（--no-deps 避免影响依赖服务）
-            pull = f"{prefix}docker compose -f {shlex.quote(compose_file)} pull {svc_arg}".strip()
-            up = f"{prefix}docker compose -f {shlex.quote(compose_file)} up -d --no-deps {svc_arg}{extra}".strip()
+            pull = f"{prefix}docker compose {ef_arg}-f {shlex.quote(compose_file)} pull {svc_arg}".strip()
+            up = f"{prefix}docker compose {ef_arg}-f {shlex.quote(compose_file)} up -d --no-deps {svc_arg}{extra}".strip()
             return pull + " && " + up
 
     pm2_name = tv.get("pm2_name") or ""
@@ -574,7 +578,7 @@ def _check_remote_dir_exists(ssh, base_dir: str) -> tuple:
     return True, ""
 
 
-def _check_docker_status(ssh, base_dir: str, compose_file: str, compose_svc: str) -> dict:
+def _check_docker_status(ssh, base_dir: str, compose_file: str, compose_svc: str, env_file: str = "") -> dict:
     """通过 docker compose ps 检查容器状态，检测重启循环、架构错误等异常。
 
     返回 {'restart_loop': bool, 'status': str, 'containers': [...], 'restart_count': int}
@@ -585,7 +589,8 @@ def _check_docker_status(ssh, base_dir: str, compose_file: str, compose_svc: str
 
     try:
         svc_filter = f" {shlex.quote(compose_svc)}" if compose_svc else ""
-        ps_cmd = f"cd {shlex.quote(base_dir)} && docker compose -f {shlex.quote(compose_file)} ps{svc_filter} 2>&1"
+        ef_arg = f"--env-file {shlex.quote(env_file)} " if env_file else ""
+        ps_cmd = f"cd {shlex.quote(base_dir)} && docker compose {ef_arg}-f {shlex.quote(compose_file)} ps{svc_filter} 2>&1"
         code, out, err = ssh.exec(ps_cmd, timeout=15)
         if code != 0:
             result["status"] = f"ps_failed: {err[:200]}"
@@ -635,13 +640,14 @@ def _check_docker_status(ssh, base_dir: str, compose_file: str, compose_svc: str
     return result
 
 
-def _get_container_logs(ssh, base_dir: str, compose_file: str, compose_svc: str) -> str:
+def _get_container_logs(ssh, base_dir: str, compose_file: str, compose_svc: str, env_file: str = "") -> str:
     """获取容器最近日志，用于诊断重启原因。"""
     if not base_dir:
         return ""
     try:
         svc_filter = f" {shlex.quote(compose_svc)}" if compose_svc else ""
-        logs_cmd = f"cd {shlex.quote(base_dir)} && docker compose -f {shlex.quote(compose_file)} logs --tail 30{svc_filter} 2>&1"
+        ef_arg = f"--env-file {shlex.quote(env_file)} " if env_file else ""
+        logs_cmd = f"cd {shlex.quote(base_dir)} && docker compose {ef_arg}-f {shlex.quote(compose_file)} logs --tail 30{svc_filter} 2>&1"
         code, out, err = ssh.exec(logs_cmd, timeout=15)
         if code != 0 and err:
             return f"logs_failed: {err[:200]}"
@@ -702,12 +708,13 @@ def _execute_service_control(server_key: str, system: str, service: str, action:
             # Docker Compose 部署：通过 docker compose ps 验证容器状态，
             # 检测重启循环、架构错误、OOM 等问题
             if is_docker:
-                container_status = _check_docker_status(ssh, base_dir, compose_file, compose_svc)
+                env_file = tv.get("env_file", "")
+                container_status = _check_docker_status(ssh, base_dir, compose_file, compose_svc, env_file)
 
             # 检测到重启循环时，自动获取容器日志辅助诊断
             if container_status and container_status.get("restart_loop"):
                 container_status["logs_tail"] = _get_container_logs(
-                    ssh, base_dir, compose_file, compose_svc
+                    ssh, base_dir, compose_file, compose_svc, tv.get("env_file", "")
                 )
 
             try:

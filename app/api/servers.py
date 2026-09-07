@@ -778,6 +778,7 @@ def _detect_server_deployment(db: Session, server_name: str) -> dict:
                 "mode": mode,
                 "compose_dir": compose_dir,
                 "compose_file": tv.get("compose_file", "docker-compose.yml"),
+                "env_file": tv.get("env_file", ""),
                 "pm2_name": pm2_name,
                 "process_keyword": keyword,
                 "template_variables": tv,
@@ -812,20 +813,22 @@ def server_processes(request: Request, name: str, db: Session = Depends(get_db))
                     continue
                 cdir = (s.get("compose_dir") or "").strip() or "."
                 cfile = (s.get("compose_file") or "docker-compose.yml").strip() or "docker-compose.yml"
-                key = (cdir, cfile)
+                cenv = (s.get("env_file") or "").strip()
+                key = (cdir, cfile, cenv)
                 if key in seen:
                     continue
                 seen.add(key)
-                compose_targets.append((cdir, cfile))
+                compose_targets.append((cdir, cfile, cenv))
             if not compose_targets:
-                compose_targets = [("", "docker-compose.yml")]
+                compose_targets = [("", "docker-compose.yml", "")]
             result = []
-            for cdir, cfile in compose_targets:
+            for cdir, cfile, cenv in compose_targets:
                 base_cmd = f"cd {shlex.quote(cdir)} && " if cdir not in ("", ".") else ""
+                ef_arg = f"--env-file {shlex.quote(cenv)} " if cenv else ""
                 # docker compose ps --format json 输出每行一个 JSON 对象
                 exit_code, out, err = ssh.exec(
-                    f"{base_cmd} docker compose -f {shlex.quote(cfile)} ps --format json 2>/dev/null || "
-                    f"{base_cmd} docker-compose -f {shlex.quote(cfile)} ps 2>/dev/null",
+                    f"{base_cmd} docker compose {ef_arg}-f {shlex.quote(cfile)} ps --format json 2>/dev/null || "
+                    f"{base_cmd} docker-compose {ef_arg}-f {shlex.quote(cfile)} ps 2>/dev/null",
                     timeout=20,
                 )
                 # 尝试解析 JSON 行格式

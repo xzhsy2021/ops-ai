@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { auditLog, deployment, reports } from '../api'
 import { ROUTES } from '../routes'
@@ -11,8 +11,13 @@ function formatTime(value?: string) {
 }
 
 function formatDay(value?: string) {
+  // sqlite naive 串 "2026-09-04 07:50:06..." 直接取前 10 位——
+  // 禁止走 new Date()/toISOString()（本地时区解析后再转 UTC，
+  // UTC+8 下每天 0-8 点记录会回退一天，日期过滤边界歪 ±8h；
+  // 旧 Safari 上 Invalid Date 还会让 endDate 过滤整段失效）
   if (!value) return '-'
-  try { return new Date(value).toISOString().slice(0, 10) } catch { return value }
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value).trim())
+  return m ? m[1] : String(value)
 }
 
 // ── 快捷过滤：按动作前缀分组（生产审计分布实测 2026-09-04）──
@@ -153,17 +158,21 @@ export default function AuditLogPage() {
     return ''
   }, [appliedAction, quickFilter])
 
+  // 请求序号守卫：快速翻页/切筛选时旧响应不得覆盖新状态（最后一发为准）
+  const loadSeqRef = useRef(0)
   async function load() {
+    const seq = ++loadSeqRef.current
     setLoading(true)
     setError('')
     try {
       const res: any = await auditLog.list({ limit: pageSize, offset, action: effAction || undefined })
+      if (seq !== loadSeqRef.current) return // 已有更新的请求，丢弃本响应
       setItems(res.data?.items || [])
       setTotal(Number(res.data?.total || 0))
     } catch (e: any) {
-      setError(e?.message || String(e))
+      if (seq === loadSeqRef.current) setError(e?.message || String(e))
     } finally {
-      setLoading(false)
+      if (seq === loadSeqRef.current) setLoading(false)
     }
   }
 
@@ -180,29 +189,36 @@ export default function AuditLogPage() {
     return rows
   }, [items, targetInput, startDate, endDate])
 
+  const chainSeqRef = useRef(0)
   async function loadOperationChains() {
+    const seq = ++chainSeqRef.current
     setChainLoading(true)
     setChainError('')
     try {
       const res: any = await auditLog.operationChains({ limit: 80, kind: chainKind || undefined, risk: chainRisk || undefined })
+      if (seq !== chainSeqRef.current) return
       setChains(res.data?.items || [])
     } catch (e: any) {
-      setChainError(e?.message || String(e))
+      if (seq === chainSeqRef.current) setChainError(e?.message || String(e))
     } finally {
-      setChainLoading(false)
+      if (seq === chainSeqRef.current) setChainLoading(false)
     }
   }
 
+  // 回放请求序号：A 在途时点 B，A 的返回不得覆盖 B 的面板/加载态
+  const replaySeqRef = useRef(0)
   async function openOperationChain(chainId: string) {
+    const seq = ++replaySeqRef.current
     setChainError('')
     setChainReplaying(chainId)
     try {
       const res: any = await auditLog.operationChain(chainId)
+      if (seq !== replaySeqRef.current) return
       setSelectedChain(res.data)
     } catch (e: any) {
-      setChainError(e?.message || String(e))
+      if (seq === replaySeqRef.current) setChainError(e?.message || String(e))
     } finally {
-      setChainReplaying('')
+      if (seq === replaySeqRef.current) setChainReplaying('')
     }
   }
 
@@ -215,25 +231,37 @@ export default function AuditLogPage() {
   }
 
   async function saveRetention() {
-    const res: any = await deployment.updateRetention(retention)
-    setRetention(res.data?.policy || retention)
-    setPreview(res.data?.preview || null)
-    setRetentionMsg('审计清理策略已保存')
+    try {
+      const res: any = await deployment.updateRetention(retention)
+      setRetention(res.data?.policy || retention)
+      setPreview(res.data?.preview || null)
+      setRetentionMsg('审计清理策略已保存')
+    } catch (e: any) {
+      setRetentionMsg(`保存失败：${e?.message || e}`)
+    }
   }
 
   async function previewCleanup() {
-    const res: any = await deployment.previewRetention()
-    setPreview(res.data)
-    setRetentionMsg('已生成清理预览，未删除任何数据')
+    try {
+      const res: any = await deployment.previewRetention()
+      setPreview(res.data)
+      setRetentionMsg('已生成清理预览，未删除任何数据')
+    } catch (e: any) {
+      setRetentionMsg(`预览失败：${e?.message || e}`)
+    }
   }
 
   const cleanupCount = Number(preview?.candidate_counts?.audit_logs || 0) + Number(preview?.candidate_counts?.audit_records || 0) + Number(preview?.candidate_counts?.tool_call_logs || 0) + Number(preview?.candidate_counts?.tool_plans || 0)
 
   async function runCleanup() {
-    const res: any = await deployment.cleanupRetention({ dry_run: false })
-    setPreview(res.data)
-    setRetentionMsg('清理完成')
-    load()
+    try {
+      const res: any = await deployment.cleanupRetention({ dry_run: false })
+      setPreview(res.data)
+      setRetentionMsg('清理完成')
+      load()
+    } catch (e: any) {
+      setRetentionMsg(`清理失败：${e?.message || e}`)
+    }
   }
 
   async function confirmCleanup() {
@@ -241,10 +269,12 @@ export default function AuditLogPage() {
     await runCleanup()
   }
 
-  // 初始加载
-  useEffect(() => { loadRetention(); loadOperationChains() }, [])
+  // 初始加载（链路由 [chainKind, chainRisk] 的 effect 首轮覆盖，不双载）
+  useEffect(() => { loadRetention() }, [])
   useEffect(() => { load() }, [offset, pageSize, effAction])
   useEffect(() => { loadOperationChains() }, [chainKind, chainRisk])
+  // 筛选变化重载列表后，已选链可能不在新列表——过期面板主动收起
+  useEffect(() => { setSelectedChain(null) }, [chainKind, chainRisk])
   // ESC 关闭链路回放面板（与日志详情弹窗一致的手势）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -254,11 +284,12 @@ export default function AuditLogPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [selectedChain])
 
-  // URL action 同步（外部跳转带 ?action= 进来）
+  // URL action 同步（外部跳转带 ?action= 进来）——同时清 chip 避免双筛选并存
   useEffect(() => {
     if (urlAction && urlAction !== appliedAction) {
       setAppliedAction(urlAction)
       setActionInput(urlAction)
+      setQuickFilter((q) => (urlAction.startsWith(q) || q === '' ? q : ''))
       setOffset(0)
     }
   }, [urlAction])
@@ -272,10 +303,24 @@ export default function AuditLogPage() {
 
   const applyQuickFilter = (match: string) => {
     const next = quickFilter === match ? '' : match
+    // chip 与 URL 统一语义：快捷过滤也落 URL（刷新/分享不丢态），
+    // 取消 chip 时不再误清 URL 带入的手输 action（仅当 action 属于本 chip 才清）
     setQuickFilter(next)
-    setActionInput('')
-    setAppliedAction('')
-    setQueryState({ action: '' })
+    if (next) {
+      setActionInput('')
+      setAppliedAction('')
+      setQueryState({ action: next })
+    } else {
+      // 取消：若当前 appliedAction 恰好是本 chip 的 match 则一并清，
+      // 否则保留（URL ?action= 带入的筛选不受 chip 取消影响）
+      if (appliedAction === match) {
+        setAppliedAction('')
+        setActionInput('')
+        setQueryState({ action: '' })
+      } else {
+        setQueryState({ action: appliedAction })
+      }
+    }
     setOffset(0)
   }
 

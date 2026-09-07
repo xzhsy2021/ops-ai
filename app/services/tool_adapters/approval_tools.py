@@ -521,9 +521,13 @@ def _execution_reply_template(plan) -> str:
             result_text = ""
         if s.error_message:
             result_text = s.error_message
+        if s.error_message:
+            result_text = s.error_message
         if result_text:
-            one_line = result_text.strip().splitlines()[0][:120]
-            line += f"：{one_line}"
+            # 空白文本（" " / "\n"）strip 后 splitlines 为空列表——防 IndexError
+            stripped = result_text.strip()
+            if stripped:
+                line += f"：{stripped.splitlines()[0][:120]}"
         step_lines.append(line)
 
     status_emoji = {"SUCCEEDED": "✅", "FAILED": "❌", "PARTIAL_FAILED": "⚠️"}.get(plan.status, "⏳")
@@ -1496,8 +1500,11 @@ def approval_execute_plan(args, ctx, db):
     if not plan:
         return {
             "ok": False,
-            "error": "执行器未找到执行计划",
+            "error": "执行器未找到执行计划（计划可能在 consume 与执行之间被并发删除）",
+            "error_code": "plan_missing",
             "plan_id": args["plan_id"],
+            "plan_status": None,
+            "next_step": "请用 ops.approval.list 查询该计划的当前状态；若已不存在，请用户重新发起部署请求生成新计划。",
         }
 
     result = {

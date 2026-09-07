@@ -70,7 +70,7 @@ def list_tool_calls(args, ctx, db):
         "type": "object",
         "properties": {
             "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-            "kind": {"type": "string", "description": "tool_call/job/plan/deployment"},
+            "kind": {"type": "string", "description": "tool_call/job/plan/execution_plan/deployment"},
             "status": {"type": "string"},
             "risk": {"type": "string"},
         },

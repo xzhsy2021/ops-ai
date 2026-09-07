@@ -272,7 +272,10 @@ def _collect_from_root(
         def _resolve(raw_id: str, model, col) -> str:
             if not raw_id or len(raw_id) >= 32:
                 return raw_id
-            row = db.query(model).filter(col.like(f"{raw_id}%")).first()
+            # LIKE 通配符转义：用户输入含 % / _ 时不得当通配符用
+            # （如 plan:abcd_efg 会静默匹配到 abcdXefg...，构建出错误链路）
+            escaped = raw_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            row = db.query(model).filter(col.like(f"{escaped}%", escape="\\")).first()
             return row.id if row else raw_id
         if typ in {"tool", "tool_call"}:
             tool_call_id = tool_call_id or raw
@@ -379,8 +382,11 @@ def _collect_from_root(
                 if call.id not in tool_ids:
                     tool_ids.add(call.id); changed = True
             # prepare/execute 的 job arguments 里也带 plan_id（ExecutionPlan id）
+            # 下推筛选：request_json 含 "plan_id" 键的 job 才可能是调用方——
+            # 原先 .isnot(None) 全表载入后 Python 逐行解包，782+ 行 × 4 轮循环
             linked_jobs = db.query(OperationJob).filter(
-                OperationJob.request_json.isnot(None)
+                OperationJob.request_json.isnot(None),
+                OperationJob.request_json.contains('"plan_id"'),
             ).all()
             for job in linked_jobs:
                 if job.id in job_ids:

@@ -76,6 +76,27 @@ def _now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _parse_naive(value: Any) -> datetime | None:
+    """宽松解析 sqlite naive 时间（'2026-09-04 07:50:06.586754' / ISO 带 T 带 Z）。
+    解析失败返回 None（调用方按不可删处理，宁保守勿误删）。"""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("Z", "").replace("z", "")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            try:
+                return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+
+
 def _as_int(value: Any, default: int = 0) -> int:
     try:
         return max(0, int(value))
@@ -110,6 +131,14 @@ def _normalize_policy(policy: Dict[str, Any]) -> Dict[str, Any]:
     ]
     for key in int_keys:
         merged[key] = _as_int(merged.get(key), DEFAULT_RETENTION.get(key, 0))
+    # 天数=0 语义护栏：0 会被 _audit_cutoff_for_action 解释为"立即过期"（now 前全部
+    # 可删），历史上 UI 提交空值即写入 0 造成静默清库。护栏 = 钳到 min_keep_days
+    # （默认 7 天），真实想缩短需显式降低 min_keep_days。保留天数上限不设防。
+    floor = max(1, merged.get("min_keep_days", DEFAULT_RETENTION.get("min_keep_days", 7)))
+    for key in ("audit_keep_days", "audit_high_risk_keep_days", "tool_call_keep_days",
+                "tool_plan_keep_days", "deploy_keep_days"):
+        if merged[key] < floor:
+            merged[key] = floor
     merged["dry_run"] = _as_bool(merged.get("dry_run"), True)
     return merged
 
@@ -191,6 +220,14 @@ def _deployment_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[List[st
         for row in rows[keep_max:]:
             if not row.started_at or row.started_at > min_keep_cutoff or (row.status or "").lower() in RUNNING_STATUSES:
                 continue
+            # cap 扫尾不得绕过 age 规则的状态/环境保护：生产失败/回滚部署有
+            # keep_prod_failed_days / deploy_rollback_keep_days（365d）显式豁免，
+            # keep_max 溢出不能让只放了 8 天的 prod 失败记录进删除候选。
+            keep_days = _deployment_keep_days(row, policy)
+            if keep_days is None:
+                continue
+            if row.started_at >= now - timedelta(days=keep_days):
+                continue
             candidates.setdefault(row.id, {
                 "id": row.id,
                 "status": row.status,
@@ -220,9 +257,9 @@ def _deployment_record_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[
     rows = db.query(DeploymentRecord).order_by(DeploymentRecord.started_at.desc()).all()
     candidates: Dict[str, Dict[str, Any]] = {}
     for row in rows:
-        value = row.started_at or ""
-        if value and value < cutoff.isoformat():
-            candidates[row.id] = {"id": row.id, "system": row.system, "status": row.status, "started_at": value, "reason": f"age>{policy.get('deploy_keep_days')}d"}
+        value = _parse_naive(row.started_at)
+        if value and value < cutoff:
+            candidates[row.id] = {"id": row.id, "system": row.system, "status": row.status, "started_at": row.started_at, "reason": f"age>{policy.get('deploy_keep_days')}d"}
     keep_max = int(policy.get("deploy_keep_max", 1000) or 0)
     if keep_max > 0 and len(rows) > keep_max:
         for row in rows[keep_max:]:
@@ -244,13 +281,17 @@ def _audit_record_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[List[
     rows = db.query(AuditRecord).order_by(AuditRecord.created_at.desc()).all()
     candidates: Dict[int, Dict[str, Any]] = {}
     for row in rows:
-        created_text = row.created_at or ""
-        cutoff = _audit_cutoff_for_action(row.action, policy).isoformat()
-        if created_text and created_text < cutoff:
-            candidates[row.id] = {"id": row.id, "action": row.action, "created_at": created_text, "reason": "age_high_risk" if _is_high_risk_action(row.action) else "age"}
+        created_dt = _parse_naive(row.created_at)
+        cutoff = _audit_cutoff_for_action(row.action, policy)
+        if created_dt and created_dt < cutoff:
+            candidates[row.id] = {"id": row.id, "action": row.action, "created_at": row.created_at, "reason": "age_high_risk" if _is_high_risk_action(row.action) else "age"}
     keep_max = int(policy.get("audit_keep_max", 5000) or 0)
     if keep_max > 0 and len(rows) > keep_max:
+        min_keep_cutoff = _now_naive() - timedelta(days=int(policy.get("min_keep_days", 7)))
         for row in rows[keep_max:]:
+            created_dt = _parse_naive(row.created_at)
+            if created_dt and created_dt > min_keep_cutoff:
+                continue
             candidates.setdefault(row.id, {"id": row.id, "action": row.action, "created_at": row.created_at, "reason": f"exceed_max>{keep_max}"})
     by_reason = Counter(item.get("reason") for item in candidates.values())
     return list(candidates.keys()), {"count": len(candidates), "total": len(rows), "by_reason": dict(by_reason), "sample": _sample(list(candidates.values()))}
@@ -277,7 +318,12 @@ def _tool_call_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[List[str
             candidates[row.id] = {"id": row.id, "tool_name": row.tool_name, "risk_level": row.risk_level, "created_at": row.created_at.isoformat(), "reason": "age_high_risk" if cutoff == cutoff_high else "age"}
     keep_max = int(policy.get("tool_call_keep_max", 10000) or 0)
     if keep_max > 0 and len(rows) > keep_max:
+        # cap 扫尾同样先过 age 缓冲（min_keep_days）：刚写入 1 秒的调用日志
+        # 不得因表超量直接进删除候选
+        min_keep_cutoff = _now_naive() - timedelta(days=int(policy.get("min_keep_days", 7)))
         for row in rows[keep_max:]:
+            if row.created_at and row.created_at > min_keep_cutoff:
+                continue
             candidates.setdefault(row.id, {"id": row.id, "tool_name": row.tool_name, "risk_level": row.risk_level, "created_at": row.created_at.isoformat() if row.created_at else None, "reason": f"exceed_max>{keep_max}"})
     return list(candidates.keys()), {"count": len(candidates), "total": len(rows), "sample": _sample(list(candidates.values()))}
 
@@ -293,7 +339,10 @@ def _tool_plan_candidates(db: Session, policy: Dict[str, Any]) -> Tuple[List[str
             candidates[row.id] = {"id": row.id, "plan_type": row.plan_type, "status": row.status, "risk_level": row.risk_level, "created_at": row.created_at.isoformat(), "reason": "age_high_risk" if cutoff == cutoff_high else "age"}
     keep_max = int(policy.get("tool_plan_keep_max", 5000) or 0)
     if keep_max > 0 and len(rows) > keep_max:
+        min_keep_cutoff = _now_naive() - timedelta(days=int(policy.get("min_keep_days", 7)))
         for row in rows[keep_max:]:
+            if row.created_at and row.created_at > min_keep_cutoff:
+                continue
             candidates.setdefault(row.id, {"id": row.id, "plan_type": row.plan_type, "status": row.status, "risk_level": row.risk_level, "created_at": row.created_at.isoformat() if row.created_at else None, "reason": f"exceed_max>{keep_max}"})
     return list(candidates.keys()), {"count": len(candidates), "total": len(rows), "sample": _sample(list(candidates.values()))}
 
@@ -389,6 +438,12 @@ def cleanup_release_history(db: Session, dry_run: bool = True) -> Dict[str, Any]
     if record_ids:
         result["deleted"]["deployment_records"] = db.query(DeploymentRecord).filter(DeploymentRecord.id.in_(record_ids)).delete(synchronize_session=False)
     if tool_plan_ids:
+        # 先清引用再删行：ToolCallLog.related_plan_id 置 NULL（调用日志保留），
+        # 避免回放图悬空边（audit_chain 会为每个 tool_call 生成 plan:{id} 边，
+        # plan 行删掉后边指向不存在节点）。与 scripts/cleanup_stale_chain_data.py 行为对齐。
+        db.query(ToolCallLog).filter(ToolCallLog.related_plan_id.in_(tool_plan_ids)).update(
+            {ToolCallLog.related_plan_id: None}, synchronize_session=False
+        )
         result["deleted"]["tool_plan_events"] = db.query(ToolPlanEvent).filter(ToolPlanEvent.plan_id.in_(tool_plan_ids)).delete(synchronize_session=False)
         result["deleted"]["tool_plans"] = db.query(ToolPlan).filter(ToolPlan.id.in_(tool_plan_ids)).delete(synchronize_session=False)
     if tool_call_ids:

@@ -509,6 +509,9 @@ def test_execute_plan_next_step_guides_by_status():
     assert "PARTIAL_FAILED" in src and "save_lesson" in src
     assert "失败计划是终态" in src
     assert "不要重新执行" in src or "不能重试 execute_plan" in src
+    # 范围纪律（2026-09-08）：回执不得把他人请求列为待确认项/主动请缨
+    assert "范围纪律" in src, "next_step 必须包含房间待办范围纪律"
+    assert "不汇总房间待办" in src or "不要汇总房间待办" in src
 
 
 # ──────────────────────────────────────────────────────────────

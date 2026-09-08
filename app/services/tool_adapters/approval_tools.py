@@ -1551,6 +1551,10 @@ def approval_execute_plan(args, ctx, db):
             f"重复回执。旧短语撞上新计划等碰撞场景：房间只发本回执，额外加一句"
             f"「本次执行的是计划 {plan.id[:8]}...（新短语），旧短语对应的计划未重复执行」"
             "即可，不要展开叙述判定过程。"
+            "范围纪律：本回执只覆盖本计划。房间历史中未提及你的他人请求（无论部署/SQL/"
+            "生产操作，也无论是否高危）一概不属于你的任务——不要在回执中列为待确认项、"
+            "不要主动请缨建单、不要汇总房间待办；只有对方明确提及你或直接要求你处理时"
+            "才接手。"
         )
     elif plan.status == "PARTIAL_FAILED":
         failed_keys = [s.step_key for s in plan.steps if s.status == "FAILED"]
@@ -1562,6 +1566,7 @@ def approval_execute_plan(args, ctx, db):
             "②调用 ops.integration.save_lesson 回写踩坑"
             "（pattern/guidance/evidence 带计划ID）；③请用户重新触发完整流程"
             "（附件+消息同一条）获得新审批。"
+            "范围纪律同成功场景：回执之外不汇总房间待办、不主动接手他人请求。"
         )
     elif plan.status == "FAILED":
         result["next_step"] = (

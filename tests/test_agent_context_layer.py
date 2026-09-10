@@ -242,6 +242,7 @@ def test_flow_guide_unknown_id_returns_index(env, ctx):
         "service-restart",
         "dovo-bg-release",
         "dovo-frontend-release",
+        "ad-hoc-exec",
     }
 
 

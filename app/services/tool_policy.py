@@ -5,6 +5,10 @@ from fastapi import HTTPException
 
 from app.db.repository import CapabilitySettingsRepository
 from app.services.tool_context import ToolContext
+from app.services.exec_command_policy import (
+    DEFAULT_EXEC_ALLOW_MULTILINE,
+    DEFAULT_EXEC_MAX_LENGTH,
+)
 
 # Default capability settings.
 #
@@ -55,6 +59,23 @@ DEFAULT_CAPABILITY_SETTINGS = {
     "taskize_high_risk_tools": True,           # 3rd-layer: queue as OperationJob
     "strict_prod_confirmation": True,          # 4th-layer: prod env requires extra phrase
     "token_expire_days": 90,
+
+    # ── Ad-hoc 远程命令执行审批（EXEC_REMOTE）────────────────────────────
+    # 设计：docs/exec-remote-approval-design.md
+    # 默认全部关闭：管理员显式开启 allow_exec_remote_tool 后，AI 才能**提交**
+    # 命令执行审批；真正执行仍需房间内一次性短码人工批准，且 AI 始终不持有
+    # ops.exec_remote 的直接调用权（该工具对 tool_token 保持 L4 硬阻断）。
+    # 注意：模板/黑名单（exec_remote_templates 等）不放入默认值——它们是
+    # 「可选覆盖」，避免一旦保存设置就把默认模板固化进 DB，导致后续代码
+    # 升级的模板改动被旧快照遮蔽。
+    "allow_exec_remote_tool": False,           # kill switch：关闭则 prepare_exec 直接 403
+    "exec_remote_mode": "allowlist",           # allowlist（模板白名单）| free（任意命令）
+    "exec_remote_allow_prod": True,            # 是否允许生产环境（破坏性命令仍恒拒）
+    "exec_remote_allow_multiline": DEFAULT_EXEC_ALLOW_MULTILINE,
+    "exec_remote_max_length": DEFAULT_EXEC_MAX_LENGTH,
+    "exec_remote_max_timeout_seconds": 300,
+    "exec_remote_max_targets": 20,
+    "exec_remote_max_per_hour": 10,            # 0 = 不限频
 }
 
 
@@ -222,6 +243,13 @@ def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) ->
                     "ai_level": "L4",
                 },
             )
+
+    # Ad-hoc 远程命令执行审批：kill switch（默认关闭，管理员显式开启）
+    if tool_def.name == "ops.approval.prepare_exec" and not settings.get("allow_exec_remote_tool", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Ad-hoc remote exec approval is disabled (allow_exec_remote_tool=false)",
+        )
 
     if tool_def.category == "deploy_plan" and not settings.get("allow_deploy_plan", True):
         raise HTTPException(status_code=403, detail="Deploy plan tools are disabled")

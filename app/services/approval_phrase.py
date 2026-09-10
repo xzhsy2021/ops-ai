@@ -26,6 +26,7 @@ _ACTION_VERBS: dict[str, str] = {
     "DML": "SQL变更",
     "PACKAGE_CLEANUP": "包清理",
     "MATRIX_PULL": "拉取附件",
+    "EXEC_REMOTE": "远程命令",
 }
 
 _MAX_VERBS = 3  # 动作过多时截断，保持短语可读

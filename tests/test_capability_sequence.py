@@ -171,14 +171,14 @@ def _live_registry_env():
 
 
 def test_validate_sequence_ok_on_production():
-    """生产四层校验全绿（flow=5/工具=124 实测）。"""
-    from app.services.agent_context import validate_capability_sequence
+    """生产四层校验全绿（flow 数随 FLOW_GUIDES 增长，与定义同步）。"""
+    from app.services.agent_context import FLOW_GUIDES, validate_capability_sequence
 
     db, ctx = _live_registry_env()
     try:
         report = validate_capability_sequence(db, ctx)
         assert report["ok"], report["violations"]
-        assert report["flows_checked"] == 5
+        assert report["flows_checked"] == len(FLOW_GUIDES)
     finally:
         db.close()
 

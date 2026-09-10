@@ -38,6 +38,8 @@ FORBIDDEN = [
     "禁止为 MATRIX_PULL 单独创建第二个计划/第二个审批——拉取与部署必须一个计划一次审批",
     "禁止把附件包的 SHA-256 当作消息摘要填进 content_sha256（包校验值只用于 FILE_UPLOAD 步骤参数）",
     "禁止在 resolve 之后停下输出中间状态（如'票据已签发但尚未创建计划'）——Step 链路必须同轮推进到等待审批",
+    "禁止用 ops.exec_remote 绕过审批执行任意命令（该工具对 AI token 是 L4 硬阻断，仅管理员会话可用）；AI 的 ad-hoc 命令一律走 ops.approval.prepare_exec",
+    "禁止在工具调用失败（403/400/404）后静默结束轮次——任何失败都必须用 message 工具回报房间（见 L012）",
 ]
 
 # ──────────────────────────────────────────────────────────────
@@ -122,6 +124,20 @@ LESSONS: list[dict[str, Any]] = [
         "id": "L011",
         "pattern": "测试环境受益人计划含 MATRIX_PULL 时 temporary_grant_id 为 null，无法自审批整链",
         "guidance": "MATRIX_PULL 已纳入临时自审批动作集（2026-09-02 commit 6bdeeba）；授权 request 时 allowed_actions 需含 MATRIX_PULL 才覆盖全链。旧授权（动作集不含 MATRIX_PULL）仍有效但只覆盖不含拉取的计划——或者先确认包已在文件中心（见 L010）走无拉取计划",
+        "status": "active",
+        "severity": "info",
+    },
+    {
+        "id": "L012",
+        "pattern": "工具调用被策略拒绝（403）后不回报、直接结束轮次，房间零输出",
+        "guidance": "任何工具调用失败（403/400/404/超时）都必须用 message 工具把失败原因与下一步回报到房间。OPS 的拒绝信息本身就是给用户的可执行结论，例如 'Ad-hoc remote exec approval is disabled (allow_exec_remote_tool=false)'（→ 找管理员开开关）、'命令未通过安全护栏：...'（→ 按提示改命令）、'Tool token does not allow production operations'（→ 找管理员开 allow_prod）。禁止静默结束轮次",
+        "status": "active",
+        "severity": "warning",
+    },
+    {
+        "id": "L013",
+        "pattern": "要在服务器上临时装包/起服务，却去用 prepare_service_control 或 ops.exec_remote",
+        "guidance": "prepare_service_control 只按受控变量生成服务控制命令，明确不允许注入任意命令行；ops.exec_remote 对 AI token 是 L4 硬阻断。需要任意命令时用 ops.approval.prepare_exec（前提：管理员已开启 allow_exec_remote_tool），命令须匹配白名单模板；装 docker 这类复合操作有专用模板 docker_install_official_repo",
         "status": "active",
         "severity": "info",
     },
@@ -483,6 +499,65 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
         "hard_rules": [
             "remote_path 固定 /data/www/dist.zip（www.sh 就地处理固定名）",
             "front_version 由 www.sh 内部维护（14 位时间戳），执行器无需处理",
+        ],
+    },
+    "ad-hoc-exec": {
+        "flow_id": "ad-hoc-exec",
+        "title": "临时远程命令执行（装包 / 起服务 / 一次性排障）",
+        "trigger": "同一消息内 @agent + 明确的服务器操作诉求（如『给 4 台量化服务器装 docker』『看下这几台 docker 状态』『查 /opt 占用』），且不属于发版/回滚/巡检既有流程",
+        "atomic": True,
+        "parameterized": True,
+        "default_system": "crypto-trader",
+        "default_environment": "prod",
+        "prerequisite": "需管理员先开启 allow_exec_remote_tool（默认关闭）。未开启时 prepare_exec 返回 403 'Ad-hoc remote exec approval is disabled'——这是配置结论，不是故障，不要反复重试",
+        "steps": [
+            {
+                "n": 1,
+                "tool": "ops.routing.resolve_message_target",
+                "purpose": "签发路由票据（绑定房间/消息/发送者/摘要）",
+                "args_hint": {
+                    "message_text": "<触发消息原文，一字不差>",
+                    "message_context": "五字段：channel=matrix/channel_account_id=default/conversation_id=<消息所在房间>/message_id=<消息ID>/sender_id=<发送者>",
+                },
+                "must_follow": "不传 content_sha256；同一轮内立即进入下一步，禁止停下回报'票据已签发'",
+            },
+            {
+                "n": 2,
+                "tool": "ops.approval.prepare_exec",
+                "purpose": "冻结命令/目标/超时，创建一次性审批工单",
+                "args_hint": {
+                    "message_context": "<resolve 返回的 message_context 原样>",
+                    "routing_ticket": "<resolve 返回的 ticket>",
+                    "system_name": "<resolve 返回的 system_name>",
+                    "environment": "prod（生产）或 test",
+                    "targets": ["<目标服务器名>", "<...>"],
+                    "command": "<要执行的单行 shell 命令>",
+                    "timeout": 120,
+                },
+                "must_follow": "allowlist 模式下命令必须匹配管理员白名单模板（apt_update / apt_install_packages / docker_readonly / systemctl_service_status / system_status_probe / docker_install_official_repo）；不匹配时按 403 返回的原因改命令，不要试图绕过护栏",
+            },
+            {
+                "n": 3,
+                "tool": "(matrix 回复)",
+                "purpose": "把 prepare_exec 返回的 reply_template 原样发到房间（卡片含逐字命令、命令 SHA256、超时、风险提示），等待审批人批准",
+            },
+            {
+                "n": 4,
+                "tool": "ops.approval.execute",
+                "purpose": "审批人回复「批准<短语>」后立即执行（逐目标串行、不自动重试），再把结果回报房间",
+                "args_hint": {
+                    "approval_id": "<prepare_exec 返回>",
+                    "short_code": "<审批消息里的完整短语>",
+                    "room_id": "<审批消息所在房间>",
+                    "approver_matrix_id": "<审批人 Matrix ID>",
+                },
+            },
+        ],
+        "hard_rules": [
+            "命令以逐字形式冻结在审批卡片上（OPS 自动渲染），审批通过后原样执行——执行时不允许改命令",
+            "不自动重试：部分目标失败时保留逐目标明细（成功数/失败数/各机 stdout+stderr），需重跑请重新提交审批",
+            "生产环境破坏性命令（rm -r/-f、mkfs、dd、关机重启、改密、清空防火墙、prune 等）一律拒绝，非生产环境需显式 allow_destructive=true",
+            "禁止用 ops.exec_remote 承接此类需求：该工具对 AI token 保持 L4 硬阻断，仅管理员会话可用",
         ],
     },
 }
@@ -976,16 +1051,33 @@ def validate_flow_guide_contract(db, ctx) -> dict[str, Any]:
     listed = registry.list_tools(db, ctx, include_disabled=False, include_schema=True, limit=2000)
     schema_by_name = {t["name"]: t.get("input_schema") or {} for t in listed["tools"]}
 
+    def _registered_schema(tool_name: str):
+        """返回工具的 input_schema；工具存在但当前策略下不可见时仍返回其 schema。
+
+        ``list_tools`` 受策略过滤（例如管理员关闭某类别开关、或 EXEC_REMOTE 的
+        kill switch 未开启时，工具不在可见列表内）。此时 flow guide 引用它是
+        「当前不可用」而非「按记忆调用不存在工具」——前者是配置状态，后者才是
+        契约漂移。用 ``registry.get``（只看 registered + enabled）区分两者，
+        同时仍用真实 schema 校验 args_hint。
+        """
+        if tool_name in schema_by_name:
+            return schema_by_name[tool_name]
+        try:
+            return registry.get(tool_name).input_schema or {}
+        except Exception:
+            return None
+
     reader_keys = _step_param_reader_keys()
     for flow_id, flow in FLOW_GUIDES.items():
         for step in flow.get("steps", []):
             tool_name = str(step.get("tool") or "")
             if not tool_name.startswith("ops."):
                 continue  # (matrix 回复) 等非工具步骤
-            if tool_name not in schema_by_name:
+            schema = _registered_schema(tool_name)
+            if schema is None:
                 violations.append(f"{flow_id}#{step['n']}: 工具未注册 {tool_name}")
                 continue
-            props = set((schema_by_name[tool_name].get("properties") or {}).keys())
+            props = set((schema.get("properties") or {}).keys())
             for key in (step.get("args_hint") or {}):
                 if key not in props:
                     violations.append(f"{flow_id}#{step['n']}: args_hint 键 {key} 不在 {tool_name} schema")

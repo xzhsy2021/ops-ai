@@ -129,6 +129,8 @@ class ApprovalExecutor:
             return self._execute_service_control(approval, payload)
         elif action_type == "FILE_UPLOAD":
             return self._execute_file_upload(approval, payload)
+        elif action_type == "EXEC_REMOTE":
+            return self._execute_exec_remote(approval, payload)
         else:
             raise ValueError(f"未知的操作类型: {action_type}")
 
@@ -249,6 +251,117 @@ class ApprovalExecutor:
             "success_count": success_count,
             "fail_count": fail_count,
             "message": f"服务控制完成: {success_count}/{len(targets)} 成功, {fail_count} 失败",
+        }
+
+    # ── Ad-hoc 远程命令执行（EXEC_REMOTE）──
+
+    def _execute_exec_remote(self, approval: AiActionApproval, payload: dict) -> dict[str, Any]:
+        """执行审批通过的 ad-hoc 远程命令（逐目标串行，不自动重试）。
+
+        设计：docs/exec-remote-approval-design.md §4.4
+
+        与 SERVICE_CONTROL 的关键差别——命令来自冻结的审批载荷而非服务配置，
+        因此在真正 SSH 之前做第 3 层护栏复核：
+
+        1. 重跑 prepare 时的同一套命令护栏（denylist + 白名单模板）；
+        2. 比对命令 SHA256，防止审批载荷被篡改（防 TOCTOU）；
+        3. 串行执行、不自动重试，部分失败保留逐目标明细；
+        4. 输出经 ``mask_sensitive`` 脱敏并截断后才落库/回执。
+        """
+        import hashlib
+
+        from app.services.sensitive_data import mask_sensitive
+        from app.services.exec_command_policy import (
+            assert_exec_command,
+            ExecCommandRejected,
+            policy_from_settings,
+        )
+        from app.services.tool_policy import get_capability_settings
+        from app.services.tool_adapters.server_tools import _connect
+
+        action_parameters = dict(payload.get("action_parameters") or {})
+        command = str(action_parameters.get("command") or "")
+        expected_sha256 = str(action_parameters.get("command_sha256") or "")
+        targets = [str(item or "").strip() for item in (payload.get("targets") or []) if str(item or "").strip()]
+        environment = str(payload.get("environment") or "")
+
+        if not targets:
+            raise ValueError("命令执行操作需要至少一个目标服务器")
+        if not command:
+            raise ValueError("命令执行操作缺少冻结的命令文本")
+        if not expected_sha256:
+            raise ValueError("命令执行操作缺少 command_sha256，拒绝执行（无法校验完整性）")
+
+        actual_sha256 = hashlib.sha256(command.encode("utf-8")).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ValueError(
+                "命令完整性校验失败（command_sha256 不匹配），审批载荷可能被篡改，已拒绝执行"
+            )
+
+        settings = get_capability_settings(self.db)
+        guard = policy_from_settings(settings)
+        try:
+            assert_exec_command(
+                command,
+                mode=guard["mode"],
+                templates=guard["templates"],
+                deny_patterns=guard["deny_patterns"],
+                destructive_patterns=guard["destructive_patterns"],
+                environment=environment,
+                max_length=guard["max_length"],
+                allow_multi_line=guard["allow_multi_line"],
+                allow_destructive=bool(action_parameters.get("allow_destructive", False)),
+                target_count=len(targets),
+                max_targets=int(guard["max_targets"]),
+            )
+        except ExecCommandRejected as exc:
+            raise ValueError(f"执行前护栏复核未通过：{exc.reason}") from exc
+
+        max_timeout = int(settings.get("exec_remote_max_timeout_seconds") or 300)
+        try:
+            timeout = int(action_parameters.get("timeout") or 120)
+        except (TypeError, ValueError):
+            timeout = 120
+        timeout = max(5, min(timeout, max_timeout))
+
+        results = []
+        for server_name in targets:
+            entry: dict[str, Any] = {"server": server_name, "command": command, "timeout": timeout}
+            try:
+                ssh, _srv = _connect(server_name)
+                try:
+                    code, out, err = ssh.exec(command, timeout=timeout)
+                finally:
+                    ssh.close()
+                entry.update({
+                    "ok": code == 0,
+                    "exit_code": code,
+                    "stdout": mask_sensitive(out or "", limit=8192),
+                    "stderr": mask_sensitive(err or "", limit=8192),
+                })
+            except Exception as exc:  # 单机失败不影响其余目标
+                entry.update({"ok": False, "error": str(exc)})
+            results.append(entry)
+
+        success_count = sum(1 for item in results if item.get("ok"))
+        fail_count = len(results) - success_count
+        return {
+            "action": "EXEC_REMOTE",
+            "command": command,
+            "command_sha256": actual_sha256,
+            "mode": guard["mode"],
+            "template_id": action_parameters.get("template_id", ""),
+            "system": payload.get("system_name", ""),
+            "environment": environment,
+            "targets": targets,
+            "timeout": timeout,
+            "results": results,
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "message": (
+                f"远程命令执行完成: {success_count}/{len(targets)} 成功, {fail_count} 失败"
+                "（不自动重试：如需重跑请重新提交审批）"
+            ),
         }
 
     def _execute_file_upload(self, approval: AiActionApproval, payload: dict) -> dict[str, Any]:

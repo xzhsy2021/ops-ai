@@ -26,6 +26,7 @@ from app.services.qclaw_routing import (
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
+from app.services.approval_phrase import build_approval_phrase
 from app.db.models import ExecutionPlan
 from app.services.execution_plan import ExecutionPlanService, step_approval_details
 from app.services.package_intake import intake_package, list_staging_packages
@@ -35,6 +36,12 @@ from app.services.tool_adapters.file_transfer_tools import (
     _resolve_source,
 )
 from app.services.package_retention import get_package_retention_policy, inspect_package_file
+from app.services.exec_command_policy import (
+    is_prod_environment,
+    policy_from_settings,
+    validate_exec_command,
+)
+from app.config.servers import resolve_server
 
 
 def _current_channel_identities(
@@ -372,6 +379,7 @@ _STEP_VERBS = {
     "DML": "SQL变更",
     "PACKAGE_CLEANUP": "包清理",
     "MATRIX_PULL": "拉取附件",
+    "EXEC_REMOTE": "远程命令",
 }
 
 
@@ -390,6 +398,12 @@ def _approval_reply_template(
     approvers=None,
     package_size_bytes=None,
     package_sha256: str = "",
+    command_block: str = "",
+    command_sha256: str = "",
+    exec_mode: str = "",
+    exec_template_id: str = "",
+    exec_timeout_seconds: int = 0,
+    risk_notes=None,
 ) -> str:
     """生成固定格式的中文 Markdown 审批回执（Agent 直接转发，禁止自由发挥）。
 
@@ -421,7 +435,7 @@ def _approval_reply_template(
     else:
         step_line = ""
 
-    noun = "执行计划" if kind == "plan" else "审批工单"
+    noun = "执行计划" if kind == "plan" else "工单"
     lines = [
         f"OPS 审批{noun}已创建，当前状态：`{status}`",
         "",
@@ -444,7 +458,27 @@ def _approval_reply_template(
         lines.append(f"- 包大小：`{int(package_size_bytes):,} bytes`")
     if package_sha256:
         lines.append(f"- SHA256：`{package_sha256}`")
+    if command_block:
+        mode_label = exec_mode or "allowlist"
+        mode_suffix = f"（模板 `{exec_template_id}`）" if exec_template_id else ""
+        lines.append(f"- 执行模式：`{mode_label}`{mode_suffix}")
+        if command_sha256:
+            lines.append(f"- 命令 SHA256：`{command_sha256}`")
+        if exec_timeout_seconds:
+            lines.append(f"- 单机超时：`{int(exec_timeout_seconds)}s`")
+        lines.append("- 风险：**高** —— 将在目标服务器执行 shell 命令，**不可自动回滚、不自动重试**")
+        for note in (risk_notes or []):
+            lines.append(f"  - 提示：{note}")
     lines.append(f"- 有效期至：`{_fmt_expiry(expires_at)}`")
+    if command_block:
+        lines += [
+            "",
+            "将执行的命令（**逐字**，审批通过后原样执行）：",
+            "",
+            "```bash",
+            command_block,
+            "```",
+        ]
     lines += [
         "",
         "请指定审批人回复：",
@@ -929,6 +963,261 @@ def approval_prepare_service_control(args, ctx, db):
         "control_action": control_action,
         "action_label": action_label,
         "targets": args["targets"],
+        "authorized_approvers": approvers,
+        # 固定格式回执模板：Agent 原样转发到房间，不要自由改写
+        "reply_template": reply_template,
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# EXEC_REMOTE：ad-hoc 远程命令执行审批（设计见 docs/exec-remote-approval-design.md）
+# ──────────────────────────────────────────────────────────────
+def _normalize_exec_targets(raw_targets, db, max_targets: int) -> list[str]:
+    """把目标键（名称 / host / UUID / 短前缀）规范化为服务器名，并去重限数。"""
+    if not isinstance(raw_targets, (list, tuple)):
+        raise HTTPException(status_code=400, detail="targets 必须是字符串数组")
+    seen: set[str] = set()
+    canonical_targets: list[str] = []
+    for item in raw_targets:
+        wanted = str(item or "").strip()
+        if not wanted or wanted in seen:
+            continue
+        srv = resolve_server(wanted, db=db)
+        if not srv:
+            raise HTTPException(status_code=404, detail=f"Server not found: {wanted}")
+        name = str(srv.get("name") or wanted)
+        if name in seen:
+            continue
+        seen.add(wanted)
+        seen.add(name)
+        canonical_targets.append(name)
+    if not canonical_targets:
+        raise HTTPException(status_code=400, detail="targets 不能为空")
+    if len(canonical_targets) > int(max_targets):
+        raise HTTPException(
+            status_code=400,
+            detail=f"目标数量 {len(canonical_targets)} 超出上限 {max_targets}",
+        )
+    return canonical_targets
+
+
+@registry.register(
+    name="ops.approval.prepare_exec",
+    title="准备远程命令执行审批",
+    description=(
+        "为 ad-hoc 远程命令执行（装包 / 起服务 / 排障巡检等一次性运维）创建不可变审批工单。"
+        "命令、目标、超时会被冻结并计算 SHA256，审批通过后由 OPS 内部执行器逐目标原样执行"
+        "（不自动重试、不回滚）。默认 allowlist 模式：命令必须匹配管理员预置的白名单模板；"
+        "破坏性命令（递归删除、mkfs、关机、改密等）在生产环境一律拒绝，非生产环境需显式 "
+        "allow_destructive=true。返回的 reply_template 必须原样发送到房间，不要自由改写。"
+        "中文：准备命令执行审批/远程命令审批/ad-hoc 执行审批/服务器装包起服务。"
+    ),
+    scopes=["ops:read"],
+    risk="low",
+    requires_human_approval=True,
+    category="approval_prepare",
+    input_schema={
+        "type": "object",
+        "properties": {
+            **_common_prepare_schema()["properties"],
+            "targets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "目标服务器名称列表（也接受 host / UUID）",
+            },
+            "command": {
+                "type": "string",
+                "description": "要执行的 shell 命令（单行）；allowlist 模式下须匹配白名单模板",
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "单机执行超时秒数，默认 120；上限由管理员设置（默认 300）",
+            },
+            "allow_destructive": {
+                "type": "boolean",
+                "description": "非生产环境显式放行破坏性命令；生产环境无效（恒拒）",
+            },
+        },
+        "required": _common_prepare_schema()["required"] + ["targets", "command"],
+        "additionalProperties": False,
+    },
+)
+def approval_prepare_exec(args, ctx, db):
+    """冻结 ad-hoc 命令执行参数，生成一次性审批工单。
+
+    与 prepare_service_control 的关键差别：这里执行的是**调用方给定的命令文本**
+    （而非由 OPS 按受控变量生成的服务控制命令），因此护栏更严：
+    1. 调用前——denylist + 白名单模板 + 结构校验（exec_command_policy）；
+    2. 审批时——人工短码 + 卡片逐字展示命令 + 命令 SHA256；
+    3. 执行时——重跑同一套护栏并比对 SHA256（防 TOCTOU）。
+    """
+    # 延迟导入：避免 tool_policy ↔ tool_adapters 的模块级循环依赖
+    from app.services.tool_policy import get_capability_settings
+
+    message_context, routing_revision, ticket_digest = _validated_prepare_ticket(args, ctx)
+
+    settings = get_capability_settings(db)
+    guard = policy_from_settings(settings)
+
+    environment = str(args.get("environment") or "")
+    if is_prod_environment(environment) and not settings.get("exec_remote_allow_prod", True):
+        raise HTTPException(
+            status_code=403,
+            detail="Ad-hoc remote exec is disabled for production (exec_remote_allow_prod=false)",
+        )
+
+    max_targets = int(guard["max_targets"])
+    targets = _normalize_exec_targets(args.get("targets"), db, max_targets)
+    command = str(args.get("command") or "")
+
+    verdict = validate_exec_command(
+        command,
+        mode=guard["mode"],
+        templates=guard["templates"],
+        deny_patterns=guard["deny_patterns"],
+        destructive_patterns=guard["destructive_patterns"],
+        environment=environment,
+        max_length=guard["max_length"],
+        allow_multi_line=guard["allow_multi_line"],
+        allow_destructive=bool(args.get("allow_destructive", False)),
+        target_count=len(targets),
+        max_targets=max_targets,
+    )
+    if not verdict["ok"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"命令未通过安全护栏：{verdict['reason']}",
+        )
+
+    # 频控：限制同一请求者近 1 小时的 EXEC_REMOTE 提交次数（0 = 不限）
+    max_per_hour = int(settings.get("exec_remote_max_per_hour") or 0)
+    if max_per_hour > 0 and db is not None:
+        from datetime import datetime, timedelta, timezone
+
+        from app.db.models import AiActionApproval
+
+        window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+        recent = (
+            db.query(AiActionApproval)
+            .filter(
+                AiActionApproval.action_type == "EXEC_REMOTE",
+                AiActionApproval.request_sender_id == message_context.sender_id,
+                AiActionApproval.created_at >= window_start,
+            )
+            .count()
+        )
+        if recent >= max_per_hour:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"命令执行审批提交过于频繁：近 1 小时 {recent} 次，"
+                    f"上限 {max_per_hour} 次（exec_remote_max_per_hour）。"
+                    "请等待既有工单处理完成或联系管理员调整上限。"
+                ),
+            )
+
+    max_timeout = int(settings.get("exec_remote_max_timeout_seconds") or 300)
+    try:
+        timeout = int(args.get("timeout") or 120)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="timeout 必须为整数秒")
+    if timeout < 5:
+        raise HTTPException(status_code=400, detail="timeout 不得小于 5 秒")
+    if timeout > max_timeout:
+        raise HTTPException(
+            status_code=400,
+            detail=f"timeout {timeout}s 超出上限 {max_timeout}s（exec_remote_max_timeout_seconds）",
+        )
+
+    command_sha256 = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    mode = str(guard["mode"])
+    template_id = str(verdict.get("template_id") or "")
+
+    approvers = _lookup_approvers(
+        ctx,
+        args["system_name"],
+        args.get("service_name"),
+        channel=message_context.channel,
+        channel_account_id=message_context.channel_account_id,
+    )
+
+    action_parameters = {
+        "command": command,
+        "command_sha256": command_sha256,
+        "timeout": timeout,
+        "mode": mode,
+        "template_id": template_id,
+        "allow_destructive": bool(args.get("allow_destructive", False)),
+        "guard_notes": list(verdict.get("notes") or []),
+    }
+
+    approval, short_code = ActionApprovalService(db).prepare(
+        action_type="EXEC_REMOTE",
+        tool_name="ops.approval.prepare_exec",
+        message_context=message_context,
+        system_name=args["system_name"],
+        service_name=args.get("service_name"),
+        environment=environment,
+        targets=targets,
+        action_parameters=action_parameters,
+        routing_config_revision=routing_revision,
+        routing_ticket_digest=ticket_digest,
+        risk_level="high",
+        ai_reason=args.get("ai_reason", ""),
+        authorized_identities=[
+            {
+                "channel": message_context.channel,
+                "channel_account_id": message_context.channel_account_id,
+                "sender_id": sender_id,
+            }
+            for sender_id in approvers
+        ],
+    )
+
+    # 幂等复用：相同 digest 命中既有 PENDING 工单时，服务层约定不重新签发短语
+    # （返回空串，见 ActionApprovalService.prepare 与计划侧既有契约）。但回执必须
+    # 让审批人能照抄短语，否则复用场景下卡片不可用。短语是确定性派生
+    # （action_type + system_name + environment + digest），因此按既有 action_digest
+    # 复现，结果与首次签发一致，且仍能对上库中 approval_code_hash。
+    if not short_code:
+        short_code = build_approval_phrase(
+            action_types=["EXEC_REMOTE"],
+            system_name=args["system_name"],
+            environment=environment,
+            digest=approval.action_digest,
+        )
+
+    reply_template = _approval_reply_template(
+        kind="action",
+        status=approval.status,
+        object_id=approval.id,
+        short_code=short_code,
+        system_name=args["system_name"],
+        service_name=args.get("service_name") or "",
+        environment=environment,
+        targets=targets,
+        expires_at=approval.expires_at,
+        steps=[{"action_type": "EXEC_REMOTE"}],
+        approvers=approvers,
+        command_block=command,
+        command_sha256=command_sha256,
+        exec_mode=mode,
+        exec_template_id=template_id,
+        exec_timeout_seconds=timeout,
+        risk_notes=list(verdict.get("notes") or []),
+    )
+    return {
+        "approval_id": approval.id,
+        "short_code": short_code,
+        "action_digest": approval.action_digest,
+        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+        "status": approval.status,
+        "targets": targets,
+        "command": command,
+        "command_sha256": command_sha256,
+        "timeout": timeout,
+        "mode": mode,
+        "template_id": template_id,
         "authorized_approvers": approvers,
         # 固定格式回执模板：Agent 原样转发到房间，不要自由改写
         "reply_template": reply_template,

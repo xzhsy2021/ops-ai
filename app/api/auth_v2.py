@@ -64,12 +64,21 @@ def login(payload: LoginPayload, response: Response, request: Request, db: Sessi
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_session_token(user.username, getattr(user, "session_version", 1) or 1)
-    is_prod = os.getenv("ENV", os.getenv("APP_ENV", "development")).lower() in {"prod", "production"}
+    # Cookie Secure 策略：默认跟随请求协议（HTTPS 才带 Secure），可用 OPS_COOKIE_SECURE 覆盖。
+    # 之前绑死 ENV=production，导致内网 HTTP 访问（http://192.168.1.92:8000）时浏览器拒存
+    # Secure cookie，出现"登录成功又弹回登录页"循环。
+    cookie_secure_override = os.getenv("OPS_COOKIE_SECURE", "").strip().lower()
+    if cookie_secure_override in {"1", "true", "yes", "on"}:
+        cookie_secure = True
+    elif cookie_secure_override in {"0", "false", "no", "off"}:
+        cookie_secure = False
+    else:
+        cookie_secure = request.url.scheme == "https"
     response.set_cookie(
         key="ops_session_v2",
         value=token,
         httponly=True,
-        secure=is_prod,
+        secure=cookie_secure,
         max_age=86400,
         path="/",
         samesite="lax",

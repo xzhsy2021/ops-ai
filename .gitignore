@@ -93,3 +93,8 @@ mcp-capability-discovery-audit/_shared/
 docs/servers_inventory.md
 
 docs/servers_inventory.local.md
+
+# fnOS / NAS 迁移运维脚本目录 —— 含明文凭证（NAS SSH 密码、gateway token、
+# MCP Bearer、matrix 账户密码、mihomo API secret）以及生产源码副本，
+# 严禁进入公开仓库。如需入库请先做脱敏改造。
+/fnos-migration/

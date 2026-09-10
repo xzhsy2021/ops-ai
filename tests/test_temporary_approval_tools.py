@@ -125,10 +125,12 @@ def test_temporary_access_tool_is_registered():
         "beneficiary_identity", "duration_value", "duration_unit",
         "reason", "allowed_actions",
         "grant_id", "short_code", "revoke_reason",
+        "status", "limit",
     ):
         assert field in props, f"temporary_access schema 缺少 {field}"
     assert "operation" in tool.input_schema["required"]
     assert tool.input_schema["additionalProperties"] is False
+    assert "query" in props["operation"]["enum"], "operation enum 必须包含 query"
 
 
 def test_temporary_access_never_exposes_confirmation_hash(db):
@@ -308,3 +310,267 @@ def test_temporary_access_rejects_prod_environment_and_forbidden_actions(db):
         db=db,
     )
     assert dml["ok"] is False
+
+
+# ── query 操作 ──
+
+
+def _request_grant(db, *, message, beneficiary="@requester:matrix.org", actions=("SERVICE_CONTROL",), reason="query test"):
+    """辅助：发起一条临时授权申请，返回 (工具结果, 发起 context)。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    context = _context(message=message, sender=beneficiary)
+    result = temporary_access(
+        args={
+            "operation": "request",
+            "message_context": context.to_dict(),
+            "beneficiary_identity": context.actor_key,
+            "system_name": "crypto-trader",
+            "environment": "test",
+            "allowed_actions": list(actions),
+            "reason": reason,
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True, result
+    return result, context
+
+
+def test_temporary_access_query_returns_beneficiary(db):
+    """query 返回授权列表并含受益人字段（本会话内可见他人作为受益人的授权）。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    grant, context = _request_grant(db, message="tool-query-beneficiary")
+    result = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True
+    assert result["total"] >= 1
+    matched = next(
+        (item for item in result["items"] if item["id"] == grant["grant_id"]),
+        None,
+    )
+    assert matched is not None, result["items"]
+    assert matched["beneficiary_actor_key"] == context.actor_key
+    assert matched["status"] == "PENDING"
+    assert matched["allowed_actions"] == ["SERVICE_CONTROL"]
+
+
+def test_temporary_access_query_filters_by_status_and_system(db):
+    """query 支持 status / system_name 过滤。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    grant, context = _request_grant(db, message="tool-query-filter")
+    ctx = _ctx(approver_matrix_ids=["@owner:matrix.org"])
+
+    active = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "status": "ACTIVE",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert active["ok"] is True
+    assert all(item["status"] == "ACTIVE" for item in active["items"])
+
+    pending = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "status": "PENDING",
+            "system_name": "crypto-trader",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert pending["ok"] is True
+    matched = [item for item in pending["items"] if item["id"] == grant["grant_id"]]
+    assert matched, pending["items"]
+
+    # 未知系统名返回错误而不是空列表（与 request 的失败语义一致）
+    missing = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "system_name": "no-such-system",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert missing["ok"] is False
+
+
+def test_temporary_access_query_scoped_to_conversation(db):
+    """query 只返回当前会话的授权：其他会话的记录不可见。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    grant, context = _request_grant(db, message="tool-query-scope")
+
+    # 另一会话的调用者查不到这条授权
+    outsider = _context(message="tool-query-scope-outsider", sender="@owner:matrix.org")
+    result = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": outsider.to_dict(),
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True
+    assert all(item["id"] != grant["grant_id"] for item in result["items"])
+
+    # 按 grant_id 精确查询同样受会话作用域限制
+    by_id_outside = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": outsider.to_dict(),
+            "grant_id": grant["grant_id"],
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert by_id_outside["ok"] is True
+    assert by_id_outside["total"] == 0
+
+    # 原会话按 grant_id 精确查询可见
+    by_id = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "grant_id": grant["grant_id"],
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert by_id["ok"] is True
+    assert by_id["total"] == 1
+    assert by_id["items"][0]["id"] == grant["grant_id"]
+
+
+def test_temporary_access_query_never_exposes_confirmation_hash_or_code(db):
+    """query 结果不包含确认码哈希与确认码。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    grant, context = _request_grant(db, message="tool-query-hash")
+    result = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "grant_id": grant["grant_id"],
+        },
+        ctx=_ctx(approver_matrix_ids=["@owner:matrix.org"]),
+        db=db,
+    )
+    assert result["ok"] is True
+    assert result["total"] == 1
+    assert "confirmation_code_hash" not in str(result)
+    assert "short_code" not in str(result)
+
+
+def test_temporary_access_query_rejects_invalid_status_and_limit(db):
+    """query 的非法 status / limit 被拒绝或收敛。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    context = _context(message="tool-query-invalid")
+    ctx = _ctx(approver_matrix_ids=["@owner:matrix.org"])
+
+    bad_status = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "status": "BOGUS",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert bad_status["ok"] is False
+
+    # limit 超上限被收敛为 200，非法值被拒绝
+    huge = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "limit": 500,
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert huge["ok"] is True
+
+    broken = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "limit": "not-a-number",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert broken["ok"] is False
+
+
+def test_temporary_access_query_reflects_lifecycle_states(db):
+    """query 反映 confirm/revoke 后的状态变化。"""
+    from app.services.tool_adapters.approval_tools import temporary_access
+
+    requested, context = _request_grant(db, message="tool-query-lifecycle")
+    ctx = _ctx(approver_matrix_ids=["@owner:matrix.org"])
+    owner_ctx = _in_same_conversation(context, message="tool-query-lifecycle-confirm", sender="@owner:matrix.org")
+
+    confirmed = temporary_access(
+        args={
+            "operation": "confirm",
+            "message_context": owner_ctx.to_dict(),
+            "grant_id": requested["grant_id"],
+            "short_code": requested["short_code"],
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert confirmed["ok"] is True
+
+    after_confirm = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "grant_id": requested["grant_id"],
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert after_confirm["ok"] is True
+    assert after_confirm["items"][0]["status"] == "ACTIVE"
+
+    revoked = temporary_access(
+        args={
+            "operation": "revoke",
+            "message_context": owner_ctx.to_dict(),
+            "grant_id": requested["grant_id"],
+            "revoke_reason": "done",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert revoked["ok"] is True
+
+    after_revoke = temporary_access(
+        args={
+            "operation": "query",
+            "message_context": context.to_dict(),
+            "status": "REVOKED",
+        },
+        ctx=ctx,
+        db=db,
+    )
+    assert after_revoke["ok"] is True
+    matched = [item for item in after_revoke["items"] if item["id"] == requested["grant_id"]]
+    assert matched, after_revoke["items"]
+    assert matched[0]["status"] == "REVOKED"

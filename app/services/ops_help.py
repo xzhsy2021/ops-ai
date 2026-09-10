@@ -129,6 +129,16 @@ _TOPIC_EXAMPLES: dict[str, list[dict[str, Any]]] = {
             },
             "note": "确认码 15 分钟有效、仅消费一次；重复作用域不叠加。",
         },
+        {
+            "message": "查一下现在有哪些临时授权还在生效，受益人都是谁",
+            "tool": "ops.approval.temporary_access",
+            "operation": "query",
+            "arguments": {
+                "operation": "query",
+                "status": "ACTIVE",
+            },
+            "note": "query 按当前会话过滤，返回受益人/动作/有效期；可用 system_name、environment、beneficiary_identity、grant_id、status 过滤。",
+        },
     ],
     "临时审批": [
         {

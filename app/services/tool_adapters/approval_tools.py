@@ -779,6 +779,8 @@ def _defer_matrix_pull_fed_upload(raw_parameters: dict) -> dict:
 
     包名、SHA256、大小在审批执行后由 MATRIX_PULL 结果回填，这里只校验并保留
     远端路径等与包无关的静态字段，标记 defer_package_from_dependency 供执行器识别。
+    调用方已确保 package_name 缺省或与 pull 目标 filename 一致；一致的包名
+    保留下来供审批展示，执行时仍以 MATRIX_PULL 实际拉取结果回填为准。
     """
     remote_path = _remote_file_path(raw_parameters.get("remote_path"))
     overwrite = bool(raw_parameters.get("overwrite", False))
@@ -792,6 +794,9 @@ def _defer_matrix_pull_fed_upload(raw_parameters: dict) -> dict:
         "overwrite": overwrite,
         "defer_package_from_dependency": True,
     }
+    supplied_name = str(raw_parameters.get("package_name") or "").strip()
+    if supplied_name:
+        deferred["package_name"] = supplied_name
     if confirm_path:
         deferred["confirm_path"] = confirm_path
     return deferred
@@ -851,14 +856,56 @@ def _normalize_matrix_pull_steps(steps: list[dict], message_context, args: dict 
 
 
 def _freeze_file_upload_plan_steps(steps: list[dict], db) -> list[dict]:
-    frozen_steps = []
+    """冻结计划中的 FILE_UPLOAD 步骤参数。
+
+    pull-fed 步骤（依赖链上存在 MATRIX_PULL）一律走延迟冻结：包内容在
+    审批执行后才由 MATRIX_PULL 拉取入库，创建时按包名查询文件中心会
+    冻结到“创建时刻的旧包”——执行时 pull 结果覆盖同名包后，冻结的
+    expected_sha256 必然与实际内容不符，导致 409（2026-09-09 Jun
+    发版事故 plan ea7f8178 的根因）。因此：
+
+    - 依赖 MATRIX_PULL 的 FILE_UPLOAD：只冻结静态字段（remote_path/
+      overwrite/confirm_path），包名与校验和执行时从依赖结果回填；
+      显式传入的 expected_sha256/expected_size_bytes 一律拒绝——
+      它们无法与“执行时才知道的包”对账，保留只会复现事故。
+    - 显式 package_name 与 pull 目标 filename 不一致时同样拒绝：
+      混用“拉取的新包”与“文件中心旧包”语义矛盾。
+    - 不依赖 MATRIX_PULL 的 FILE_UPLOAD：维持原契约，必须引用文件
+      中心已存在包并冻结其校验和。
+    """
     fed_by_matrix = _steps_fed_by_matrix_pull(steps)
+    frozen_steps = []
+    pull_filenames = {
+        str((step.get("parameters") or {}).get("filename") or "").strip()
+        for step in steps
+        if str(step.get("action_type") or "").strip() == "MATRIX_PULL"
+    }
+    pull_filenames.discard("")
     for raw_step in steps:
         step = dict(raw_step)
         if str(step.get("action_type") or "").strip() == "FILE_UPLOAD":
             parameters = dict(step.get("parameters") or {})
             action_parameters = dict(parameters.get("action_parameters") or {})
-            if step.get("step_key") in fed_by_matrix and not action_parameters.get("package_name"):
+            if step.get("step_key") in fed_by_matrix:
+                if action_parameters.get("expected_sha256") or action_parameters.get("expected_size_bytes"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "FILE_UPLOAD 步骤依赖 MATRIX_PULL 时不能携带 expected_sha256/"
+                            "expected_size_bytes——包在审批执行后才拉取入库，创建时无法预知"
+                            "其校验和；请移除该字段，执行时将从拉取结果回填"
+                        ),
+                    )
+                supplied_name = str(action_parameters.get("package_name") or "").strip()
+                if supplied_name and pull_filenames and supplied_name not in pull_filenames:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"FILE_UPLOAD 步骤依赖 MATRIX_PULL，但 package_name={supplied_name!r} "
+                            f"与 MATRIX_PULL 拉取目标 {sorted(pull_filenames)} 不一致；"
+                            "该步骤应上传 pull 拉取的包，请对齐包名或移除 package_name 由执行时回填"
+                        ),
+                    )
                 parameters["action_parameters"] = _defer_matrix_pull_fed_upload(action_parameters)
             else:
                 action_parameters, _, _, _, _ = _freeze_file_upload_parameters(
@@ -1525,7 +1572,7 @@ def _plan_steps_schema() -> dict:
             "type": "object",
             "properties": {
                 "step_key": {"type": "string", "description": "计划内唯一步骤键"},
-                "action_type": {"type": "string", "description": "Step type: SERVICE_CONTROL / FILE_UPLOAD / HEALTH_CHECK / RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP / MATRIX_PULL（从 Matrix 房间拉取附件到文件中心，parameters: room_id, sender, minutes?, filename?, system?, service?, overwrite?）"},
+                "action_type": {"type": "string", "description": "Step type: SERVICE_CONTROL / FILE_UPLOAD / HEALTH_CHECK / RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP / MATRIX_PULL（从 Matrix 房间拉取附件到文件中心，parameters: room_id, sender, minutes?, filename?, system?, service?, overwrite?）。注意：FILE_UPLOAD 若依赖 MATRIX_PULL（直接或间接），其包与校验和由执行时拉取结果回填——禁止携带 expected_sha256/expected_size_bytes，package_name 只能等于 MATRIX_PULL 的 filename 或省略；独立 FILE_UPLOAD 才要求 package_name 引用文件中心已存在包并冻结其校验和。"},
                 "parameters": {"type": "object", "description": "冻结的步骤参数"},
                 "dependencies": {
                     "type": "array",
@@ -1968,7 +2015,7 @@ def approval_reject_plan(args, ctx, db):
 @registry.register(
     name="ops.approval.temporary_access",
     title="管理临时自审批授权",
-    description="为测试环境变更创建/确认/撤销限时自审批授权。操作身份只从 message_context.sender_id 推导；仅配置的原始审批人能确认/撤销；授权只允许固定受益人、固定测试系统/环境、固定动作集与授权生命周期。确认码 15 分钟有效且仅能消费一次。",
+    description="为测试环境变更创建/确认/撤销/查询限时自审批授权。操作身份只从 message_context.sender_id 推导；仅配置的原始审批人能确认/撤销；授权只允许固定受益人、固定测试系统/环境、固定动作集与授权生命周期。确认码 15 分钟有效且仅能消费一次。query 操作按调用会话返回授权列表（含受益人/状态/有效期），不返回确认码。",
     scopes=["ops:read"],
     risk="low",
     category="approval_prepare",
@@ -1977,13 +2024,13 @@ def approval_reject_plan(args, ctx, db):
         "properties": {
             "operation": {
                 "type": "string",
-                "enum": ["request", "confirm", "revoke"],
-                "description": "操作类型：request 发起授权申请 / confirm 确认授权 / revoke 撤销授权",
+                "enum": ["request", "confirm", "revoke", "query"],
+                "description": "操作类型：request 发起授权申请 / confirm 确认授权 / revoke 撤销授权 / query 查询授权（含受益人）",
             },
             "message_context": message_context_schema(),
-            "system_name": {"type": "string", "description": "目标系统名（request 必填）"},
-            "environment": {"type": "string", "description": "测试环境名（request 必填）"},
-            "beneficiary_identity": {"type": "string", "description": "受益人 actor key，如 matrix:default:@user:example.org（request 必填）"},
+            "system_name": {"type": "string", "description": "目标系统名（request 必填；query 可选过滤）"},
+            "environment": {"type": "string", "description": "测试环境名（request 必填；query 可选过滤）"},
+            "beneficiary_identity": {"type": "string", "description": "受益人 actor key，如 matrix:default:@user:example.org（request 必填；query 可选过滤）"},
             "allowed_actions": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1992,25 +2039,29 @@ def approval_reject_plan(args, ctx, db):
             "reason": {"type": "string", "description": "授权理由（request 必填）"},
             "duration_value": {"type": "integer", "description": "授权时长数值（request 可选，默认 1）"},
             "duration_unit": {"type": "string", "enum": ["day", "week"], "description": "授权时长单位（request 可选，默认 day）"},
-            "grant_id": {"type": "string", "description": "授权 ID（confirm/revoke 必填）"},
+            "grant_id": {"type": "string", "description": "授权 ID（confirm/revoke 必填；query 可选精确过滤）"},
             "short_code": {"type": "string", "description": "一次性确认码（confirm 必填）"},
             "revoke_reason": {"type": "string", "description": "撤销理由（revoke 可选）"},
+            "status": {"type": "string", "enum": ["PENDING", "ACTIVE", "REVOKED", "EXPIRED"], "description": "query 状态过滤（可选）：PENDING 待确认 / ACTIVE 生效中 / REVOKED 已撤销 / EXPIRED 已过期"},
+            "limit": {"type": "integer", "description": "query 返回数量上限（可选，默认 50，最大 200）"},
         },
         "required": ["operation", "message_context"],
         "additionalProperties": False,
     },
 )
 def temporary_access(args, ctx, db):
-    """临时自审批授权管理工具：request / confirm / revoke。
+    """临时自审批授权管理工具：request / confirm / revoke / query。
 
     操作身份只从 message_context.sender_id 推导；原始审批人从
     _lookup_approvers（数据库/Token 策略）解析，绝不信任消息文本里的用户名。
+    query 按调用会话（channel+account+conversation）过滤授权记录，
+    受益人字段原样返回，任何结果不包含确认码或其哈希。
     """
     from app.services.temporary_approval import TemporaryApprovalService
 
     operation = str(args.get("operation") or "").strip()
-    if operation not in ("request", "confirm", "revoke"):
-        return {"ok": False, "error": "operation must be request, confirm or revoke"}
+    if operation not in ("request", "confirm", "revoke", "query"):
+        return {"ok": False, "error": "operation must be request, confirm, revoke or query"}
 
     try:
         message_context = normalize_message_context(args.get("message_context") or {})
@@ -2080,6 +2131,73 @@ def temporary_access(args, ctx, db):
         payload["ok"] = True
         payload["grant_id"] = payload.get("id")
         return payload
+
+    if operation == "query":
+        grant_id = str(args.get("grant_id") or "").strip()
+        status = str(args.get("status") or "").strip()
+        if status and status not in ("PENDING", "ACTIVE", "REVOKED", "EXPIRED"):
+            return {"ok": False, "error": "status must be PENDING, ACTIVE, REVOKED or EXPIRED"}
+        try:
+            limit = int(args.get("limit") or 50)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "limit must be an integer"}
+        if limit < 1:
+            limit = 1
+        limit = min(limit, 200)
+
+        # 精确查询单条：仍强制会话作用域，防止跨会话按 ID 枚举授权记录。
+        if grant_id:
+            view = service.get(grant_id)
+            if view is None:
+                return {"ok": True, "total": 0, "items": [], "note": "grant not found"}
+            if (
+                view.channel != message_context.channel
+                or view.channel_account_id != message_context.channel_account_id
+                or view.conversation_id != message_context.conversation_id
+            ):
+                return {"ok": True, "total": 0, "items": [], "note": "grant not found"}
+            if status and view.status != status:
+                return {"ok": True, "total": 0, "items": []}
+            items = [view]
+        else:
+            # 列表查询：按调用会话过滤（会话内可见该会话的全部授权，
+            # 含他人作为受益人的记录——与 Web 管理端的登录可见性对齐）。
+            system_id = None
+            environment_id = None
+            system_name = str(args.get("system_name") or "").strip()
+            environment_name = str(args.get("environment") or "").strip()
+            if system_name:
+                from app.db.models import System, SystemEnvironment
+                system = db.query(System).filter(System.name == system_name).first()
+                if system is None:
+                    return {"ok": False, "error": f"system does not exist: {system_name}"}
+                system_id = system.id
+                if environment_name:
+                    environment = db.query(SystemEnvironment).filter(
+                        SystemEnvironment.system_name == system.name,
+                        SystemEnvironment.name == environment_name,
+                    ).first()
+                    if environment is None:
+                        return {"ok": False, "error": f"environment does not exist: {environment_name}"}
+                    environment_id = environment.id
+
+            beneficiary = str(args.get("beneficiary_identity") or "").strip()
+            items = service.list(
+                status=status or None,
+                limit=limit,
+                channel=message_context.channel,
+                channel_account_id=message_context.channel_account_id,
+                conversation_id=message_context.conversation_id,
+                beneficiary_actor_key=beneficiary or None,
+                system_id=system_id,
+                environment_id=environment_id,
+            )
+
+        return {
+            "ok": True,
+            "total": len(items),
+            "items": [item.to_dict() for item in items],
+        }
 
     if operation in ("confirm", "revoke"):
         grant_id = str(args.get("grant_id") or "").strip()

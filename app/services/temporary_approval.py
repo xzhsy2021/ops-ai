@@ -502,8 +502,48 @@ class TemporaryApprovalService:
     def can_self_approve_plan(self, **kwargs) -> bool:
         return self.is_self_approval_allowed(**kwargs)
 
-    def list(self, *, status: str | None = None, limit: int = 50) -> list[TemporaryApprovalGrantView]:
+    def list(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+        channel: str | None = None,
+        channel_account_id: str | None = None,
+        conversation_id: str | None = None,
+        beneficiary_actor_key: str | None = None,
+        system_id: str | None = None,
+        environment_id: str | None = None,
+    ) -> list[TemporaryApprovalGrantView]:
+        """按条件查询授权列表。
+
+        传入 channel/channel_account_id/conversation_id 时按会话作用域过滤
+        （MCP 查询路径用它防止跨会话枚举授权记录）。投影不含确认码哈希。
+        """
         query = self.db.query(TemporaryApprovalGrant)
         if status:
             query = query.filter(TemporaryApprovalGrant.status == status)
+        if channel:
+            query = query.filter(TemporaryApprovalGrant.channel == channel)
+        if channel_account_id:
+            query = query.filter(TemporaryApprovalGrant.channel_account_id == channel_account_id)
+        if conversation_id:
+            query = query.filter(TemporaryApprovalGrant.conversation_id == conversation_id)
+        if beneficiary_actor_key:
+            query = query.filter(TemporaryApprovalGrant.beneficiary_actor_key == beneficiary_actor_key)
+        if system_id:
+            query = query.filter(TemporaryApprovalGrant.system_id == system_id)
+        if environment_id:
+            query = query.filter(TemporaryApprovalGrant.environment_id == environment_id)
         return [self._view(row) for row in query.order_by(TemporaryApprovalGrant.created_at.desc()).limit(limit).all()]
+
+    def get(self, grant_id: str) -> TemporaryApprovalGrantView | None:
+        """按 ID 查询单条授权（无权限判定，调用方自行强制作用域）。
+
+        过期检查会同步落库：到期记录被更新为 EXPIRED 后按当前状态返回，
+        而不是对查询者隐藏其存在。
+        """
+        grant = self.db.query(TemporaryApprovalGrant).filter(TemporaryApprovalGrant.id == str(grant_id or "").strip()).first()
+        if grant is None:
+            return None
+        self._expire_if_needed(grant)
+        return self._view(grant)

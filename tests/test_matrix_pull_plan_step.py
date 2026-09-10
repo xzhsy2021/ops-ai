@@ -278,6 +278,124 @@ def test_matrix_pull_fed_file_upload_defers_freeze():
     assert "expected_size_bytes" not in ap
 
 
+# ── Jun 事故回归（2026-09-09 plan ea7f8178）：pull-fed FILE_UPLOAD
+#    提供了 package_name（按批量计划契约），旧逻辑因此走冻结路径，
+#    把“创建时刻的文件中心同名旧包”SHA256 冻结进计划；执行时
+#    MATRIX_PULL 拉取新包覆盖同名包 → 冻结值必然失配 → 409。──
+
+
+def test_pull_fed_upload_with_package_name_also_defers():
+    """pull-fed FILE_UPLOAD 提供 package_name 时也必须走 defer，不冻结旧包。
+
+    这是 Jun 发版事故的直接根因：agent 按「批量计划 FILE_UPLOAD 必须引用
+    package_name」契约如实传参，旧逻辑却因此落入冻结路径。
+    """
+    frozen = _freeze(
+        {"step_key": "pull", "action_type": "MATRIX_PULL",
+         "parameters": {"room_id": "!r:x", "filename": "crypto-trader-web.tar.gz"},
+         "dependencies": []},
+        {"step_key": "upload", "action_type": "FILE_UPLOAD",
+         "parameters": {"action_parameters": {
+             "remote_path": "/data/web/crypto-trader-web.tar.gz",
+             "package_name": "crypto-trader-web.tar.gz",
+             "overwrite": True,
+             "confirm_path": "/data/web/crypto-trader-web.tar.gz",
+         }},
+         "dependencies": ["pull"]},
+    )
+    upload = next(s for s in frozen if s["step_key"] == "upload")
+    ap = upload["parameters"]["action_parameters"]
+    assert ap["defer_package_from_dependency"] is True
+    # 包名与 pull 目标一致时保留（供审批展示），但绝不冻结校验和
+    assert ap.get("package_name") == "crypto-trader-web.tar.gz"
+    assert "expected_sha256" not in ap
+    assert "expected_size_bytes" not in ap
+
+
+def test_pull_fed_upload_rejects_frozen_checksum():
+    """pull-fed FILE_UPLOAD 显式携带 expected_sha256/size 一律拒绝。
+
+    包在审批执行后才拉取入库，创建时无法预知其校验和；保留任何
+    预冻值都必然与实际拉取内容失配（409 事故模式）。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        _freeze(
+            {"step_key": "pull", "action_type": "MATRIX_PULL",
+             "parameters": {"room_id": "!r:x"}, "dependencies": []},
+            {"step_key": "upload", "action_type": "FILE_UPLOAD",
+             "parameters": {"action_parameters": {
+                 "remote_path": "/opt/pkg.tar.gz",
+                 "expected_sha256": "e" * 64,
+             }},
+             "dependencies": ["pull"]},
+        )
+    assert "expected_sha256" in str(exc_info.value.detail)
+
+
+def test_pull_fed_upload_rejects_mismatched_package_name():
+    """pull-fed FILE_UPLOAD 的 package_name 与 MATRIX_PULL 拉取目标不一致时拒绝。
+
+    混用「拉取的新包」与「文件中心另一旧包」语义矛盾，审批人无法
+    判断实际上传的是哪个包。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        _freeze(
+            {"step_key": "pull", "action_type": "MATRIX_PULL",
+             "parameters": {"room_id": "!r:x", "filename": "new-build.tar.gz"},
+             "dependencies": []},
+            {"step_key": "upload", "action_type": "FILE_UPLOAD",
+             "parameters": {"action_parameters": {
+                     "remote_path": "/data/web/old-name.tar.gz",
+                     "package_name": "old-name.tar.gz",
+                 }},
+             "dependencies": ["pull"]},
+        )
+    assert "不一致" in str(exc_info.value.detail) or "old-name" in str(exc_info.value.detail)
+
+
+def test_pull_fed_upload_executes_with_pulled_checksum(db, monkeypatch):
+    """执行时 deferred FILE_UPLOAD 注入 pull 结果的 sha256/size 作为对账值。
+
+    完整复现 Jun 事故链：文件中心存在同名旧包（旧 SHA）→ pull 拉取
+    新包覆盖同名包 → 上传步骤以 pull 结果的校验和对账 → 必须成功，
+    而不是拿旧包 SHA 比对失败。
+    """
+    import app.services.tool_adapters.matrix_tools as mt
+    from app.services.approval_executor import ApprovalExecutor
+
+    captured = {}
+    NEW_SHA = "f" * 64  # pull 拉取的新包校验和
+
+    def fake_upload(self, approval, payload):
+        captured["payload"] = payload
+        return {"action": "FILE_UPLOAD", "ok": True, "message": "done"}
+
+    monkeypatch.setattr(
+        mt, "pull_matrix_attachment_core",
+        lambda db_, **kwargs: {"package_name": "crypto-trader-web.tar.gz", "sha256": NEW_SHA, "size_bytes": 1661567},
+    )
+    monkeypatch.setattr(ApprovalExecutor, "_execute_file_upload", fake_upload)
+
+    steps = [
+        {"step_key": "pull", "action_type": "MATRIX_PULL",
+         "parameters": {"room_id": "!r:x", "sender": "@jun:x", "filename": "crypto-trader-web.tar.gz"},
+         "dependencies": []},
+        {"step_key": "upload", "action_type": "FILE_UPLOAD",
+         "parameters": {"action_parameters": {"remote_path": "/data/web/crypto-trader-web.tar.gz", "defer_package_from_dependency": True}},
+         "dependencies": ["pull"]},
+    ]
+    plan = _prepare_approved(db, "pull-upload-sha", steps)
+    result = PlanExecutor(db).execute(plan.id)
+
+    assert result.status == "SUCCEEDED"
+    by_key = {s.step_key: s for s in result.steps}
+    assert by_key["upload"].status == "SUCCEEDED"
+    ap = captured["payload"]["action_parameters"]
+    assert ap["package_name"] == "crypto-trader-web.tar.gz"
+    assert ap["expected_sha256"] == NEW_SHA
+    assert ap["expected_size_bytes"] == 1661567
+
+
 def test_standalone_file_upload_still_demands_package():
     """不依赖 MATRIX_PULL 的 FILE_UPLOAD 步骤仍要求引用已存在包并冻结校验。"""
     from fastapi import HTTPException

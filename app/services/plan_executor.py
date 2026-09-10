@@ -312,13 +312,22 @@ def _file_upload_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Sessi
     params = step.parameters or {}
     action_parameters = dict(params.get("action_parameters") or {})
     if action_parameters.pop("defer_package_from_dependency", False):
-        # 包来自前置 MATRIX_PULL 步骤，创建时未冻结，执行时从依赖结果回填 package_name
-        package_name = _dependency_package_name(plan, step)
+        # 包来自前置 MATRIX_PULL 步骤，创建时未冻结，执行时从依赖结果
+        # 回填 package_name 及其校验和（sha256/size 来自 pull 结果，
+        # 是该包在执行时点的唯一可信对账值）
+        package_info = _dependency_package_info(plan, step)
+        package_name = package_info.get("package_name") or ""
         if not package_name:
             raise ValueError(
                 "FILE_UPLOAD 步骤依赖 MATRIX_PULL 未产生 package_name，无法执行上传"
             )
         action_parameters["package_name"] = package_name
+        pulled_sha = package_info.get("sha256") or ""
+        if pulled_sha and not action_parameters.get("expected_sha256"):
+            action_parameters["expected_sha256"] = pulled_sha
+        pulled_size = package_info.get("size_bytes")
+        if pulled_size and not action_parameters.get("expected_size_bytes"):
+            action_parameters["expected_size_bytes"] = int(pulled_size)
     payload = {
         "system_name": params.get("system_name") or plan.system_name,
         "service_name": params.get("service_name") or plan.service_name,
@@ -381,12 +390,14 @@ def _matrix_pull_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Sessi
     )
 
 
-def _dependency_package_name(plan: ExecutionPlan, step: ExecutionPlanStep) -> str:
-    """从依赖步骤的执行结果中回填 package_name（如 MATRIX_PULL → RELEASE）。
+def _dependency_package_info(plan: ExecutionPlan, step: ExecutionPlanStep) -> dict:
+    """从依赖步骤（如 MATRIX_PULL）的执行结果中提取包信息。
 
-    计划 manifest 在审批时冻结，而拉取到的包名只有运行时才知道；
-    因此 RELEASE 步骤未显式指定 package_name 时，按依赖顺序查找
-    前置步骤结果里的 package_name。
+    返回 {"package_name": ..., "sha256": ..., "size_bytes": ...}；无可用
+    结果时返回空 dict。pull 结果的 sha256/size 是执行时唯一可信的包
+    校验值——deferred FILE_UPLOAD 步骤用它注入 expected_sha256，确保
+    “上传的一定是 pull 拉到的那个包”，防止执行间隙文件中心同名包被
+    其他流程再次替换（fail-closed 对账）。
     """
     by_key = {s.step_key: s for s in plan.steps}
     for dep in step.dependencies or []:
@@ -394,8 +405,22 @@ def _dependency_package_name(plan: ExecutionPlan, step: ExecutionPlanStep) -> st
         result = getattr(dep_step, "result", None) or {}
         package_name = str(result.get("package_name") or "").strip()
         if package_name:
-            return package_name
-    return ""
+            return {
+                "package_name": package_name,
+                "sha256": str(result.get("sha256") or "").strip(),
+                "size_bytes": result.get("size_bytes"),
+            }
+    return {}
+
+
+def _dependency_package_name(plan: ExecutionPlan, step: ExecutionPlanStep) -> str:
+    """从依赖步骤的执行结果中回填 package_name（如 MATRIX_PULL → RELEASE）。
+
+    计划 manifest 在审批时冻结，而拉取到的包名只有运行时才知道；
+    因此 RELEASE 步骤未显式指定 package_name 时，按依赖顺序查找
+    前置步骤结果里的 package_name。
+    """
+    return _dependency_package_info(plan, step).get("package_name") or ""
 
 
 def _release_handler(plan: ExecutionPlan, step: ExecutionPlanStep, db: Session) -> dict[str, Any]:

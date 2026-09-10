@@ -94,7 +94,8 @@ conversation_key = <channel>:<channel_account_id>:<conversation_id>
 2. **确认**：原始审批人在同一会话回复确认码（15 分钟内有效，仅能消费一次）。未确认前状态为 `PENDING`。
 3. **生效**：确认后状态 `ACTIVE`，受益人在 `expires_at` 前可通过自审批路径消费计划。
 4. **撤销**：原始审批人调用 `revoke`（需 `revoke_reason`）；撤销后授权立即失效。
-5. **过期**：`get_active_grant()` 把已过 `expires_at` 的授权视作过期，无需后台任务。
+5. **查询**：任意会话成员调用 `operation=query` 查看本会话的授权记录（含受益人 `beneficiary_actor_key`、动作集、状态、有效期）。支持 `grant_id` / `system_name` / `environment` / `beneficiary_identity` / `status`（PENDING/ACTIVE/REVOKED/EXPIRED）过滤与 `limit`（默认 50，上限 200）。查询结果**永不包含**确认码或其哈希；按 `grant_id` 精确查询同样受会话作用域限制（跨会话按 ID 枚举返回空）。
+6. **过期**：`get_active_grant()` 把已过 `expires_at` 的授权视作过期，无需后台任务。
 
 重复的活跃授权**不会叠加**：同一作用域同时只允许一个 `ACTIVE` 授权（唯一索引强制）。
 
@@ -133,7 +134,8 @@ QClaw 下载附件后，通过 `POST /api/v2/tools/packages/upload`（`approval_
 
 多步骤消息使用一次 `ops.approval.prepare_plan`（冻结 manifest + 一次性短码）与一次 `ops.approval.execute_plan`（消费短码后按声明顺序执行）：
 
-- 支持的步骤类型：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`、`MATRIX_PULL`（从 Matrix 房间拉取最新附件入库，参数 `room_id` + `sender` 必填；其结果 `package_name` 自动回填依赖的 `RELEASE` 步骤，「拉包 + 发布」一次审批完成）。
+- 支持的步骤类型：`SERVICE_CONTROL`、`HEALTH_CHECK`、`FILE_UPLOAD`、`RELEASE`、`ROLLBACK`、`DML`、`PACKAGE_CLEANUP`、`MATRIX_PULL`（从 Matrix 房间拉取最新附件入库，参数 `room_id` + `sender` 必填；其结果 `package_name` 自动回填依赖的 `RELEASE` / `FILE_UPLOAD` 步骤，「拉包 + 发布」一次审批完成）。
+- **pull-fed FILE_UPLOAD 延迟冻结（2026-09-09 事故修复）**：`FILE_UPLOAD` 步骤直接或间接依赖 `MATRIX_PULL` 时，包与校验和不进入 manifest——执行时从 pull 结果回填 `package_name` 与其 `sha256`/`size_bytes` 并以此为对账值。该类步骤**禁止携带** `expected_sha256` / `expected_size_bytes`（携带即 409 拒绝：包在审批执行后才拉取入库，创建时无法预知其校验和）；`package_name` 只能等于 `MATRIX_PULL` 的 `filename` 或省略（不一致即 409：混用「拉取的新包」与「文件中心另一旧包」语义矛盾）。背景：修复前按「是否提供 package_name」决定冻结路径，agent 遵守批量计划契约传了包名，导致计划冻结「创建时刻文件中心同名旧包」的校验和，执行时 pull 新包覆盖同名包后必然 409（`Local package checksum no longer matches the approved checksum`），上传失败、后续步骤全部搁浅。
 - 计划不可变：任何步骤或包哈希的变更都会使计划摘要失效，受益人无法消费。`MATRIX_PULL` 的 `package_name` 是运行时产物，不参与 manifest 冻结。
 - 临时授权生效时：受益人获得自审批路径，计划记录 `temporary_grant_id`；原始审批人仍在授权身份中，但**不作为通知目标**。
 - 授权过期/撤销后：受益人不能消费；**原始审批人仍可消费已有计划**。

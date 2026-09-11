@@ -18,6 +18,7 @@ from app.db.migrations.runner import run_schema_migrations
 from app.db.models import AiActionApproval, OperationJob
 from app.services.action_approval import ActionApprovalService, _utcnow
 from app.services.approval_executor import ApprovalExecutor
+from app.services.approval_phrase import PROD_CONFIRM_CLAUSE
 from app.services.message_context import MessageContext
 from app.services.qclaw_routing import (
     RoutingOutcome,
@@ -53,6 +54,17 @@ def _event(suffix: str) -> str:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _consume(service, **kwargs):
+    """本文件所有工单都是 environment="prod"：统一补上第 4 层额外确认从句。
+
+    第 4 层（strict_prod_confirmation）要求生产环境除一次性短语外，审批人还必须
+    给出固定从句；此处集中补齐，让各用例只关注自己真正要验证的行为（重放/过期/
+    跨房间/操作类型分发等），而不是每处都重复这个常量。
+    """
+    kwargs.setdefault("prod_confirm_text", PROD_CONFIRM_CLAUSE)
+    return service.consume(**kwargs)
 
 
 def _matrix_context(room_id: str, event_id: str, content_sha256: str) -> MessageContext:
@@ -200,7 +212,7 @@ class TestEndToEndReleaseFlow:
 
         # Step 4: consume 消费确认短语（模拟授权用户在 Element 回复该短语）
         approval_event = _event("approval-full-flow")
-        consumed = service.consume(
+        consumed = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -299,7 +311,7 @@ class TestIdempotencyAndReplay:
         )
 
         # 第一次消费成功
-        first = service.consume(
+        first = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -310,7 +322,7 @@ class TestIdempotencyAndReplay:
         assert first.status == "EXECUTING"
 
         # 第二次消费失败（已消费）
-        second = service.consume(
+        second = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@bob:matrix.org",
@@ -344,7 +356,7 @@ class TestIdempotencyAndReplay:
         )
 
         # 错误短码
-        wrong = service.consume(
+        wrong = _consume(service, 
             approval_id=approval.id,
             short_code="00000000",
             approver_matrix_id="@alice:matrix.org",
@@ -354,7 +366,7 @@ class TestIdempotencyAndReplay:
         assert wrong is None
 
         # 正确短码仍可消费
-        right = service.consume(
+        right = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -387,7 +399,7 @@ class TestIdempotencyAndReplay:
         )
 
         # 在 B 房间消费应失败
-        cross = service.consume(
+        cross = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -424,7 +436,7 @@ class TestExpiryAndReject:
         approval.expires_at = _utcnow() - timedelta(minutes=1)
         db.commit()
 
-        result = service.consume(
+        result = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -495,7 +507,7 @@ class TestExpiryAndReject:
         assert rejected.rejected_by == "matrix:default:@bob:matrix.org"
 
         # 拒绝后不能再消费
-        consume_after_reject = service.consume(
+        consume_after_reject = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -633,7 +645,7 @@ class TestActionTypeDispatch:
 
         # 消费
         service = ActionApprovalService(db)
-        consumed = service.consume(
+        consumed = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -669,7 +681,7 @@ class TestActionTypeDispatch:
         )
 
         service = ActionApprovalService(db)
-        consumed = service.consume(
+        consumed = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -702,7 +714,7 @@ class TestActionTypeDispatch:
         )
 
         service = ActionApprovalService(db)
-        consumed = service.consume(
+        consumed = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -734,7 +746,7 @@ class TestActionTypeDispatch:
         )
 
         service = ActionApprovalService(db)
-        consumed = service.consume(
+        consumed = _consume(service, 
             approval_id=approval.id,
             short_code=short_code,
             approver_matrix_id="@alice:matrix.org",
@@ -868,6 +880,8 @@ class TestMCPExecuteChain:
                     "approver_matrix_id": "@alice:matrix.org",
                     "room_id": room_id,
                     "approval_event_id": _event(f"approval-{suffix}"),
+                    # environment="prod"：第 4 层要求随短语一起给出确认从句
+                    "prod_confirm_text": PROD_CONFIRM_CLAUSE,
                 },
                 ctx=ctx,
                 db=db,
@@ -928,6 +942,7 @@ class TestMCPExecuteChain:
                     "approver_matrix_id": "@alice:matrix.org",
                     "room_id": room_id,
                     "approval_event_id": _event(f"approval-{suffix}"),
+                    "prod_confirm_text": PROD_CONFIRM_CLAUSE,
                 },
                 ctx=ctx,
                 db=db,
@@ -985,7 +1000,8 @@ class TestMCPExecuteChain:
         )
 
         assert result["ok"] is False
-        assert "确认短语无效" in result["error"]
+        # 报错文案精确化（2026-09-11）：不再笼统说"无效"，而是指名短语与工单不匹配
+        assert "不匹配" in result["error"]
 
         # 工单仍为 PENDING_APPROVAL（未被消费）
         db.refresh(approval)

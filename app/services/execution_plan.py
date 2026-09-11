@@ -23,7 +23,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import QCLAW_APPROVAL_TTL_SECONDS
 from app.db.models import ExecutionPlan, ExecutionPlanStep
-from app.services.approval_phrase import build_approval_phrase, fingerprint_of
+from app.services.approval_phrase import (
+    PROD_CONFIRM_CLAUSE,
+    build_approval_phrase,
+    fingerprint_of,
+    split_prod_confirmation,
+)
 from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
@@ -105,7 +110,12 @@ def _verify_approval_code_tolerant(short_code: str, plan: ExecutionPlan) -> bool
     tokens = (short_code or "").strip().split()
     if not tokens:
         return False
-    return hmac.compare_digest(tokens[-1].upper(), fingerprint)
+    # compare_digest 对含非 ASCII 的 str 会抛 TypeError（审批消息带中文说明、
+    # 或末段是生产确认从句时都会命中）。统一按 UTF-8 字节比较：保留常量时间
+    # 语义，同时不再把"审批人写了中文"变成异常。
+    return hmac.compare_digest(
+        tokens[-1].upper().encode("utf-8"), fingerprint.encode("utf-8")
+    )
 
 
 def _normalize_steps(steps: list[dict]) -> list[dict]:
@@ -488,6 +498,7 @@ class ExecutionPlanService:
         *,
         approval_context: MessageContext | dict | None = None,
         digest: str | None = None,
+        prod_confirm_text: str | None = None,
     ) -> ExecutionPlan | None:
         """原子消费审批码。成功返回 plan（状态 APPROVED），失败返回 None。
 
@@ -512,8 +523,12 @@ class ExecutionPlanService:
         if plan.consumed_at is not None:
             self.last_consume_error = f"计划 {plan.id[:8]}... 的确认短语已被消费过"
             return None
+        # 生产额外确认从句的**剥离**先做（纯函数）：审批人可能把
+        # 「批准 <短语> 我确认生产操作」整行照抄，剥离后短语才能对上。
+        # 是否**要求**从句放到有效期校验之后判定（见下方第 4 层）。
+        stripped_code, prod_clause_ok = split_prod_confirmation(short_code, prod_confirm_text)
         # 验证审批码（含中文编码损坏容错：全文失配时退化为指纹段校验）
-        if not _verify_approval_code_tolerant(short_code, plan):
+        if not _verify_approval_code_tolerant(stripped_code, plan):
             self.last_consume_error = "确认短语与计划不匹配"
             return None
         # 验证房间一致，防止跨房间重放
@@ -572,6 +587,17 @@ class ExecutionPlanService:
             plan.status = "EXPIRED"
             self.db.commit()
             self.last_consume_error = f"确认短语已过期（有效期至 {plan.expires_at:%Y-%m-%d %H:%M}）"
+            return None
+        # 第 4 层（strict_prod_confirmation）：生产环境除一次性短语外还必须有
+        # 额外确认从句。位置刻意放在有效期校验之后——先如实报告"已过期/已消费"，
+        # 再把"缺从句"作为执行前的最后一道拦阻。
+        from app.services.tool_policy import strict_prod_confirmation_required
+
+        if not prod_clause_ok and strict_prod_confirmation_required(self.db, plan.environment or ""):
+            self.last_consume_error = (
+                f"生产环境（{plan.environment}）需要额外确认从句「{PROD_CONFIRM_CLAUSE}」："
+                "批准消息必须同时包含一次性短语与该从句，缺一不可"
+            )
             return None
         # 验证存储 manifest 未发生实质变化
         if not self._verify_stored_manifest(plan):

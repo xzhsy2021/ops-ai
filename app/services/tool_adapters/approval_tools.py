@@ -27,7 +27,7 @@ from app.services.qclaw_routing import (
     RoutingOutcome,
 )
 from app.services.action_approval import ActionApprovalService
-from app.services.approval_phrase import build_approval_phrase
+from app.services.approval_phrase import PROD_CONFIRM_CLAUSE, build_approval_phrase
 from app.db.models import ExecutionPlan
 from app.services.execution_plan import ExecutionPlanService, step_approval_details
 from app.services.package_intake import intake_package, list_staging_packages
@@ -496,6 +496,17 @@ def _reuse_short_code(
     )
 
 
+def _prod_confirm_clause(db, environment: str) -> str:
+    """生产环境必须随短语一起给出的额外确认从句；非生产/开关关闭时为空串。
+
+    第 4 层（strict_prod_confirmation）。回执模板据此把「批准 <短语> <从句>」
+    作为可整行照抄的审批行；执行入口 consume 会独立强制该从句。
+    """
+    from app.services.tool_policy import strict_prod_confirmation_required
+
+    return PROD_CONFIRM_CLAUSE if strict_prod_confirmation_required(db, environment) else ""
+
+
 def _approval_reply_template(
     *,
     kind: str,
@@ -517,6 +528,7 @@ def _approval_reply_template(
     exec_template_id: str = "",
     exec_timeout_seconds: int = 0,
     risk_notes=None,
+    prod_confirm_text: str = "",
 ) -> str:
     """生成固定格式的中文 Markdown 审批回执（Agent 直接转发，禁止自由发挥）。
 
@@ -583,6 +595,11 @@ def _approval_reply_template(
         for note in (risk_notes or []):
             lines.append(f"  - 提示：{note}")
     lines.append(f"- 有效期至：`{_fmt_expiry(expires_at)}`")
+    if prod_confirm_text:
+        lines.append(
+            f"- 生产环境额外确认：`{prod_confirm_text}`（第 4 层防护，"
+            "必须与确认短语写在**同一条**消息里，缺一不可）"
+        )
     if command_block:
         lines += [
             "",
@@ -592,12 +609,15 @@ def _approval_reply_template(
             command_block,
             "```",
         ]
+    approve_line = f"批准 {short_code}"
+    if prod_confirm_text:
+        approve_line = f"{approve_line} {prod_confirm_text}"
     lines += [
         "",
         "请指定审批人回复：",
         "",
         "```text",
-        f"批准 {short_code}",
+        approve_line,
         "```",
     ]
     return "\n".join(lines)
@@ -1176,10 +1196,12 @@ def approval_prepare_service_control(args, ctx, db):
         expires_at=approval.expires_at,
         steps=[{"action_type": "SERVICE_CONTROL"}],
         approvers=approvers,
+        prod_confirm_text=_prod_confirm_clause(db, args["environment"]),
     )
     return {
         "approval_id": approval.id,
         "short_code": short_code,
+        "prod_confirm_text": _prod_confirm_clause(db, args["environment"]) or None,
         "action_digest": approval.action_digest,
         "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
         "status": approval.status,
@@ -1426,10 +1448,12 @@ def approval_prepare_exec(args, ctx, db):
         exec_template_id=template_id,
         exec_timeout_seconds=timeout,
         risk_notes=list(verdict.get("notes") or []),
+        prod_confirm_text=_prod_confirm_clause(db, environment),
     )
     return {
         "approval_id": approval.id,
         "short_code": short_code,
+        "prod_confirm_text": _prod_confirm_clause(db, environment) or None,
         "action_digest": approval.action_digest,
         "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
         "status": approval.status,
@@ -1564,7 +1588,7 @@ def approval_prepare_file_upload(args, ctx, db):
 @registry.register(
     name="ops.approval.execute",
     title="执行已审批的操作",
-    description="消费审批确认短语（如「批准服务控制 crypto-trader@test A3F9C2D1」），验证通过后将审批工单标记为 EXECUTING 并触发实际操作（部署/回滚/DML/包清理）。安全门禁是确认短语本身（一次性、15 分钟过期、绑定房间+事件、内容指纹防跨单复用），而非调用方 token scope，因此只需 ops:read。",
+    description="消费审批确认短语（如「批准服务控制 crypto-trader@test A3F9C2D1」），验证通过后将审批工单标记为 EXECUTING 并触发实际操作（部署/回滚/DML/包清理）。安全门禁是确认短语本身（一次性、15 分钟过期、绑定房间+事件、内容指纹防跨单复用），而非调用方 token scope，因此只需 ops:read。生产环境（environment=prod）另有第 4 层防护 strict_prod_confirmation：除短语外还必须回传 prepare 返回的 prod_confirm_text（固定从句「我确认生产操作」），审批人也必须在同一条消息里同时给出该从句。",
     scopes=["ops:read"],
     risk="low",
     category="approval_execute",
@@ -1574,6 +1598,7 @@ def approval_prepare_file_upload(args, ctx, db):
         "properties": {
             "approval_id": {"type": "string", "description": "审批工单 ID"},
             "short_code": {"type": "string", "description": "一次性确认短语，来自 prepare 返回（如 批准服务控制 crypto-trader@test A3F9C2D1）"},
+            "prod_confirm_text": {"type": "string", "description": "生产环境额外确认从句（第 4 层）：environment 为生产时，准备阶段的回执里会给出一句固定中文（如 我确认生产操作），审批人必须在同一条消息里同时给出该从句与一次性短语。把从句原样放在这里；若审批人写成「批准 <短语> <从句>」整行，也可只把整行放进 short_code，系统会自动剥离从句。"},
             "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
@@ -1602,11 +1627,15 @@ def approval_execute(args, ctx, db):
         room_id=approval_context.conversation_id,
         approval_event_id=approval_context.message_id,
         approval_context=approval_context,
+        prod_confirm_text=args.get("prod_confirm_text"),
     )
     if not approval:
         return {
             "ok": False,
-            "error": "确认短语无效、已过期、已被消费或房间不匹配",
+            "error": (
+                getattr(service, "last_consume_error", "")
+                or "确认短语无效、已过期、已被消费或房间不匹配"
+            ),
             "approval_id": args["approval_id"],
         }
 
@@ -1900,6 +1929,8 @@ def approval_prepare_plan(args, ctx, db):
         digest=plan.plan_digest,
     )
 
+    prod_confirm_text = _prod_confirm_clause(db, plan.environment)
+
     reply_template = _approval_reply_template(
         kind="plan",
         status=plan.status,
@@ -1914,6 +1945,7 @@ def approval_prepare_plan(args, ctx, db):
         approvers=approvers,
         package_size_bytes=package_size_bytes,
         package_sha256=package_sha256,
+        prod_confirm_text=prod_confirm_text,
     )
 
     return {
@@ -1941,6 +1973,9 @@ def approval_prepare_plan(args, ctx, db):
             for s in plan.steps
         ],
         "authorized_approvers": approvers,
+        # 生产环境额外确认从句（第 4 层 strict_prod_confirmation）：非 null 时
+        # 审批人必须把这一句与确认短语写在同一条消息里，否则 execute_plan 会拒绝。
+        "prod_confirm_text": prod_confirm_text or None,
         # 固定格式回执模板：Agent 应原样发送到房间（Matrix msgtype=m.text），
         # 不要自由改写/截断/重排；如需自定义展示，使用上面的结构化字段自组。
         "reply_template": reply_template,
@@ -1948,9 +1983,17 @@ def approval_prepare_plan(args, ctx, db):
             "把 reply_template 原样发到房间等待审批——这是唯一需要播报的消息；"
             "扫描房间/读事件/核对附件等中间动作静默执行，不要把过程复述到房间。"
             "当审批人在同一房间回复"
-            f"「批准 {short_code}」后，立即调用 ops.approval.execute_plan："
+            f"「批准 {short_code}"
+            + (f" {prod_confirm_text}" if prod_confirm_text else "")
+            + "」后，立即调用 ops.approval.execute_plan："
             "plan_id=本结果 plan_id、short_code=审批消息里的完整短语、"
-            "room_id=审批消息所在房间、approver_matrix_id=审批人 Matrix ID。"
+            + (
+                f"prod_confirm_text={prod_confirm_text}（本计划是生产环境，"
+                "必须原样回传该从句，否则会被拒绝）、"
+                if prod_confirm_text
+                else ""
+            )
+            + "room_id=审批消息所在房间、approver_matrix_id=审批人 Matrix ID。"
             "不要因'缺少上下文'而停止——房间与审批人就是审批消息本身携带的，"
             "直接调用即可。"
         ),
@@ -1960,7 +2003,7 @@ def approval_prepare_plan(args, ctx, db):
 @registry.register(
     name="ops.approval.execute_plan",
     title="执行已审批的执行计划",
-    description="消费一次性确认短语（如「批准发布+健康检查 crypto-trader@test A3F9C2D1」），验证通过后将执行计划置为可执行并按冻结步骤顺序执行。安全门禁是确认短语本身（一次性、15 分钟过期、绑定房间+事件、内容指纹防跨计划复用），而非调用方 token scope，因此只需 ops:read。",
+    description="消费一次性确认短语（如「批准发布+健康检查 crypto-trader@test A3F9C2D1」），验证通过后将执行计划置为可执行并按冻结步骤顺序执行。安全门禁是确认短语本身（一次性、15 分钟过期、绑定房间+事件、内容指纹防跨计划复用），而非调用方 token scope，因此只需 ops:read。生产环境（environment=prod）另有第 4 层防护 strict_prod_confirmation：除短语外还必须回传 prepare_plan 返回的 prod_confirm_text（固定从句「我确认生产操作」），审批人也必须在同一条消息里同时给出该从句。",
     scopes=["ops:read"],
     risk="low",
     category="approval_execute",
@@ -1970,6 +2013,7 @@ def approval_prepare_plan(args, ctx, db):
         "properties": {
             "plan_id": {"type": "string", "description": "执行计划 ID"},
             "short_code": {"type": "string", "description": "一次性确认短语，来自 prepare_plan 返回（如 批准发布+健康检查 crypto-trader@test A3F9C2D1）"},
+            "prod_confirm_text": {"type": "string", "description": "生产环境额外确认从句（第 4 层）：environment 为生产时，prepare_plan 返回的 prod_confirm_text 给出固定中文（如 我确认生产操作），审批人必须在同一条消息里同时给出该从句与一次性短语。把从句原样放在这里；若审批人写成「批准 <短语> <从句>」整行，也可只把整行放进 short_code，系统会自动剥离从句。"},
             "message_context": message_context_schema(),
             "approver_matrix_id": {"type": "string", "description": "审批人的 Matrix user ID"},
             "room_id": {"type": "string", "description": "Matrix 房间 ID"},
@@ -1997,6 +2041,7 @@ def approval_execute_plan(args, ctx, db):
         room_id=approval_context.conversation_id,
         approval_event_id=approval_context.message_id,
         approval_context=approval_context,
+        prod_confirm_text=args.get("prod_confirm_text"),
     )
     if not plan:
         # consume 失败的具体原因（短语碰撞/旧计划终态/过期/人不对/隔离拒绝…），

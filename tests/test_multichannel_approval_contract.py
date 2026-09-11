@@ -9,6 +9,7 @@ from app.db.base import Base
 from app.db.migrations.runner import run_schema_migrations
 from app.db.models import AiActionApproval, ExecutionPlan
 from app.services.action_approval import ActionApprovalService, compute_action_digest
+from app.services.approval_phrase import PROD_CONFIRM_CLAUSE
 from app.services.execution_plan import ExecutionPlanService, compute_plan_digest
 from app.services.message_context import MessageContext
 
@@ -281,6 +282,9 @@ def test_all_supported_channels_can_prepare_and_consume(tmp_path, channel, servi
             code,
             approval_context=approval_context,
             digest=request.action_digest if service_kind == "action" else request.plan_digest,
+            # _action_prepare/_plan_prepare 造的是 environment="prod" 工单：
+            # 第 4 层 strict_prod_confirmation 要求同时给出确认从句。
+            prod_confirm_text=PROD_CONFIRM_CLAUSE,
         )
         assert consumed is not None
         assert consumed.approved_by == f"{channel}:primary:approver"

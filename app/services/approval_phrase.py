@@ -31,6 +31,31 @@ _ACTION_VERBS: dict[str, str] = {
 
 _MAX_VERBS = 3  # 动作过多时截断，保持短语可读
 
+# 生产环境额外确认从句（第 4 层 strict_prod_confirmation 的强制内容）。
+# 审批人必须把这一句与一次性短语写在同一条消息里；短语本身只证明"批准了这次
+# 内容指纹"，多这一句才证明"清楚知道这是生产"。措辞固定、可背诵，因此单独
+# 出现不构成确认，必须与当次短语同时出现。
+PROD_CONFIRM_CLAUSE = "我确认生产操作"
+
+
+def split_prod_confirmation(
+    short_code: str, prod_confirm_text: str | None = None
+) -> tuple[str, bool]:
+    """拆分「一次性短语」与「生产额外确认从句」。
+
+    返回 ``(用于哈希校验的短语, 从句是否满足)``。
+
+    审批人可能把两句写在同一行照抄（回复模板就是这么给的），因此这里容忍
+    "短语 + 从句"整行形式：剥掉尾部的从句后再校验短语本身。但**从句必须出现**，
+    不能因为能剥掉就当没要求——那正是第 4 层的意义。
+    """
+    code = (short_code or "").strip()
+    provided = (prod_confirm_text or "").strip()
+    if not provided and code.endswith(PROD_CONFIRM_CLAUSE):
+        provided = PROD_CONFIRM_CLAUSE
+        code = code[: -len(PROD_CONFIRM_CLAUSE)].strip()
+    return code, provided == PROD_CONFIRM_CLAUSE
+
 
 def fingerprint_of(digest: str) -> str:
     """由 digest 派生 8 位十六进制大写指纹，供短语生成与校验对称复用。"""

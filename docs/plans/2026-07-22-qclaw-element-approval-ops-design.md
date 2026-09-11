@@ -176,13 +176,20 @@ The action and resulting plan bind `package_id`, `package_name`, and SHA-256. `T
 
 ## 9. Minimal MCP Surface
 
+> **实现现状（2026-09-11 生产发版审计）**：下表里的 `ops.approval.prepare_release` /
+> `prepare_rollback` / `prepare_package_cleanup` / `prepare_dml` **从未注册**。实际实现
+> 收敛为**计划式审批**：`ops.approval.prepare_plan`（步骤类型覆盖 RELEASE / ROLLBACK /
+> DML / PACKAGE_CLEANUP / FILE_UPLOAD / MATRIX_PULL）+ `ops.approval.execute_plan`。
+> `tool_policy.APPROVAL_TOOL_MAP` 已改为指向真实注册的工具，并有契约测试
+> （`tests/test_strict_prod_confirmation.py`）防止再次指向不存在的工具。
+
 Add a `qclaw_approval` discovery profile that exposes only required read and workflow capabilities:
 
 - `ops.routing.resolve_message_target`
-- `ops.approval.prepare_release`
-- `ops.approval.prepare_rollback`
-- `ops.approval.prepare_package_cleanup`
-- `ops.approval.prepare_dml`
+- `ops.approval.prepare_release`（未实现 → 见上方说明，实际用 `ops.approval.prepare_plan`）
+- `ops.approval.prepare_rollback`（未实现 → 同上）
+- `ops.approval.prepare_package_cleanup`（未实现 → 同上）
+- `ops.approval.prepare_dml`（未实现 → 同上）
 - `ops.approval.execute`
 - `ops.approval.reject`
 - `ops.approval.get`

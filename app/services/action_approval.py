@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import QCLAW_APPROVAL_TTL_SECONDS
 from app.db.models import AiActionApproval
-from app.services.approval_phrase import build_approval_phrase
+from app.services.approval_phrase import (
+    PROD_CONFIRM_CLAUSE,
+    build_approval_phrase,
+    split_prod_confirmation,
+)
 from app.services.message_context import MessageContext, normalize_identity, normalize_message_context
 
 
@@ -140,6 +144,9 @@ def _stored_context(approval: AiActionApproval) -> MessageContext | None:
 class ActionApprovalService:
     def __init__(self, db: Session):
         self.db = db
+        # 消费失败的具体原因（与 ExecutionPlanService 同口径），供调用方生成
+        # 可行动的回复而不是笼统的"无效短语"。
+        self.last_consume_error = ""
 
     def prepare(
         self,
@@ -256,11 +263,19 @@ class ActionApprovalService:
         *,
         approval_context: MessageContext | dict | None = None,
         digest: str | None = None,
+        prod_confirm_text: str | None = None,
     ) -> AiActionApproval | None:
         approval = self.db.query(AiActionApproval).filter(AiActionApproval.id == approval_id).first()
         if not approval or approval.status != "PENDING_APPROVAL" or approval.consumed_at is not None:
             return None
-        if not _verify_approval_code(short_code, approval.approval_code_hash or ""):
+
+        # 生产额外确认从句的**剥离**先做（纯函数、无副作用）：审批人可能把
+        # 「批准 <短语> 我确认生产操作」整行照抄，剥离后短语哈希才能对上。
+        # 是否**要求**从句放到有效期校验之后判定（见下方第 4 层），否则过期
+        # 工单会被报成"缺从句"，且不再流转为 EXPIRED。
+        stripped_code, prod_clause_ok = split_prod_confirmation(short_code, prod_confirm_text)
+        if not _verify_approval_code(stripped_code, approval.approval_code_hash or ""):
+            self.last_consume_error = "确认短语与工单不匹配"
             return None
         context = _context(
             approval_context,
@@ -330,7 +345,22 @@ class ActionApprovalService:
         if approval.expires_at and _utcnow() > approval.expires_at:
             approval.status = "EXPIRED"
             self.db.commit()
+            self.last_consume_error = "确认短语已过期"
             return None
+
+        # 第 4 层（strict_prod_confirmation）：生产环境除一次性短语外还必须有
+        # 额外确认从句。位置刻意放在有效期校验之后——先如实报告"已过期/已消费"，
+        # 再把"缺从句"作为执行前的最后一道拦阻。
+        from app.services.tool_policy import strict_prod_confirmation_required
+
+        payload_env = str(payload.get("environment") or "")
+        if not prod_clause_ok and strict_prod_confirmation_required(self.db, payload_env):
+            self.last_consume_error = (
+                f"生产环境（{payload_env}）需要额外确认从句「{PROD_CONFIRM_CLAUSE}」："
+                "审批消息必须同时包含一次性短语与该从句，缺一不可。"
+            )
+            return None
+
         now = _utcnow()
         result = self.db.query(AiActionApproval).filter(
             and_(AiActionApproval.id == approval_id, AiActionApproval.status == "PENDING_APPROVAL", AiActionApproval.consumed_at.is_(None))

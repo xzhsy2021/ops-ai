@@ -200,8 +200,15 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
                     "short_code": "<审批消息里的完整短语>",
                     "room_id": "<审批消息所在房间>",
                     "approver_matrix_id": "<审批人 Matrix ID>",
+                    "prod_confirm_text": "<prepare_plan 返回的 prod_confirm_text；生产环境必填>",
                 },
-                "must_follow": "禁止以'缺少原始上下文'为由停止——四个参数全部在审批消息中",
+                "must_follow": (
+                    "禁止以'缺少原始上下文'为由停止——四个参数全部在审批消息中；"
+                    "生产环境（environment=prod）时 prepare_plan 会返回 prod_confirm_text"
+                    "（固定从句「我确认生产操作」），审批人必须在同一条消息里连同短语一起给出，"
+                    "execute_plan 必须原样回传该字段——第 4 层防护（strict_prod_confirmation）"
+                    "会独立校验，缺了会被拒绝"
+                ),
             },
         ],
         "steps_template": {

@@ -12,6 +12,9 @@ from app.services.action_approval import (
     compute_action_digest,
     _utcnow,
 )
+# 生产环境第 4 层防护：本文件默认用 environment="prod" 造工单，成功消费必须带上
+# 额外确认从句（strict_prod_confirmation），否则会在执行前被拦下。
+from app.services.approval_phrase import PROD_CONFIRM_CLAUSE
 
 
 # 每次测试运行使用唯一前缀，避免与历史数据冲突（数据库为持久化 SQLite 文件）
@@ -205,6 +208,7 @@ def test_consume_is_atomic_under_two_concurrent_calls(db):
             approver_matrix_id="@alice:matrix.org",
             room_id=_room("concurrent"),
             approval_event_id=_event("approve-1"),
+            prod_confirm_text=PROD_CONFIRM_CLAUSE,
         )
         result2 = svc2.consume(
             approval_id=approval.id,
@@ -212,6 +216,7 @@ def test_consume_is_atomic_under_two_concurrent_calls(db):
             approver_matrix_id="@bob:matrix.org",
             room_id=_room("concurrent"),
             approval_event_id=_event("approve-2"),
+            prod_confirm_text=PROD_CONFIRM_CLAUSE,
         )
 
         # 只有一个成功

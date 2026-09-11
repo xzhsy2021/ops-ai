@@ -101,28 +101,66 @@ def ai_tool_level(tool_def) -> str:
 
 
 # Map tool categories/names to the approval tool that unlocks them.
+#
+# 约束：这里只能填**真实注册**的审批工具。历史上 deploy_execute / package_cleanup /
+# db_write 分别指向 ops.approval.prepare_release / prepare_package_cleanup /
+# prepare_dml，但这三个工具从来没有注册过（2026-09-11 生产发版审计发现）。后果是
+# AI 客户端被 403 后照着 guidance 去调用一个不存在的工具，链路直接断在生产发布前，
+# 且报错是"工具不存在"而不是"需要审批"，非常难自查。
+#
+# 计划式审批工具 ops.approval.prepare_plan 的 STEP_HANDLERS 覆盖
+# RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP / FILE_UPLOAD / MATRIX_PULL，
+# 因此它就是这些动作的正确且唯一的入口。
 APPROVAL_TOOL_MAP: Dict[str, str] = {
     "server_write": "ops.approval.prepare_service_control",
-    "deploy_execute": "ops.approval.prepare_release",
-    "package_cleanup": "ops.approval.prepare_package_cleanup",
-    "db_write": "ops.approval.prepare_dml",
+    "deploy_execute": "ops.approval.prepare_plan",
+    "package_cleanup": "ops.approval.prepare_plan",
+    "db_write": "ops.approval.prepare_plan",
 }
 
 # Specific tool name overrides (for tools that don't fit category mapping).
 APPROVAL_TOOL_NAME_MAP: Dict[str, str] = {
-    "ops.execute_rollback_plan": "ops.approval.prepare_rollback",
-    "ops.execute_deploy_plan": "ops.approval.prepare_release",
+    "ops.execute_rollback_plan": "ops.approval.prepare_plan",
+    "ops.execute_deploy_plan": "ops.approval.prepare_plan",
+    "ops.matrix.deploy_from_matrix": "ops.approval.prepare_plan",
     "ops.upload_file": "ops.approval.prepare_file_upload",
+    # 取消部署没有对应的计划步骤类型（STEP_HANDLERS 无 CANCEL），没有审批工具
+    # 能解锁它——留空走通用提示（联系管理员/Web UI），不再指向不存在的工具。
+    "ops.cancel_deployment": "",
 }
 
 
+def _approval_tool_registered(name: str) -> bool:
+    """映射到的审批工具是否真的注册了。
+
+    注册表在进程内注册内置工具后才可用；未初始化时（只导入策略模块的单元测试、
+    轻量工具进程）不做判断直接放行，避免把有效映射误判成失效。
+    """
+    if not name:
+        return False
+    try:
+        from app.services.tool_registry import registry
+
+        if not getattr(registry, "_tools", None):
+            return True
+        registry.get(name)
+        return True
+    except Exception:
+        return False
+
+
 def _find_approval_tool_for(tool_def) -> str:
-    """Return the approval tool name that unlocks this tool, or empty string."""
+    """Return the approval tool name that unlocks this tool, or empty string.
+
+    返回值保证要么是空（调用方给通用提示），要么是**真实存在**的工具名——
+    绝不再把 AI 客户端指向一个不存在的工具。
+    """
     name = getattr(tool_def, "name", "")
     if name in APPROVAL_TOOL_NAME_MAP:
-        return APPROVAL_TOOL_NAME_MAP[name]
-    category = getattr(tool_def, "category", "")
-    return APPROVAL_TOOL_MAP.get(category, "")
+        candidate = APPROVAL_TOOL_NAME_MAP[name]
+    else:
+        candidate = APPROVAL_TOOL_MAP.get(getattr(tool_def, "category", ""), "")
+    return candidate if _approval_tool_registered(candidate) else ""
 
 
 def _approval_hint_for_tool(tool_def, level: str) -> str:
@@ -169,6 +207,30 @@ def save_capability_settings(db, data: Dict[str, Any]) -> Dict[str, Any]:
 def _is_prod_env(environment: str) -> bool:
     env = (environment or "").lower()
     return env in {"prod", "production", "online", "release", "live", "线上", "生产"}
+
+
+def is_prod_environment(environment: str) -> bool:
+    """生产环境判定（发布链路与审批链路共用同一口径）。"""
+    return _is_prod_env(environment)
+
+
+def strict_prod_confirmation_required(db, environment: str) -> bool:
+    """第 4 层：生产环境执行需要额外确认短语（capability_settings.strict_prod_confirmation）。
+
+    审计发现（2026-09-11）：strict_prod_confirmation 此前只有默认值定义与
+    describe_capabilities 的对外暴露，**代码里没有任何强制点**——也就是
+    声明了但没实现，客户端看到 features.strict_prod_confirmation=true 却得不到
+    任何额外校验。这里把它真正落到审批消费入口：生产环境下审批人除一次性短语外，
+    还必须显式给出额外确认从句，避免把测试房间的习惯性短语直接套用到生产。
+
+    读取设置异常时对生产 fail-closed（要求从句）。
+    """
+    if not _is_prod_env(environment):
+        return False
+    try:
+        return bool(get_capability_settings(db).get("strict_prod_confirmation", True))
+    except Exception:
+        return True
 
 
 def enforce_tool_policy(tool_def, args: Dict[str, Any], ctx: ToolContext, db) -> Dict[str, Any]:

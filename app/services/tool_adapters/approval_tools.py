@@ -159,6 +159,58 @@ def _enforce_system_room(message_context: MessageContext, system_name: str) -> N
         )
 
 
+# 顶层「兼容字段」与结构化 message_context 的等价映射。兼容字段是历史调用方的
+# 写法；两者同时出现时按值合并即可，不必报错——只要值一致就是纯冗余。
+# 2026-09-11 实测：agent 同时传 room_id / event_id / sender_matrix_id 与
+# message_context（三者取值与 context 完全相同），被 400 卡断、白跑一轮，
+# 因此把「并存即拒绝」改成「一致则合并、真冲突才拒绝」。
+_LEGACY_CONTEXT_ALIASES: Dict[str, str] = {
+    "room_id": "conversation_id",
+    "event_id": "message_id",
+    "request_event_id": "message_id",
+    "sender_matrix_id": "sender_id",
+}
+_LEGACY_CONTEXT_FIELDS = tuple(_LEGACY_CONTEXT_ALIASES) + ("content_sha256",)
+
+
+def _reconcile_legacy_matrix_fields(args: dict, context: MessageContext) -> MessageContext:
+    """合并 message_context 与顶层兼容字段，只有真冲突才拒绝。
+
+    - 兼容字段与 message_context 一致，或 message_context 该字段为空 → 采纳之，不报错；
+    - 两者取值不一致 → 400 并指名冲突字段（保留「不允许含糊绑定」的安全语义）；
+    - content_sha256 允许冗余：以 message_context 内的摘要为准，
+      其缺失/未绑定时用顶层提供的合法摘要补全。
+    """
+    values = context.to_dict()
+    conflicts: list[str] = []
+    for legacy_key, ctx_key in _LEGACY_CONTEXT_ALIASES.items():
+        raw_value = args.get(legacy_key)
+        if raw_value is None:
+            continue
+        legacy_value = str(raw_value).strip()
+        if not legacy_value:
+            continue
+        current = str(values.get(ctx_key) or "").strip()
+        if not current:
+            values[ctx_key] = legacy_value
+        elif current != legacy_value:
+            conflicts.append(f"{legacy_key}={legacy_value} 与 message_context.{ctx_key}={current} 不一致")
+    digest = str(args.get("content_sha256") or "").strip()
+    if (
+        digest
+        and is_valid_content_sha256(digest)
+        and is_unbound_content_sha256(values.get("content_sha256", ""))
+    ):
+        values["content_sha256"] = digest
+    if conflicts:
+        raise ValueError(
+            "message_context 与兼容字段冲突（"
+            + "；".join(conflicts)
+            + "）：请只传 message_context（推荐）或只传兼容字段，不要混用不一致的值"
+        )
+    return MessageContext.from_dict(values)
+
+
 # ──────────────────────────────────────────────────────────────
 # ops.routing.* — 消息路由
 # ──────────────────────────────────────────────────────────────
@@ -180,23 +232,23 @@ def _enforce_system_room(message_context: MessageContext, system_name: str) -> N
             "message_context": message_context_schema(),
             "room_id": {
                 "type": "string",
-                "description": "兼容字段：Matrix 房间 ID",
+                "description": "已弃用兼容字段：Matrix 房间 ID。优先用 message_context；与 message_context 同传时取值必须一致，不一致会被拒绝",
             },
             "event_id": {
                 "type": "string",
-                "description": "兼容字段：Matrix 事件 ID",
+                "description": "已弃用兼容字段：Matrix 事件 ID。优先用 message_context；与 message_context 同传时取值必须一致，不一致会被拒绝",
             },
             "request_event_id": {
                 "type": "string",
-                "description": "兼容字段：Matrix 请求事件 ID",
+                "description": "已弃用兼容字段：Matrix 请求事件 ID。优先用 message_context；与 message_context 同传时取值必须一致，不一致会被拒绝",
             },
             "sender_matrix_id": {
                 "type": "string",
-                "description": "兼容字段：Matrix 发起人 ID",
+                "description": "已弃用兼容字段：Matrix 发起人 ID。优先用 message_context；与 message_context 同传时取值必须一致，不一致会被拒绝",
             },
             "content_sha256": {
                 "type": "string",
-                "description": "消息内容的 SHA-256（hex 64 位）。可选：未传时 OPS 自动按 message_text 计算",
+                "description": "消息内容的 SHA-256（hex 64 位）。可选：未传时 OPS 自动按 message_text 计算。已弃用兼容字段：优先放进 message_context",
             },
         },
         "required": ["message_text"],
@@ -205,19 +257,9 @@ def _enforce_system_room(message_context: MessageContext, system_name: str) -> N
 )
 def routing_resolve_message_target(args, ctx, db):
     message_text = args["message_text"]
-    legacy_fields = {
-        "room_id",
-        "event_id",
-        "request_event_id",
-        "sender_matrix_id",
-        "content_sha256",
-    }
+    legacy_fields = set(_LEGACY_CONTEXT_FIELDS)
     try:
         if "message_context" in args:
-            if legacy_fields & set(args):
-                raise ValueError(
-                    "message_context cannot be combined with legacy Matrix fields"
-                )
             # 非法摘要先剔除再规范化：调用方可能误把附件路径/文件名/包校验值
             # 当作 content_sha256 传入（zeroclaw 2026-09-01 实测案例），旧规则
             # 下的这种请求不应被 400 卡断——忽略垃圾值，走自动补算。
@@ -225,7 +267,10 @@ def routing_resolve_message_target(args, ctx, db):
             raw_digest = str(raw_context.get("content_sha256") or "").strip()
             if raw_digest and not is_valid_content_sha256(raw_digest):
                 raw_context.pop("content_sha256", None)
-            message_context = normalize_message_context(raw_context)
+            # 兼容字段可并存：一致则合并，冲突才 400（见 _reconcile_legacy_matrix_fields）
+            message_context = _reconcile_legacy_matrix_fields(
+                args, normalize_message_context(raw_context)
+            )
             # 缺 content_sha256（或占位值）时自动按消息原文计算：
             # 票据绑定的摘要即 OPS 实际路由的消息文本，agent 无需本地预计算
             # SHA-256（多端 hex 大小写/编码差异是常见阻断源）。
@@ -314,6 +359,29 @@ def routing_resolve_message_target(args, ctx, db):
         routing_config_revision=decision.routing_config_revision,
     )
 
+    # 房间作用域提前显式化：prepare_plan/prepare_exec 会按 message_routing.rooms
+    # 硬校验并 403。若此处不点明「当前会话不在授权房间内」，调用方会先拿到票据、
+    # 再在下一步被拒（2026-09-11 实测：agent 因此在测试房白跑一轮）。
+    allowed_rooms = _resolve_system_rooms(decision.system_name)
+    room_scope_ok = not allowed_rooms or {
+        "channel": message_context.channel,
+        "channel_account_id": message_context.channel_account_id,
+        "conversation_id": message_context.conversation_id,
+    } in allowed_rooms
+    next_step = (
+        "票据已签发（15 分钟内有效）。请在同一轮内立即调用 "
+        "ops.approval.prepare_plan：message_context 原样回传本结果的 "
+        "message_context（勿改任何字段）、routing_ticket=本结果 ticket、"
+        "system_name=本结果 system_name、environment、steps、policy。"
+        "不要在两步之间停下回复用户。"
+    )
+    if not room_scope_ok:
+        next_step += (
+            " ⚠️ 但当前会话不在该系统授权房间内（message_routing.rooms）："
+            "prepare_plan/prepare_exec 会被拒绝（403）。请先告知用户在授权房间发起，"
+            "或由管理员把本会话加入该系统 message_routing.rooms。"
+        )
+
     return {
         "outcome": decision.outcome.value,
         "system_name": decision.system_name,
@@ -325,17 +393,12 @@ def routing_resolve_message_target(args, ctx, db):
         "approver_identities": effective_identities,
         "approver_actor_keys": approver_actor_keys,
         "approvers": approver_sender_ids,
-        "allowed_rooms": _resolve_system_rooms(decision.system_name),
+        "allowed_rooms": allowed_rooms,
+        "room_scope_ok": room_scope_ok,
         "ticket": ticket.ticket,
         "ticket_digest": ticket.digest,
         "routing_config_revision": decision.routing_config_revision,
-        "next_step": (
-            "票据已签发（15 分钟内有效）。请在同一轮内立即调用 "
-            "ops.approval.prepare_plan：message_context 原样回传本结果的 "
-            "message_context（勿改任何字段）、routing_ticket=本结果 ticket、"
-            "system_name=本结果 system_name、environment、steps、policy。"
-            "不要在两步之间停下回复用户。"
-        ),
+        "next_step": next_step,
     }
 
 
@@ -350,11 +413,11 @@ def _common_prepare_schema() -> dict:
         "properties": {
             "message_context": message_context_schema(),
             "routing_ticket": {"type": "string", "description": "完整签名路由票据"},
-            "room_id": {"type": "string", "description": "兼容字段：Matrix 房间 ID"},
-            "request_event_id": {"type": "string", "description": "兼容字段：Matrix 请求事件 ID"},
-            "event_id": {"type": "string", "description": "兼容字段：Matrix 事件 ID"},
-            "sender_matrix_id": {"type": "string", "description": "兼容字段：Matrix 发起人 ID"},
-            "content_sha256": {"type": "string", "description": "兼容字段：消息内容 SHA-256"},
+            "room_id": {"type": "string", "description": "已弃用兼容字段：Matrix 房间 ID。优先用 message_context；同传时取值必须一致"},
+            "request_event_id": {"type": "string", "description": "已弃用兼容字段：Matrix 请求事件 ID。优先用 message_context；同传时取值必须一致"},
+            "event_id": {"type": "string", "description": "已弃用兼容字段：Matrix 事件 ID。优先用 message_context；同传时取值必须一致"},
+            "sender_matrix_id": {"type": "string", "description": "已弃用兼容字段：Matrix 发起人 ID。优先用 message_context；同传时取值必须一致"},
+            "content_sha256": {"type": "string", "description": "已弃用兼容字段：消息内容 SHA-256。优先放进 message_context，或留空由票据反填"},
             "system_name": {"type": "string", "description": "目标系统名"},
             "service_name": {"type": "string", "description": "目标服务名（可选）"},
             "environment": {"type": "string", "description": "环境（test/staging/prod）"},
@@ -634,25 +697,18 @@ def _validated_prepare_ticket(args, ctx):
             detail="routing revision and ticket digest are computed by OPS",
         )
 
-    legacy_fields = {
-        "room_id",
-        "request_event_id",
-        "event_id",
-        "sender_matrix_id",
-        "content_sha256",
-    }
+    legacy_fields = set(_LEGACY_CONTEXT_FIELDS)
     try:
         if "message_context" in args:
-            if legacy_fields & set(args):
-                raise ValueError(
-                    "message_context cannot be combined with legacy Matrix fields"
-                )
             # 非法摘要（附件路径/文件名等误传）剔除后再构造，走票据反填
             raw_context = dict(args["message_context"])
             raw_digest = str(raw_context.get("content_sha256") or "").strip()
             if raw_digest and not is_valid_content_sha256(raw_digest):
                 raw_context.pop("content_sha256", None)
-            context = MessageContext.from_dict(raw_context)
+            # 兼容字段可并存：一致则合并，冲突才 400（见 _reconcile_legacy_matrix_fields）
+            context = _reconcile_legacy_matrix_fields(
+                args, MessageContext.from_dict(raw_context)
+            )
         else:
             legacy_context = {key: args[key] for key in legacy_fields if key in args}
             legacy_digest = str(legacy_context.get("content_sha256") or "").strip()

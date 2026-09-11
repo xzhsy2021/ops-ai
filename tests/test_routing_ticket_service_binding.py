@@ -208,3 +208,105 @@ def test_prepare_plan_reason_names_message_context_field(monkeypatch):
     assert exc.value.status_code == 403
     detail = str(exc.value.detail)
     assert "message_id" in detail
+
+
+# ──────────────────────────────────────────────────────────────
+# 批量发版：一条消息提到多个服务时的解析
+# ──────────────────────────────────────────────────────────────
+
+BATCH_MSG = "智能助手AIbot: 测试环境拉取system, transaction, strategy 最新镜像，按顺序部署，transaction，strategy 两台都部署"
+
+
+def _systems_multi(approvers=None):
+    systems = _systems_kw([approvers or _approver()])
+    routing = systems["crypto-trader"]["message_routing"]
+    routing["keywords"] = ["量化测试", "system", "transaction", "strategy"]
+    systems["crypto-trader"]["services"] = [
+        {"name": "system"},
+        {"name": "transaction"},
+        {"name": "strategy"},
+    ]
+    return systems
+
+
+def _resolve_multi(monkeypatch, message_text=BATCH_MSG):
+    systems = _systems_multi()
+    monkeypatch.setattr(approval_tools, "get_all_systems", lambda: systems)
+    monkeypatch.setattr(
+        "app.services.tool_adapters.approval_tools._routing_systems",
+        lambda: list(systems.values()),
+    )
+    return approval_tools.routing_resolve_message_target(
+        {"message_text": message_text, "message_context": _message_context(message_text)},
+        _ctx(),
+        None,
+    )
+
+
+def test_resolve_multi_service_message_issues_system_level_ticket(monkeypatch):
+    """批量发版消息（提到 3 个服务）→ 系统级票据，不再钉住最长命中的那个服务。"""
+    resolved = _resolve_multi(monkeypatch)
+    assert resolved["outcome"] == "RESOLVED"
+    assert resolved["system_name"] == "crypto-trader"
+    assert resolved["service_name"] is None
+    assert resolved["matched_by"] == "system_keyword_multi_service"
+    assert resolved["matched_services"] == ["strategy", "system", "transaction"]
+
+
+def test_resolve_multi_service_next_step_guides_batch_plan(monkeypatch):
+    """next_step 要点明：不要传 service_name，按服务各建一个 step。"""
+    resolved = _resolve_multi(monkeypatch)
+    next_step = resolved["next_step"]
+    for name in ("system", "transaction", "strategy"):
+        assert name in next_step
+    assert "不要" in next_step and "step" in next_step
+
+
+def test_resolve_single_service_message_still_binds_service(monkeypatch):
+    """只提到一个服务时仍然是服务级票据（不因本次改动放宽）。"""
+    resolved = _resolve(monkeypatch)
+    assert resolved["service_name"] == "transaction"
+    assert resolved["matched_by"] == "system_keyword_service"
+    assert resolved["matched_services"] == ["transaction"]
+
+
+def test_resolve_single_service_without_other_keyword_hits(monkeypatch):
+    """消息只含一个服务名（无其它关键词）时同样绑定该服务。"""
+    resolved = _resolve(monkeypatch, message_text="transaction")
+    assert resolved["service_name"] == "transaction"
+    assert resolved["matched_by"] in {"service_name", "system_keyword_service"}
+
+
+def test_prepare_plan_batch_multi_service_plan_succeeds(monkeypatch):
+    """批量计划端到端：系统级票据 + 每个服务一个 step + 不传 service_name。"""
+    from app.db.base import Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    resolved = _resolve_multi(monkeypatch)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    _seed_test_env(db, resolved["system_name"])
+    args = {
+        "message_context": dict(resolved["message_context"]),
+        "routing_ticket": resolved["ticket"],
+        "system_name": resolved["system_name"],
+        "environment": "test",
+        "steps": [
+            {
+                "step_key": f"restart-{svc}",
+                "action_type": "SERVICE_CONTROL",
+                "parameters": {"action": "restart", "targets": ["cc-test2"],
+                               "service_name": svc},
+            }
+            for svc in resolved["matched_services"]
+        ],
+        "policy": {"continue_on_error": False},
+    }
+    try:
+        prepared = approval_tools.approval_prepare_plan(args=args, ctx=_ctx(), db=db)
+    finally:
+        db.close()
+    assert prepared["plan_id"]
+    assert prepared.get("service_name") in (None, "")

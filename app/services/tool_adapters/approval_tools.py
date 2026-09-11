@@ -228,7 +228,12 @@ def _reconcile_legacy_matrix_fields(args: dict, context: MessageContext) -> Mess
         "properties": {
             "message_text": {
                 "type": "string",
-                "description": "QClaw 渠道消息原文",
+                "description": (
+                    "QClaw 渠道消息原文（照抄，不要改写、摘要或自行拼装服务清单）。"
+                    "路由按这段文本判定系统/服务：若其中命中**多个**服务名，将签发系统级票据"
+                    "（matched_by=system_keyword_multi_service）并回传 matched_services，"
+                    "适合批量发版；只命中一个服务名时才是服务级票据。"
+                ),
             },
             "message_context": message_context_schema(),
             "room_id": {
@@ -382,6 +387,12 @@ def routing_resolve_message_target(args, ctx, db):
             "要么**不传** service_name（不传时票据自动沿用绑定值，走系统级计划）；"
             "传成别的服务名会被判为「绑定了另一个消息目标」而 403。多服务任务请不传 service_name。"
         )
+    if len(decision.matched_services) >= 2:
+        next_step += (
+            " 本消息提到多个服务（" + "、".join(decision.matched_services) + "）："
+            "已按**系统级**签发票据，批量操作请**不要**传 service_name，"
+            "并在 steps 里为每个服务各建一个 step（step_key 唯一、parameters.targets 指向该服务的服务器）。"
+        )
     if not room_scope_ok:
         next_step += (
             " ⚠️ 但当前会话不在该系统授权房间内（message_routing.rooms）："
@@ -394,6 +405,7 @@ def routing_resolve_message_target(args, ctx, db):
         "system_name": decision.system_name,
         "service_name": decision.service_name,
         "matched_by": decision.matched_by,
+        "matched_services": list(decision.matched_services),
         "candidates": list(decision.candidates),
         "message_context": message_context.to_dict(),
         "configured_approver_identities": configured_identities,

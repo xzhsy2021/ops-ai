@@ -41,6 +41,8 @@ class RoutingDecision:
     routing_config_revision: str | None = None
     candidates: tuple[str, ...] = ()
     approvers: tuple[dict[str, str], ...] = ()
+    # 消息里被命中的服务名（可能多个）。批量发版场景下调用方据此逐个建 step。
+    matched_services: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -354,6 +356,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
             matched_by=matched_by,
             routing_config_revision=revision,
             approvers=_extract_approvers(sys_routing),
+            matched_services=(svc_name,),
         )
     if len(service_matches) > 1:
         candidates = tuple(sorted(f"{s}/{sv}" for s, sv, *_ in service_matches))
@@ -368,28 +371,47 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
     for sys_cfg, routing in active_systems:
         priority = routing.get("priority", 0)
         # 系统级关键词：取命中的最长关键词（更具体，避免 'trader' 抢在
-        # 'crypto-trader-web' 之前命中），若恰好等于某服务规范名则解析为
-        # 服务级 ticket；否则签发 service_name=None 的系统级 ticket。
+        # 'crypto-trader-web' 之前命中）。
+        #
+        # 服务绑定规则（2026-09-11 修正）：只有当本消息**恰好命中一个**服务规范名时
+        # 才签发服务级票据。批量发版场景（如「拉取 system, transaction, strategy 最新
+        # 镜像」）会同时命中多个服务名，旧规则按「最长关键词」钉住其中一个（transaction），
+        # 导致调用方一旦按自己真正想操作的服务传 service_name 就被判为「绑定到另一个
+        # 目标」而 403。命中多个时改为签发系统级票据，并在 matched_services 里回传
+        # 识别到的服务清单，由调用方按服务逐个建 step。
+        matched_keywords = [
+            keyword
+            for keyword in routing.get("keywords", [])
+            if keyword and normalize_text(keyword) in normalized_msg
+        ]
         matched_kw = ""
-        for keyword in routing.get("keywords", []):
-            if keyword and normalize_text(keyword) in normalized_msg:
-                if len(keyword) > len(matched_kw):
-                    matched_kw = keyword
+        for keyword in matched_keywords:
+            if len(keyword) > len(matched_kw):
+                matched_kw = keyword
         if matched_kw:
-            kw_norm = normalize_text(matched_kw)
-            svc_name = ""
-            for svc in sys_cfg.get("services", []):
-                name = svc.get("name", "")
-                if name and normalize_text(name) == kw_norm:
-                    svc_name = name
-                    break
-            if svc_name:
+            hit_norms = {normalize_text(keyword) for keyword in matched_keywords}
+            hit_services = sorted(
+                {
+                    svc.get("name", "")
+                    for svc in sys_cfg.get("services", [])
+                    if svc.get("name") and normalize_text(svc.get("name", "")) in hit_norms
+                }
+            )
+            if len(hit_services) >= 2:
                 keyword_matches.append(
-                    (sys_cfg.get("name", ""), svc_name, priority,
-                     "system_keyword_service", routing)
+                    (sys_cfg.get("name", ""), None, priority,
+                     "system_keyword_multi_service", routing, tuple(hit_services))
+                )
+            elif len(hit_services) == 1:
+                keyword_matches.append(
+                    (sys_cfg.get("name", ""), hit_services[0], priority,
+                     "system_keyword_service", routing, tuple(hit_services))
                 )
             else:
-                keyword_matches.append((sys_cfg.get("name", ""), None, priority, "system_keyword", routing))
+                keyword_matches.append(
+                    (sys_cfg.get("name", ""), None, priority,
+                     "system_keyword", routing, ())
+                )
 
     if not keyword_matches:
         return RoutingDecision(
@@ -405,7 +427,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
     )
 
     if len(top_matches) == 1:
-        sys_name, svc_name, _, matched_by, sys_routing = top_matches[0]
+        sys_name, svc_name, _, matched_by, sys_routing, matched_services = top_matches[0]
         return RoutingDecision(
             outcome=RoutingOutcome.RESOLVED,
             system_name=sys_name,
@@ -413,6 +435,7 @@ def resolve_message_target(message_text: str, systems: list[dict]) -> RoutingDec
             matched_by=matched_by,
             routing_config_revision=revision,
             approvers=_extract_approvers(sys_routing),
+            matched_services=matched_services,
         )
 
     # 同优先级多匹配 → AMBIGUOUS

@@ -118,6 +118,11 @@ class UpdateSettingsPayload(BaseModel):
     settings: Dict[str, Any]
 
 
+class ExecPolicyPreviewPayload(BaseModel):
+    command: str = ""
+    environment: str = ""
+
+
 class DeleteToolRecordsPayload(BaseModel):
     call_ids: List[str] = Field(default_factory=list, max_length=200)
     plan_ids: List[str] = Field(default_factory=list, max_length=200)
@@ -690,6 +695,84 @@ def get_exec_policy(request: Request, db: Session = Depends(get_db)):
         "default_templates": DEFAULT_EXEC_TEMPLATES,
         "default_max_length": DEFAULT_EXEC_MAX_LENGTH,
         "default_allow_multi_line": DEFAULT_EXEC_ALLOW_MULTILINE,
+    })
+
+
+@tools_router.post("/exec-policy/preview")
+def preview_exec_policy(
+    payload: ExecPolicyPreviewPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """用**后端同一份护栏**判定一条命令，供管理页「命令试匹配」。
+
+    为什么必须由后端判定：模板正则是 Python re 语法，具名组写作 ``(?P<name>...)``，
+    而它在 JavaScript 里是**非法分组**（JS 用 ``(?<name>...)``），``new RegExp`` 会抛
+    "Invalid group"。管理页原先在浏览器里直接拿模板 pattern 编译，于是所有含具名组的
+    模板（docker_readonly、systemctl_service_status、system_status_probe、
+    apt_install_packages、docker_install_official_repo）都被 catch 静默跳过——
+    表现就是 docker ps / systemctl status 一律显示「不命中任何模板」，而后端实际是
+    放行的。试匹配走后端可彻底杜绝这类前后端口径漂移（也顺带覆盖 env 过滤与参数校验）。
+    """
+    require_admin(request, db)
+    from app.services.exec_command_policy import (
+        DEFAULT_EXEC_TEMPLATES,
+        _template_allows_env,
+        policy_from_settings,
+        validate_exec_command,
+    )
+
+    command = (payload.command or "").strip()
+    environment = (payload.environment or "").strip()
+
+    settings = get_capability_settings(db)
+    policy = policy_from_settings(settings)
+    templates = policy["templates"] or DEFAULT_EXEC_TEMPLATES
+
+    per_template = []
+    regex_matched_id = ""
+    for template in templates:
+        pattern = str((template or {}).get("pattern") or "")
+        env_allowed = _template_allows_env(template, environment)
+        regex_ok = False
+        error = ""
+        if command:
+            try:
+                regex_ok = bool(re.fullmatch(pattern, command, re.IGNORECASE)) if pattern else False
+            except re.error as exc:
+                error = str(exc)
+        if not env_allowed:
+            regex_ok = False
+        if regex_ok and not regex_matched_id:
+            regex_matched_id = str(template.get("id") or "")
+        per_template.append({
+            "id": template.get("id"),
+            "regex_matched": regex_ok,
+            "env_allowed": env_allowed,
+            "error": error,
+        })
+
+    verdict = validate_exec_command(
+        command,
+        mode=policy["mode"],
+        templates=policy["templates"],
+        environment=environment,
+        max_length=policy["max_length"],
+        allow_multi_line=policy["allow_multi_line"],
+        target_count=1,
+        max_targets=policy["max_targets"],
+    )
+    return api_response(data={
+        "command": command,
+        "environment": environment,
+        "mode": policy["mode"],
+        "allowed": bool(verdict.get("ok")),
+        "template_id": str(verdict.get("template_id") or regex_matched_id or ""),
+        "template_description": str(verdict.get("template_description") or ""),
+        "reason": str(verdict.get("reason") or ""),
+        "level": str(verdict.get("level") or ""),
+        "notes": verdict.get("notes") or [],
+        "templates": per_template,
     })
 
 

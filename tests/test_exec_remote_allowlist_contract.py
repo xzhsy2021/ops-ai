@@ -198,3 +198,134 @@ def test_exec_policy_endpoint_requires_admin(db, monkeypatch):
     monkeypatch.setattr(tools_api, "require_admin", _forbid)
     resp = TestClient(app).get("/api/v2/tools/exec-policy")
     assert resp.status_code == 403
+
+
+# ── 试匹配接口 ──
+# 管理页原先在浏览器里编译模板正则，而模板是 Python re 语法（具名组 (?P<name>...)），
+# JS 的 RegExp 会抛 "Invalid group"，于是含具名组的模板被静默跳过、docker ps 误报
+# 「不命中」。改成后端判定后，这里锁死接口行为。
+
+
+@pytest.mark.parametrize("command,template_id", [
+    ("docker ps", "docker_readonly"),
+    ("docker ps -a", "docker_readonly"),
+    ("docker compose ps", "docker_readonly"),
+    ("docker compose -f /data/crypto-trader/docker-compose.yml ps", "docker_readonly"),
+    ("docker compose logs --tail=100", "docker_readonly"),
+    ("systemctl status nginx", "systemctl_service_status"),
+    ("apt-get update", "apt_update"),
+    ("df -h", "system_status_probe"),
+])
+def test_exec_policy_preview_allows_commands_with_named_group_templates(
+    tools_api_client, command, template_id
+):
+    """含具名组 (?P<...>) 的模板必须在试匹配里判为放行（前端编译不了它们）。"""
+    resp = tools_api_client.post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": command, "environment": "prod"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["allowed"] is True, f"{command} 应放行，实际：{data.get('reason')}"
+    assert data["template_id"] == template_id
+    assert data["environment"] == "prod"
+    row = next(t for t in data["templates"] if t["id"] == template_id)
+    assert row["regex_matched"] is True
+    assert row["error"] == ""
+    assert row["env_allowed"] is True
+
+
+def test_exec_policy_preview_rejects_command_outside_allowlist(tools_api_client):
+    resp = tools_api_client.post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": "docker compose up -d", "environment": "prod"},
+    )
+    data = resp.json()["data"]
+    assert data["allowed"] is False
+    assert data["template_id"] == ""
+    assert data["reason"]
+    # 每条模板都应带上「未命中」而非报正则错误
+    assert all(t["error"] == "" for t in data["templates"])
+    assert not any(t["regex_matched"] for t in data["templates"])
+
+
+def test_exec_policy_preview_reports_per_template_detail_for_partial_hits(tools_api_client):
+    """docker ps 只应命中 docker_readonly，其余模板如实报未命中。"""
+    data = tools_api_client.post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": "docker ps", "environment": "prod"},
+    ).json()["data"]
+    matched = [t["id"] for t in data["templates"] if t["regex_matched"]]
+    assert matched == ["docker_readonly"]
+
+
+def test_exec_policy_preview_respects_environment_scoping(tools_api_client, monkeypatch):
+    """env 不含目标环境时，即便正则命中也不算放行。"""
+    from app.api import tools as tools_api
+    from app.services.tool_policy import DEFAULT_CAPABILITY_SETTINGS
+
+    settings = dict(DEFAULT_CAPABILITY_SETTINGS)
+    settings["exec_remote_templates"] = [{
+        "id": "docker_test_only",
+        "description": "仅测试环境",
+        "pattern": r"docker\s+ps",
+        "env": ["test"],
+    }]
+    monkeypatch.setattr(tools_api, "get_capability_settings", lambda db: settings)
+
+    prod = tools_api_client.post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": "docker ps", "environment": "prod"},
+    ).json()["data"]
+    assert prod["allowed"] is False
+    assert prod["templates"][0]["env_allowed"] is False
+    assert prod["templates"][0]["regex_matched"] is False
+
+    test = tools_api_client.post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": "docker ps", "environment": "test"},
+    ).json()["data"]
+    assert test["allowed"] is True
+    assert test["template_id"] == "docker_test_only"
+
+
+def test_exec_policy_preview_reports_broken_regex_instead_of_silent_skip(
+    tools_api_client, monkeypatch
+):
+    """模板正则写坏时要如实报错，不能像前端那样静默当成「不命中」。"""
+    from app.api import tools as tools_api
+    from app.services.tool_policy import DEFAULT_CAPABILITY_SETTINGS
+
+    settings = dict(DEFAULT_CAPABILITY_SETTINGS)
+    settings["exec_remote_templates"] = [{
+        "id": "broken",
+        "description": "坏正则",
+        "pattern": r"docker\s+(?P<bad",
+        "env": ["test", "prod"],
+    }]
+    monkeypatch.setattr(tools_api, "get_capability_settings", lambda db: settings)
+
+    data = tools_api_client.post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": "docker ps", "environment": "prod"},
+    ).json()["data"]
+    assert data["allowed"] is False
+    assert data["templates"][0]["error"]
+
+
+def test_exec_policy_preview_requires_admin(db, monkeypatch):
+    from app.api import tools as tools_api
+
+    app = FastAPI()
+    app.include_router(tools_api.tools_router)
+    app.dependency_overrides[get_db] = lambda: db
+
+    def _forbid(request, db):
+        raise HTTPException(status_code=403, detail="Admin required")
+
+    monkeypatch.setattr(tools_api, "require_admin", _forbid)
+    resp = TestClient(app).post(
+        "/api/v2/tools/exec-policy/preview",
+        json={"command": "docker ps", "environment": "prod"},
+    )
+    assert resp.status_code == 403

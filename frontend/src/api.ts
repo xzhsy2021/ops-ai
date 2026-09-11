@@ -474,6 +474,13 @@ export const capabilityTools = {
   updateSettings: (settings: Record<string, any>) => api.put('/tools/settings', { settings }),
   // 当前生效的 ad-hoc 远程命令执行（EXEC_REMOTE）护栏：模式/限额/白名单模板
   execPolicy: () => api.get('/tools/exec-policy'),
+  // 试匹配走后端：模板是 Python re 语法（具名组 (?P<name>...) 在 JS 里非法），
+  // 前端自己编译会把含具名组的模板全部静默跳过
+  execPolicyPreview: (payload: { command: string; environment?: string }) =>
+    api.post('/tools/exec-policy/preview', {
+      command: payload.command,
+      environment: payload.environment || '',
+    }),
   tokens: () => api.get('/tools/tokens'),
   tokenTemplates: () => cachedGet('tools.tokenTemplates', 60000, () => api.get('/tools/token-templates')),
   createToken: (data: {

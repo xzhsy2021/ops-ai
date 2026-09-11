@@ -286,6 +286,13 @@ export default function ToolAccessPage() {
     }
   }
 
+  // 试匹配交给后端判定：模板是 Python re 语法（具名组 (?P<name>...) 在 JS 里
+  // 是非法分组），前端自己编译会把含具名组的模板全部静默跳过。
+  const previewExecPolicy = async (payload: { command: string; environment: string }) => {
+    const res = await capabilityTools.execPolicyPreview(payload)
+    return getData(res) || null
+  }
+
   // 清除模板覆盖：把 exec_remote_templates 从设置里删掉再整体保存，
   // 这样 capability_settings 不再持有该键，后端回落到内置默认模板。
   const clearExecOverride = async () => {
@@ -731,6 +738,7 @@ export default function ToolAccessPage() {
             onSave={saveExecPolicy}
             onClearOverride={clearExecOverride}
             onReload={loadExecPolicy}
+            onPreview={previewExecPolicy}
           />
         </section>
       )}

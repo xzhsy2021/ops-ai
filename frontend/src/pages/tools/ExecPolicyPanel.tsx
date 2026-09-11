@@ -68,6 +68,7 @@ export function ExecPolicyPanel({
   onSave,
   onClearOverride,
   onReload,
+  onPreview,
 }: {
   policy: ExecPolicy | null
   loading: boolean
@@ -76,11 +77,18 @@ export function ExecPolicyPanel({
   onSave: (payload: Record<string, any>) => Promise<void>
   onClearOverride: () => Promise<void>
   onReload: () => void
+  onPreview: (payload: { command: string; environment: string }) => Promise<any>
 }) {
   const [draft, setDraft] = useState<Draft>(draftFrom(policy))
   const [templateText, setTemplateText] = useState('[]')
   const [jsonError, setJsonError] = useState('')
   const [preview, setPreview] = useState('')
+  // 试匹配走后端：模板是 Python re 语法，JS 的 RegExp 编译不了 (?P<name>...)，
+  // 前端自己匹配会把含具名组的模板全部静默跳过（docker ps 就因此误报不命中）。
+  const [previewEnv, setPreviewEnv] = useState('prod')
+  const [previewResult, setPreviewResult] = useState<any>(null)
+  const [previewError, setPreviewError] = useState('')
+  const [previewBusy, setPreviewBusy] = useState(false)
 
   useEffect(() => {
     setDraft(draftFrom(policy))
@@ -132,19 +140,20 @@ export function ExecPolicyPanel({
     await onSave(payload)
   }
 
-  const previewMatch = () => {
+  const previewMatch = async () => {
     const target = preview.trim()
     if (!target) return
-    // 只做前端粗匹配，帮助管理员确认模板写法；真正判定仍以后端为准
-    let hit = ''
-    for (const t of templates) {
-      try {
-        if (new RegExp(`^(?:${t.pattern})$`, 'i').test(target)) { hit = String(t.id); break }
-      } catch {
-        hit = ''
-      }
+    setPreviewBusy(true)
+    setPreviewError('')
+    try {
+      const data = await onPreview({ command: target, environment: previewEnv })
+      setPreviewResult(data || null)
+    } catch (e: any) {
+      setPreviewResult(null)
+      setPreviewError(String(e?.message || e))
+    } finally {
+      setPreviewBusy(false)
     }
-    setPreview(hit ? `✅ 命中模板 ${hit}` : '❌ 不命中任何模板（后端会按 403 拒绝）')
   }
 
   const switchRows = useMemo(() => ([
@@ -299,15 +308,67 @@ export function ExecPolicyPanel({
       {/* 命令试匹配 */}
       <div style={{ display: 'grid', gap: 6 }}>
         <strong>命令试匹配</strong>
+        <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+          由后端用同一份护栏判定（含环境过滤与参数校验），不是前端粗略正则。
+        </span>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <input
             style={{ flex: '1 1 320px', minWidth: 260 }}
             placeholder="例如 docker compose ps"
             value={preview}
             onChange={(e) => setPreview(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') previewMatch() }}
           />
-          <button className="btn btn-subtle" onClick={previewMatch} disabled={!preview.trim()}>试匹配</button>
+          <select value={previewEnv} onChange={(e) => setPreviewEnv(e.target.value)}>
+            <option value="prod">生产 prod</option>
+            <option value="test">测试 test</option>
+            <option value="">不限环境</option>
+          </select>
+          <button className="btn btn-subtle" onClick={previewMatch} disabled={!preview.trim() || previewBusy}>
+            {previewBusy ? '判定中…' : '试匹配'}
+          </button>
         </div>
+
+        {previewError && (
+          <div style={{ color: 'var(--danger)', fontSize: 13 }}>判定失败：{previewError}</div>
+        )}
+
+        {previewResult && (
+          <div style={{ display: 'grid', gap: 6, marginTop: 2 }}>
+            <div style={{
+              fontSize: 13,
+              color: previewResult.allowed ? 'var(--success)' : 'var(--danger)',
+            }}>
+              {previewResult.allowed
+                ? `✅ 放行${previewResult.template_id ? `（命中模板 ${previewResult.template_id}）` : ''}`
+                : `❌ 拒绝：${previewResult.reason || '未通过护栏校验'}`}
+              {previewResult.environment ? `　环境=${previewResult.environment}` : '　环境=不限'}
+              　模式={previewResult.mode}
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="data-table data-table--compact">
+                <thead>
+                  <tr>
+                    <th>模板</th>
+                    <th>适用环境</th>
+                    <th>正则命中</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(previewResult.templates || []).map((row: any) => (
+                    <tr key={String(row.id)}>
+                      <td>{row.id}</td>
+                      <td>{row.env_allowed ? '是' : '否'}</td>
+                      <td>{row.error ? '正则错误' : (row.regex_matched ? '命中' : '—')}</td>
+                      <td style={{ color: 'var(--text-muted)' }}>{row.error || ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 覆盖编辑 */}

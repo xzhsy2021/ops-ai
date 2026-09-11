@@ -1028,7 +1028,14 @@ def _step_param_reader_keys() -> dict[str, set[str]]:
             "control_action", "system_name", "system", "service_name", "service",
             "targets", "environment", "compose_dir", "compose_service", "compose_args", "env",
         },
-        "RELEASE": {"package_name", "release_name", "rollback_point", "targets", "environment"},
+        # RELEASE 的 system_name/service_name 是**逐步**读取的（plan_executor._release_handler：
+        # params.get("service_name") or plan.service_name），因此一个计划可以按服务拆分多个
+        # RELEASE 步骤，实现"一次审批、批量发版多个服务"。2026-09-11 前此处漏列，导致
+        # 批量发版只能退化为"一个服务一个计划"。
+        "RELEASE": {
+            "package_name", "release_name", "rollback_point", "targets", "environment",
+            "system_name", "service_name", "action_parameters",
+        },
         "ROLLBACK": {"release_name", "rollback_point", "targets"},
         "HEALTH_CHECK": {"service_name", "system_name", "targets"},
         "DML": {"connection", "sql", "confirm_text"},

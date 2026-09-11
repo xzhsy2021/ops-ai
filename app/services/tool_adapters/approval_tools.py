@@ -390,8 +390,11 @@ def routing_resolve_message_target(args, ctx, db):
     if len(decision.matched_services) >= 2:
         next_step += (
             " 本消息提到多个服务（" + "、".join(decision.matched_services) + "）："
-            "已按**系统级**签发票据，批量操作请**不要**传 service_name，"
-            "并在 steps 里为每个服务各建一个 step（step_key 唯一、parameters.targets 指向该服务的服务器）。"
+            "已按**系统级**签发票据，批量操作请**不要**传顶层 service_name。"
+            "改为**每个服务各建一个 step**：step_key 唯一、parameters.service_name=该服务、"
+            "parameters.targets=该服务的服务器（两台都发就都列上），并用 dependencies 串成先后顺序"
+            "（step-2 的 dependencies=[\"step-1\"]）。执行器按步骤读取 parameters.service_name，"
+            "因此一个计划即可批量发版多个服务。"
         )
     if not room_scope_ok:
         next_step += (

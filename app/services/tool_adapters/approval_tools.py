@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from typing import Any, Dict
 from fastapi import HTTPException
 
@@ -375,6 +376,12 @@ def routing_resolve_message_target(args, ctx, db):
         "system_name=本结果 system_name、environment、steps、policy。"
         "不要在两步之间停下回复用户。"
     )
+    if decision.service_name:
+        next_step += (
+            f" 本票据绑定 service_name={decision.service_name!r}：prepare_* 要么原样传该值，"
+            "要么**不传** service_name（不传时票据自动沿用绑定值，走系统级计划）；"
+            "传成别的服务名会被判为「绑定了另一个消息目标」而 403。多服务任务请不传 service_name。"
+        )
     if not room_scope_ok:
         next_step += (
             " ⚠️ 但当前会话不在该系统授权房间内（message_routing.rooms）："
@@ -419,7 +426,7 @@ def _common_prepare_schema() -> dict:
             "sender_matrix_id": {"type": "string", "description": "已弃用兼容字段：Matrix 发起人 ID。优先用 message_context；同传时取值必须一致"},
             "content_sha256": {"type": "string", "description": "已弃用兼容字段：消息内容 SHA-256。优先放进 message_context，或留空由票据反填"},
             "system_name": {"type": "string", "description": "目标系统名"},
-            "service_name": {"type": "string", "description": "目标服务名（可选）"},
+            "service_name": {"type": "string", "description": "目标服务名（可选）。若传则必须与路由票据绑定的 service_name 完全一致，否则票据被判为「绑定了另一个消息目标」而 403；多服务/系统级计划请留空（留空时票据自动沿用其绑定服务）"},
             "environment": {"type": "string", "description": "环境（test/staging/prod）"},
             "ai_reason": {"type": "string", "description": "AI 建议此操作的理由"},
         },
@@ -682,6 +689,63 @@ def _execution_reply_template(plan) -> str:
     return "\n".join(lines)
 
 
+def _ticket_failure_reason(
+    routing_ticket: str,
+    context: MessageContext,
+    system_name: str | None,
+    service_name: str | None,
+) -> str:
+    """票据校验失败时给出可定位的具体原因。
+
+    原错误信息把「无效/过期/绑定到另一个目标」三种可能混在一句里，调用方（尤其是
+    AI 客户端）无法判断该改哪个字段，只能反复重试。这里解码票据后逐字段比对，
+    明确指出是哪个字段不一致、分别是什么值。
+    """
+    payload = _decode_ticket_payload(routing_ticket)
+    if not isinstance(payload, dict):
+        return "票据无法解析：可能被截断/改写，或不是 OPS 签发的票据"
+
+    problems: list[str] = []
+
+    expires_raw = str(payload.get("expires_at") or "")
+    try:
+        expires_at = datetime.fromisoformat(expires_raw)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > expires_at:
+            problems.append(f"票据已过期（expires_at={expires_raw}）")
+    except Exception:
+        problems.append("票据缺少可解析的 expires_at，无法确认有效期")
+
+    bound = payload.get("message_context")
+    current = context.to_dict()
+    if bound != current:
+        if isinstance(bound, dict):
+            diff = [
+                f"{key}: 票据={bound.get(key)!r} 请求={current.get(key)!r}"
+                for key in current
+                if bound.get(key) != current.get(key)
+            ]
+            problems.append("消息上下文不一致（" + "；".join(diff) + "）")
+        else:
+            problems.append("票据未绑定消息上下文")
+
+    if payload.get("system_name") != system_name:
+        problems.append(
+            f"system_name 不一致：票据={payload.get('system_name')!r} 请求={system_name!r}"
+        )
+    if payload.get("service_name") != service_name:
+        problems.append(
+            f"service_name 不一致：票据={payload.get('service_name')!r} 请求={service_name!r}"
+            "（服务级票据只能用于该服务；多服务或系统级计划请**不要**传 service_name，"
+            "不传时票据会自动沿用其绑定值）"
+        )
+
+    if not problems:
+        problems.append("签名校验未通过（票据可能被改写，或 OPS 签名密钥已轮换）")
+    return "；".join(problems)
+
+
 def _routing_systems() -> list[dict]:
     return [
         {**system, "name": system.get("name") or name}
@@ -774,7 +838,12 @@ def _validated_prepare_ticket(args, ctx):
     if not valid:
         raise HTTPException(
             status_code=403,
-            detail="Routing ticket is invalid, expired, or bound to another message target",
+            detail=(
+                "Routing ticket is invalid, expired, or bound to another message target"
+                "（" + _ticket_failure_reason(
+                    routing_ticket, context, args["system_name"], expected_service_name
+                ) + "）"
+            ),
         )
 
     _enforce_system_room(context, args["system_name"])

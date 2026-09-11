@@ -98,8 +98,22 @@ class TestEnvFileCommandGeneration:
 class TestPullerServiceConfig:
     def test_puller_services_registered(self, db):
         """4 个新服务 + 改造后的 puller：docker_compose + test1 绑定。"""
+        import os
+
         from app.db.models import Service
+
+        # scripts.migrate_puller_services 是"导入即执行"的一次性迁移脚本，导入期会
+        # 做 os.environ.setdefault("APPROVAL_SIGNING_KEY", ...)（它需要该变量才能
+        # 导入 app 模块，故不改脚本）。这里导入后立即还原，避免把该键泄漏给同进程
+        # 后续测试——曾使 test_task5_final_review 的 dotenv 用例误判（该用例依赖
+        # "只有未导出的键才回填"的语义）。
+        prev_signing_key = os.environ.get("APPROVAL_SIGNING_KEY")
         from scripts.migrate_puller_services import COMPOSE_TV_BASE, NEW_SERVICES, TEST1  # noqa
+
+        if prev_signing_key is None:
+            os.environ.pop("APPROVAL_SIGNING_KEY", None)
+        else:
+            os.environ["APPROVAL_SIGNING_KEY"] = prev_signing_key
 
         # 模拟迁移（复用脚本的逻辑而非直接调脚本 main）
         for name, compose_svc in NEW_SERVICES.items():

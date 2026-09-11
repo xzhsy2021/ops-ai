@@ -383,6 +383,34 @@ _STEP_VERBS = {
 }
 
 
+def _reuse_short_code(
+    short_code: str,
+    *,
+    action_types,
+    system_name: str,
+    environment: str,
+    digest: str,
+) -> str:
+    """幂等复用既有待审批对象时，补齐服务层约定不返回的确认短语。
+
+    ActionApprovalService.prepare / ExecutionPlanService.prepare 在命中相同
+    digest 的 PENDING 对象时返回空短语（见两者 `return existing, ""`）。但回执
+    必须让审批人能照抄短语，否则复用场景下卡片不可用（短语位置为空）。
+
+    短语是确定性派生（action_types + system_name + environment + digest），
+    因此按既有 digest 复现与原签发结果完全一致，仍能对上库里的
+    approval_code_hash，也不放宽任何校验（一次性/15 分钟/房间+事件绑定不变）。
+    """
+    if short_code or not digest:
+        return short_code
+    return build_approval_phrase(
+        action_types=list(action_types or []),
+        system_name=system_name,
+        environment=environment,
+        digest=digest,
+    )
+
+
 def _approval_reply_template(
     *,
     kind: str,
@@ -988,6 +1016,14 @@ def approval_prepare_service_control(args, ctx, db):
             for sender_id in approvers
         ],
     )
+    # 幂等复用既有 PENDING 工单时补齐短语（服务层复用分支返回空串）
+    short_code = _reuse_short_code(
+        short_code,
+        action_types=["SERVICE_CONTROL"],
+        system_name=args["system_name"],
+        environment=args["environment"],
+        digest=approval.action_digest,
+    )
     reply_template = _approval_reply_template(
         kind="action",
         status=approval.status,
@@ -1222,17 +1258,15 @@ def approval_prepare_exec(args, ctx, db):
     )
 
     # 幂等复用：相同 digest 命中既有 PENDING 工单时，服务层约定不重新签发短语
-    # （返回空串，见 ActionApprovalService.prepare 与计划侧既有契约）。但回执必须
-    # 让审批人能照抄短语，否则复用场景下卡片不可用。短语是确定性派生
-    # （action_type + system_name + environment + digest），因此按既有 action_digest
-    # 复现，结果与首次签发一致，且仍能对上库中 approval_code_hash。
-    if not short_code:
-        short_code = build_approval_phrase(
-            action_types=["EXEC_REMOTE"],
-            system_name=args["system_name"],
-            environment=environment,
-            digest=approval.action_digest,
-        )
+    # （返回空串，见 ActionApprovalService.prepare 与计划侧既有契约）。按既有
+    # action_digest 复现同一短语，保证复用场景下回执卡片仍可照抄。
+    short_code = _reuse_short_code(
+        short_code,
+        action_types=["EXEC_REMOTE"],
+        system_name=args["system_name"],
+        environment=environment,
+        digest=approval.action_digest,
+    )
 
     reply_template = _approval_reply_template(
         kind="action",
@@ -1355,6 +1389,14 @@ def approval_prepare_file_upload(args, ctx, db):
             {"channel": message_context.channel, "channel_account_id": message_context.channel_account_id, "sender_id": sender_id}
             for sender_id in approvers
         ],
+    )
+    # 幂等复用既有 PENDING 工单时补齐短语（服务层复用分支返回空串）
+    short_code = _reuse_short_code(
+        short_code,
+        action_types=["FILE_UPLOAD"],
+        system_name=args["system_name"],
+        environment=args["environment"],
+        digest=approval.action_digest,
     )
     return {
         "approval_id": approval.id,
@@ -1704,6 +1746,20 @@ def approval_prepare_plan(args, ctx, db):
                 package_sha256 = str(ap["expected_sha256"]).lower()
             break
 
+    # 幂等复用既有 PENDING 计划时补齐短语（ExecutionPlanService.prepare 复用分支
+    # 返回空串）。action_types 必须按 step_order 还原成创建 manifest 的顺序，
+    # 否则多动作计划的短语可能复现成另一种拼接结果。
+    short_code = _reuse_short_code(
+        short_code,
+        action_types=[
+            s.action_type
+            for s in sorted(plan.steps, key=lambda item: getattr(item, "step_order", 0) or 0)
+        ],
+        system_name=plan.system_name,
+        environment=plan.environment,
+        digest=plan.plan_digest,
+    )
+
     reply_template = _approval_reply_template(
         kind="plan",
         status=plan.status,
@@ -1922,7 +1978,7 @@ def approval_execute_plan(args, ctx, db):
 @registry.register(
     name="ops.approval.reject_plan",
     title="拒绝执行计划",
-    description="将一条待审批（PENDING_APPROVAL）的执行计划正式标记为 REJECTED 终态，阻止其后续执行。用于审批链路中把被否决/放弃的工单同步为已拒绝。幂等：计划已处于终态时返回其当前状态，不产生副作用；仅 PENDING_APPROVAL 可被拒绝。需要 ops:write 权限并由调用方身份（rejected_by）记录审计。",
+    description="将一条待审批（PENDING_APPROVAL）的执行计划正式标记为 REJECTED 终态，阻止其后续执行。用于审批链路中把被否决/放弃的工单同步为已拒绝。幂等：非 PENDING_APPROVAL（含执行中 RUNNING、已终态）时原样返回当前状态，不产生副作用；仅 PENDING_APPROVAL 可被拒绝。需要 ops:write 权限并由调用方身份（rejected_by）记录审计。",
     scopes=["ops:write"],
     risk="medium",
     category="approval_reject",
@@ -1954,7 +2010,7 @@ def approval_reject_plan(args, ctx, db):
             "ok": True,
             "plan_id": plan.id,
             "status": plan.status,
-            "note": "计划已处于终态，无需重复拒绝",
+            "note": f"计划当前状态为 {plan.status}，仅 PENDING_APPROVAL 可拒绝，未做变更",
         }
 
     rejecter = ""
@@ -2004,6 +2060,100 @@ def approval_reject_plan(args, ctx, db):
         "status": plan.status,
         "rejected_by": plan.rejected_by,
         "rejected_at": plan.rejected_at.isoformat() if plan.rejected_at else None,
+        "reason": reason or None,
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# ops.approval.reject — 拒绝单动作工单
+# ──────────────────────────────────────────────────────────────
+
+@registry.register(
+    name="ops.approval.reject",
+    title="拒绝单动作工单",
+    description="将一条待审批（PENDING_APPROVAL）的单动作工单（SERVICE_CONTROL / EXEC_REMOTE / FILE_UPLOAD）标记为 REJECTED 终态，阻止其被批准执行。与 ops.approval.reject_plan 互补：执行计划请改用 reject_plan，本工具只处理单动作工单。幂等：非 PENDING_APPROVAL（含执行中 RUNNING、已终态）时原样返回当前状态，不产生副作用；仅 PENDING_APPROVAL 可被拒绝。需要 ops:write 权限；拒绝人身份从 message_context.sender_id 推导（无上下文时回退 rejecter_matrix_id / 调用方身份）并落库为 rejected_by 供审计，可选 reason 落库为 failure_reason。",
+    scopes=["ops:write"],
+    risk="medium",
+    category="approval_reject",
+    write=True,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "approval_id": {"type": "string", "description": "待拒绝的单动作工单 ID（可用 ops.approval.list 按 status=PENDING_APPROVAL 查询获得）"},
+            "reason": {"type": "string", "description": "拒绝原因（可选，落库为 failure_reason 以便审计）"},
+            "message_context": message_context_schema(),
+            "rejecter_matrix_id": {"type": "string", "description": "拒绝人身份 ID（无 message_context 时使用，如 Matrix user ID / 用户名）"},
+            "room_id": {"type": "string", "description": "来源房间 ID（兼容 legacy Matrix 调用）"},
+            "request_event_id": {"type": "string", "description": "来源消息事件 ID（兼容 legacy Matrix 调用）"},
+        },
+        "required": ["approval_id"],
+        "additionalProperties": False,
+    },
+)
+def approval_reject(args, ctx, db):
+    """拒绝一条待审批的单动作工单（幂等），记录拒绝者并可附拒绝原因。"""
+    from app.db.models import AiActionApproval
+
+    approval = db.query(AiActionApproval).filter(AiActionApproval.id == args["approval_id"]).first()
+    if not approval:
+        return {"ok": False, "error": "审批工单不存在", "approval_id": args["approval_id"]}
+
+    if approval.status != "PENDING_APPROVAL":
+        return {
+            "ok": True,
+            "approval_id": approval.id,
+            "action_type": approval.action_type,
+            "status": approval.status,
+            "note": f"工单当前状态为 {approval.status}，仅 PENDING_APPROVAL 可拒绝，未做变更",
+        }
+
+    rejecter = ""
+    reject_ctx = None
+    raw_ctx = args.get("message_context")
+    if raw_ctx:
+        try:
+            reject_ctx = normalize_message_context(raw_ctx)
+            rejecter = reject_ctx.sender_id
+        except ValueError:
+            reject_ctx = None
+    if not rejecter:
+        rejecter = (
+            args.get("rejecter_matrix_id")
+            or getattr(ctx, "username", "")
+            or "system"
+        )
+
+    service = ActionApprovalService(db)
+    approval = service.reject(
+        approval_id=args["approval_id"],
+        rejecter_matrix_id=rejecter,
+        rejection_context=reject_ctx,
+    )
+    if not approval:
+        current = (
+            db.query(AiActionApproval).filter(AiActionApproval.id == args["approval_id"]).first()
+        )
+        status = current.status if current else "unknown"
+        return {
+            "ok": False,
+            "error": f"拒绝失败：工单当前状态为 {status}，仅 PENDING_APPROVAL 可拒绝",
+            "approval_id": args["approval_id"],
+            "status": status,
+        }
+
+    reason = (args.get("reason") or "").strip()
+    if reason:
+        approval.failure_reason = reason
+        db.commit()
+        db.refresh(approval)
+
+    return {
+        "ok": True,
+        "approval_id": approval.id,
+        "action_type": approval.action_type,
+        "status": approval.status,
+        "rejected_by": approval.rejected_by,
+        "rejected_at": approval.rejected_at.isoformat() if approval.rejected_at else None,
         "reason": reason or None,
     }
 

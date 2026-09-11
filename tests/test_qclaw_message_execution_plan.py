@@ -505,7 +505,8 @@ class TestMessageExecutionPlanFlow:
 
         assert r1["plan_id"] == r2["plan_id"]
         assert r1["short_code"] != ""
-        assert r2["short_code"] == ""
+        # 复用分支按既有 plan_digest 复现同一确定性短语（原先返回空串，卡片不可用）
+        assert r2["short_code"] == r1["short_code"]
 
         plans = db.query(ExecutionPlan).filter(ExecutionPlan.plan_digest == r1["plan_digest"]).all()
         assert len(plans) == 1

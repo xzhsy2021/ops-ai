@@ -16,6 +16,25 @@ from app.services.agent_context import (  # noqa: E402
 )
 
 
+def _env(name: str) -> str:
+    """从仓库 .env 读一个键的值（只解析文本，不执行文件内容）。"""
+    for line in open(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8"):
+        line = line.strip()
+        if line.startswith(name + "="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _bind_signing_key(monkeypatch) -> None:
+    """注入 APPROVAL_SIGNING_KEY，测试结束后由 monkeypatch 自动还原。
+
+    此前这里用 os.environ.setdefault 直接改写进程环境且从不回收，会把该键泄漏
+    给同进程后续测试：test_task5_final_review 的 dotenv 用例依赖“未导出的键才
+    回填”语义，被泄漏的键会让它误判失败。
+    """
+    monkeypatch.setenv("APPROVAL_SIGNING_KEY", _env("APPROVAL_SIGNING_KEY"))
+
+
 def _tool_map(**overrides):
     """构造受控 tool_map。"""
     base = {
@@ -77,21 +96,12 @@ def test_drift_marked_when_tool_missing():
     assert drifts, "工具不在 tool_map 应标 drift"
 
 
-def test_all_flow_tools_in_real_registry():
+def test_all_flow_tools_in_real_registry(monkeypatch):
     """CI 漂移检测：全部流程步骤工具名必须在真 registry。
 
     与 validate_capability_annotations 同思路——名称 join 的地基。
     """
-    import os
-
-    def _env(n):
-        for line in open(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8"):
-            line = line.strip()
-            if line.startswith(n + "="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-        return ""
-
-    os.environ.setdefault("APPROVAL_SIGNING_KEY", _env("APPROVAL_SIGNING_KEY"))
+    _bind_signing_key(monkeypatch)
     from app.db.base import SessionLocal
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import register_builtin_tools, registry
@@ -113,18 +123,9 @@ def test_all_flow_tools_in_real_registry():
         db.close()
 
 
-def test_capability_sequence_in_pack():
+def test_capability_sequence_in_pack(monkeypatch):
     """pack.flows[] 携带 capability_sequence（生产组装验证）。"""
-    import os
-
-    def _env(n):
-        for line in open(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8"):
-            line = line.strip()
-            if line.startswith(n + "="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-        return ""
-
-    os.environ.setdefault("APPROVAL_SIGNING_KEY", _env("APPROVAL_SIGNING_KEY"))
+    _bind_signing_key(monkeypatch)
     from app.db.base import SessionLocal
     from app.services.tool_context import ToolContext
     from app.services.agent_context import build_context_pack
@@ -149,17 +150,8 @@ def test_capability_sequence_in_pack():
 # ──────────────────────────────────────────────────────────────
 
 
-def _live_registry_env():
-    import os
-
-    def _env(n):
-        for line in open(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8"):
-            line = line.strip()
-            if line.startswith(n + "="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-        return ""
-
-    os.environ.setdefault("APPROVAL_SIGNING_KEY", _env("APPROVAL_SIGNING_KEY"))
+def _live_registry_env(monkeypatch):
+    _bind_signing_key(monkeypatch)
     from app.db.base import SessionLocal
     from app.services.tool_context import ToolContext
     from app.services.tool_registry import register_builtin_tools
@@ -170,11 +162,11 @@ def _live_registry_env():
     return db, ctx
 
 
-def test_validate_sequence_ok_on_production():
+def test_validate_sequence_ok_on_production(monkeypatch):
     """生产四层校验全绿（flow 数随 FLOW_GUIDES 增长，与定义同步）。"""
     from app.services.agent_context import FLOW_GUIDES, validate_capability_sequence
 
-    db, ctx = _live_registry_env()
+    db, ctx = _live_registry_env(monkeypatch)
     try:
         report = validate_capability_sequence(db, ctx)
         assert report["ok"], report["violations"]
@@ -193,7 +185,7 @@ def test_validate_sequence_catches_drift(monkeypatch):
                   {"n": 3, "tool": "ops.approval.execute_plan"}],
     }
     monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
-    db, ctx = _live_registry_env()
+    db, ctx = _live_registry_env(monkeypatch)
     try:
         seq = ac.build_capability_sequence(flow, {})  # 空 map → drift 标记
         assert any(s.get("drift") for s in seq)
@@ -210,7 +202,7 @@ def test_validate_sequence_gate_uniqueness(monkeypatch):
                   {"n": 2, "tool": "ops.approval.execute_plan"}],  # 零审批门
     }
     monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
-    db, ctx = _live_registry_env()
+    db, ctx = _live_registry_env(monkeypatch)
     try:
         report = ac.validate_capability_sequence(db, ctx)
         assert not report["ok"]
@@ -232,7 +224,7 @@ def test_validate_sequence_action_type_illegal(monkeypatch):
         },
     }
     monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
-    db, ctx = _live_registry_env()
+    db, ctx = _live_registry_env(monkeypatch)
     try:
         report = ac.validate_capability_sequence(db, ctx)
         assert not report["ok"]
@@ -255,7 +247,7 @@ def test_validate_sequence_dependency_dangling(monkeypatch):
         },
     }
     monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
-    db, ctx = _live_registry_env()
+    db, ctx = _live_registry_env(monkeypatch)
     try:
         report = ac.validate_capability_sequence(db, ctx)
         assert not report["ok"]
@@ -264,7 +256,7 @@ def test_validate_sequence_dependency_dangling(monkeypatch):
         db.close()
 
 
-def test_pipeline_flow_guide_ids_valid():
+def test_pipeline_flow_guide_ids_valid(monkeypatch):
     """层5：pipelines.flow_guide_id 合法性（fixture 库内自建数据验证）。
 
     生产库回填验证见 scripts/backfill_pipeline_flow_guide.py 的 live probe；
@@ -274,7 +266,7 @@ def test_pipeline_flow_guide_ids_valid():
     from app.db.models import Pipeline
     from app.services.agent_context import FLOW_GUIDES, validate_capability_sequence
 
-    db, ctx = _live_registry_env()  # registry ctx；db 用 fixture 库
+    db, ctx = _live_registry_env(monkeypatch)  # registry ctx；db 用 fixture 库
     # _live_registry_env 返回的 db 也是 fixture 库（同 DATABASE_URL）——直接用
     try:
         # 干净库：无 pipeline → 层5 不违规
@@ -321,7 +313,7 @@ def test_pipeline_flow_guide_id_dangling_detected(monkeypatch):
                   {"n": 3, "tool": "ops.approval.execute_plan"}],
     }
     monkeypatch.setattr(ac, "FLOW_GUIDES", {"x-flow": flow})
-    db, ctx = _live_registry_env()
+    db, ctx = _live_registry_env(monkeypatch)
     try:
         report = ac.validate_capability_sequence(_FakeDB(), ctx)
         assert not report["ok"]

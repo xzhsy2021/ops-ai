@@ -542,8 +542,8 @@ if tool_def.name == "ops.approval.prepare_exec" and not settings.get("allow_exec
 | ③ | 更多模板 | 首批只覆盖只读查询与 apt/docker 安装。其他常用运维（日志抓取、配置查看、服务重启）按需追加到 `exec_remote_templates` |
 | ④ | 执行结果回执模板 | 执行后目前复用通用 `ops.approval.execute` 返回结构，未做 §4.3 式的专用执行回执模板 |
 | ⑤ | 频控参数调优 | `exec_remote_max_per_hour=10` 为初始值，按实际使用调整 |
-| ⑥ | 单工单缺拒绝工具 | 只有 `ops.approval.reject_plan`（计划专用）。单工单（EXEC_REMOTE / FILE_UPLOAD / SERVICE_CONTROL）没有对应的拒绝工具，被拒/放弃时只能等 15 分钟过期。**服务层 `ActionApprovalService.reject()` 本身是通用的**（按 id 拒绝任意工单，可复用），缺的只是一个工具包装。本次验证工单即通过直接调用服务层完成撤销 |
-| ⑦ | 计划/文件上传路径的同类空短语问题 | 与 11.2-6 同源：`approval_prepare_plan`（`approval_tools.py:1694` 附近）与 file_upload/service_control 路径（`:991`、`:1223` 附近）在幂等复用场景同样会把空短语渲染进回执。本次只修了 EXEC_REMOTE；是否统一修复待决策（做法相同，风险低） |
+| ⑥ | 单工单缺拒绝工具 | ✅ **已补齐**（见 11.8）：新增 `ops.approval.reject`。服务层 `ActionApprovalService.reject()` 本就是通用的，工具按其语义包装：幂等、仅 PENDING_APPROVAL 可拒、拒绝人身份从 `message_context.sender_id` 推导（回落 `rejecter_matrix_id` / 调用方身份）并落 `rejected_by`、可选 reason 落 `failure_reason`。与 `reject_plan`（计划专用）互补 |
+| ⑦ | 计划/文件上传路径的同类空短语问题 | ✅ **已修复**（见 11.8）：抽出共享助手 `_reuse_short_code()`，`prepare_plan` / `prepare_service_control` / `prepare_file_upload` / `prepare_exec` 四条路径统一在幂等复用场景复现确定性短语。服务层「复用分支返回空串」的契约**未改动**，仍由服务层测试固定 |
 
 ### 11.7 运行时验证记录（2026-09-10，Windows OPS 192.168.1.44:8000）
 
@@ -563,3 +563,68 @@ if tool_def.name == "ops.approval.prepare_exec" and not settings.get("allow_exec
 **当前开关状态：`allow_exec_remote_tool = true`（已开启）**，即该能力可用；每次执行仍必须由房间内人工一次性短码批准。如需关闭：`python fnos-migration/exec_remote_switch.py off`（立即生效，无需重启）。
 
 **设置持久化实证**：`GET /api/v2/tools/settings` 返回的是"库中值 + 默认值"的合并结果，管理员保存时会把合并结果整体写回——实测落库 36 个键（含本次 7 个 `exec_remote_*` 标量开关）。这正好实证了 11.2-3 的判断：若把模板/黑名单放进 `DEFAULT_CAPABILITY_SETTINGS`，它们会在此被固化进 DB 并遮蔽后续升级；因此它们只留在代码侧，DB 里没有对应键。
+
+### 11.8 后续收尾（2026-09-10 第二轮）
+
+#### 11.8.1 单动作工单拒绝工具 `ops.approval.reject`
+
+补齐 11.6-⑥。实现完全对齐既有 `ops.approval.reject_plan` 的口径（幂等、终态原样返回、`ops:write`、`write=True`、`category=approval_reject`），差别只在对象是 `AiActionApproval` 而非 `ExecutionPlan`：
+
+- 参数：`approval_id`（必填，可用 `ops.approval.list` 按 `status=PENDING_APPROVAL` 取得）、`reason?`、`message_context?`、`rejecter_matrix_id?`
+- 行为：`PENDING_APPROVAL` → 调服务层 `reject()` 置 `REJECTED`；非 `PENDING_APPROVAL`（已终态、或执行中 `RUNNING`）→ 幂等返回当前状态并附 `note`，不做变更；服务层拒绝返回空（并发竞态）→ 回报当前状态
+  - `AiActionApproval` 的真实状态集为 `PENDING_APPROVAL / RUNNING / SUCCEEDED / FAILED / REJECTED / EXPIRED`（执行器在 `approval_executor.py:82` 置 `RUNNING`），其中 `RUNNING` 不是终态。因此顺带把 `reject_plan` 原有的 `note`「已处于终态，无需重复拒绝」也改成按实际状态表述——原措辞对执行中的工单不成立，会误导操作者以为已经结束
+- 身份：只从 `message_context.sender_id` 推导，`rejecter_matrix_id` / 调用方身份仅作回落——与 `reject_plan` 一致，不信任调用方传参
+- 审计：`rejected_by` + `rejected_at`（服务层写入），`reason` → `failure_reason`
+- 发现性：新增 MCP 英文/中文描述映射；`ad-hoc-exec` 流程指引补一条 `hard_rules`（该用 `reject` 还是 `reject_plan`）
+
+授权面与既有 `reject_plan` 一致（`ops:write`，不额外要求"必须是本工单的授权审批人"）。理由：拒绝是收敛动作、不触发执行，且与既有 HTTP `POST /api/v2/approvals/{id}/reject` 口径相同。若日后要求"只有该工单的授权审批人可拒"，应在服务层统一加闸，而不是只在工具层加。
+
+#### 11.8.2 四条路径的空短语问题统一修复
+
+新增共享助手 `_reuse_short_code()`（`approval_tools.py`），替换 EXEC_REMOTE 原先的内联实现，并接入另外三条路径：
+
+| 路径 | action_types 来源 | digest 来源 |
+|---|---|---|
+| `prepare_service_control` | `["SERVICE_CONTROL"]` | `approval.action_digest` |
+| `prepare_file_upload` | `["FILE_UPLOAD"]` | `approval.action_digest` |
+| `prepare_exec` | `["EXEC_REMOTE"]` | `approval.action_digest` |
+| `prepare_plan` | `[s.action_type for s in sorted(plan.steps, key=step_order)]` | `plan.plan_digest` |
+
+计划路径**必须按 `step_order` 还原**成创建 manifest 时的顺序：短语只取前 3 个不同动词且保序，顺序错会让多动作计划复现出另一种拼接结果（`ExecutionPlanService.prepare` 里 `step_order=idx` 即 manifest 下标，见 `execution_plan.py:431`）。
+
+分层不变：服务层复用分支仍返回空串（`ActionApprovalService.prepare` / `ExecutionPlanService.prepare` 的既有契约与测试保持不动），由工具层把确定性短语还给调用方，因此不放松任何校验（一次性、15 分钟、房间+事件绑定、加盐哈希比对全部照旧）。
+
+**随之更新的两处工具层契约断言**（原断言"复用返回空短语"）：
+- `tests/test_execution_plan_tools_contract.py::test_prepare_plan_idempotent_for_duplicate_manifest`
+- `tests/test_qclaw_message_execution_plan.py`（计划幂等用例）
+
+#### 11.8.3 三例既有测试失败修复
+
+这三例与 EXEC_REMOTE 无关（B 落地前即失败），本次一并处理：
+
+| 用例 | 根因 | 修法 |
+|---|---|---|
+| `test_routing_sha_autocompute.py::test_prepare_plan_ignores_garbage_digest_and_backfills_from_ticket` | 测试自建内存 SQLite，未录入环境→服务器清单，触发 `validate_targets_in_environment` 的 fail-closed（`execution_plan.py:285`） | 按 `tests/test_environment_isolation.py::_seed_env` 同一模式补种 `System` + `SystemEnvironment(crypto-trader@test → cc-test2)`，**不放宽生产闸门** |
+| `test_routing_sha_autocompute.py::test_prepare_plan_backfills_missing_sha256_from_signed_ticket` | 同上 | 同上 |
+| `test_task5_final_review.py::test_dotenv_loader_parses_without_execution_and_preserves_exported_values` | 跨测试污染：`test_capability_sequence.py` 用 `os.environ.setdefault("APPROVAL_SIGNING_KEY", …)` 直接改写进程环境且从不回收，被污染后 dotenv 用例的"未导出键才回填"语义失效 | 该文件改为经 `monkeypatch.setenv` 注入（4 处，测试结束自动还原），并抽出 `_env` / `_bind_signing_key` 两个模块级助手；dotenv 用例本身未改（其断言是有效的） |
+
+#### 11.8.4 本轮验证
+
+- 新增/更新测试：`tests/test_exec_remote_approval.py` 增 H（拒绝工具 6 例）与 I（短语复现 4 例）两组；`tests/test_file_upload_approval.py` 增 FILE_UPLOAD 复用复现 1 例
+- 定向回归：`test_exec_remote_approval` + `test_file_upload_approval` + `test_execution_plan_tools_contract` + `test_qclaw_message_execution_plan` = 170 passed
+- 失败修复验证：`test_capability_sequence` + `test_task5_final_review` + `test_routing_sha_autocompute` + `test_environment_isolation` = 57 passed（污染用例按"先 capability 后 final_review"的真实顺序运行）
+- **全量回归：1162 passed / 0 failed**（修复前 1148 passed / 3 failed）
+
+#### 11.8.5 运行时验证记录（2026-09-10，重启 OPS 载入改动后经 MCP 端点实跑）
+
+全程**未向任何 Matrix 房间投递消息**；创建的验证工单/计划均已 REJECTED 终态并留拒绝原因，单动作待审批遗留 = 0。
+
+| # | 验证项 | 结果 |
+|---|---|---|
+| 1 | 工具上架 | `tools/list` 由 125 → **126**，`ops_approval_reject` 注解正确：`x_ops_category=approval_reject`、`x_ops_risk=medium`、`x_ops_ai_callable=true`、`x_ops_requires_human_approval=false`、`x_ops_ai_level=L3` |
+| 2 | 执行计划路径短语复现（本轮新接入） | `prepare_plan` 两次 → 同 `plan_id=13b7cdcc`、短语逐字复现 `批准服务控制+健康检查 crypto-trader@prod B49983B0`（多动词按 `step_order` 拼接正确），清理走 `reject_plan` → REJECTED |
+| 3 | 服务控制路径短语复现（本轮新接入） | `prepare_service_control` 两次 → 同工单 `aa99122d`、短语逐字复现 `批准服务控制 crypto-trader@prod 44D5FE13` |
+| 4 | 新工具拒绝（MCP 实跑） | `ops_approval_reject` 拒绝上述工单 → `ok=true`、`status=REJECTED`、`rejected_by=matrix:default:admin`（未传 `message_context` 时的回落路径，符合设计）、`reason` 落 `failure_reason` |
+| 5 | 幂等复拒 | 再次拒绝同一工单 → `ok=true`、`status=REJECTED`、`note=工单当前状态为 REJECTED，仅 PENDING_APPROVAL 可拒绝，未做变更`，无副作用 |
+| 6 | 不存在工单 | `approval_id` 不存在 → `ok=false`、`error=审批工单不存在` |
+| 7 | EXEC_REMOTE 路径回归 | `prepare_exec` 两次 → 同工单 `cd61a12a`、短语复现 `批准远程命令 crypto-trader@prod 2A955E24`；经 `ops_approval_reject` 传 `message_context` 拒绝 → `rejected_by=matrix:default:@jack.han:hubtel.xyz`（身份从 `sender_id` 推导路径） |

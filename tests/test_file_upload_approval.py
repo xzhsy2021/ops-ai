@@ -390,6 +390,79 @@ def test_prepare_file_upload_freezes_package_manifest(monkeypatch, tmp_path):
     assert captured["action_parameters"]["expected_sha256"] == result["package_sha256"]
 
 
+def test_prepare_file_upload_recomputes_phrase_when_service_reuses_pending(monkeypatch, tmp_path):
+    """幂等复用既有 PENDING 上传工单时（服务层返回空短语），回执仍须给出短语。
+
+    与服务控制 / 命令执行 / 执行计划同一修复：短语由 action_type + system + env +
+    digest 确定性派生，调用方按既有 action_digest 复现即可；否则复用场景（agent
+    重试 / 同包重复提交）下卡片短语位置为空，审批人无从照抄。
+    """
+    from app.services.approval_phrase import build_approval_phrase
+    from app.services.tool_adapters import approval_tools
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "frontend.tar.gz").write_bytes(b"package-data")
+    monkeypatch.setenv("UPLOAD_DIR", str(upload_dir))
+
+    class _Approval:
+        id = "approval-reuse-1"
+        action_type = "FILE_UPLOAD"
+        action_digest = "digest-reuse-1"
+        status = "PENDING_APPROVAL"
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    class _ApprovalService:
+        def __init__(self, db):
+            pass
+
+        def prepare(self, **kwargs):
+            return _Approval(), ""  # 复用分支：服务层不再签发短语
+
+    monkeypatch.setattr(approval_tools, "ActionApprovalService", _ApprovalService)
+    monkeypatch.setattr(approval_tools, "_lookup_approvers", lambda *args, **kwargs: [])
+    context = MessageContext(
+        channel="matrix",
+        channel_account_id="default",
+        conversation_id="!room:example.org",
+        message_id="$event",
+        sender_id="@requester:example.org",
+        content_sha256="b" * 64,
+    )
+    ticket = issue_ticket(
+        context,
+        "crypto-trader",
+        "crypto-frontend",
+        compute_routing_revision(approval_tools._routing_systems()),
+    )
+
+    result = approval_tools.approval_prepare_file_upload(
+        {
+            "message_context": context.to_dict(),
+            "routing_ticket": ticket.ticket,
+            "system_name": "crypto-trader",
+            "service_name": "crypto-frontend",
+            "environment": "test",
+            "targets": ["server-a"],
+            "action_parameters": {
+                "package_name": "frontend.tar.gz",
+                "remote_path": "/srv/releases/frontend.tar.gz",
+            },
+        },
+        SimpleNamespace(bound_room_ids=[], approver_matrix_ids=["@approver:example.org"]),
+        None,
+    )
+
+    expected = build_approval_phrase(
+        action_types=["FILE_UPLOAD"],
+        system_name="crypto-trader",
+        environment="test",
+        digest="digest-reuse-1",
+    )
+    assert expected.startswith("批准上传制品")
+    assert result["short_code"] == expected
+
+
 def test_upload_package_rejects_backend_path_outside_controlled_roots(tmp_path):
     from app.services.tool_adapters import file_tools
 

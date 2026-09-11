@@ -149,6 +149,11 @@ def test_dotenv_loader_parses_without_execution_and_preserves_exported_values(tm
     )
     env = os.environ.copy()
     env["KEEP"] = "already-exported"
+    # 本用例验证"文件里的键仅在未被导出时才回填"（KEEP 已导出故被排除）。
+    # APPROVAL_SIGNING_KEY 与断言无关，且历史上被一次性迁移脚本在导入期
+    # setdefault 进过进程环境（见 tests/test_puller_envfile_commands.py），
+    # 显式清掉以保证断言只反映加载器语义、不受测试执行顺序影响。
+    env.pop("APPROVAL_SIGNING_KEY", None)
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/load_dotenv.py"), "--format", "json", str(env_file)],
         check=True,

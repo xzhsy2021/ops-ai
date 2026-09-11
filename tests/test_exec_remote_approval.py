@@ -896,3 +896,256 @@ def test_exec_remote_phrase_uses_chinese_verb():
 
 def test_step_verbs_map_includes_exec_remote():
     assert approval_tools._STEP_VERBS["EXEC_REMOTE"] == "远程命令"
+
+
+# ──────────────────────────────────────────────────────────────
+# H. 单动作工单拒绝（ops.approval.reject）
+# ──────────────────────────────────────────────────────────────
+class _RejectTicket:
+    """单动作工单替身（状态可变）。"""
+
+    def __init__(self, status: str = "PENDING_APPROVAL"):
+        self.id = "approval-reject-1"
+        self.action_type = "EXEC_REMOTE"
+        self.status = status
+        self.rejected_by = None
+        self.rejected_at = None
+        self.failure_reason = None
+
+
+class _SingleRowQuery:
+    def __init__(self, row):
+        self._row = row
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self._row
+
+
+class _SingleRowDb:
+    """只实现 query().filter().first() 链，并计数 commit / refresh。"""
+
+    def __init__(self, row):
+        self._row = row
+        self.commits = 0
+
+    def query(self, *args, **kwargs):
+        return _SingleRowQuery(self._row)
+
+    def commit(self):
+        self.commits += 1
+
+    def refresh(self, obj):  # pragma: no cover - 仅为接口完整
+        return None
+
+
+def _reject_args(**overrides):
+    args = {
+        "approval_id": "approval-reject-1",
+        "message_context": _context().to_dict(),
+        "reason": "命令拼错，撤回重提",
+    }
+    args.update(overrides)
+    return args
+
+
+def _reject_service(monkeypatch, ticket, seen):
+    """把 ActionApprovalService 换成记录调用的替身。"""
+
+    class _Service:
+        def __init__(self, db):
+            seen["db"] = db
+
+        def reject(self, approval_id, rejecter_matrix_id, *, rejection_context=None):
+            from datetime import datetime
+
+            seen["approval_id"] = approval_id
+            seen["rejecter"] = rejecter_matrix_id
+            seen["has_context"] = rejection_context is not None
+            ticket.status = "REJECTED"
+            ticket.rejected_by = "matrix:default:@requester:example.org"
+            ticket.rejected_at = datetime(2026, 1, 1, 12, 0, 0)
+            return ticket
+
+    monkeypatch.setattr(approval_tools, "ActionApprovalService", _Service)
+    return seen
+
+
+def test_reject_tool_registered_as_approval_reject():
+    from app.services.tool_registry import ensure_builtin_registered, registry
+
+    ensure_builtin_registered()
+    tool = registry.get("ops.approval.reject")
+    assert tool is not None
+    assert tool.category == "approval_reject"
+    assert tool.scopes == ["ops:write"]
+    assert tool.write is True
+    assert tool.risk == "medium"
+    assert tool.input_schema["required"] == ["approval_id"]
+
+
+def test_reject_pending_ticket_marks_rejected(monkeypatch):
+    ticket = _RejectTicket("PENDING_APPROVAL")
+    db = _SingleRowDb(ticket)
+    seen = _reject_service(monkeypatch, ticket, {})
+
+    result = approval_tools.approval_reject(_reject_args(), SimpleNamespace(), db)
+
+    assert result["ok"] is True
+    assert result["approval_id"] == "approval-reject-1"
+    assert result["action_type"] == "EXEC_REMOTE"
+    assert result["status"] == "REJECTED"
+    assert result["rejected_by"] == "matrix:default:@requester:example.org"
+    assert result["rejected_at"] == "2026-01-01T12:00:00"
+    assert result["reason"] == "命令拼错，撤回重提"
+    # 原因落库为 failure_reason（与 reject_plan 的审计口径一致）
+    assert ticket.failure_reason == "命令拼错，撤回重提"
+    assert db.commits == 1
+    assert seen["approval_id"] == "approval-reject-1"
+
+
+def test_reject_derives_identity_from_message_context(monkeypatch):
+    """拒绝人身份只从 message_context.sender_id 推导，不信任调用方传参。"""
+    ticket = _RejectTicket("PENDING_APPROVAL")
+    seen = _reject_service(monkeypatch, ticket, {})
+
+    approval_tools.approval_reject(
+        _reject_args(rejecter_matrix_id="@spoofed:example.org"),
+        SimpleNamespace(),
+        _SingleRowDb(ticket),
+    )
+
+    assert seen["rejecter"] == "@requester:example.org"
+    assert seen["has_context"] is True
+
+
+def test_reject_falls_back_to_caller_identity(monkeypatch):
+    ticket = _RejectTicket("PENDING_APPROVAL")
+    seen = _reject_service(monkeypatch, ticket, {})
+    args = {"approval_id": "approval-reject-1", "rejecter_matrix_id": "@ops:example.org"}
+
+    approval_tools.approval_reject(args, SimpleNamespace(), _SingleRowDb(ticket))
+
+    assert seen["rejecter"] == "@ops:example.org"
+    assert seen["has_context"] is False
+
+
+def test_reject_unknown_ticket_returns_error(monkeypatch):
+    called = {"n": 0}
+
+    class _Service:
+        def __init__(self, db):
+            called["n"] += 1
+
+    monkeypatch.setattr(approval_tools, "ActionApprovalService", _Service)
+
+    result = approval_tools.approval_reject(_reject_args(), SimpleNamespace(), _SingleRowDb(None))
+
+    assert result["ok"] is False
+    assert "不存在" in result["error"]
+    assert called["n"] == 0
+
+
+def test_reject_terminal_ticket_is_idempotent(monkeypatch):
+    """非待审批状态（已终态 / 执行中）原样返回，不产生副作用（也不构造服务）。"""
+    ticket = _RejectTicket("SUCCEEDED")
+    called = {"n": 0}
+
+    class _Service:
+        def __init__(self, db):
+            called["n"] += 1
+
+    monkeypatch.setattr(approval_tools, "ActionApprovalService", _Service)
+
+    result = approval_tools.approval_reject(_reject_args(), SimpleNamespace(), _SingleRowDb(ticket))
+
+    assert result["ok"] is True
+    assert result["status"] == "SUCCEEDED"
+    assert "仅 PENDING_APPROVAL 可拒绝" in result["note"]
+    assert called["n"] == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# I. 幂等复用时的短语复现（exec / service_control / file_upload / plan 共用）
+# ──────────────────────────────────────────────────────────────
+def test_reuse_short_code_keeps_existing_code():
+    existing = "批准远程命令 crypto-trader@prod ABCD1234"
+    assert approval_tools._reuse_short_code(
+        existing,
+        action_types=["EXEC_REMOTE"],
+        system_name=SYSTEM,
+        environment="prod",
+        digest="d" * 64,
+    ) == existing
+
+
+def test_reuse_short_code_recomputes_from_digest():
+    digest = "d" * 64
+    assert approval_tools._reuse_short_code(
+        "",
+        action_types=["EXEC_REMOTE"],
+        system_name=SYSTEM,
+        environment="prod",
+        digest=digest,
+    ) == build_approval_phrase(
+        action_types=["EXEC_REMOTE"],
+        system_name=SYSTEM,
+        environment="prod",
+        digest=digest,
+    )
+
+
+def test_reuse_short_code_without_digest_stays_empty():
+    assert (
+        approval_tools._reuse_short_code(
+            "",
+            action_types=["EXEC_REMOTE"],
+            system_name=SYSTEM,
+            environment="prod",
+            digest="",
+        )
+        == ""
+    )
+
+
+def test_service_control_prepare_reuse_returns_phrase(monkeypatch):
+    """SERVICE_CONTROL 复用分支同样复现短语（与 exec / 上传 / 计划一致）。"""
+    _settings(monkeypatch)
+    context = _context()
+
+    class _ReuseService:
+        def __init__(self, db):
+            self.db = db
+
+        def prepare(self, **kwargs):
+            return _FakeApproval(), ""
+
+    monkeypatch.setattr(approval_tools, "ActionApprovalService", _ReuseService)
+    monkeypatch.setattr(
+        approval_tools, "_lookup_approvers", lambda *a, **k: ["@approver:example.org"]
+    )
+
+    result = approval_tools.approval_prepare_service_control(
+        {
+            "message_context": context.to_dict(),
+            "routing_ticket": _ticket(context),
+            "system_name": SYSTEM,
+            "environment": "prod",
+            "control_action": "restart",
+            "targets": ["server-a"],
+        },
+        SimpleNamespace(),
+        None,
+    )
+
+    expected = build_approval_phrase(
+        action_types=["SERVICE_CONTROL"],
+        system_name=SYSTEM,
+        environment="prod",
+        digest=_FakeApproval.action_digest,
+    )
+    assert expected.startswith("批准服务控制")
+    assert result["short_code"] == expected
+    assert expected in result["reply_template"]

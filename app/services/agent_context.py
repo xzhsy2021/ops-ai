@@ -558,6 +558,7 @@ FLOW_GUIDES: dict[str, dict[str, Any]] = {
             "不自动重试：部分目标失败时保留逐目标明细（成功数/失败数/各机 stdout+stderr），需重跑请重新提交审批",
             "生产环境破坏性命令（rm -r/-f、mkfs、dd、关机重启、改密、清空防火墙、prune 等）一律拒绝，非生产环境需显式 allow_destructive=true",
             "禁止用 ops.exec_remote 承接此类需求：该工具对 AI token 保持 L4 硬阻断，仅管理员会话可用",
+            "工单不应继续时（命令拼错、需求撤回、审批人否决）用 ops.approval.reject 把该单动作工单置为 REJECTED 终态（幂等，需 ops:write）；执行计划用 ops.approval.reject_plan——两者不可混用，也不要用 execute 去消费一个不该执行的单",
         ],
     },
 }

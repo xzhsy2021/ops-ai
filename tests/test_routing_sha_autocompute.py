@@ -48,6 +48,30 @@ def _systems_kw(approvers):
     }
 
 
+def _seed_test_env(db, system_name, server_ids=("cc-test2",)):
+    """给内存库补环境→服务器绑定。
+
+    execution_plan 的环境隔离闸是 fail-closed 的：环境未绑服务器清单时任何
+    targets 都拒绝（见 validate_targets_in_environment）。本文件测的是摘要反填，
+    与隔离闸无关，因此需按 tests/test_environment_isolation.py::_seed_env 的
+    同一模式，为 crypto-trader@test 录入权威清单。
+    """
+    from app.db.models import System, SystemEnvironment
+
+    if not db.query(System).filter(System.name == system_name).first():
+        db.add(System(name=system_name, display_name=system_name))
+        db.flush()
+    db.add(
+        SystemEnvironment(
+            system_name=system_name,
+            name="test",
+            category="test",
+            servers=[{"id": sid} for sid in server_ids],
+        )
+    )
+    db.commit()
+
+
 def test_resolve_autocomputes_content_sha256_from_message_text(monkeypatch):
     """未传 content_sha256：自动按消息原文（UTF-8）计算摘要并签发票据。"""
     monkeypatch.setattr(approval_tools, "get_all_systems", lambda: _systems_kw([_identity("matrix", "@ops:example.org", account="default")]))
@@ -182,6 +206,7 @@ def test_prepare_plan_ignores_garbage_digest_and_backfills_from_ticket(monkeypat
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     db = Session()
+    _seed_test_env(db, resolved["system_name"])
     try:
         # 消息里带垃圾摘要（附件路径标识），模拟 zeroclaw 误传场景
         ctx_dict = dict(resolved["message_context"])
@@ -241,6 +266,7 @@ def test_prepare_plan_backfills_missing_sha256_from_signed_ticket(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
+    _seed_test_env(db, resolved["system_name"])
     try:
         ctx_dict = dict(resolved["message_context"])
         ctx_dict.pop("content_sha256")

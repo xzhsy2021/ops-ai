@@ -257,7 +257,13 @@ def test_prepare_plan_rejects_room_outside_system_binding(monkeypatch, db):
 
 
 def test_prepare_plan_idempotent_for_duplicate_manifest(db):
-    """重复 manifest 的 prepare_plan 返回已有计划且无新短码。"""
+    """重复 manifest 的 prepare_plan 复用已有计划，并复现同一短语。
+
+    服务层复用分支不再签发新短语（返回空串，见 ExecutionPlanService.prepare
+    的既有契约，服务层测试继续固定该行为）。但工具层必须把确定性短语还给调用方，
+    否则卡片会渲染出空短语、审批人无从照抄。短语由 digest 完全决定，复现结果与
+    首次签发一致。
+    """
     from app.services.tool_adapters.approval_tools import approval_prepare_plan
 
     suffix = "prepare-idem"
@@ -269,7 +275,7 @@ def test_prepare_plan_idempotent_for_duplicate_manifest(db):
 
     assert r1["plan_id"] == r2["plan_id"]
     assert r1["short_code"] != ""
-    assert r2["short_code"] == ""
+    assert r2["short_code"] == r1["short_code"]
     assert r2["status"] == "PENDING_APPROVAL"
 
 

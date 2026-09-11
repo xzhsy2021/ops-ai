@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 from fastapi import HTTPException
 
@@ -394,28 +395,50 @@ def list_services_tool(args, ctx, db):
 @registry.register(
     name="ops.list_environments",
     title="查询环境配置",
-    description="列出系统/项目发布环境。",
+    description=(
+        "列出系统/项目发布环境，返回每个环境的服务器清单（servers）与服务级 env→servers 映射"
+        "（service_server_map）。发布计划 parameters.targets 必须用这里的目标服务器名。"
+    ),
     scopes=["ops:read"],
     risk="low",
     category="app",
     ai_callable=True,
     ai_auto_callable=True,
-    input_schema={"type": "object", "properties": {"system": {"type": "string"}, "limit": {"type": "integer", "default": 100}}, "additionalProperties": False},
+    input_schema={
+        "type": "object",
+        "properties": {
+            "system": {"type": "string", "description": "系统名，如 crypto-trader"},
+            "service": {"type": "string", "description": "可选：只看某个服务的 env→servers 映射"},
+            "limit": {"type": "integer", "default": 100},
+        },
+        "additionalProperties": False,
+    },
 )
 def list_environments_tool(args, ctx, db):
     system = str(args.get("system") or "").strip()
     items = []
     seen = set()
-    from app.db.models import Environment, SystemEnvironment
+    from app.db.models import Environment, Service, SystemEnvironment
     query = db.query(SystemEnvironment)
     if system:
         query = query.filter(SystemEnvironment.system_name == system)
     for row in query.order_by(SystemEnvironment.system_name, SystemEnvironment.name).all():
         seen.add((row.system_name, row.name))
+        # servers 是发布计划 parameters.targets 的唯一权威来源。此前该字段未回传，
+        # 导致 AI 客户端无法判断"生产该发哪几台"，只能凭服务器名里的环境字样猜
+        # （2026-09-11 审计发现）。
+        raw_servers = row.servers if isinstance(row.servers, list) else json.loads(row.servers or "[]")
+        server_names = [
+            str(s.get("id") if isinstance(s, dict) else s)
+            for s in raw_servers
+            if (s.get("id") if isinstance(s, dict) else s)
+        ]
         items.append({
             "system_name": row.system_name,
             "name": row.name,
             "display_name": row.display_name or row.name,
+            "category": row.category,
+            "servers": server_names,
             "variables": row.variables or {},
             "source": "database",
         })
@@ -426,11 +449,32 @@ def list_environments_tool(args, ctx, db):
             "variables": row.variables or {},
             "source": "database",
         })
+
+    # 服务级 env→servers（services.template_variables.servers_by_env）：告诉客户端
+    # 每个服务在该环境实际跑在哪几台上（例如 system 只在主节点）。
+    service_server_map: dict = {}
+    svc_query = db.query(Service)
+    if system:
+        svc_query = svc_query.filter(Service.system_name == system)
+    service_filter = str(args.get("service") or "").strip()
+    if service_filter:
+        svc_query = svc_query.filter(Service.name == service_filter)
+    for svc in svc_query.order_by(Service.name).all():
+        tv = svc.template_variables if isinstance(svc.template_variables, dict) else json.loads(svc.template_variables or "{}")
+        env_map = (tv or {}).get("servers_by_env") or {}
+        if isinstance(env_map, dict) and env_map:
+            service_server_map[svc.name] = {str(k): list(v or []) for k, v in env_map.items()}
+
     try:
         limit = max(1, min(int(args.get("limit") or 100), 500))
     except Exception:
         limit = 100
-    return {"items": items[:limit], "total": len(items[:limit]), "summary": f"查询到 {len(items[:limit])} 个环境"}
+    return {
+        "items": items[:limit],
+        "total": len(items[:limit]),
+        "service_server_map": service_server_map,
+        "summary": f"查询到 {len(items[:limit])} 个环境；{len(service_server_map)} 个服务带环境服务器映射",
+    }
 
 
 # ─── Server CRUD ────────────────────────────────────────────────────────────

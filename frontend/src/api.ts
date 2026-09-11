@@ -472,6 +472,8 @@ export const capabilityTools = {
   call: (tool: string, args?: Record<string, any>) => api.post('/tools/call', { tool, arguments: args || {} }),
   settings: () => api.get('/tools/settings'),
   updateSettings: (settings: Record<string, any>) => api.put('/tools/settings', { settings }),
+  // 当前生效的 ad-hoc 远程命令执行（EXEC_REMOTE）护栏：模式/限额/白名单模板
+  execPolicy: () => api.get('/tools/exec-policy'),
   tokens: () => api.get('/tools/tokens'),
   tokenTemplates: () => cachedGet('tools.tokenTemplates', 60000, () => api.get('/tools/token-templates')),
   createToken: (data: {

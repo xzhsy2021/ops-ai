@@ -10,16 +10,18 @@ import { ToolOverviewPanel } from './tools/ToolOverviewPanel'
 import { ToolRiskPolicyPanel } from './tools/ToolRiskPolicyPanel'
 import { ToolTokenPanel } from './tools/ToolTokenPanel'
 import { TemporaryApprovalPanel } from './tools/TemporaryApprovalPanel'
+import { ExecPolicyPanel, type ExecPolicy } from './tools/ExecPolicyPanel'
 import { McpAccessGuide } from './tools/McpAccessGuide'
 import { ToolDetailDrawer } from './tools/ToolDetailDrawer'
 import type { ToolInfo as _ToolInfo } from './tools/ToolCatalogPanel'
 
 type ToolInfo = _ToolInfo
 
-type TabKey = 'overview' | 'tokens' | 'temp-approvals' | 'catalog' | 'playground' | 'audit'
+type TabKey = 'overview' | 'exec-policy' | 'tokens' | 'temp-approvals' | 'catalog' | 'playground' | 'audit'
 
 const TAB_ITEMS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'overview', label: '概览与接入', hint: '能力开关、端点、Manifest' },
+  { key: 'exec-policy', label: '命令执行白名单', hint: 'EXEC_REMOTE 白名单模板与限额' },
   { key: 'tokens', label: 'Tool Token', hint: '令牌、权限最小化' },
   { key: 'temp-approvals', label: '临时审批授权', hint: '临时自审批授权管理' },
   { key: 'catalog', label: '工具目录', hint: '能力发现、Schema、风险' },
@@ -58,6 +60,10 @@ const CAPABILITY_DEFAULTS: Record<string, boolean> = {
   taskize_high_risk_tools: true,
   strict_prod_confirmation: true,
   agent_runtime_enabled: false,
+  // EXEC_REMOTE（ad-hoc 远程命令执行审批）：默认全关，管理员显式开启
+  allow_exec_remote_tool: false,
+  exec_remote_allow_prod: true,
+  exec_remote_allow_multiline: false,
 }
 
 function getData(res: any) {
@@ -172,6 +178,8 @@ export default function ToolAccessPage() {
   const [showSwitchModal, setShowSwitchModal] = useState(false)
   const [showRiskPolicyModal, setShowRiskPolicyModal] = useState(false)
   const [showManifestModal, setShowManifestModal] = useState(false)
+  const [execPolicy, setExecPolicy] = useState<ExecPolicy | null>(null)
+  const [execSaving, setExecSaving] = useState(false)
 
   const loadInitial = async () => {
     setLoading(true)
@@ -182,12 +190,13 @@ export default function ToolAccessPage() {
         include_schema: false,
         limit: 300,
       }
-      const [listRes, capRes, settingsRes, tokensRes, tokenTemplateRes] = await Promise.allSettled([
+      const [listRes, capRes, settingsRes, tokensRes, tokenTemplateRes, execPolicyRes] = await Promise.allSettled([
         capabilityTools.list(params),
         capabilityTools.capabilities({ profile: 'admin_full', include_disabled: true, include_schema: false, limit: 300 }),
         capabilityTools.settings(),
         capabilityTools.tokens(),
         capabilityTools.tokenTemplates(),
+        capabilityTools.execPolicy(),
       ])
       if (listRes.status === 'fulfilled') {
         const d = getData(listRes.value)
@@ -201,6 +210,7 @@ export default function ToolAccessPage() {
       }
       if (tokensRes.status === 'fulfilled') setTokens(getData(tokensRes.value) || [])
       if (tokenTemplateRes.status === 'fulfilled') setTokenTemplates(getData(tokenTemplateRes.value)?.templates || [])
+      if (execPolicyRes.status === 'fulfilled') setExecPolicy(getData(execPolicyRes.value) || null)
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
     } finally {
@@ -222,6 +232,8 @@ export default function ToolAccessPage() {
         const d = getData(res)
         setTools(d.tools || [])
         setSettings(d.settings || settings)
+      } else if (tab === 'exec-policy') {
+        await loadExecPolicy()
       } else if (tab === 'audit') {
         const [callsRes, plansRes] = await Promise.allSettled([
           capabilityTools.calls({ limit: callPageSize, offset: callOffset }),
@@ -246,6 +258,50 @@ export default function ToolAccessPage() {
       }
     } catch (e: any) {
       notify({ type: 'error', text: String(e) })
+    }
+  }
+
+  // ── EXEC_REMOTE（命令执行白名单）──
+  const loadExecPolicy = async () => {
+    try {
+      const res = await capabilityTools.execPolicy()
+      setExecPolicy(getData(res) || null)
+    } catch (e: any) {
+      notify({ type: 'error', text: String(e) })
+    }
+  }
+
+  const saveExecPolicy = async (payload: Record<string, any>) => {
+    setExecSaving(true)
+    try {
+      await capabilityTools.updateSettings({ ...settings, ...payload })
+      capabilityTools.clearCache()
+      setSettings((prev) => ({ ...prev, ...payload }))
+      await loadExecPolicy()
+      notify({ type: 'success', text: '命令执行白名单已保存' })
+    } catch (e: any) {
+      notify({ type: 'error', text: String(e) })
+    } finally {
+      setExecSaving(false)
+    }
+  }
+
+  // 清除模板覆盖：把 exec_remote_templates 从设置里删掉再整体保存，
+  // 这样 capability_settings 不再持有该键，后端回落到内置默认模板。
+  const clearExecOverride = async () => {
+    setExecSaving(true)
+    try {
+      const next = { ...settings }
+      delete next.exec_remote_templates
+      await capabilityTools.updateSettings(next)
+      capabilityTools.clearCache()
+      setSettings(next)
+      await loadExecPolicy()
+      notify({ type: 'success', text: '已清除模板覆盖，恢复系统内置白名单' })
+    } catch (e: any) {
+      notify({ type: 'error', text: String(e) })
+    } finally {
+      setExecSaving(false)
     }
   }
 
@@ -321,22 +377,27 @@ export default function ToolAccessPage() {
     }
   }
 
-  const updateSetting = async (key: string, value: boolean) => {
+  const updateSetting = async (key: string, value: boolean | string | number) => {
     // 乐观更新：先更新本地状态，UI 立即响应
     const next = { ...settings, [key]: value }
     setSettings(next)
     try {
       const res = await capabilityTools.updateSettings(next)
       const serverSettings = getData(res)
-      // 将后端可能返回的字符串布尔值转换为真正的布尔值
+      // 兼容历史遗留的字符串布尔（'true'/'false'）；但不能把
+      // exec_remote_mode='allowlist' 这类字符串枚举一并压成布尔——
+      // 只有当本地该键本来就是布尔（或值恰好是 true/false 字面量）时才转换。
+      const normalize = (k: string, v: any) => {
+        if (typeof v !== 'string') return v
+        const current = next[k] ?? CAPABILITY_DEFAULTS[k]
+        if (typeof current === 'boolean' || v === 'true' || v === 'false') {
+          return v.toLowerCase() === 'true'
+        }
+        return v
+      }
       const normalized: Record<string, any> = {}
       for (const k of Object.keys(serverSettings || next)) {
-        const v = serverSettings?.[k] ?? next[k]
-        if (typeof v === 'string') {
-          normalized[k] = v.toLowerCase() === 'true'
-        } else {
-          normalized[k] = v
-        }
+        normalized[k] = normalize(k, serverSettings?.[k] ?? next[k])
       }
       setSettings(normalized)
       capabilityTools.clearCache()
@@ -579,6 +640,14 @@ export default function ToolAccessPage() {
                         { key: 'strict_prod_confirmation', label: '严格生产环境确认', desc: '严格生产环境确认' },
                       ],
                     },
+                    {
+                      title: '远程命令执行（EXEC_REMOTE）',
+                      keys: [
+                        { key: 'allow_exec_remote_tool', label: '允许命令执行审批', desc: '允许 AI 提交 ad-hoc 远程命令执行审批（白名单模板见「命令执行白名单」标签页）' },
+                        { key: 'exec_remote_allow_prod', label: '允许生产执行', desc: '允许在生产环境提交命令执行审批（破坏性命令仍恒拒）' },
+                        { key: 'exec_remote_allow_multiline', label: '允许多行命令', desc: '放宽单行限制；多行容易被用来夹带额外命令，默认关闭' },
+                      ],
+                    },
                   ].map((group) => (
                     <div key={group.title} className="tool-switch-group">
                       <div className="tool-switch-group-title">{group.title}</div>
@@ -649,6 +718,20 @@ export default function ToolAccessPage() {
               </div>
             </div>
           )}
+        </section>
+      )}
+
+      {activeTab === 'exec-policy' && (
+        <section className="tool-tab-panel">
+          <ExecPolicyPanel
+            policy={execPolicy}
+            loading={loading}
+            saving={execSaving}
+            isAdmin={isAdmin}
+            onSave={saveExecPolicy}
+            onClearOverride={clearExecOverride}
+            onReload={loadExecPolicy}
+          />
         </section>
       )}
 

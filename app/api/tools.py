@@ -655,6 +655,44 @@ def update_tool_settings(payload: UpdateSettingsPayload, request: Request, db: S
     return api_response(data=settings)
 
 
+@tools_router.get("/exec-policy")
+def get_exec_policy(request: Request, db: Session = Depends(get_db)):
+    """当前**生效**的 ad-hoc 远程命令执行（EXEC_REMOTE）护栏，供管理页展示。
+
+    capability_settings 里 exec_remote_templates 只是「可选覆盖」：不配置时用代码
+    内置的 DEFAULT_EXEC_TEMPLATES。管理页需要看到真正生效的那一份（含来源标记），
+    否则只能看到一堆开关、看不到白名单到底放行了哪些命令。
+    """
+    require_admin(request, db)
+    from app.services.exec_command_policy import (
+        DEFAULT_EXEC_TEMPLATES,
+        DEFAULT_EXEC_MAX_LENGTH,
+        DEFAULT_EXEC_ALLOW_MULTILINE,
+        policy_from_settings,
+    )
+
+    settings = get_capability_settings(db)
+    policy = policy_from_settings(settings)
+    override = settings.get("exec_remote_templates")
+    templates = policy["templates"] or DEFAULT_EXEC_TEMPLATES
+    return api_response(data={
+        "mode": policy["mode"],
+        "allow_exec_remote_tool": bool(settings.get("allow_exec_remote_tool")),
+        "allow_prod": bool(settings.get("exec_remote_allow_prod", True)),
+        "allow_multi_line": policy["allow_multi_line"],
+        "max_length": policy["max_length"],
+        "max_targets": policy["max_targets"],
+        "max_timeout_seconds": int(settings.get("exec_remote_max_timeout_seconds") or 300),
+        "max_per_hour": int(settings.get("exec_remote_max_per_hour") or 0),
+        "templates": templates,
+        "templates_source": "override" if override else "default",
+        "templates_overridden": bool(override),
+        "default_templates": DEFAULT_EXEC_TEMPLATES,
+        "default_max_length": DEFAULT_EXEC_MAX_LENGTH,
+        "default_allow_multi_line": DEFAULT_EXEC_ALLOW_MULTILINE,
+    })
+
+
 @tools_router.get("/tokens")
 def list_tokens(request: Request, response: Response, since_id: str = "", limit: int = 50, db: Session = Depends(get_db)):
     user = require_auth(request, db)

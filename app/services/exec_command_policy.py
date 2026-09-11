@@ -119,11 +119,27 @@ DEFAULT_EXEC_TEMPLATES: List[Dict[str, Any]] = [
     },
     {
         "id": "docker_readonly",
-        "description": "只读 Docker 查询（状态/镜像/容器/网络/卷/磁盘占用）",
+        "description": "只读 Docker 查询（状态/镜像/容器/网络/卷/磁盘占用，含 compose ps/top/images/port 与有界日志）",
         "pattern": (
-            r"docker\s+(?:ps(?:\s+-a)?|images|version|info|network\s+ls|volume\s+ls|"
-            r"system\s+df|compose\s+version|compose\s+ls)"
+            r"docker\s+(?:"
+            r"ps(?:\s+(?:-a|--all))?|images|version|info|network\s+ls|volume\s+ls|system\s+df|"
+            # docker compose 只读查询；-f 指定的 compose 文件须落在 params.file.prefix 内
+            r"compose\s+(?:-f\s+(?P<file>/[A-Za-z0-9._/+@-]+)\s+)?"
+            r"(?:version|ls|ps(?:\s+(?:-a|--all))?|top|images|"
+            r"port(?:\s+(?P<port_svc>[A-Za-z0-9@._-]+))?|"
+            # 日志必须带 --tail=N（有界输出），否则按不匹配模板拒绝
+            r"logs\s+--tail[= ](?P<tail>\d{1,5})(?:\s+(?P<log_svc>[A-Za-z0-9@._-]+))?)"
+            r"|"
+            # 单容器有界日志（同样强制 --tail=N）
+            r"logs\s+--tail[= ](?P<ctr_tail>\d{1,5})\s+(?P<container>[A-Za-z0-9][A-Za-z0-9@._-]*)"
+            r")"
         ),
+        "params": {
+            "file": {
+                "kind": "path",
+                "prefix": ["/opt", "/data", "/var", "/vol1", "/root", "/etc", "/srv", "/home"],
+            }
+        },
         "env": ["test", "prod"],
     },
     {
@@ -296,6 +312,13 @@ def _check_params(template: Dict[str, Any], match: "re.Match[str]") -> Optional[
     return None
 
 
+def _template_allows_env(template: Optional[Dict[str, Any]], environment: str) -> bool:
+    """模板是否适用于该环境（env 为空视为通用）。"""
+    allowed_envs = [str(x).strip().lower() for x in ((template or {}).get("env") or [])]
+    env = (environment or "").strip().lower()
+    return not allowed_envs or not env or env in allowed_envs
+
+
 def match_template(
     command: str,
     templates: Optional[Iterable[Dict[str, Any]]] = None,
@@ -308,8 +331,7 @@ def match_template(
         pattern = str((template or {}).get("pattern") or "")
         if not pattern:
             continue
-        allowed_envs = [str(x).strip().lower() for x in (template.get("env") or [])]
-        if allowed_envs and env and env not in allowed_envs:
+        if not _template_allows_env(template, env):
             continue
         try:
             match = re.fullmatch(pattern, command, re.IGNORECASE)
@@ -413,9 +435,20 @@ def validate_exec_command(
             result["reason"] = err
             return result
         if not template:
+            # 把当前环境下可用的模板 id 一并回报，让调用方（AI/人）能直接照着改
+            # 命令，而不是反复试错；管理员也可在「AI 工具接入 → 命令执行白名单」
+            # 里查看/覆盖这些模板。
+            available = [
+                str((t or {}).get("id") or "")
+                for t in (DEFAULT_EXEC_TEMPLATES if templates is None else list(templates))
+                if _template_allows_env(t, environment)
+            ]
+            available = [x for x in available if x]
+            hint = "；当前环境下可用模板：" + "、".join(available) if available else ""
             result["reason"] = (
-                "命令不匹配任何白名单模板（当前为 allowlist 模式）；"
-                "如需自由命令请由管理员开启 exec_remote_mode=free"
+                "命令不匹配任何白名单模板（当前为 allowlist 模式）"
+                + hint
+                + "；如需自由命令请由管理员开启 exec_remote_mode=free"
             )
             return result
         result["template_id"] = str(template.get("id") or "")

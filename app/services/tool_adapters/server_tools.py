@@ -73,10 +73,23 @@ def _service_dir(system: str, service: str, ctx, db) -> str:
     cfg = get_service_config({"system": system, "service": service}, ctx, db)
     if not cfg.get("found"):
         raise HTTPException(status_code=404, detail="Service config not found")
-    path = cfg.get("service_dir") or cfg.get("deploy_path") or ""
+    # 服务目录（deploy_path / service_dir）在服务编辑页保存后落在
+    # template_variables 里（见 InventoryReadService.get_service），并不在
+    # 配置字典顶层。只读顶层会让每个按 UI 配置的服务都误报
+    # "Service directory is not configured"（例如前端服务 crypto-trader-web
+    # 配了 deploy_path=/data/web）。本文件 tail_service_log 早已按
+    # template_variables 取值，这里补齐同一口径；顶层字段仍兼容旧数据。
+    template_vars = cfg.get("template_variables") or {}
+    path = (
+        cfg.get("service_dir")
+        or cfg.get("deploy_path")
+        or template_vars.get("service_dir")
+        or template_vars.get("deploy_path")
+        or ""
+    )
     if not path:
         raise HTTPException(status_code=400, detail="Service directory is not configured")
-    return path.rstrip("/")
+    return str(path).rstrip("/")
 
 
 def _safe_child_path(base: str, path: str) -> str:

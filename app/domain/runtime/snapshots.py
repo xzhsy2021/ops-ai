@@ -185,7 +185,11 @@ def build_deployments_aggregate(
 
     running_count = db.query(Deployment).filter(Deployment.status == "running").count()
 
-    worker_alive = bool(_deploy_worker and _deploy_worker.running)
+    # AsyncWorkerHandle（app/deploy/worker.py）把生命周期状态收在 status() 里，
+    # 没有裸的 `running` 属性；这里读 `.running` 曾抛 AttributeError，导致
+    # ops.deploy.aggregate_status 整个接口失败。口径与 app/api/deploy/executions.py
+    # 和 app/services/system_health.py 保持一致。
+    worker_alive = bool(_deploy_worker and (_deploy_worker.status() or {}).get("running"))
 
     recent_rollback_count = db.query(Deployment).filter(
         Deployment.status == "rolled_back",

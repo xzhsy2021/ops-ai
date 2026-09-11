@@ -17,6 +17,11 @@ BACKEND_VERSION = "2.1.13"
 
 _CHECK_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 
+# Source suffixes that participate in the frontend freshness comparison.
+_SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".json"}
+# Directory under frontend/src that holds generated build outputs, not sources.
+_GENERATED_DIR_NAME = "generated"
+
 
 def _project_root() -> Path:
     return Path(ROOT_DIR).resolve()
@@ -59,8 +64,18 @@ def _iter_source_files() -> Iterable[Path]:
             yield path
         elif path.is_dir():
             for item in path.rglob("*"):
-                if item.is_file() and item.suffix in {".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".json"}:
-                    yield item
+                if not item.is_file() or item.suffix not in _SOURCE_SUFFIXES:
+                    continue
+                # frontend/src/generated/* are build outputs (buildInfo.ts is
+                # written by the prebuild step), not hand-written sources.
+                # Counting them made dist look stale whenever a generated file
+                # was rewritten — a git checkout, an interrupted build, or a
+                # dev-server run — which flipped single-process mode to
+                # API-only while the SPA routes still returned index.html, so
+                # every /assets/* request 404'd and the page rendered blank.
+                if _GENERATED_DIR_NAME in item.relative_to(path).parts:
+                    continue
+                yield item
 
 
 def _read_generated_frontend_build() -> Dict[str, Any]:

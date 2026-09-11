@@ -92,7 +92,10 @@ def test_reject_idempotent_on_terminal_state(db):
     second = approval_tools.approval_reject_plan({"plan_id": plan.id}, _ctx(), db)
     assert second["ok"] is True
     assert second["status"] == "REJECTED"
-    assert "终态" in second["note"]
+    # 幂等复拒按实际状态表述（原「已处于终态」措辞对执行中 RUNNING 的工单不成立，
+    # 已按 docs/exec-remote-approval-design.md 统一改口径），与
+    # ops.approval.reject（单动作工单）保持同一措辞。
+    assert second["note"] == "计划当前状态为 REJECTED，仅 PENDING_APPROVAL 可拒绝，未做变更"
 
 
 def test_reject_missing_plan(db):

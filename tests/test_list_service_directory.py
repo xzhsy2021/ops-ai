@@ -70,6 +70,34 @@ def test_service_dir_reads_service_dir_from_template_variables(monkeypatch):
     assert server_tools._service_dir("crypto-trader", "crypto-trader-web", _ctx(), None) == "/data/svc"
 
 
+def test_service_dir_reads_compose_dir_from_template_variables(monkeypatch):
+    """docker_compose 模板只用 compose_dir（crypto-docker-compose / puller-kline 等）。"""
+    _patch_config(monkeypatch, _service_config(compose_dir="/data/crypto-trader"))
+    assert server_tools._service_dir("crypto-trader", "crypto-docker-compose", _ctx(), None) == "/data/crypto-trader"
+
+
+def test_service_dir_reads_bg_base_dir_from_template_variables(monkeypatch):
+    """dovo 蓝绿服务只有 bg_base_dir（其下才是 bg_dirs 子目录）。"""
+    _patch_config(monkeypatch, _service_config(bg_base_dir="/data/bin/ata", bg_log_dir="/root/.pm2/logs"))
+    assert server_tools._service_dir("dovo", "dovo-pak", _ctx(), None) == "/data/bin/ata"
+
+
+def test_service_dir_prefers_most_specific_key(monkeypatch):
+    """同时配了多个目录键时取更具体的那个（service_dir > deploy_path > compose_dir > bg_base_dir）。"""
+    _patch_config(monkeypatch, _service_config(
+        service_dir="/data/bin/crypto-trader/puller",
+        compose_dir="/data/crypto-trader",
+    ))
+    assert server_tools._service_dir("crypto-trader", "puller", _ctx(), None) == "/data/bin/crypto-trader/puller"
+
+
+def test_service_dir_key_priority_is_stable():
+    """守卫：解析顺序被改动会导致服务目录悄悄指向别的路径，锁死它。"""
+    assert server_tools._SERVICE_DIR_KEYS == (
+        "service_dir", "deploy_path", "compose_dir", "bg_base_dir",
+    )
+
+
 def test_service_dir_still_accepts_top_level_fields(monkeypatch):
     """顶层字段（旧数据/其他写入路径）保持兼容，且优先于 template_variables。"""
     cfg = _service_config(deploy_path="/data/web")

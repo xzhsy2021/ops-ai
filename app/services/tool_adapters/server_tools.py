@@ -69,24 +69,34 @@ def _connect(server_key: str):
     return ssh, srv
 
 
+# 服务目录在服务编辑页保存后落在 template_variables 里，且不同模板用不同键名。
+# 顺序 = 从最具体到最宽泛，取第一个命中的；顶层字段优先于 template_variables，
+# 以兼容旧数据：
+#   service_dir  后端服务目录（generic_backend_direct / generic_backend_bluegreen）
+#   deploy_path  前端 / Web 发布目录（generic_frontend）
+#   compose_dir  docker-compose 项目目录（docker_compose）
+#   bg_base_dir  蓝绿部署基目录，其下才是 bg_dirs 各子目录（dovo-pak/bgd/tha/...）
+# 只认前两个键时，crypto-docker-compose、puller-kline/query/snapshot/trade 以及
+# 全部 dovo-* 共 10 个服务会误报「Service directory is not configured」。
+_SERVICE_DIR_KEYS = ("service_dir", "deploy_path", "compose_dir", "bg_base_dir")
+
+
 def _service_dir(system: str, service: str, ctx, db) -> str:
     cfg = get_service_config({"system": system, "service": service}, ctx, db)
     if not cfg.get("found"):
         raise HTTPException(status_code=404, detail="Service config not found")
-    # 服务目录（deploy_path / service_dir）在服务编辑页保存后落在
-    # template_variables 里（见 InventoryReadService.get_service），并不在
-    # 配置字典顶层。只读顶层会让每个按 UI 配置的服务都误报
-    # "Service directory is not configured"（例如前端服务 crypto-trader-web
+    # 服务目录并不在配置字典顶层，而是嵌套在 template_variables 里
+    # （见 InventoryReadService.get_service）。只读顶层会让每个按 UI 配置的服务都
+    # 误报 "Service directory is not configured"（例如前端服务 crypto-trader-web
     # 配了 deploy_path=/data/web）。本文件 tail_service_log 早已按
-    # template_variables 取值，这里补齐同一口径；顶层字段仍兼容旧数据。
+    # template_variables 取值，这里补齐同一口径，并按 _SERVICE_DIR_KEYS 覆盖
+    # 各模板的目录键名。
     template_vars = cfg.get("template_variables") or {}
-    path = (
-        cfg.get("service_dir")
-        or cfg.get("deploy_path")
-        or template_vars.get("service_dir")
-        or template_vars.get("deploy_path")
-        or ""
-    )
+    path = ""
+    for key in _SERVICE_DIR_KEYS:
+        path = cfg.get(key) or template_vars.get(key) or ""
+        if path:
+            break
     if not path:
         raise HTTPException(status_code=400, detail="Service directory is not configured")
     return str(path).rstrip("/")
@@ -98,7 +108,7 @@ def _safe_child_path(base: str, path: str) -> str:
         return base
     if path.startswith("/"):
         if not (path == base or path.startswith(base.rstrip("/") + "/")):
-            raise HTTPException(status_code=400, detail="Path must stay under service_dir/deploy_path")
+            raise HTTPException(status_code=400, detail="Path must stay under the service directory")
         return path
     return base.rstrip("/") + "/" + path.lstrip("/")
 

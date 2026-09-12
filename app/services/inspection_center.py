@@ -366,8 +366,55 @@ _DANGEROUS_SHELL_RE = re.compile(
     r"\bpoweroff\b|\binit\s+[06]\b|\biptables\b\s+-(F|A|I|D|X|P)|\bfirewall-cmd\b.*--(add|remove|reload|panic)|"
     r"\bufw\b\s+(allow|deny|delete|enable|disable)|\bsystemctl\b\s+(start|stop|restart|reload|enable|disable|mask|unmask)|"
     r"\bservice\b\s+\S+\s+(start|stop|restart|reload)|\bmysql\b\s+.*\b(update|delete|insert|drop|truncate|alter)\b|"
-    r"\bredis-cli\b\s+.*\bflushall\b|\bmkfs\b|\bdd\b\s+if=|>\s*/etc/|>>\s*/etc/)"
+    r"\bredis-cli\b\s+.*\bflushall\b|\bmkfs\b|\bdd\b\s+if=|>\s*/etc/|>>\s*/etc/|"
+    # 第 6 轮加固：原黑名单存在语法级绕过（关键字拆引号、${IFS}）与常见破坏命令漏项。
+    # 逐条都要求"命令词 + 参数"，避免误伤只读用法（如 cat /etc/passwd、/proc/mounts、
+    # find -printf/-ls/-exec tail、ps -ef | egrep a|b|c 这类只读统计）。
+    r"\brm\b\s+(-{1,2}\w|[/~$.])|"
+    r"\bfind\b[^\n]*\s-(delete|ok|okdir)\b|"
+    r"\bfind\b[^\n]*\s-exec(dir)?\s+(sudo\s+)?(rm|mv|cp|chmod|chown|sh|bash|python[0-9.]*|perl|dd|truncate|sed|shred|wipefs)\b|"
+    r"\bsed\b[^\n]*\s-i(\s|$)|"
+    r"\btruncate\b\s|\bshred\b\s|\bwipefs\b|\bfdisk\b|\bparted\b|\bmdadm\b|\bchattr\b\s|"
+    r"\bcrontab\b\s+-r\b|\bhistory\b\s+-c\b|(?<![\w/.-])userdel\b|\bgroupdel\b|\bchpasswd\b|(?<![\w/.-])passwd\s|"
+    r"\bmount\b\s|\bumount\b\s|\bswapon\b|\bswapoff\b|\bmodprobe\b|\binsmod\b|\brmmod\b|\bsetenforce\b|"
+    r"\s\|\s*(sudo\s+)?(ba|z|k|da)?sh\b|\s\|\s*(python[0-9.]*|perl|ruby|node)\b|"
+    r"\b(python[0-9.]*|perl|ruby|node|php)\s+-(c|e)\b)"
 )
+
+# 关键字拆分绕过（st"op" / rebo\ot / rm${IFS}-rf）在"扫描文本"里做归一，
+# 不改真正下发的命令；同时剔除注释行，避免注释里的示例被误判。
+_SHELL_QUOTE_CHARS = str.maketrans("", "", "\"'\\")
+_IFS_RE = re.compile(r"\$\{?IFS\}?", re.I)
+
+
+def _normalize_for_scan(text: str) -> str:
+    normalized = _IFS_RE.sub(" ", str(text or ""))
+    return normalized.translate(_SHELL_QUOTE_CHARS)
+
+
+def _sanitize_rule_shell(command: str) -> tuple[str, Optional[str]]:
+    """Normalize a rule shell script and reject obvious destructive commands.
+
+    The巡检中心第一阶段只允许只读巡检。规则内容可以是多行 shell，支持
+    管道、grep/find/awk/tail/ss/df 等只读命令，但会拒绝删除、修改、重启、
+    防火墙变更、DML 等高风险关键字。
+
+    局限（有意为之，非安全边界）：这是**黑名单**策略，只能拦住"明显破坏性"写法，
+    无法证明一条规则真的只读。真正的边界是"谁能编写规则"（管理端 + 审计）。
+    第 6 轮加固内容：
+      1. 扫描前把 ``$IFS``/``${IFS}`` 归一为空格并去掉引号/反斜杠，封堵
+         ``st"op"``、``rebo\\ot``、``rm${IFS}-rf`` 这类语法级绕过；
+      2. 补齐原漏项：``rm <路径>``、``find -delete/-exec``、``sed -i``、
+         ``truncate``、``crontab -r``、``history -c``、``userdel``、``passwd``、
+         ``mount/umount``、管道执行（``| sh``）与解释器 ``-c/-e`` 等。
+    """
+    cmd = str(command or "").replace("\r\n", "\n").strip()
+    if not cmd:
+        return "", "规则内容为空，无法生成可执行命令。"
+    scan_text = _normalize_for_scan("\n".join(line for line in cmd.splitlines() if not line.strip().startswith("#")))
+    if _DANGEROUS_SHELL_RE.search(scan_text):
+        return cmd, "规则命令包含疑似高风险写入/变更操作，已按只读巡检策略拦截。"
+    return cmd, None
 
 
 def _extract_config_commands(config: Any) -> List[str]:
@@ -379,22 +426,6 @@ def _extract_config_commands(config: Any) -> List[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
-
-
-def _sanitize_rule_shell(command: str) -> tuple[str, Optional[str]]:
-    """Normalize a rule shell script and reject obvious destructive commands.
-
-    The巡检中心第一阶段只允许只读巡检。规则内容可以是多行 shell，支持
-    管道、grep/find/awk/tail/ss/df 等只读命令，但会拒绝删除、修改、重启、
-    防火墙变更、DML 等高风险关键字。
-    """
-    cmd = str(command or "").replace("\r\n", "\n").strip()
-    if not cmd:
-        return "", "规则内容为空，无法生成可执行命令。"
-    scan_text = "\n".join(line for line in cmd.splitlines() if not line.strip().startswith("#"))
-    if _DANGEROUS_SHELL_RE.search(scan_text):
-        return cmd, "规则命令包含疑似高风险写入/变更操作，已按只读巡检策略拦截。"
-    return cmd, None
 
 
 def _first_command_line(command: str) -> str:
@@ -599,10 +630,8 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
     for code in selected:
         if code in builtin_codes:
             continue  # 由下面的 hardcoded 分支处理
-        # 动态从 DB 中查找自定义规则的命令
-        spec = _build_custom_rule_spec(code, scope=SERVER_SCOPE)
-        if spec:
-            specs.append(spec)
+        # 动态从 DB 中查找自定义规则的命令（同一分类可挂多条规则，全部纳入）
+        specs.extend(_build_custom_rule_specs(code, scope=SERVER_SCOPE))
     if "LOGIN_SECURITY" in selected:
         specs.append({
             "category": "LOGIN_SECURITY",
@@ -743,57 +772,67 @@ def _server_check_specs(server_name: str, categories: Iterable[str]) -> List[Dic
     return specs
 
 
-def _build_custom_rule_spec(category_code: str, scope: str = SERVER_SCOPE) -> Optional[Dict[str, Any]]:
-    """从 DB 中根据 category 构造自定义规则的 check spec。
+def _build_custom_rule_specs(category_code: str, scope: str = SERVER_SCOPE) -> List[Dict[str, Any]]:
+    """按 category 构造**该分类下所有启用规则**的 check spec（顺序 = sort_order）。
 
-    优先查找 InspectionItemConfig.item_code 关联的 InspectionItemRule.rule_code，
-    再在 InspectionRule 中取 rule_content 作为执行命令。
-    若都不存在，返回 None。
+    与 ``_rule_execution_specs`` 对齐：一个巡检项可以挂多条规则，而此前这里只取
+    ``InspectionItemRule`` 中 sort_order 最小的那一条，同分类的其余规则在项目组合巡检
+    中被静默丢弃（run 里既没有结果行也没有错误，运维无从发现）。
     """
     from app.db.models import InspectionItemConfig, InspectionItemRule, InspectionRule as RuleModel
     from app.db import SessionLocal
 
     db = SessionLocal()
     try:
-        rule_code: Optional[str] = None
+        rule_codes: List[str] = []
         try:
             cfg = db.query(InspectionItemConfig).filter(
                 InspectionItemConfig.item_code == category_code,
                 InspectionItemConfig.scope_type == scope,
             ).first()
             if cfg:
-                link = db.query(InspectionItemRule).filter(
+                links = db.query(InspectionItemRule).filter(
                     InspectionItemRule.item_config_id == cfg.id,
-                ).order_by(InspectionItemRule.sort_order).first()
-                if link and link.rule_code:
-                    rule_code = link.rule_code
+                ).order_by(InspectionItemRule.sort_order, InspectionItemRule.id).all()
+                for link in links:
+                    code = str(getattr(link, "rule_code", "") or "").strip()
+                    if code and code not in rule_codes:
+                        rule_codes.append(code)
         except Exception:
-            rule_code = None
+            rule_codes = []
 
-        # 兜底：直接在 InspectionRule 中按 category 找
-        if not rule_code:
-            try:
-                rule = db.query(RuleModel).filter(
-                    RuleModel.category == category_code,
-                    RuleModel.scope_type == scope,
-                    RuleModel.deleted == False,  # noqa: E712
-                    RuleModel.enabled == True,  # noqa: E712
-                ).first()
-                if rule:
-                    rule_code = rule.rule_code
-            except Exception:
-                rule_code = None
+        # 兜底/补全：该 category 下所有启用且未删除的规则都纳入（含 scope_type=BOTH）。
+        try:
+            rows = db.query(RuleModel).filter(
+                RuleModel.category == category_code,
+                RuleModel.scope_type.in_([scope, "BOTH"]),
+                RuleModel.deleted == False,  # noqa: E712
+                RuleModel.enabled == True,  # noqa: E712
+            ).order_by(RuleModel.rule_code).all()
+            for row in rows:
+                code = str(row.rule_code or "").strip()
+                if code and code not in rule_codes:
+                    rule_codes.append(code)
+        except Exception:
+            pass
 
-        if not rule_code:
-            return None
-        return _spec_from_rule_code(category_code, rule_code)
-    except Exception:
-        return None
+        specs: List[Dict[str, Any]] = []
+        for code in rule_codes:
+            spec = _spec_from_rule_code(category_code, code)
+            if spec:
+                specs.append(spec)
+        return specs
     finally:
         try:
             db.close()
         except Exception:
             pass
+
+
+def _build_custom_rule_spec(category_code: str, scope: str = SERVER_SCOPE) -> Optional[Dict[str, Any]]:
+    """（兼容保留）返回该 category 的第一条规则 spec；批量场景请用 ``_build_custom_rule_specs``。"""
+    specs = _build_custom_rule_specs(category_code, scope=scope)
+    return specs[0] if specs else None
 
 
 def _spec_from_rule_code(category_code: str, rule_code: str) -> Optional[Dict[str, Any]]:
@@ -813,19 +852,28 @@ def _spec_from_rule_code(category_code: str, rule_code: str) -> Optional[Dict[st
             return None
         if not rule:
             return None
+        rule_config = rule.config_json if isinstance(rule.config_json, dict) else {}
         command = _extract_command_from_content(rule.rule_content or "")
         if not command:
+            # 与 _rule_execution_specs 对齐：命令也可能存放在 config.commands/shell/cmd。
+            # 此前只读 rule_content，导致这类规则在组合巡检里被静默跳过（连结果行都没有），
+            # 而单机/批量巡检却会正常执行它。
+            command = "\n".join(_extract_config_commands(rule_config)).strip()
+        if not command:
             return None
-        rule_config = rule.config_json if isinstance(rule.config_json, dict) else {}
+        # 与 _rule_execution_specs 保持同一只读策略：DB 自定义规则的命令必须过净化器，
+        # 否则"项目组合巡检"会绕过只读校验直接执行规则内容（同一策略两个执行路径行为不一致）。
+        sanitized, blocked_reason = _sanitize_rule_shell(command)
         return {
             "category": category_code,
             "item_code": f"SERVER_CUSTOM_{rule_code}",
             "item_name": rule.rule_name or category_code,
             "execution": rule.description or "执行 InspectionRule 中保存的 shell 命令",
             "criteria": rule.suggestion or "退出码/关键字由通用 analyzer 判定",
-            "command": command,
+            "command": sanitized,
             "analyze": make_custom_rule_analyzer(rule_config, rule.risk_level or "MEDIUM"),
             "rule_config": rule_config,
+            "blocked_reason": blocked_reason,
         }
     except Exception:
         return None
@@ -839,6 +887,11 @@ def _spec_from_rule_code(category_code: str, rule_code: str) -> Optional[Dict[st
 def _server_checkers(server_name: str, categories: Iterable[str], thresholds: Optional[Dict[str, Any]] = None) -> List[CheckResult]:
     checks: List[CheckResult] = []
     for spec in _server_check_specs(server_name, categories):
+        if spec.get("blocked_reason"):
+            # 未通过只读安全校验的规则一律不执行，与 execute_server_inspection_run
+            # 的 blocked_reason 语义一致（此前组合巡检会直接执行）。
+            checks.append(_blocked_rule_result(spec))
+            continue
         checks.append(_remote_check(server_name, spec["category"], spec["item_code"], spec["item_name"], spec["command"], spec["analyze"], thresholds=thresholds))
     return checks
 
@@ -5550,6 +5603,16 @@ def _ensure_inspection_rule_schema(db: Session) -> None:
         db.rollback()
 
 
+def _rule_command_policy(content: Any) -> Dict[str, Any]:
+    """规则命令的只读策略判定（单一实现，供规则列表/详情与内置规则共用）。
+
+    执行时真正的拦截在 ``_sanitize_rule_shell``；这里只把同一判定结果回传给
+    前端/AI，让规则作者在保存或浏览时就能看到"该规则执行时会被跳过"。
+    """
+    _, reason = _sanitize_rule_shell(str(content or ""))
+    return {"readonly_allowed": reason is None, "reason": reason}
+
+
 def _rule_to_dict(r: InspectionRule, *, builtin: bool = False) -> Dict[str, Any]:
     # Compute execution/criteria by looking up the spec in builtin specs (if any)
     execution = ""
@@ -5571,6 +5634,9 @@ def _rule_to_dict(r: InspectionRule, *, builtin: bool = False) -> Dict[str, Any]
             execution = r.config_json["execution"]
         if r.config_json.get("criteria"):
             criteria = r.config_json["criteria"]
+    rule_content = getattr(r, "rule_content", None) or ((r.config_json or {}).get("content") if isinstance(r.config_json, dict) else None)
+    if not str(rule_content or "").strip():
+        rule_content = "\n".join(_extract_config_commands(r.config_json))
     return {
         "id": r.id,
         "rule_code": r.rule_code,
@@ -5581,13 +5647,14 @@ def _rule_to_dict(r: InspectionRule, *, builtin: bool = False) -> Dict[str, Any]
         "enabled": r.enabled,
         "deleted": bool(getattr(r, "deleted", False)),
         "config": r.config_json or {},
-        "rule_content": getattr(r, "rule_content", None) or ((r.config_json or {}).get("content") if isinstance(r.config_json, dict) else None),
+        "rule_content": rule_content,
         "execution": execution,
         "criteria": criteria,
         "description": r.description,
         "suggestion": r.suggestion,
         "version": r.version,
         "builtin": builtin,
+        "command_policy": _rule_command_policy(rule_content),
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
@@ -5641,6 +5708,7 @@ def _all_builtin_rules() -> List[Dict[str, Any]]:
             "config_json": {"commands": [line.strip() for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]},
             "version": SCHEMA_VERSION,
             "builtin": True,
+            "command_policy": _rule_command_policy(command),
         })
     for cat in PROJECT_CATEGORIES:
         code = f"PROJECT_{cat['code']}"
@@ -5661,6 +5729,7 @@ def _all_builtin_rules() -> List[Dict[str, Any]]:
             "config_json": {"commands": [line.strip() for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]},
             "version": SCHEMA_VERSION,
             "builtin": True,
+            "command_policy": _rule_command_policy(command),
         })
     return builtin
 
@@ -5734,7 +5803,7 @@ def _builtin_rule_by_code(rule_code: str) -> Optional[Dict[str, Any]]:
     for item in _all_builtin_rules():
         if item["rule_code"] == code:
             # Strip non-model fields so the dict can be unpacked into InspectionRule(**base)
-            return {k: v for k, v in item.items() if k not in {"builtin", "execution", "criteria"}}
+            return {k: v for k, v in item.items() if k not in {"builtin", "execution", "criteria", "command_policy"}}
     return None
 
 

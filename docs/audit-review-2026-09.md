@@ -1356,6 +1356,203 @@ now_ms = int(time.time() * 1000)          # 每次调用各取一次
 > 线上验证**刻意不测** `POST /ledger/delete`：该接口会真删台账与报表，守卫一旦失效就是
 > 破坏性操作，其行为由 HTTP 层单元测试覆盖（真实探测只做只读接口 + 预期被拒的规则创建）。
 
+## 第 12 轮（2026-09-12）· 安全边界加固（收尾轮）
+
+本轮延续第 11 轮待办里的两条：**① 部署/执行/维护链路确认闸门与鉴权一致性**、
+**② `except …: pass` 分诊**。做法是先做机械盘点再人工分诊——用 AST 扫出
+「会改状态的 HTTP 路由」199 个，逐个核对**鉴权/审计**覆盖；再用 AST 扫出
+`except` 体只有 `pass/continue/return None` 的静默失败点 187 处，按风险关键词排序后
+优先看部署、凭据、维护链路。合计修掉 **2 个真实 BUG**（1 个中危安全缺陷、1 个低-中危
+资源耗尽），其余全部逐条核实后**判定为良性或刻意设计**并记录在案（见第二节）。
+
+测试基线上轮 1579 → 本轮结束 **1591 passed**（+12，全部为本轮新增安全契约）。
+
+### 一、已修复
+
+#### 12.1 【中危】`POST /api/v2/files/browse/{server_name}`：命令注入 + 无授权 + 无目录白名单
+
+`app/api/deploy_v2.py::browse_remote`（发布页的远程文件浏览接口）原实现同时踩了三个坑：
+
+```python
+@resource_v2_router.post("/files/browse/{server_name}")
+async def browse_remote(request: Request, server_name: str):      # ← 没有任何鉴权
+    data = await request.json()
+    path = data.get("path", "/data/web/app")                      # ← 完全来自请求体
+    ...
+    cmd = f"ls -alh --time-style=long-iso '{path}' 2>/dev/null | tail -n +2"
+    exit_code, out, err = ssh.exec(cmd, timeout=10)               # ← 单引号包裹 ≠ 转义
+```
+
+| 问题 | 后果 |
+| --- | --- |
+| **命令注入** | 单引号包裹挡不住 `'`。`path` 传 `/data'; echo PWNED; id; echo '` 即可闭合引号，在**目标服务器**上以 OPS 保存的 SSH 凭据执行任意命令 |
+| **无授权** | 全平台同类接口 `app/api/sftp.py` 的每个文件端点都要求 `require_admin`（L183/247/297/344/387/432/474/498），而本端点连 `require_auth` 都没有，只靠 `app/core/security.py` 的全局会话中间件兜底 —— 任何**已登录**用户（含只读角色）都能拿服务器凭据遍历目录，属于越权 |
+| **无目录白名单** | sftp.py 用 `_server_allowed_roots`（默认 `/data,/opt,/var/log,/tmp`）限制可浏览范围，本端点可以浏览 `/etc`、`/root` 等任意路径 |
+
+修复（三层，按纵深顺序）：
+
+1. **转义**：`f"... {shlex.quote(path)} ..."` —— 与全仓其他 100+ 处远程命令口径一致
+   （`server_tools.py` 31 处、`servers.py` 12 处、`_shared.py` 9 处…都是 `shlex.quote`，
+   本处是**唯一**的例外；`deploy_v2.py` 全文只有这一个 `ssh.exec` 调用，所以该文件注入面已封闭）。
+2. **授权**：加 `require_deploy(request, db)`（可发布用户或管理员），并为端点补上
+   `db: Session = Depends(get_db)` 依赖。
+3. **白名单**：复用 sftp.py 的 `_ensure_path_allowed()`（内含 `posixpath.normpath` 归一，
+   可挡 `../` 逃逸），且校验发生在 **`_connect_ssh` 之前** —— 非法路径不会触发任何远程调用。
+   默认根目录与 sftp.py 完全一致，可用服务器配置或 `SFTP_ALLOWED_ROOTS` 放宽。
+
+- 红灯证据（暂存实现后跑本轮契约测试，**9 failed / 3 passed**）：
+  ```
+  AssertionError: 远端命令必须包含 shlex.quote 后的路径，实际：
+    ls -alh --time-style=long-iso '/data/web'; echo PWNED; id; echo '/x' 2>/dev/null | tail -n +2
+  AssertionError: 端点必须调用 require_deploy 做授权   ← assert [] == ['require_deploy']
+  AssertionError: assert 200 == 403                    ← path=/etc 被正常浏览
+  AssertionError: assert 200 == 403                    ← path=/data/../../etc 穿越成功
+  ```
+  另外用真实 POSIX shell（Git Bash）做了**行为层对照**：修前写法 `echo '{payload}'`
+  的输出里真的多出一行 `PWNED` 和一行 `uid=…`（命令被执行），`shlex.quote` 后输出
+  严格等于字面路径本身。
+- 影响面核对：前端 `api.browseRemote` / `api.uploadRemote`（`frontend/src/api.ts:228`、`:231`）
+  **没有任何调用方**（全仓 `*.ts/tsx` 搜索为空），因此收紧授权与目录白名单**不会影响任何 UI 流程**。
+
+#### 12.2 【低-中危】遗留 MCP 网关 `POST /api/v2/mcp/legacy/submit`：匿名可达 + 进程内字典无界增长
+
+`app/api/mcp_gateway.py` 的 `TASKS` 是进程内字典，`/submit` 只往里面塞、从不清理，
+而该端点**自身没有任何鉴权** —— 更关键的是它所在的 `/api/v2/mcp` 前缀在
+`app/core/security.py` 的 `PUBLIC_PREFIXES` 里（原本是为了让 tool token / MCP 客户端
+自己完成鉴权），**全局会话中间件会直接放行**：
+
+```python
+PUBLIC_PREFIXES = ("/assets/", "/docs/", "/api/v2/auth", "/api/v2/tools", "/api/v2/mcp", "/api/v2/capabilities")
+```
+
+于是匿名 POST 就能持续占用进程内存（小内存自托管机器上足以拖垮进程）。
+线上实测证实放行：匿名 `GET /api/v2/mcp/legacy/capabilities` → **200**。
+
+修复（保持旧脚本兼容，只加资源上限）：
+
+- `MAX_LEGACY_TASKS`（默认 200，`MCP_LEGACY_MAX_TASKS` 可调）：提交前按创建时间淘汰最旧条目，
+  被淘汰的任务查询时仍返回结构一致的 `status=not_found`，兼容性不变；
+- `MAX_LEGACY_PAYLOAD_BYTES`（默认 64 KiB，`MCP_LEGACY_MAX_PAYLOAD_BYTES` 可调）：
+  单条 payload 超限直接 **413**，不进入 `TASKS`。
+
+### 二、已排除 / 记录（本轮审计结论，避免误修与误报）
+
+| 审计项 | 结论 |
+| --- | --- |
+| 部署 worker 没有在应用启动时拉起？ | **不成立**：`main.py` 的 lifespan（L82-86）已经 `ensure_deploy_worker_running()` 并打印"发布后台 Worker 已启动"。进程重启后 DB 里 pending 的部署任务会被正常拾取 |
+| `approval_executor.py:581/672` 吞掉 `ensure_deploy_worker_running()` 异常 | 不是漏洞（worker 已在启动时拉起；后续任意部署/回滚请求也会顺带拉起）。仅"可观测性可改进"，未改代码 |
+| 写操作端点扫描出的一批 `NO-AUTH` | 逐条核实后**均已有闸门**：`/api/v2/tools/call`、`/call/stream`、MCP 各端点走 `get_tool_context()`（session 或 `ops_tool_*` token + scope）；`execution_plans.py` 用 `Depends(get_current_user)`；`sftp.py::file_download_post` 委托到已 `require_admin` 的 `file_download`；`inspection.py::run_server` 委托到已 `require_auth` 的 `_run_server`；`deploy/plans.py::/precheck` 委托到共享预检实现；`/api/v2/auth/setup`、`/logout` 属公开设计 |
+| `except …: pass` 187 处静默失败点 | 抽查部署/凭据/维护链路：`file_transfer_tools.py:227`（`finally` 清理临时文件）、`security_daily.py:47`（重试后 re-raise）、`upload_remote`/`browse_remote` 的 `ssh.close()`（尽力而为关闭）均为良性；未发现新的"静默失败导致业务错判" |
+| `deploy_v2.py` 其他远程命令 | 全文件只有 1 处 `ssh.exec`，即 12.1 修掉的那处；其余远程命令集中在 `_shared.py`/`server_tools.py` 等，已全部使用 `shlex.quote` |
+| 前端 `browseRemote`/`uploadRemote` 调用方 | 无（仅 `api.ts` 定义）。故 12.1 的鉴权收紧无 UI 回归风险，也说明该接口是脚本/历史用途 |
+
+### 三、待办（与末章总览一致，供后续轮次接续）
+
+- 让 `tests/test_custom_rule_engine_standalone.py` 复用实现，消除规则引擎副本漂移风险。
+- `MCP_TOOL_DESCRIPTION_OVERRIDES` 中 54 个幽灵条目（描述覆盖表里已不存在的工具）。
+- 前端 `EntityPicker` / `LogConsole` 异步搜索时序守卫；巡检页表格排序/批量操作的请求竞态。
+- `except …: pass` 剩余约 180 处的按域（Matrix/OpenClaw/fnOS）分诊。
+- 进程探针 `pgrep -f` 自匹配问题；`update_issue` 到期提醒。
+- 保留清单（需业主决策）：密钥轮换、`ENV=local` 关闭生产安全轨、fnOS/OpenClaw 遗留项。
+
+### 附：第 12 轮可复现的验证脚本
+
+- `tests/test_round12_security_hardening_contract.py`（12 项）：假 SSH 捕获实际下发的远端命令、
+  授权调用可观测、白名单/穿越用例、"连接前校验"断言、遗留 MCP 网关条目上限与 413；
+  另有一条用真实 POSIX shell 做的注入语义对照（无 POSIX shell 时自动 skip）。
+- `fnos-migration/_audit_round12_mutating_routes.py`（未入库）：199 个写操作路由的鉴权/审计盘点。
+- `fnos-migration/_audit_round12_silent_except.py`（未入库）：187 处静默 `except` 风险排序。
+- `fnos-migration/_audit_round12_shell_quoting.py`（未入库）：远程命令未转义插值扫描。
+- `fnos-migration/_verify_round12_live.py`（未入库）：对部署后的 OPS 实测断言（见下表）。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 17412；16 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| 匿名 `POST /api/v2/files/browse/<server>` | **401** `Authentication required`（全局会话中间件拦截；修复前该端点本身无鉴权，仅靠中间件兜底） |
+| 已登录 `POST …/files/browse/<server>`（`path=/etc`） | **403** `Path '/etc' is outside allowed SFTP roots: /data, /opt, /var/log, /tmp`（修复前 200 + 目录列表） |
+| 已登录 `path=/data/../../etc` | **403**（`../` 逃逸被 `posixpath.normpath` + 白名单拦住） |
+| 已登录注入载荷 `path=/data'; echo PWNED; id; echo '` | **403**，且响应中无 `uid=`、无目录列表（命令未被执行；修复前该载荷会被原样拼进远端命令） |
+| 已登录白名单内 `path=/data` | **200** 且返回真实目录列表（远程调用正常，无功能回归） |
+| 匿名 `GET /api/v2/mcp/legacy/capabilities` | 200（记录既有事实：`/api/v2/mcp` 前缀在中间件放行清单内，故 12.2 必须限制资源占用） |
+| 匿名连续提交 205 次 `/api/v2/mcp/legacy/submit` | 全部被接受，但**最早的任务已被淘汰**（`status=not_found`）、最新任务仍 `queued`（上限 200 生效；修复前无界增长） |
+| 超限 payload（>65536B）提交 | **413** `legacy payload too large (limit 65536 bytes)`，未进入 `TASKS` |
+| 第 10 轮成果回归 | `/health`、`/healthz` → 200 JSON；`/readyz` → `ready` |
+| 测试 | 全量 `pytest tests/ -q` → **1591 passed**（1579 + 12） |
+| 红灯对照 | 暂存实现后跑本轮契约测试：**9 failed / 3 passed**，`实际：ls -alh … '/data/web'; echo PWNED; id; echo '/x'`、`assert [] == ['require_deploy']`、`/etc` 与 `/data/../../etc` 均 200 |
+
+> 运维提示：本轮**只改后端**（`app/api/deploy_v2.py`、`app/api/mcp_gateway.py`）+ 测试 + 文档，
+> 前端零改动，**不需要 Ctrl+F5**；后端已重启（PID 17412）生效。
+> 实测中"白名单内 `/data`"一项会在目标服务器上执行一次**只读** `ls`（与发布页浏览目录同语义），
+> 除此之外本轮探针不含任何写操作：不触发发布/回滚、不发送任何 Matrix 消息、不删除任何数据。
+
+## 复盘总览（第 1–12 轮 · 收尾总结）
+
+### 一、12 轮范围、主题与测试基线
+
+| 轮次 | 主题 | 结束基线 | 代表性问题（均为真实缺陷） |
+| --- | --- | --- | --- |
+| 1 | 安全 / 口径 / 审计链路 | 1327 | 审计链路与敏感字段口径、已排除的假问题清单 |
+| 2 | 时间基 | 1336 | 审计时间戳写服务器本地时间，与全系统 naive UTC 错位 8 小时 |
+| 3 | 凭据写入安全 | 1348 | 改描述顺手清空私钥；`********` 占位符被当成真实密钥写库 |
+| 4 | MCP 工具层 | 1364 | SSH 私钥明文外泄、`dry_run` 契约失效、确认闸门缺少不变量 |
+| 5 | 巡检时间窗与状态机 | 1399 | 未知周期导致台账/报表 500、巡检任务无收尾与僵尸回收 |
+| 6 | 巡检只读策略一致性 | 1456 | 自定义 shell 规则绕过只读安全策略 |
+| 7 | 风险问题闭环生命周期 | 1470 | 闭环时间戳、截止时间写入路径、AI 分流口径 |
+| 8 | 服务器批量编辑 | 1492 | 批量路径静默空操作 / `NameError`、凭据与分组同步缺陷 |
+| 9 | 前端展示层 + MCP 描述层 | 1497 | 首页假绿、列表请求竞态、MCP 工具描述退化成样板句 |
+| 10 | 回滚链路 + SPA 深链 | 1518 | 回滚把"服务没起来"记成成功；`/health` 未注册；SPA 白名单漂移导致已登录用户 404 |
+| 11 | 巡检判定口径 | 1579 | 比较符写错静默换判定口径（假绿 PASS）、配置零校验、周期静默兜底、swap 死代码 |
+| 12 | 安全边界加固 | **1591** | 文件浏览接口命令注入 + 无授权 + 无目录白名单；遗留 MCP 网关匿名可达且内存无界 |
+
+合计：套件基线 **1281 → 1591（+310 项回归测试）**；15 个提交（其中 4 个为纯文档补充）。
+每一轮的修复都走同一条链路：**红灯证明 → 实现 → 全量套件 → 部署后只读实测 → 报告与待办**。
+
+### 二、缺陷类型分布（12 轮归纳）
+
+1. **"不报错但结论错"型（占比最高）**：回滚假成功、首页假绿、批量编辑静默空操作、
+   比较符静默退化、配置零校验导致规则永不触发、周期静默兜底 —— 这类缺陷不会抛异常，
+   只会让界面/报表给出与事实相反的结论，是最难被日常使用发现的一类。
+2. **安全型**：SSH 私钥明文外泄（第 4 轮）、凭据被占位符覆盖（第 3 轮）、
+   命令注入 + 越权浏览（12.1）、匿名资源耗尽（12.2）。
+3. **数据一致性型**：审计时间戳时区错位（第 2 轮）、风险闭环时间戳与截止时间（第 7 轮）。
+4. **可用性/可观测型**：SPA 深链 404、`/health` 未注册、MCP 描述退化、死代码分支（11.4）。
+
+### 三、方法论与不变量（后续维护者可直接沿用）
+
+- **红灯先于修复**：每轮都先暂存实现跑新测试，把"修前到底是什么行为"固化成可复现证据
+  （例如 12.1 红灯里能直接看到注入片段出现在远端命令中）。
+- **只读线上验证**：破坏性接口（台账删除、真实回滚、生产发布）一律只用单元/契约测试覆盖，
+  线上探针只做只读请求与"预期被拒"的请求。
+- **每轮一张"已排除"表**：把核实过但**判定为刻意设计或良性**的项记录在案，
+  避免后续轮次重复排查或误修（例如 12 轮确认部署 worker 已由 `main.py` lifespan 拉起）。
+- **双侧契约**：服务层兜底与 HTTP 层校验可以并存但都必须有测试锁定
+  （第 11 轮 `period` 的 400 校验 vs 服务层"未知周期→今日"兜底）。
+- **机械盘点 + 人工分诊**：AST 扫写操作路由（199 个）与静默 `except`（187 处）先缩小范围，
+  再逐条人工判断 —— 本轮两个真实缺陷都来自这种组合。
+
+### 四、仍需业主决策 / 建议后续接续
+
+| 事项 | 状态 |
+| --- | --- |
+| `SESSION_SECRET` 为占位值（服务启动仍告警） | 业主已决定"本地运行暂无风险"，**保留告警与 UI 提示**，不自动轮换 |
+| `ENV=local` 会关闭生产安全轨 | 既有设计，未改；上生产前需确认环境变量 |
+| 规则引擎测试副本（`tests/test_custom_rule_engine_standalone.py`） | 待改为从实现导入，消除语义漂移风险 |
+| `MCP_TOOL_DESCRIPTION_OVERRIDES` 54 个幽灵条目 | 待清理（不影响功能，影响可发现性统计） |
+| 前端 `EntityPicker` / `LogConsole` 搜索竞态、巡检页排序/批量操作 | 待接入请求守卫 |
+| 剩余约 180 处 `except …: pass` | 待按域（Matrix / OpenClaw / fnOS）继续分诊 |
+| `pgrep -f` 进程探针自匹配、`update_issue` 到期提醒 | 低危，待排期 |
+
+### 五、结论
+
+12 轮复盘覆盖了平台的六条主链路：**发布/回滚、审批与执行、巡检（判定口径 + 台账报表）、
+MCP/工具层、凭据与安全边界、前端展示层**。每一轮都以"能复现的证据 + 能回归的测试"收尾，
+累计新增 310 项回归测试，全量套件稳定在 **1591 passed**（零 flaky 记录，第 11 轮修掉了
+唯一的挂钟竞态用例）。当前仓库中**没有已知的、可复现的严重缺陷**；剩余事项均为
+低危加固项或需要业主决策的运维策略项，已在上表列明。
+
+
+
 
 
 

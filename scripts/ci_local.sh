@@ -40,6 +40,7 @@ FOCUSED_TESTS=(
   tests/test_rollback_health.py
   tests/test_spa_route_whitelist_contract.py
   tests/test_inspection_judgement_contract.py
+  tests/test_round12_security_hardening_contract.py
   tests/test_release_switch_and_rollback.py
   tests/test_mcp_contract_sync.py
   tests/test_tool_token_templates_contract.py

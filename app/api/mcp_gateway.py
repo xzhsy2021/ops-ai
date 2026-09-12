@@ -12,11 +12,13 @@ server implementation.
 
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.api.helpers import api_response
@@ -26,6 +28,12 @@ legacy_router = APIRouter(prefix="/api/v2/mcp/legacy", tags=["mcp-gateway-legacy
 compat_router = APIRouter(prefix="/api/v2/mcp", tags=["mcp-gateway-legacy"])
 
 TASKS: Dict[str, Dict[str, Any]] = {}
+# 第 12 轮：/api/v2/mcp 在全局会话中间件的放行前缀里（见 app/core/security.py 的
+# PUBLIC_PREFIXES，为了让 tool token / MCP 客户端自己完成鉴权），而本模块的
+# /submit **没有任何自身鉴权**，TASKS 又是只增不减的进程内字典 —— 匿名调用即可
+# 持续占用内存（小内存自托管机器上足以拖垮进程）。这里给条目数与单条 payload 加上限。
+MAX_LEGACY_TASKS = max(1, int(os.getenv("MCP_LEGACY_MAX_TASKS", "200") or "200"))
+MAX_LEGACY_PAYLOAD_BYTES = max(1024, int(os.getenv("MCP_LEGACY_MAX_PAYLOAD_BYTES", "65536") or "65536"))
 CANONICAL_ENDPOINTS = {
     "mcp_streamable_http": "POST /api/v2/mcp",
     "capabilities": "GET /api/v2/capabilities",
@@ -62,10 +70,34 @@ def _legacy_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _evict_legacy_tasks() -> None:
+    """保留的遗留任务数达到上限时，按创建顺序淘汰最旧的条目（第 12 轮）。
+
+    上限保证匿名（未鉴权）调用无法让进程内存无界增长；被淘汰的任务查询时
+    仍会得到结构一致的 ``status=not_found``，旧脚本的兼容性不受影响。
+    """
+    while len(TASKS) >= MAX_LEGACY_TASKS:
+        oldest = min(TASKS, key=lambda key: (str(TASKS[key].get("created_at") or ""), key))
+        TASKS.pop(oldest, None)
+
+
+def _payload_size_bytes(payload: Dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(payload or {}, ensure_ascii=False, default=str).encode("utf-8"))
+    except Exception:
+        return MAX_LEGACY_PAYLOAD_BYTES + 1
+
+
 @legacy_router.post('/submit', deprecated=True)
 @compat_router.post('/submit', deprecated=True)
 async def submit_task(request: MCPTaskRequest, response: Response):
     _deprecated_response(response)
+    if _payload_size_bytes(request.payload) > MAX_LEGACY_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"legacy payload too large (limit {MAX_LEGACY_PAYLOAD_BYTES} bytes)",
+        )
+    _evict_legacy_tasks()
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {
         'task_id': task_id,

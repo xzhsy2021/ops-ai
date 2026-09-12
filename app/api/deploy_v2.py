@@ -1238,12 +1238,38 @@ async def checksum_file(file_name: str, db: Session = Depends(get_db)):
 
 
 @resource_v2_router.post("/files/browse/{server_name}")
-async def browse_remote(request: Request, server_name: str):
+async def browse_remote(request: Request, server_name: str, db: Session = Depends(get_db)):
+    """浏览目标服务器目录（发布包/文件选择器使用）。
+
+    第 12 轮修复（原实现有三处问题）：
+
+    1. **命令注入**：``path`` 来自请求体，此前直接拼进远端命令
+       ``ls -alh --time-style=long-iso '{path}'``。单引号包裹并不能阻止注入——
+       只要 path 里带一个 ``'`` 就能闭合引号，在目标服务器上以 OPS 保存的 SSH 凭据
+       执行任意命令（例如 ``/data'; id; echo '``）。全仓其他远程命令一律使用
+       ``shlex.quote``（server_tools/file_transfer_tools/_shared 等 100+ 处），
+       这里改为同一口径。
+    2. **缺少授权**：同平台的文件浏览接口 ``app/api/sftp.py`` 每个端点都要求
+       ``require_admin``，而本端点连 ``require_auth`` 都没有（此前只靠全局会话中间件
+       兜底——任何已登录用户，包括只读角色，都能用服务器凭据遍历任意目录）。
+       这里改为 ``require_deploy``（可发布用户或管理员）。
+    3. **缺少目录白名单**：sftp.py 用 ``_server_allowed_roots`` 限制可浏览根目录，
+       本端点可以浏览任意路径。这里复用同一套策略（默认
+       ``/data,/opt,/var/log,/tmp``，可用服务器配置或 ``SFTP_ALLOWED_ROOTS`` 放宽），
+       并在**连接服务器之前**校验，非法路径不会触发任何远程调用。
+    """
+    require_deploy(request, db)
     data = await request.json()
-    path = data.get("path", "/data/web/app")
+    raw_path = str((data or {}).get("path") or "").strip() or "/data/web/app"
     srv = inventory.get_server(server_name)
     if not srv:
         raise HTTPException(status_code=404, detail=f"Server '{server_name}' not found")
+
+    # 复用 SFTP 浏览接口的白名单逻辑（含 posixpath.normpath 归一，能挡住 ../ 逃逸）。
+    from app.api.sftp import _ensure_path_allowed
+
+    path = _ensure_path_allowed(raw_path, srv)
+
     from fastapi.concurrency import run_in_threadpool
 
     def _browse_remote_sync(srv, path):
@@ -1252,7 +1278,8 @@ async def browse_remote(request: Request, server_name: str):
         if not ssh:
             return None, "", "Cannot connect", f"Cannot connect to {server_name}"
         try:
-            cmd = f"ls -alh --time-style=long-iso '{path}' 2>/dev/null | tail -n +2"
+            # shlex.quote：path 已通过白名单校验，但仍必须按 shell 字面量转义
+            cmd = f"ls -alh --time-style=long-iso {shlex.quote(path)} 2>/dev/null | tail -n +2"
             exit_code, out, err = ssh.exec(cmd, timeout=10)
             return exit_code, out, err, None
         finally:

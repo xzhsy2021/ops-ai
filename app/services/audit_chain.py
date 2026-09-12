@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config.audit import load_audit_logs
@@ -685,6 +686,49 @@ def build_operation_chain(
     return data
 
 
+def _count_operation_chains(db: Session, *, kind: str, status_f: str, risk_f: str) -> int:
+    """统计与 ``list_operation_chains`` 过滤条件等价的真实总数。
+
+    历史缺陷：``total`` 直接取 ``len(items[:limit])``，而每个数据源查询都带
+    ``.limit(limit)``，于是总数最多只能等于 limit（limit=50 时永远显示 50 条）。
+    这里改用 SQL count（status/risk 过滤与内存 ``keep()`` 等价），让 total 准确，
+    ``returned`` 单独表示本次真正返回的条数。
+    """
+
+    def _count_model(model, status_col, risk_col) -> int:
+        query = db.query(func.count(model.id))
+        if status_f:
+            query = query.filter(func.lower(status_col) == status_f.lower())
+        if risk_f:
+            query = query.filter(func.lower(risk_col) == risk_f.lower())
+        return int(query.scalar() or 0)
+
+    total = 0
+    if not kind or kind == "tool_call":
+        total += _count_model(ToolCallLog, ToolCallLog.status, ToolCallLog.risk_level)
+    if not kind or kind == "job":
+        total += _count_model(OperationJob, OperationJob.status, OperationJob.risk_level)
+    if not kind or kind == "plan":
+        total += _count_model(ToolPlan, ToolPlan.status, ToolPlan.risk_level)
+    if not kind or kind == "execution_plan":
+        total += _count_model(ExecutionPlan, ExecutionPlan.status, ExecutionPlan.risk_level)
+    if not kind or kind == "deployment":
+        # 部署的 risk_level 是派生值（生产=high，其余=medium），需在此复刻同样语义
+        query = db.query(func.count(Deployment.id))
+        if status_f:
+            query = query.filter(func.lower(Deployment.status) == status_f.lower())
+        if risk_f:
+            is_prod = func.lower(Deployment.environment).in_(("prod", "production"))
+            if risk_f.lower() == "high":
+                query = query.filter(is_prod)
+            elif risk_f.lower() == "medium":
+                query = query.filter(or_(Deployment.environment.is_(None), ~is_prod))
+            else:
+                return total
+        total += int(query.scalar() or 0)
+    return total
+
+
 def list_operation_chains(db: Session, *, limit: int = 50, kind: str = "", status: str = "", risk: str = "") -> Dict[str, Any]:
     """按 kind 精确取源：指定 kind 时只查该源（修复：旧实现对四源各查 limit 条
     再在内存丢弃，既浪费又导致混合列表时间错位）；不指定 kind 时各源取 limit 条
@@ -792,10 +836,16 @@ def list_operation_chains(db: Session, *, limit: int = 50, kind: str = "", statu
                 items.append(item)
 
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    # total 必须是匹配的真实总数；items 只是"每源最多 limit 条、合并后取前 limit 条"的样本。
+    page = items[:limit]
+    total = _count_operation_chains(db, kind=kind, status_f=status_f, risk_f=risk_f)
     return {
         "schema_version": SCHEMA_VERSION,
-        "items": items[:limit],
-        "total": len(items[:limit]),
+        "items": page,
+        "total": total,
+        "returned": len(page),
+        "truncated": len(page) < total,
+        "note": "items 为按时间倒序的样本（每类来源最多取 limit 条）；total 为匹配总数。",
         "filters": {"kind": kind, "status": status_f, "risk": risk_f, "limit": limit},
         "generated_at": _now(),
     }

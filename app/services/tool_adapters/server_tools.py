@@ -264,7 +264,20 @@ def run_health_check(args, ctx, db):
         ssh.close()
 
 
+def _truncation_note(returned: int, total: int) -> str:
+    """limit 生效时的补充说明，避免把"返回条数"当成"总数"（AI 会据此判断规模）。"""
+    if returned >= total:
+        return ""
+    return f"（仅返回前 {returned} 条，实际共 {total} 条；可提高 limit 或加 keyword 缩小范围）"
+
+
 def _filter_items(items, keyword: str = "", limit: int = 100):
+    """按关键字过滤并截断，返回 ``(当前返回列表, 过滤后的真实总数)``。
+
+    历史缺陷：本函数只返回截断后的列表，调用方用 ``len(items)`` 充当
+    ``total`` 与 summary 里的"查询到 N 台/个"，limit 生效时就会少报总数
+    （与巡检风险计数口径不一致属同一类问题）。
+    """
     keyword = str(keyword or "").strip().lower()
     result = []
     for item in items or []:
@@ -277,7 +290,7 @@ def _filter_items(items, keyword: str = "", limit: int = 100):
         limit = max(1, min(int(limit or 100), 500))
     except Exception:
         limit = 100
-    return result[:limit]
+    return result[:limit], len(result)
 
 
 @registry.register(
@@ -306,8 +319,12 @@ def list_servers_tool(args, ctx, db):
     group = str(args.get("group") or "").strip().lower()
     if group:
         items = [x for x in items if str(x.get("group") or "").strip().lower() == group]
-    items = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
-    return {"items": items, "total": len(items), "summary": f"查询到 {len(items)} 台服务器"}
+    items, total = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
+    return {
+        "items": items,
+        "total": total,
+        "summary": f"查询到 {total} 台服务器{_truncation_note(len(items), total)}",
+    }
 
 
 @registry.register(
@@ -352,8 +369,12 @@ def list_systems_tool(args, ctx, db):
             "service_count": len(cfg.get("services") or []),
             "has_environments": bool(cfg.get("environments")),
         })
-    items = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
-    return {"items": items, "total": len(items), "summary": f"查询到 {len(items)} 个系统/项目"}
+    items, total = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
+    return {
+        "items": items,
+        "total": total,
+        "summary": f"查询到 {total} 个系统/项目{_truncation_note(len(items), total)}",
+    }
 
 
 @registry.register(
@@ -388,8 +409,12 @@ def list_services_tool(args, ctx, db):
             "template_variables": row.template_variables or {},
             "source": "database",
         })
-    items = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
-    return {"items": items, "total": len(items), "summary": f"查询到 {len(items)} 个服务"}
+    items, total = _filter_items(items, args.get("keyword") or "", args.get("limit") or 100)
+    return {
+        "items": items,
+        "total": total,
+        "summary": f"查询到 {total} 个服务{_truncation_note(len(items), total)}",
+    }
 
 
 @registry.register(
@@ -469,11 +494,16 @@ def list_environments_tool(args, ctx, db):
         limit = max(1, min(int(args.get("limit") or 100), 500))
     except Exception:
         limit = 100
+    total = len(items)
+    page = items[:limit]
     return {
-        "items": items[:limit],
-        "total": len(items[:limit]),
+        "items": page,
+        "total": total,
         "service_server_map": service_server_map,
-        "summary": f"查询到 {len(items[:limit])} 个环境；{len(service_server_map)} 个服务带环境服务器映射",
+        "summary": (
+            f"查询到 {total} 个环境；{len(service_server_map)} 个服务带环境服务器映射"
+            f"{_truncation_note(len(page), total)}"
+        ),
     }
 
 

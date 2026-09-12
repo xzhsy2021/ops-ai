@@ -1188,7 +1188,12 @@ def _payload_for_report(db: Session, report_type: str, target_id: str = "", incl
         from app.services.audit_chain import list_operation_chains
         data = list_operation_chains(db, limit=200)
         items = data.get("items") or []
-        summary = {"total": len(items), "generated_from": "operation_chains"}
+        # 历史缺陷：用 len(items) 当总数，最多只能到 limit(200)，报表会把"共 N 条"少报。
+        summary = {
+            "total": data.get("total", len(items)),
+            "returned": len(items),
+            "generated_from": "operation_chains",
+        }
         return {"data": data, "summary": summary, "metadata": {}}
     if report_type == "deployment":
         if not target_id:

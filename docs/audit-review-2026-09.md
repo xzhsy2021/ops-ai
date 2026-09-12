@@ -287,3 +287,129 @@
 > （缺少 name/environment/host/username 会 422），因此"有意清空某密钥"需提交完整对象并把该字段置 `null`；
 > 前端表单只提交自己管理的字段 + 空串，语义为"保持原值"。
 
+## 第 4 轮（2026-09-12）
+
+本轮范围：**MCP 工具层**——能力清单与注册表一致性、输出脱敏声明、审批/确认闸门、
+`dry_run`（预览）语义。核心问题是"声明与实现不一致"：工具对外宣称的行为与实际行为不符，
+调用方（尤其是 AI 客户端）无法察觉。
+
+### 一、已修复
+
+#### 4.1 【高危】`ops.get_ssh_key` 回传明文 SSH 私钥，且描述声称"不含私钥内容"
+
+- **现象**：`app/services/tool_adapters/ssh_key_tools.py` 的 `ops.get_ssh_key` 直接把
+  `decrypt_secret(row.private_key_encrypted)` 放进返回值。该工具：
+
+  | 属性 | 值 | 问题 |
+  | --- | --- | --- |
+  | `scopes` | `["ops:read"]` | 只要基础只读作用域 |
+  | `risk` / `write` | `low` / `False` | 无确认、无审批闸门 |
+  | `data_sensitivity` / `output_masking` | `sensitive` / 默认 `True` | 声明要脱敏，实际未脱敏 |
+  | 档位 | 同时在 `DAILY_OPS_TOOL_NAMES` 与默认 `ai_full` | AI 客户端可见可调 |
+  | MCP 描述 | "Get SSH key metadata (no private key content)" | **与实现完全相反** |
+
+- **影响**：任何持 `ops:read` 的 AI/MCP 令牌可一次性取走**全部已注册 SSH 私钥**，
+  进而直连整个机群，**绕开部署/执行通道的全部人工审批设计**；私钥同时被写入模型上下文。
+  全仓 `decrypt_secret` 调用点中，只有这一处把明文交回给工具调用方
+  （其余在 `db/repository.py`、`maintenance/service.py`、`maintenance/sql_query.py` 内部，
+  用于真正建立 SSH/DB 连接）。
+- **现场事实**：线上当前 `ssh_keys` 共 **0** 把，故未造成实际泄漏；但代码路径一旦注册密钥
+  即可被只读令牌取走（本轮用临时探针密钥复现并验证修复）。
+- **修复**：`get_ssh_key_tool` 改为只回传元数据 + **不可逆指纹**（`secret_fingerprint`，12 位），
+  私钥字段固定掩码 `"***"`，新增 `has_private_key`；工具描述与 MCP 描述统一为"不回传私钥内容"；
+  补齐 `output_masking=True` 声明。无任何 HTTP 接口或前端功能读取该私钥，故无功能损失。
+- **回归**：`tests/test_ssh_key_secret_exposure.py`（6 项）——运行期输出扫描（明文标记不得出现
+  在返回值里）、指纹稳定性、缺失密钥契约、列表接口仅元数据、**静态守卫**（工具适配器不得在
+  `return` 中直接解密密钥）、描述一致性。
+- **红灯证据**（临时回退适配器文件后）：
+  `AssertionError: 私钥明文不得出现在工具返回值中` /
+  `assert 'SUPER-SECRE...-MARKER-4f3a' not in '{"found": t...:26.335755"}'`；修复后同一用例通过。
+
+#### 4.2 【中危】`ops.upload_package` 的 `dry_run` 对 `content_base64` 入参完全失效（会真实落盘）
+
+- **现象**：`app/services/tool_adapters/file_tools.py::upload_package` 只在 `local_path` 分支检查
+  `dry_run`；`content_base64` 分支直接 `save_package_base64(...)` 落盘 + 写 `DeployPackage` 元数据。
+- **影响**：调用方显式传 `dry_run=true` 却被**真实暂存**进文件中心；风险策略与调用日志又按
+  "非破坏性预览"记账（`_is_dry_run` → 跳过确认、置 `can_auto_execute`），
+  等于"声称预览、实际写入"，且写入在审计里不可见。
+- **修复**：新增 `_inspect_package_content(...)`，对内存内容走同一套保留策略预检
+  （扩展名白名单 / 体积上限 / 空包告警 / SHA256），检查完立即删除临时文件；
+  返回体显式标注 `dry_run=true`、`staged=false`、`source`；非法 base64 仍按 400 契约返回。
+  `local_path` 分支的 dry-run 结果也补齐同样标注。
+- **红灯证据**：修复前 `assert None is True`（返回体是真实上传结果
+  `{'exists': True, 'deleted': False, ...}`，无 `dry_run` 标注）；且非白名单后缀在 dry-run 下
+  直接 `HTTPException: 400: Unsupported package extension: notes.txt`，而不是给出 `blockers` 预检结论。
+- **回归**：`tests/test_tool_dry_run_contract.py`（含 4.3、4.4 共 10 项）。
+
+#### 4.3 【中危】`ops.prepare_release_from_local_package` 在 `dry_run + content_base64` 下返回空预检
+
+- **现象**：dry-run 分支只处理 `local_path`，用 `content_base64` 调用时静默返回一份
+  `local_inspection={}` 的"dry-run 成功"。
+- **影响**：高风险工具（`risk=high`、`requires_confirmation=True`）的 dry-run 会跳过确认，
+  而调用方拿到的却是"没有任何预检信息"的成功响应，容易据此误判后进入真实发布。
+- **修复**：dry-run 分支把 `content_base64` 一并转交 `upload_package(..., dry_run=True)`，
+  返回真实预检结果；仍不落盘、不建计划（回归断言 `ToolPlan` 数量为 0）。
+
+#### 4.4 【加固】`_is_dry_run` 只对**声明了** `dry_run` 的工具生效
+
+- **背景**：`validate_schema` 仅在 schema 声明 `additionalProperties: false` 时拒绝未知参数
+  （`app/services/tool_schema.py:23-31`），而任务中心后台执行路径（`job_service.py:268-270`）
+  **不经过 schema 校验**；原 `_is_dry_run(args)` 只看调用方是否传了 `dry_run`。
+- **风险**：若将来出现"写法不严"的写工具，任何调用方多带一个 `dry_run: true` 就能让
+  `confirmation_required` 变 `False`，等于给全部写操作留一个**通用跳确认开关**。
+- **修复**：`_is_dry_run(tool_def, args)` 要求工具 `input_schema.properties` 中确实声明 `dry_run`，
+  否则不认。既保持两个真正实现预览语义的工具可用，也让闸门不再依赖各工具 schema 的严谨度。
+- **回归**：`test_undeclared_dry_run_does_not_skip_confirmation`（要求确认）、
+  `test_undeclared_dry_run_still_raises_428`（HTTP 428 `CONFIRMATION_REQUIRED`）、
+  `test_declared_dry_run_still_skips_confirmation`（正向对照）、
+  `test_real_registry_write_tools_only_allow_declared_dry_run`（注册表级：仅
+  `ops.upload_package`、`ops.prepare_release_from_local_package` 声明了 `dry_run`）。
+
+### 二、已排除的"假问题"（本轮审计结论，避免误修）
+
+| 审计项 | 结论 | 证据 |
+| --- | --- | --- |
+| 高危写工具是否缺人工确认/审批闸门 | **无缺口**：20/20 高危/严重写工具都带 `requires_confirmation` 或 `requires_human_approval` | `fnos-migration/_audit_tool_gates.py`：A 类 0、B 类（声明需确认但风险阈值不生效）0 |
+| 写工具是否允许 AI 自动调用 | **无**：28 个写工具中 `ai_auto_callable=True` 为 **0** | 同上 |
+| `dry_run` 能否成为通用跳确认开关 | **当前不可利用**：28/28 写工具都声明 `additionalProperties: false`，夹带 `dry_run` 会被 400 拒绝；仅 2 个工具声明 `dry_run` | `fnos-migration/_audit_dry_run_bypass.py`；现场 D2 实测 `400 Unknown tool arguments: dry_run` |
+| 是否存在绕过策略的工具执行路径 | **无**：`registry.call`、任务中心 worker、`/tools/packages/upload` 三处都会执行 `enforce_tool_policy` | `tool_registry.py:663`、`job_service.py:268`、`api/tools.py:558` |
+| 两个直接建 job 的接口能否夹带参数 | **不能**：`args` 由服务端从类型化 payload 构造，`inspection.py` 还硬编码 `confirm_text` | `api/servers.py:1260-1265`、`api/inspection.py:865-870` |
+| `ops.update_connection` 声称"高风险需人工审批"却查不到 | **死元数据**：该工具未注册，`MCP_TOOL_DESCRIPTION_OVERRIDES` 里的描述不会出现在 AI 可见清单，无用户可见影响 | `mcp_capability_service.py:188` vs `registry._tools` |
+| `data_sensitivity` / `output_masking` 未被运行时强制 | **设计如此**：二者只做策略分级（`ai_tool_level` → L2）与清单声明，脱敏由各适配器自行实现；本轮逐点核对了密钥类输出 | `tool_policy.py:91/186`、各适配器 `_MASK` |
+| 工具调用日志会保存密钥明文 | **不会**：`tool_audit._preview` 按字段名正则脱敏（含 `private_key`/`password`/`token`） | 现场实测日志行为 `"private_key": "***MASKED***"` |
+
+### 三、待办（后续轮次）
+
+- 巡检域（`inspection_center.py` 5600+ 行）状态机、幂等与时间窗语义核查（尚未开始）。
+- MCP 工具描述里的**正向漂移**批量校准（本轮只修了会误导安全判断的一条）；
+  反向"注册了但能力清单未声明"的工具也要补描述。
+- 剩余 `except: pass` 静默失败分诊（约 142 处）。
+- 前端竞态与假交互；部署/执行/维护链路确认闸门与回滚一致性。
+- 保留第 3 轮清单：批量改 `auth_type` 时不校验新认证方式凭据、密钥轮换（待业主决定）、
+  `ENV=local` 关闭生产安全轨相关项。
+
+### 附：第 4 轮可复现的验证脚本
+
+- `tests/test_tool_dry_run_contract.py`：10 项 dry-run 契约 + 闸门不变量回归；
+- `tests/test_ssh_key_secret_exposure.py`：6 项私钥外泄回归（含静态守卫与描述一致性）；
+- `fnos-migration/_audit_tool_gates.py`（未入库，只读）：写工具闸门矩阵（确认标志 / AI 自动调用 / `dry_run` 声明）；
+- `fnos-migration/_audit_dry_run_bypass.py`（未入库，只读）：`dry_run` 跳确认可利用性矩阵；
+- `fnos-migration/_verify_round4_fixes.py`（未入库）：对**部署后的 OPS 生产进程**做端到端实测。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 39044；25 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| 临时播种探针密钥后 `POST /api/v2/tools/call` 调 `ops.get_ssh_key` | HTTP 200；响应**不含** `PRIVATE KEY` 头、不含私钥明文标记、不含口令明文 |
+| 同上返回字段 | `private_key="***"`、`has_private_key=true`、`private_key_fingerprint="6535a6e625f5"`（12 位不可逆指纹） |
+| 该次调用的 `tool_call_logs.result_preview` | `{"found": true, "name": "round4-probe-key", "private_key": "***MASKED***", ...}` —— **日志无明文** |
+| 探针密钥清理 | 删除后库内残留 **0** |
+| `ops.upload_package`（`content_base64` + `dry_run=true`） | HTTP 200；`dry_run=true`、`staged=false`、`size=32`；文件中心无该包、`data/uploads` 无落盘、`DeployPackage` 计数 14 → 14 |
+| `ops.prepare_release_from_local_package`（`content_base64` + `dry_run=true`） | HTTP 200；返回真实预检（`size=32`），未落盘 |
+| 高危写工具夹带 `dry_run`（`ops.execute_deploy_plan`） | 缺 `confirm_text` → 400；补上确认短语但夹带 `dry_run` → `400 Unknown tool arguments: dry_run` |
+| 全量测试套件 | `pytest tests/ -q` → **1364 passed**（第 3 轮 1348 + 本轮新增 16） |
+
+> 运维提示：本轮修复只改后端（工具适配器 + 风险策略），**需要重启 OPS 才生效**；
+> 前端无改动，无需强制刷新。`/api/v2/tools/call` 的响应若出现 `private_key: "***"`，
+> 属预期脱敏；若需要辨识"某台服务器用了哪把钥匙"，请使用 `private_key_fingerprint`。
+

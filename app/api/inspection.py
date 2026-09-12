@@ -510,18 +510,22 @@ def runs(request: Request, scope_type: str = "", server_id: str = "", project_id
 @router.get("/ledger")
 def ledger(request: Request, period: str = "daily", date_from: str = "", date_to: str = "", scope_type: str = "", server_id: str = "", project_id: str = "", status: str = "", limit: int = 500, offset: int = 0, db: Session = Depends(get_db)):
     require_auth(request, db)
+    # 第 11 轮：周期/日期参数显式校验（非法值以前会被静默当成"今日"）
+    svc.validate_period_query(period, date_from, date_to)
     return api_response(data=svc.inspection_ledger(db, period=period, date_from=date_from, date_to=date_to, scope_type=scope_type, server_id=server_id, project_id=project_id, status=status, limit=limit, offset=offset))
 
 
 @router.get("/reports/periodic-preview")
 def periodic_report_preview(request: Request, period: str = "daily", date_from: str = "", date_to: str = "", scope_type: str = "", db: Session = Depends(get_db)):
     require_auth(request, db)
+    svc.validate_period_query(period, date_from, date_to)
     return api_response(data=svc.inspection_periodic_report_payload(db, period=period, date_from=date_from, date_to=date_to, scope_type=scope_type))
 
 
 @router.post("/reports/periodic")
 def periodic_report(payload: PeriodicReportPayload, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
+    svc.validate_period_query(payload.period, payload.date_from, payload.date_to)
     result = svc.generate_periodic_report(db, period=payload.period, date_from=payload.date_from, date_to=payload.date_to, scope_type=payload.scope_type, fmt=payload.format or "md", title=payload.title or "", created_by=user.get("username") or "")
     audit("inspection.report.periodic", "inspection", payload.period, f"user={user.get('username')} period={payload.period} report={result.get('report', {}).get('id')}")
     return api_response(data=result, message="巡检台账/报表已生成")
@@ -552,6 +556,7 @@ def runs_delete(payload: DeleteRunsPayload, request: Request, db: Session = Depe
 @router.post("/ledger/delete")
 def ledger_delete(payload: DeleteLedgerPayload, request: Request, db: Session = Depends(get_db)):
     user = require_auth(request, db)
+    svc.validate_period_query(payload.period, payload.date_from, payload.date_to)
     result = svc.delete_inspection_history(db, period=payload.period, date_from=payload.date_from, date_to=payload.date_to, scope_type=payload.scope_type, server_id=payload.server_id, project_id=payload.project_id, status=payload.status, delete_reports=payload.delete_reports, force=payload.force)
     audit("inspection.ledger.delete", "inspection", payload.period, f"user={user.get('username')} deleted={result.get('deleted')} reports={result.get('deleted_reports')}")
     return api_response(data=result, message="巡检台账历史已删除")

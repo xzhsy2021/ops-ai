@@ -10,6 +10,7 @@ import { IssueDetailModal } from './inspection/IssueDetailModal'
 import { ItemConfigEditorModal } from './inspection/ItemConfigEditorModal'
 import { CategoryOptions } from './inspection/CategoryOptions'
 import { formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
+import { thresholdLabels, thresholdOrderHint } from '../utils/inspectionThreshold'
 import { OverviewTab } from './inspection/OverviewTab'
 import { ServerProfileStrip } from './inspection/ServerProfileStrip'
 import { ServerStatsGrid } from './inspection/ServerStatsGrid'
@@ -1372,15 +1373,15 @@ export default function InspectionCenterPage() {
                     </header>
                     <div className="rule-section__body rule-grid rule-grid--threshold">
                       <label className="rule-cell rule-cell--high">
-                        <span className="rule-cell__label">HIGH ≥</span>
+                        <span className="rule-cell__label">{thresholdLabels(ruleEditor.form.threshold_comparator).high}</span>
                         <input type="number" value={ruleEditor.form.threshold_high ?? ''} onChange={(e) => updateRuleForm({ threshold_high: e.target.value })} placeholder="90" />
                       </label>
                       <label className="rule-cell rule-cell--medium">
-                        <span className="rule-cell__label">MEDIUM ≥</span>
+                        <span className="rule-cell__label">{thresholdLabels(ruleEditor.form.threshold_comparator).medium}</span>
                         <input type="number" value={ruleEditor.form.threshold_medium ?? ''} onChange={(e) => updateRuleForm({ threshold_medium: e.target.value })} placeholder="75" />
                       </label>
                       <label className="rule-cell rule-cell--low">
-                        <span className="rule-cell__label">LOW ≥</span>
+                        <span className="rule-cell__label">{thresholdLabels(ruleEditor.form.threshold_comparator).low}</span>
                         <input type="number" value={ruleEditor.form.threshold_low ?? ''} onChange={(e) => updateRuleForm({ threshold_low: e.target.value })} placeholder="50" />
                       </label>
                       <label>比较符
@@ -1392,6 +1393,9 @@ export default function InspectionCenterPage() {
                           <option value="==">== 等于</option>
                           <option value="contains">包含</option>
                         </select>
+                        <small className="rule-cell__hint" style={{ display: 'block', fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                          {thresholdOrderHint(ruleEditor.form.threshold_comparator)}
+                        </small>
                       </label>
                       <label>单位
                         <select value={ruleEditor.form.threshold_unit || 'count'} onChange={(e) => updateRuleForm({ threshold_unit: e.target.value })}>

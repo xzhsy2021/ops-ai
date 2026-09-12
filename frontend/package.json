@@ -13,7 +13,8 @@
     "test:datetime": "node --test ./tests/datetime.test.js",
     "test:dashboard": "node --test ./tests/dashboardStatus.test.js",
     "test:guard": "node --test ./tests/requestGuard.test.js",
-    "test:unit": "node --test ./tests/approverIdentities.test.js ./tests/datetime.test.js ./tests/dashboardStatus.test.js ./tests/requestGuard.test.js"
+    "test:threshold": "node --test ./tests/inspectionThreshold.test.js",
+    "test:unit": "node --test ./tests/approverIdentities.test.js ./tests/datetime.test.js ./tests/dashboardStatus.test.js ./tests/requestGuard.test.js ./tests/inspectionThreshold.test.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

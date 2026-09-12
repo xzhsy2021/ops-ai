@@ -105,6 +105,15 @@ RISK_WEIGHT = {"HIGH": 15, "MEDIUM": 8, "LOW": 2, "NONE": 0}
 RISK_ORDER = {"HIGH": 4, "MEDIUM": 3, "LOW": 2, "NONE": 1}
 ISSUE_STATUSES = {"OPEN", "PROCESSING", "FIXED", "VERIFIED", "IGNORED"}
 
+# 第 11 轮：自定义规则判定链路的取值白名单。
+# 前端"比较符"下拉提供的正是这 6 个；以前后端没有任何校验，写错的比较符会在判定时
+# 静默退化成 `>`（见 _apply_comparator），阈值写成 "10GB" 会在 float() 处抛错。
+SUPPORTED_COMPARATORS = (">", ">=", "<", "<=", "==", "contains")
+SUPPORTED_EXTRACTOR_MODES = ("regex", "numeric", "keyword", "json")
+# 台账/报表接口的周期白名单（服务层 _period_bounds 对未知值仍保留"兜底为今日"的历史契约）
+SUPPORTED_PERIODS = ("daily", "weekly", "monthly")
+PERIOD_ALIASES = {"day": "daily", "week": "weekly", "month": "monthly"}
+
 DEFAULT_BATCH_CONCURRENCY = int(os.getenv("INSPECTION_BATCH_CONCURRENCY", "20") or "20")
 DEFAULT_BATCH_SIZE = int(os.getenv("INSPECTION_BATCH_SIZE", "71") or "71")
 DEFAULT_COMMAND_TIMEOUT_SECONDS = int(os.getenv("INSPECTION_COMMAND_TIMEOUT_SECONDS", "20") or "20")
@@ -1837,6 +1846,7 @@ def _analyze_memory(out: str, err: str, code: int, thresholds: Optional[Dict[str
     mem_avail_kb = meminfo.get("MemAvailable", 0)
     swap_total_kb = meminfo.get("SwapTotal", 0)
     swap_free_kb = meminfo.get("SwapFree", 0)
+    swap_used_kb = max(swap_total_kb - swap_free_kb, 0)  # meminfo 只有 total/free，used 由差值得出
     if mem_total_kb > 0 and mem_avail_kb > 0:
         source = "meminfo"
         mem_pct = int(round((mem_total_kb - mem_avail_kb) / mem_total_kb * 100))
@@ -1891,29 +1901,26 @@ def _analyze_memory(out: str, err: str, code: int, thresholds: Optional[Dict[str
             s = line.strip()
             if s.startswith("Swap:") and not s.startswith("SwapTotal"):
                 parts = s.split()
-                if len(parts) >= 4:
+                # 第 11 轮：只要拿到 total+used 就能算百分比，free 列可有可无
+                # （此前要求 >=4 列，某些 free 变体/截断输出只给 total+used 时会静默算成 0%）。
+                if len(parts) >= 3:
                     try:
                         swap_total_kb = _parse_mem_value_with_unit(parts[1], free_unit)
-                        swap_free_kb = _parse_mem_value_with_unit(parts[3], free_unit)
+                        swap_used_kb = _parse_mem_value_with_unit(parts[2], free_unit)
+                        if len(parts) >= 4:
+                            swap_free_kb = _parse_mem_value_with_unit(parts[3], free_unit)
                     except (ValueError, IndexError):
                         pass
 
     if swap_total_kb > 0:
-        swap_used_kb = max(swap_total_kb - swap_free_kb, 0)
+        # 第 11 轮：优先用 used 列（free/Swap: total used free），used 缺失时才用
+        # total-free 推算。此前只认 total-free，而下面那段"用 used 列兜底"的分支
+        # 处在 `swap_total_kb <= 0` 的路径里、内部又判断 `swap_total_kb > 0`，
+        # 条件恒为假 → 是永远算不出结果的死代码（swap_pct 会静默停在 0）。
+        if swap_used_kb <= 0:
+            swap_used_kb = max(swap_total_kb - swap_free_kb, 0)
+        swap_used_kb = max(min(swap_used_kb, swap_total_kb), 0)
         swap_pct = int(round(swap_used_kb / swap_total_kb * 100))
-    elif source == "free":
-        # free 命令的 swap used 在第 2 列
-        for line in out.splitlines():
-            s = line.strip()
-            if s.startswith("Swap:") and not s.startswith("SwapTotal"):
-                parts = s.split()
-                if len(parts) >= 3:
-                    try:
-                        used = _parse_mem_value_with_unit(parts[2], free_unit)
-                        if swap_total_kb > 0:
-                            swap_pct = int(round(used / swap_total_kb * 100))
-                    except (ValueError, IndexError):
-                        pass
 
     cfg = (thresholds or {}).get("MEMORY", {}) or {}
     mem_high_pct = int(cfg.get("mem_high_pct", 95))
@@ -1968,12 +1975,13 @@ def _analyze_memory(out: str, err: str, code: int, thresholds: Optional[Dict[str
 def _parse_mem_value(val: str) -> int:
     """Parse memory value to KB.
 
+    注意（第 11 轮更正文档）：本函数**不做单位换算**，只剥掉 K/M/G/T/B 后缀后取数字部分，
+    因此 "1.5G" 得到的是 1（截断），而不是 1572864。需要换算请用
+    ``_parse_mem_value_with_unit(val, unit)``。本函数目前全仓无调用方，保留仅为兼容。
+
     支持格式：
-    - "16384000" → 16384000 (无后缀视为 KB，符合 `free` 默认输出)
-    - "3562M" / "3562" (来自 `free -m`) → 3562 * 1024 = 3,646,208 KB
-      实际通过 unit 参数显式指定，避免歧义
-    - "1.5G" → 1572864
-    - "1841924 kB" → 1841924 (meminfo 自动去掉单位)
+    - "16384000" → 16384000
+    - "1841924 kB" → 1841924
     """
     val = val.strip().upper().rstrip("KMGTB")
     val = val.replace(",", "").strip()
@@ -3618,22 +3626,45 @@ def _max_risk(*levels: str) -> str:
 
 
 def _apply_comparator(value: float, threshold: float, comparator: str) -> bool:
-    """应用比较符判断 value 是否触发阈值。"""
+    """应用比较符判断 value 是否触发阈值。
+
+    第 11 轮修复：以前未知比较符（例如配置写错成 ``gte``/``=<``/``!=``）会**静默**
+    退化成 ``value > threshold``，规则照样"有结论"，但判定口径与配置意图完全不符
+    （可能把"低于阈值才告警"的规则算成相反方向）。
+    现在对未知比较符显式抛错：该巡检项会落成 ERROR（``_remote_check`` 会把 analyzer
+    异常记成可见的失败项），而不是一个看似正常的风险结论。
+    比较符缺省/为空仍按历史约定视为 ``>``。
+    """
     if value is None:
         return False
-    if comparator == ">":
+    cmp = str(comparator if comparator is not None else ">").strip() or ">"
+    if cmp == ">":
         return value > threshold
-    if comparator == ">=":
+    if cmp == ">=":
         return value >= threshold
-    if comparator == "<":
+    if cmp == "<":
         return value < threshold
-    if comparator == "<=":
+    if cmp == "<=":
         return value <= threshold
-    if comparator == "==":
+    if cmp == "==":
         return value == threshold
-    if comparator == "contains":
+    if cmp == "contains":
         return str(threshold) in str(value)
-    return value > threshold
+    raise ValueError(f"不支持的比较符 {comparator!r}（仅支持 {'/'.join(SUPPORTED_COMPARATORS)}）")
+
+
+def _threshold_number(value: Any, field: str) -> Optional[float]:
+    """把阈值配置转成 float；空值返回 None，非数字抛错（第 11 轮）。
+
+    以前 ``float(high)`` 直接抛 ValueError，错误信息是
+    ``could not convert string to float: '10GB'``——排查时看不出是哪条规则的哪个阈值。
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"阈值 {field} 不是数字：{value!r}（阈值只接受数字，单位请写在 threshold.unit）") from None
 
 
 def _extract_value(out: str, err: str, extractor: Dict[str, Any]) -> Dict[str, Any]:
@@ -3744,25 +3775,93 @@ def _evaluate_threshold(extracted: Optional[float], threshold: Dict[str, Any]) -
     if extracted is None or not threshold:
         return None
     comparator = threshold.get("comparator") or ">"
-    high = threshold.get("high")
-    medium = threshold.get("medium")
-    low = threshold.get("low")
-    # contains 比较符不强制 float
-    if comparator == "contains":
-        if high is not None and _apply_comparator(extracted, high, comparator):
+    # contains 比较符不强制 float（阈值是关键字文本，先判、先返回，避免被数值化拦住）
+    if str(comparator).strip() == "contains":
+        raw_high = threshold.get("high")
+        raw_medium = threshold.get("medium")
+        raw_low = threshold.get("low")
+        if raw_high is not None and _apply_comparator(extracted, raw_high, comparator):
             return "HIGH"
-        if medium is not None and _apply_comparator(extracted, medium, comparator):
+        if raw_medium is not None and _apply_comparator(extracted, raw_medium, comparator):
             return "MEDIUM"
-        if low is not None and _apply_comparator(extracted, low, comparator):
+        if raw_low is not None and _apply_comparator(extracted, raw_low, comparator):
             return "LOW"
         return "NONE"
-    if high is not None and _apply_comparator(extracted, float(high), comparator):
+    high = _threshold_number(threshold.get("high"), "high")
+    medium = _threshold_number(threshold.get("medium"), "medium")
+    low = _threshold_number(threshold.get("low"), "low")
+    if high is not None and _apply_comparator(extracted, high, comparator):
         return "HIGH"
-    if medium is not None and _apply_comparator(extracted, float(medium), comparator):
+    if medium is not None and _apply_comparator(extracted, medium, comparator):
         return "MEDIUM"
-    if low is not None and _apply_comparator(extracted, float(low), comparator):
+    if low is not None and _apply_comparator(extracted, low, comparator):
         return "LOW"
     return "NONE"
+
+
+def validate_rule_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """校验（并归一化）自定义规则的 extractor/threshold 配置（第 11 轮）。
+
+    此前这两个字段完全没有校验，错误只会在"巡检执行"阶段暴露，而且往往表现为
+    **错误的判定结论**而不是配置错误：
+
+      * ``comparator`` 写错 → 静默按 ``>`` 判定（见 ``_apply_comparator``）；
+      * 阈值写成 ``"10GB"`` → 运行期 ``float()`` 抛错；
+      * ``extractor.mode=regex`` 的 pattern 非法或 ``keyword`` 没给关键词 → 运行期报错；
+      * ``mode`` 拼错 → ``_extract_value`` 返回 ``unknown-xxx``，提取值为 None，
+        阈值判定直接跳过（规则永远不触发）——最隐蔽的一种。
+
+    现在在建/改规则时就拒绝（HTTP 400），与同函数里 risk_level / scope_type 的校验风格一致。
+    """
+    cfg = dict(config or {})
+    threshold = cfg.get("threshold")
+    if threshold is not None and not isinstance(threshold, dict):
+        raise HTTPException(status_code=400, detail="config.threshold 必须是对象")
+    if isinstance(threshold, dict):
+        threshold = dict(threshold)
+        comparator = str(threshold.get("comparator") or ">").strip() or ">"
+        if comparator not in SUPPORTED_COMPARATORS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"config.threshold.comparator 仅支持 {'/'.join(SUPPORTED_COMPARATORS)}，收到 {comparator!r}",
+            )
+        threshold["comparator"] = comparator
+        for field in ("high", "medium", "low"):
+            try:
+                _threshold_number(threshold.get(field), field)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+        cfg["threshold"] = threshold
+
+    extractor = cfg.get("extractor")
+    if extractor is not None and not isinstance(extractor, dict):
+        raise HTTPException(status_code=400, detail="config.extractor 必须是对象")
+    if isinstance(extractor, dict):
+        extractor = dict(extractor)
+        mode = str(extractor.get("mode") or "regex").strip().lower() or "regex"
+        if mode not in SUPPORTED_EXTRACTOR_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"config.extractor.mode 仅支持 {'/'.join(SUPPORTED_EXTRACTOR_MODES)}，收到 {mode!r}",
+            )
+        if mode == "regex":
+            pattern = str(extractor.get("pattern") or "")
+            if not pattern:
+                raise HTTPException(status_code=400, detail="config.extractor.mode=regex 必须提供 pattern")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise HTTPException(status_code=400, detail=f"config.extractor.pattern 不是合法正则：{exc}") from None
+        if mode == "keyword":
+            keywords = extractor.get("keywords")
+            if isinstance(keywords, str):
+                keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+            if not keywords:
+                raise HTTPException(status_code=400, detail="config.extractor.mode=keyword 必须提供非空 keywords")
+            extractor["keywords"] = list(keywords)
+        extractor["mode"] = mode
+        cfg["extractor"] = extractor
+    return cfg
 
 
 def make_custom_rule_analyzer(rule_config: Dict[str, Any], base_risk_level: str = "MEDIUM"):
@@ -5238,26 +5337,75 @@ def overview(db: Session) -> Dict[str, Any]:
 
 
 
-def _parse_dt(value: Any, fallback: Optional[datetime] = None) -> datetime:
+def _try_parse_dt(value: Any) -> Optional[datetime]:
+    """严格解析日期/时间；无法解析时返回 None（第 11 轮抽出，供参数校验使用）。
+
+    与 `_parse_dt` 的区别：`_parse_dt` 保留历史兜底契约（解析不了就退回 fallback/now），
+    本函数让调用方能区分"没传"和"传错了"。
+    """
     if isinstance(value, datetime):
         parsed = value
         if parsed.tzinfo is not None:
             parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
         return parsed
-    if value:
-        text_value = str(value).strip()
-        try:
-            if len(text_value) == 10:
-                return datetime.fromisoformat(text_value + "T00:00:00")
-            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
-            # 全仓持久化时间统一为 naive UTC：带偏移的入参必须换算到 UTC，
-            # 不能直接丢掉 tzinfo（否则 +08:00 会被当成 UTC，日期窗整体偏移 8 小时）。
-            if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            return parsed
-        except Exception:
-            pass
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    try:
+        if len(text_value) == 10:
+            return datetime.fromisoformat(text_value + "T00:00:00")
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        # 全仓持久化时间统一为 naive UTC：带偏移的入参必须换算到 UTC，
+        # 不能直接丢掉 tzinfo（否则 +08:00 会被当成 UTC，日期窗整体偏移 8 小时）。
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _parse_dt(value: Any, fallback: Optional[datetime] = None) -> datetime:
+    parsed = _try_parse_dt(value)
+    if parsed is not None:
+        return parsed
     return fallback or _now()
+
+
+def validate_period_query(period: str, date_from: str = "", date_to: str = "") -> str:
+    """台账/报表/历史删除接口的周期与日期参数校验（第 11 轮）。
+
+    背景：服务层 `_period_bounds` 对未知周期**静默兜底为"今日"**——这是第 5 轮刻意锁定的
+    契约（见 tests/test_inspection_period_window.py：不得因未知 period 让接口 500）。
+    但 HTTP 边界不应该把垃圾参数当合法输入：
+
+        GET /api/v2/inspection/ledger?period=quarterly
+        GET /api/v2/inspection/reports/periodic-preview?period=7d
+
+    以前会返回一份"看起来正常、区间其实是今天"的台账/报表（period 标签还被改成 daily），
+    比直接报错危险得多。这里在 API 边界显式 400，服务层的兜底契约保持不变。
+
+    返回归一化后的周期（day/week/month 别名照旧可用）。
+    """
+    raw = str(period if period is not None else "daily").strip().lower() or "daily"
+    canonical = PERIOD_ALIASES.get(raw, raw)
+    if canonical not in SUPPORTED_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"period 仅支持 daily/weekly/monthly（含 day/week/month 别名），收到 {period!r}",
+        )
+    if date_from:
+        if _try_parse_dt(date_from) is None:
+            raise HTTPException(status_code=400, detail=f"date_from 不是合法日期（期望 YYYY-MM-DD 或 ISO8601）：{date_from!r}")
+    if date_to:
+        if _try_parse_dt(date_to) is None:
+            raise HTTPException(status_code=400, detail=f"date_to 不是合法日期（期望 YYYY-MM-DD 或 ISO8601）：{date_to!r}")
+    start = _try_parse_dt(date_from) if date_from else None
+    end = _try_parse_dt(date_to) if date_to else None
+    if start and end and start > end:
+        raise HTTPException(status_code=400, detail="date_from 不能晚于 date_to")
+    return canonical
 
 
 def _period_bounds(period: str = "daily", date_from: str = "", date_to: str = "") -> tuple[datetime, datetime, str]:
@@ -5883,6 +6031,15 @@ def update_rule(db: Session, rule_code: str, payload: Dict[str, Any]) -> Dict[st
     new_code = str(payload.get("rule_code") or old_code).strip().upper().replace(" ", "_")
     if not new_code:
         raise HTTPException(status_code=400, detail="rule_code is required")
+
+    # 第 11 轮：extractor/threshold 结构校验（comparator 白名单、阈值必须可转数字、
+    # regex 必须可编译、keyword 必须非空）。在任何写库之前拒绝，避免落库一条
+    # "永远不触发"或"按相反方向判定"的规则。
+    incoming_config = payload.get("config")
+    if not isinstance(incoming_config, dict):
+        incoming_config = payload.get("config_json")
+    if isinstance(incoming_config, dict):
+        validate_rule_config(incoming_config)
 
     allowed_levels = {"HIGH", "MEDIUM", "LOW", "NONE"}
     allowed_scopes = {SERVER_SCOPE, PROJECT_SCOPE, PROJECT_COMBINED_SCOPE, "BOTH"}

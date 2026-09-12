@@ -245,13 +245,16 @@ def _encrypted_wrapper(event_id="$enc1", sender="@alice:example.org", ts_ms=None
     }
 
 
-def _decrypted_inner(event_id="$enc1", sender="@alice:example.org", filename="pkg.tar.gz"):
-    now_ms = int(time.time() * 1000)
+def _decrypted_inner(event_id="$enc1", sender="@alice:example.org", filename="pkg.tar.gz", ts_ms=None):
+    # 第 11 轮：origin_server_ts 支持显式传入（显式值即最终值，不再额外偏移）。
+    # 此前固定用挂钟毫秒 -60s，凡是"多个事件 + 断言顺序"的用例都会因为两次调用跨毫秒边界
+    # 而随机反转（list_media_events_async 按 origin_server_ts 倒序）。
+    ts = (int(time.time() * 1000) - 60_000) if ts_ms is None else int(ts_ms)
     return {
         "type": "m.room.message",
         "event_id": event_id,
         "sender": sender,
-        "origin_server_ts": now_ms - 60_000,
+        "origin_server_ts": ts,
         "content": {
             "msgtype": "m.file",
             "body": filename,
@@ -267,22 +270,45 @@ def _decrypted_inner(event_id="$enc1", sender="@alice:example.org", filename="pk
 
 def test_list_media_events_async_with_decryptor():
     client = MatrixClient(homeserver_url="https://hs.example", access_token="tok")
+    base_ms = int(time.time() * 1000)
+    ts_older, ts_newer = base_ms - 120_000, base_ms - 60_000
 
     async def decryptor(raw_event):
         assert raw_event["type"] == "m.room.encrypted"
-        return _decrypted_inner(event_id=raw_event["event_id"])
+        # 用显式时间戳（都在 15 分钟窗口内）：$enc1 更早、$enc2 更新。
+        # 挂钟毫秒会让两次调用跨毫秒边界，从而随机反转断言顺序。
+        ts = ts_older if raw_event["event_id"] == "$enc1" else ts_newer
+        return _decrypted_inner(event_id=raw_event["event_id"], ts_ms=ts)
 
-    chunk = [_encrypted_wrapper("$enc1", ts_ms=1_700_000_000_000),
-             _encrypted_wrapper("$enc2", ts_ms=1_700_000_000_000)]
+    chunk = [_encrypted_wrapper("$enc1", ts_ms=ts_older),
+             _encrypted_wrapper("$enc2", ts_ms=ts_newer)]
+    client.fetch_room_messages = lambda room_id, limit=50: chunk
+
+    events = asyncio.run(
+        client.list_media_events_async("!r:x", event_decryptor=decryptor, limit=10)
+    )
+    # 契约：媒体事件按 origin_server_ts 倒序（最新在前）——显式断言语义，而不是依赖相等时间戳的稳定性
+    assert [e.event_id for e in events] == ["$enc2", "$enc1"]
+    assert all(e.encrypted for e in events)
+    assert events[0].file_dict["url"] == "mxc://hs/encrypted-media"
+    assert events[0].filename == "pkg.tar.gz"
+
+
+def test_list_media_events_async_equal_timestamps_keep_input_order():
+    """同一时间戳的事件保持调用方给出的顺序（sort 稳定性契约，确定性用例）。"""
+    client = MatrixClient(homeserver_url="https://hs.example", access_token="tok")
+    same_ts = int(time.time() * 1000) - 60_000
+
+    async def decryptor(raw_event):
+        return _decrypted_inner(event_id=raw_event["event_id"], ts_ms=same_ts)
+
+    chunk = [_encrypted_wrapper("$enc1", ts_ms=same_ts), _encrypted_wrapper("$enc2", ts_ms=same_ts)]
     client.fetch_room_messages = lambda room_id, limit=50: chunk
 
     events = asyncio.run(
         client.list_media_events_async("!r:x", event_decryptor=decryptor, limit=10)
     )
     assert [e.event_id for e in events] == ["$enc1", "$enc2"]
-    assert all(e.encrypted for e in events)
-    assert events[0].file_dict["url"] == "mxc://hs/encrypted-media"
-    assert events[0].filename == "pkg.tar.gz"
 
 
 def test_list_media_events_async_decrypt_failure_skips_event():

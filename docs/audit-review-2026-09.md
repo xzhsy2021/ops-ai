@@ -1165,6 +1165,197 @@ POSIX shell 里**管道的退出码取最后一个命令**，即 `head`（恒为
 > 并向发版房间发通知。该语义由 12 项单元测试（假 runtime + 假 ssh）覆盖，
 > 线上只做只读的预检接口验证。
 
+## 第 11 轮（2026-09-12）
+
+本轮范围：**巡检判定口径**（第 10 轮待办第一条：20+ analyzer 的业务判定逐个复核）
+与**巡检台账/报表入参校验**。修出来的问题和前几轮同族——**不报错，但结论是错的**：
+
+- 自定义规则的比较符写错（`gte`/`=<`）不会提示，而是**静默按 `>` 判定**，可以给出 `PASS`；
+- 阈值/提取器配置零校验：`"10GB"` 到运行期才崩，`mode` 拼错则规则**永远不触发**却仍显示"已启用"；
+- 台账/报表传 `?period=quarterly` 不报错，而是返回一份**区间其实是"今天"**的数据；
+- 内存判定里的 swap 兜底分支是死代码，某些 `free` 输出下 `swap_pct` 静默停在 0%；
+- 顺手修掉一个挂钟毫秒竞态导致的**偶发红**（全量跑 1 failed，单跑必过）。
+
+测试基线上轮 1518 → 本轮结束 **1579 passed**（+61：判定口径契约 60 项、Matrix 媒体顺序 1 项）。
+
+### 一、已修复
+
+#### 11.1 【中危】比较符写错 = 静默换一套判定口径，配置错误变成"假绿 PASS"
+
+`app/services/inspection_center.py::_apply_comparator` 原实现：
+
+```python
+if comparator == ">":    return value > threshold
+if comparator == ">=":   return value >= threshold
+...
+if comparator == "contains": return str(threshold) in str(value)
+return value > threshold          # ← 未知比较符静默退化成 ">"
+```
+
+前端下拉只提供 `> / >= / < / <= / == / contains` 六个值，但后端**从不校验**：
+用 API/脚本写规则时把比较符写成 `gte`、`=<`、`!=`，判定会**照常出结论**，
+而且方向可能与配置意图相反（例如"低于阈值才告警"被算成"高于阈值才告警"）。
+
+修复：未知比较符抛错（缺省/空值仍按历史约定视为 `>`）。这一点很关键——错误发生在
+`_remote_check` 的 analyzer 调用里，**会被记成可见的 `ERROR` 巡检项**（`status=ERROR` +
+`巡检项执行失败：不支持的比较符 'gte'（仅支持 >/>=/</<=/==/contains）`），
+既不会静默给 PASS，也不会炸掉整轮巡检。
+
+- 红灯证据（本轮新增契约测试）：`AssertionError: 未知比较符必须落成 ERROR，实际 PASS`
+  ——即修前该规则判定为"无风险"。
+
+#### 11.2 【中危】`extractor` / `threshold` 配置零校验，两种失败都很隐蔽
+
+同一函数的建/改规则入口（`update_rule` / `create_rule`）此前只校验 `risk_level` 与
+`scope_type`，`config.extractor`、`config.threshold` 原样落库：
+
+| 写错的字段 | 修前后果 |
+| --- | --- |
+| `threshold.high = "10GB"` | 巡检执行时 `float('10GB')` 抛 `ValueError`，报错文本只有 `could not convert string to float: '10GB'`，看不出是哪条规则的哪个阈值 |
+| `extractor.mode = "regexp"`（拼错） | `_extract_value` 走 `return {"value": None, "method": f"unknown-{mode}"}` → 提取值为 None → 阈值判定**整体跳过** → 规则**永远不会触发**，界面却显示"已启用" |
+| `extractor.mode = "regex"` 但 pattern 非法/为空 | 运行期 `re.error` |
+| `extractor.mode = "keyword"` 但没有 keywords | 运行期无命中，同样静默失效 |
+
+修复：新增 `validate_rule_config()`，在建/改规则时校验并归一化（比较符白名单、阈值必须可转
+数字、regex 必须能编译、keyword 必须非空、mode 必须是 `regex/numeric/keyword/json` 之一），
+非法一律 **HTTP 400**，且发生在**任何写库之前**（`update_rule` 里放在最前面，`create_rule`
+复用同一路径）。错误信息直接指出字段与受支持取值：
+
+```
+config.threshold.comparator 仅支持 >/>=/</<=/==/contains，收到 'gte'
+config.extractor.mode 仅支持 regex/numeric/keyword/json，收到 'regexp'
+阈值 high 不是数字：'10GB'（阈值只接受数字，单位请写在 threshold.unit）
+```
+
+#### 11.3 【低-中】台账/报表的 `period`/日期参数静默兜底：区间错了但报表"看起来正常"
+
+第 5 轮修掉了 `period` 未知时的 `UnboundLocalError`，落到"兜底为今日"，并把这个行为
+**锁定成服务层契约**（`tests/test_inspection_period_window.py`：不得因未知 period 让接口 500）。
+但 HTTP 边界一直没做校验，于是：
+
+```
+GET /api/v2/inspection/ledger?period=quarterly          → 200 + 一份"今日"台账（period 标签还写 daily）
+GET /api/v2/inspection/reports/periodic-preview?period=7d → 200 + "每日巡检台账"
+GET /api/v2/inspection/ledger?period=daily&date_from=2026-09-10&date_to=2026-09-01 → 200 + 空数据
+```
+
+修复采取**两侧分工**，不破坏第 5 轮锁定：
+
+- 新增 `validate_period_query()`：周期白名单（`daily/weekly/monthly` + `day/week/month` 别名）、
+  日期必须能解析（`YYYY-MM-DD` 或 ISO8601）、`date_from <= date_to`，否则 **400**；
+- 接到 4 个入口：`GET /ledger`、`GET /reports/periodic-preview`、`POST /reports/periodic`、
+  `POST /ledger/delete`；
+- 服务层 `_period_bounds` 的"未知周期兜底为今日"**保持不变**（内部调用方不会被 500 打断），
+  该边界由本轮测试双向锁定。
+
+顺带把 `_parse_dt` 拆出严格的 `_try_parse_dt`（失败返回 None，供参数校验区分"没传"与"传错"），
+`_parse_dt` 自身的兜底语义不变。
+
+#### 11.4 【低】内存判定里的死代码：`swap_pct` 在某些 `free` 输出下静默为 0%
+
+`_analyze_memory` 里原有一段"用 `free` 的 used 列兜底算 swap 使用率"的分支：
+
+```python
+if swap_total_kb > 0:
+    swap_pct = int(round((swap_total_kb - swap_free_kb) / swap_total_kb * 100))
+elif source == "free":                      # ← 进入这里的前提就是 swap_total_kb <= 0
+    ...
+    if swap_total_kb > 0:                   # ← 恒为假，永远算不出结果
+        swap_pct = int(round(used / swap_total_kb * 100))
+```
+
+条件自相矛盾 → 整段是死代码；而 `Swap:` 行的解析又要求**至少 4 列**（total/used/free），
+所以只给 total+used 的输出（部分 `free` 变体/截断输出）会让 swap 使用率**静默停在 0%**，
+一台正在大量使用 swap 的机器会被判成"内存健康"。
+
+修复：Swap 行解析放宽到 ≥3 列（free 列可选），使用率**优先用 used 列**、
+缺失时才用 `total-free` 推算，并夹紧到 `0..total`（异常输入不会算出 >100%）。
+阈值口径与 `criteria` 文案未变，既有 analyzer 契约测试全部保持通过。
+
+#### 11.5 【低】全量测试偶发红：Matrix 媒体列表顺序依赖挂钟毫秒
+
+本轮全量跑出现 `1 failed`（单跑必过、连跑 3 次必过）：
+
+```
+tests/test_matrix_e2ee.py:282: in test_list_media_events_async_with_decryptor
+    assert [e.event_id for e in events] == ["$enc1", "$enc2"]
+E   AssertionError: assert ['$enc2', '$enc1'] == ['$enc1', '$enc2']
+```
+
+排查结论：**不是实现问题**，是测试夹具的竞态。`MatrixClient.list_media_events_async`
+是顺序 `await`（无并发），最后按 `origin_server_ts` **倒序**排序；而两条被测事件的
+时间戳来自夹具 `_decrypted_inner()` 内部的挂钟毫秒：
+
+```python
+now_ms = int(time.time() * 1000)          # 每次调用各取一次
+"origin_server_ts": now_ms - 60_000
+```
+
+两个事件连续解密，全量负载下两次调用很容易跨过 1ms 边界 → 后解密的事件时间戳更大 →
+倒序后排到最前，断言随机失败。修复：夹具支持显式 `ts_ms`（显式值即最终值），
+测试改为**断言真实语义"最新在前"**（`["$enc2", "$enc1"]`），并新增一条确定性用例
+锁定"同一时间戳保持输入顺序"的稳定性契约。
+
+- 机制复现脚本：`fnos-migration/_repro_round11_matrix_order.py`（未入库，纯内存无网络）：
+  ```
+  旧夹具（挂钟毫秒）顺序 = ['$enc2', '$enc1']
+    旧断言 ['$enc1', '$enc2'] 失败（顺序反转）
+  新夹具（显式时间戳）顺序 = ['$enc2', '$enc1']（期望 ['$enc2', '$enc1']：最新在前）
+  ```
+
+### 二、已排除 / 记录（本轮审计结论，避免误修与误报）
+
+| 审计项 | 结论 |
+| --- | --- |
+| `RISK_WEIGHT` / `RISK_ORDER` / `_compute_score` / `_aggregate_risk_counts` | 复核一致：`_compute_score = max(0, round(100 - min(60, (H*15+M*8+L*2)/server_count)))` 与文档公式一致；`_aggregate_risk_counts` 的 `normal` 逐行计数是第 8 轮确认过的**刻意设计**（有测试锁定），未动 |
+| `<` / `<=` 比较符要求阈值**升序**（high < medium < low） | 是既有语义而非 bug：`_evaluate_threshold` 顺序取首个命中档位；`tests/test_custom_rule_engine_standalone.py` 已用升序样例锁定（5/15/25/50 → HIGH/MEDIUM/LOW/NONE）。本轮未改语义，只改了前端标签与提示 |
+| 内存单位启发式（`free -m` 且总量 < 1000 会被判成 G） | 只影响 `mem_total`/`swap_total` 的**展示文本**：`mem_pct`/`swap_pct` 用同一单位做除法，比值不受影响。未改（改动会牵动多处展示口径），记录备查 |
+| `_parse_mem_value`（无单位版） | 全仓无调用方，且 docstring 声称 `"1.5G" → 1572864` 而实际返回 1（只剥后缀不换算）。本轮**只更正文档**，未删函数（避免动无调用代码） |
+| `tests/test_custom_rule_engine_standalone.py` 把规则引擎**复制**了一份 | 该文件自带 `_apply_comparator`/`_extract_value`/`_evaluate_threshold` 副本，实现改动后副本不会同步 → 存在语义漂移风险（本轮已确认其断言仍成立）。待办：改为从实现导入或由实现生成 |
+| analyzer 异常是否会让整轮巡检失败 | 不会：`_remote_check` 的 `except Exception` 把 analyzer 异常转成 `status=ERROR` 的巡检项（本轮正是利用这一点把"配置错误"变成可见失败） |
+| `_analyze_memory` 里 free 输出的启发式单位探测 | 与上面"内存单位启发式"同一条记录，未改 |
+| 其余 19 个 analyzer 的阈值口径 | 逐个核对了数值解析/百分比/阈值比较路径，未发现新的判定方向性错误；`/proc/meminfo` 优先、available 列优先于 buff/cache 等既有修正在位 |
+
+### 三、待办（后续轮次）
+
+- 巡检域剩余 analyzer 的**跨服务器聚合**口径复核（本轮聚焦单机判定与入参校验）。
+- 让 `tests/test_custom_rule_engine_standalone.py` 复用实现，消除引擎副本漂移风险。
+- 前端巡检页其余交互（表格排序、批量操作）的请求竞态排查（复用 `requestGuard`）。
+- 部署/执行/维护链路确认闸门一致性；`except …: pass` 157 处分诊（优先部署/维护/凭据）。
+- 进程探针 `pgrep -f` 自匹配问题；`MCP_TOOL_DESCRIPTION_OVERRIDES` 54 个幽灵条目。
+- `EntityPicker` / `LogConsole` 异步搜索时序守卫；`update_issue` 到期提醒。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨、fnOS/OpenClaw 遗留项。
+
+### 附：第 11 轮可复现的验证脚本
+
+- `tests/test_inspection_judgement_contract.py`（60 项）：比较符语义与失败模式、阈值数值化
+  错误信息、`validate_rule_config` 与 `update_rule`/`create_rule` 的 400 + 不落库、
+  period/日期校验（含 6 条 HTTP 层 400）、服务层兜底契约仍保留、内存/swap 解析。
+- `frontend/tests/inspectionThreshold.test.js`（4 项，已并入 `npm run test:unit`）：
+  阈值标签跟随比较符、填写顺序提示。
+- `fnos-migration/_verify_round11_live.py`（未入库）：对部署后的 OPS 实测 18 项断言。
+- `fnos-migration/_repro_round11_matrix_order.py`（未入库）：11.5 的挂钟竞态机制复现。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 25816；18 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| `GET /api/v2/inspection/ledger?period=quarterly` | **400** `period 仅支持 daily/weekly/monthly（含 day/week/month 别名），收到 'quarterly'`（修复前 200 + 今日台账） |
+| `GET …/ledger?period=daily&date_from=2026-09-10&date_to=2026-09-01` | **400** `date_from 不能晚于 date_to` |
+| `GET …/ledger?period=daily&date_from=09/01/2026` | **400** 非法日期格式 |
+| `GET …/reports/periodic-preview?period=7d`、`POST …/reports/periodic {"period":"quarterly"}` | **400** |
+| `GET …/ledger?period=daily\|week\|monthly` | 200（合法周期无回归） |
+| `POST …/rules`（`comparator: "gte"`） | **400** `config.threshold.comparator 仅支持 >/>=/</<=/==/contains，收到 'gte'`，且事后 `GET …/rules?keyword=CUSTOM_R11_BAD_CMP` 查无此规则（未落库） |
+| `POST …/rules`（`extractor.mode: "regexp"`） | **400** `config.extractor.mode 仅支持 regex/numeric/keyword/json，收到 'regexp'` |
+| 第 10 轮成果回归 | `/health`、`/healthz` → 200 JSON；`/readyz` → `ready`（DB ok） |
+| 测试 | 全量 `pytest tests/ -q` → **1579 passed**（1518 + 61）；前端 `npm run test:unit` 24 项、`npm run typecheck` 干净 |
+| 红灯对照 | 暂存实现后跑本轮契约测试：**51 failed / 9 passed**，其中 `未知比较符必须落成 ERROR，实际 PASS`、`3 列 Swap 行（total+used）也应算出 25%，实际 0`、6 条 HTTP 400 断言全部失败 |
+
+> 运维提示：本轮**改了前端**（`InspectionCenterPage.tsx` 阈值标签跟随比较符 + 顺序提示），
+> 已 `npm run build`，需要 **Ctrl+F5** 刷新；后端已重启（PID 25816）生效。
+> 线上验证**刻意不测** `POST /ledger/delete`：该接口会真删台账与报表，守卫一旦失效就是
+> 破坏性操作，其行为由 HTTP 层单元测试覆盖（真实探测只做只读接口 + 预期被拒的规则创建）。
+
 
 
 

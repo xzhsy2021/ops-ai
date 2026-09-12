@@ -26,18 +26,30 @@ def build_recommendations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     mcp = sections.get("mcp") or payload.get("mcp") or {}
 
     secret = checks.get("secret_key") or {}
-    if secret.get("status") == "warn":
+    secret_status = secret.get("status")
+    # 历史缺陷：只在 warn 时产生建议，于是"密钥不安全"（status=error，占位密钥）反而没有任何整改提示。
+    if secret_status in ("warn", "error"):
+        is_error = secret_status == "error"
         _add(
             items,
             key="secret_key",
-            severity="medium",
-            title="配置生产级 OPS_SECRET_KEY",
+            severity="high" if is_error else "medium",
+            title="轮换不安全的会话/凭据加密密钥" if is_error else "配置生产级 OPS_SECRET_KEY",
             reason=secret.get("message") or "当前密钥配置偏弱。",
-            actions=[
-                "在 .env 或启动环境中设置 OPS_SECRET_KEY，建议 32 字符以上随机字符串。",
-                "重启后端服务。",
-                "刷新 /system/diagnostics，确认 secret_key 恢复为正常。",
-            ],
+            actions=(
+                [
+                    "执行 python scripts/rotate_secrets.py --check 体检（列出占位/弱密钥与库内加密数据量）。",
+                    "执行 python scripts/rotate_secrets.py --rotate-session-secret --apply 轮换会话签名密钥（所有会话需重新登录）。",
+                    "OPS_SECRET_KEY 同样不安全时：python scripts/rotate_secrets.py --rotate-ops-key --apply（自动备份数据库并重新加密库内凭据）。",
+                    "重启后端服务，刷新 /system/diagnostics，确认 secret_key 恢复为正常。",
+                ]
+                if is_error
+                else [
+                    "在 .env 或启动环境中设置 OPS_SECRET_KEY，建议 32 字符以上随机字符串。",
+                    "重启后端服务。",
+                    "刷新 /system/diagnostics，确认 secret_key 恢复为正常。",
+                ]
+            ),
             source="system.health.secret_key",
         )
 

@@ -46,11 +46,37 @@ foreach ($dir in @($AppData, $Upload, $Keys, $Backup, $Log, $Runtime)) {
     }
 }
 
-if ($env:OPS_SECRET_KEY) {
-    if ($env:OPS_SECRET_KEY.Length -lt 24) { Warn "OPS_SECRET_KEY is set but short; use at least 32 random chars" } else { Ok "OPS_SECRET_KEY configured" }
-} else {
-    Warn "OPS_SECRET_KEY not set; local dev works, but stored credentials may use compatibility mode"
+# 占位/示例值检测：与 app/core/secrets_policy.py 的 INSECURE_MARKERS 保持一致。
+# 历史缺陷：这里只判断"是否设置 + 长度"，于是与仓库 .env.example 逐字节相同的占位
+# 密钥（可伪造会话令牌 / 可解密库内凭据）会被报成 OK。
+$InsecureMarkers = @('change-me', 'change_me', 'changeme', 'please-change', 'please-generate',
+    'replace-me', 'replace_me', 'your-secret', 'your_secret', 'yoursecret', 'your-key',
+    'your_key', 'placeholder', 'do-not-use-in-production', 'dev-fallback')
+
+function Test-InsecureSecret([string]$Value) {
+    if (-not $Value) { return $false }
+    $lower = $Value.ToLower()
+    foreach ($marker in $InsecureMarkers) { if ($lower.Contains($marker)) { return $true } }
+    return $false
 }
+
+function Test-SecretKey([string]$Name, [string]$Value, [bool]$Required) {
+    if (-not $Value) {
+        if ($Required) { Fail "$Name is not set; it is required (production)"; return }
+        Warn "$Name not set; local dev works, but stored credentials may use compatibility mode"
+        return
+    }
+    if (Test-InsecureSecret $Value) {
+        Fail "$Name looks like a public example/placeholder value; rotate it (python scripts/rotate_secrets.py --rotate-$($Name.ToLower()) --apply)"
+        return
+    }
+    if ($Value.Length -lt 32) { Warn "$Name is set but short ($($Value.Length)); use at least 32 random chars"; return }
+    Ok "$Name configured"
+}
+
+Test-SecretKey "SESSION_SECRET" $env:SESSION_SECRET $false
+Test-SecretKey "OPS_SECRET_KEY" $env:OPS_SECRET_KEY $false
+Ok "密钥体检（权威判定）：python scripts/rotate_secrets.py --check"
 
 if (Test-Path (Join-Path $Root "requirements.txt")) { Ok "requirements.txt found" } else { Fail "requirements.txt missing" }
 Write-Host "APP_DATA_DIR=$AppData"

@@ -22,6 +22,7 @@ from app.core.config import (
     ROOT_DIR,
 )
 from app.core.platform import platform_info
+from app.core.secrets_policy import rotate_hint, secret_key_report
 from app.services.runtime_resources import get_runtime_usage, get_storage_usage
 from app.services.system_health import build_system_health
 from app.services.build_info import get_build_info, get_frontend_build_check
@@ -145,12 +146,47 @@ def _database_check(db: Session | None = None) -> Dict[str, Any]:
 
 
 def _secret_key_check() -> Dict[str, Any]:
-    value = os.getenv("OPS_SECRET_KEY") or os.getenv("SESSION_SECRET")
-    if not value:
-        return _warn("OPS_SECRET_KEY 未配置，当前为开发兼容模式；正式使用建议设置 32 字符以上随机字符串", configured=False)
-    if len(value) < 24:
-        return _warn("OPS_SECRET_KEY 长度偏短，建议至少 32 字符", configured=True, length=len(value))
-    return _ok("OPS_SECRET_KEY 已配置", configured=True, length=len(value))
+    """密钥强度检查。
+
+    历史缺陷：这里只判断"是否配置 + 长度 ≥ 24"，于是与仓库 `.env.example` 逐字节相同的
+    占位密钥会被报成 `ok`（"OPS_SECRET_KEY 已配置"）。而该密钥可离线伪造会话令牌
+    （接管平台）并可解密库内服务器凭据，属于必须报警的高危配置。
+    """
+    report = secret_key_report()
+    keys = report["keys"]
+    payload: Dict[str, Any] = {
+        "configured": keys["OPS_SECRET_KEY"]["status"] != "missing",
+        "length": keys["OPS_SECRET_KEY"]["length"],
+        "keys": {
+            name: {
+                "status": info["status"],
+                "reason": info["reason"],
+                "length": info["length"],
+                "fingerprint": info["fingerprint"],
+                "documented_example": info["documented_example"],
+            }
+            for name, info in keys.items()
+        },
+    }
+    problems = [
+        name
+        for name in ("SESSION_SECRET", "OPS_SECRET_KEY")
+        if keys[name]["status"] in ("insecure", "weak")
+    ]
+    if problems:
+        detail = "；".join(f"{name}：{keys[name]['reason']}" for name in problems)
+        return _error(
+            f"密钥不安全（{detail}）。更换命令：{rotate_hint()}；"
+            "也可用 scripts/rotate_secrets.py --check 体检、--apply 轮换后重启",
+            **payload,
+        )
+    if keys["OPS_SECRET_KEY"]["status"] == "missing":
+        return _warn(
+            "OPS_SECRET_KEY 未配置，当前为开发兼容模式（库内凭据不加密）；"
+            "正式使用建议设置 32 字符以上随机字符串",
+            **payload,
+        )
+    return _ok("密钥强度合格", **payload)
 
 
 def _python_runtime_check() -> Dict[str, Any]:

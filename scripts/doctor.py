@@ -9,6 +9,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.core.secrets_policy import (  # noqa: E402  (路径修正后再导入，仅依赖标准库)
+    is_production,
+    resolve_secret,
+    rotate_hint,
+    secret_key_report,
+)
+
 APP_DATA_DIR = Path(os.getenv("APP_DATA_DIR", ROOT / "data")).resolve()
 SENSITIVE_PATTERNS = ["keys", "venv", ".venv", "node_modules", "frontend/node_modules", ".pytest_cache", ".pytest_tmp", "__pycache__"]
 SENSITIVE_FILES = ["ops.db", "ops.db-shm", "ops.db-wal", "ops.log", ".env", ".initial_admin_password"]
@@ -118,11 +128,27 @@ def main() -> int:
         check_runtime_hygiene(args.strict),
         check_dist_hygiene(),
     ]
-    if os.getenv("ENV") == "production" and not os.getenv("SESSION_SECRET"):
-        status("FAIL", "SESSION_SECRET is required in production")
+    # 密钥强度判定统一走 app.core.secrets_policy：
+    # 历史缺陷是"只在缺失时报错"，于是与仓库 .env.example 逐字节相同的占位密钥
+    # （可伪造会话令牌 / 可解密库内凭据）会被判定为一切正常。
+    report = secret_key_report()
+    keys = report["keys"]
+    for name in ("SESSION_SECRET", "OPS_SECRET_KEY"):
+        info = keys[name]
+        if info["status"] == "ok":
+            status("OK", f"{name} strength ok (length={info['length']}, fingerprint={info['fingerprint']})")
+        elif info["status"] == "missing":
+            level = "FAIL" if (name == "SESSION_SECRET" and is_production()) else "WARN"
+            status(level, f"{name} is not configured; {rotate_hint()}")
+            checks.append(level != "FAIL")
+        else:
+            status("FAIL", f"{name} is {info['status']} ({info['reason']}); {rotate_hint()}")
+            checks.append(False)
+    if not resolve_secret("APPROVAL_SIGNING_KEY"):
+        status("WARN", "APPROVAL_SIGNING_KEY is not configured; approval workflows will fail closed")
+    if report["insecure"]:
+        status("FAIL", "insecure secrets detected; run: python scripts/rotate_secrets.py --check")
         checks.append(False)
-    if not os.getenv("OPS_SECRET_KEY"):
-        status("WARN", "OPS_SECRET_KEY is not configured; encrypted secret storage is disabled")
     return 0 if all(checks) else 1
 
 

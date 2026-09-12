@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_app_data_dir, get_database_path, get_runtime_path
+from app.core.secrets_policy import secret_key_report
 from app.services.recommendations import build_recommendations
 
 
@@ -135,14 +136,55 @@ def build_system_health(db: Session) -> Dict[str, Any]:
     except Exception as exc:
         checks["database"]["size_check_error"] = str(exc)
 
-    secret_key = os.getenv("OPS_SECRET_KEY") or os.getenv("SESSION_SECRET")
-    checks["secret_key"] = {
-        "status": "ok" if secret_key and len(secret_key) >= 24 else "warn",
-        "configured": bool(secret_key),
-        "message": "密钥已配置" if secret_key else "未配置 OPS_SECRET_KEY，凭据加密会退回开发兼容模式",
+    # 历史缺陷：这里只按"是否配置 + 长度"判定，会把与仓库 .env.example 逐字节相同的
+    # 占位密钥报成 ok（"密钥已配置"）。占位 SESSION_SECRET 可离线伪造会话令牌，
+    # 占位 OPS_SECRET_KEY 可解密库内服务器凭据，必须报 error。
+    secret_report = secret_key_report()
+    secret_keys = secret_report["keys"]
+    tracked = ("SESSION_SECRET", "OPS_SECRET_KEY")
+    secret_detail = {
+        name: {
+            "status": secret_keys[name]["status"],
+            "reason": secret_keys[name]["reason"],
+            "fingerprint": secret_keys[name]["fingerprint"],
+            "documented_example": secret_keys[name]["documented_example"],
+        }
+        for name in tracked
     }
-    if secret_key and len(secret_key) < 24:
-        checks["secret_key"]["message"] = "密钥长度偏短，建议使用至少 32 字符随机字符串"
+    insecure = [name for name in tracked if secret_keys[name]["status"] == "insecure"]
+    weak = [name for name in tracked if secret_keys[name]["status"] == "weak"]
+    if insecure:
+        checks["secret_key"] = {
+            "status": "error",
+            "configured": secret_keys["OPS_SECRET_KEY"]["status"] != "missing",
+            "message": "密钥不安全（"
+            + "；".join(f"{name}：{secret_keys[name]['reason']}" for name in insecure)
+            + "）；该密钥可伪造会话令牌或解密库内凭据，请轮换后重启",
+            "keys": secret_detail,
+        }
+    elif weak:
+        checks["secret_key"] = {
+            "status": "warn",
+            "configured": True,
+            "message": "密钥强度不足（"
+            + "；".join(f"{name}：{secret_keys[name]['reason']}" for name in weak)
+            + "），建议使用至少 32 字符随机字符串",
+            "keys": secret_detail,
+        }
+    elif secret_keys["OPS_SECRET_KEY"]["status"] == "missing":
+        checks["secret_key"] = {
+            "status": "warn",
+            "configured": False,
+            "message": "未配置 OPS_SECRET_KEY，凭据加密会退回开发兼容模式",
+            "keys": secret_detail,
+        }
+    else:
+        checks["secret_key"] = {
+            "status": "ok",
+            "configured": True,
+            "message": "密钥强度合格",
+            "keys": secret_detail,
+        }
 
     runtime_dirs = {
         "app_data": get_app_data_dir(),

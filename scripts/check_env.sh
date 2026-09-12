@@ -29,15 +29,33 @@ for dir in "$APP_DATA_DIR" "$UPLOAD_DIR" "$KEYS_DIR" "$BACKUP_DIR" "$LOG_DIR"; d
   fi
 done
 
-if [ -n "${OPS_SECRET_KEY:-}" ]; then
-  if [ "${#OPS_SECRET_KEY}" -lt 24 ]; then
-    warn "OPS_SECRET_KEY is set but short; use at least 32 random chars"
-  else
-    ok "OPS_SECRET_KEY configured"
+# 占位/示例值检测：与 app/core/secrets_policy.py 的 INSECURE_MARKERS 保持一致。
+# 历史缺陷：这里只判断"是否设置 + 长度"，于是与仓库 .env.example 逐字节相同的占位
+# 密钥（可伪造会话令牌 / 可解密库内凭据）会被报成 OK。
+check_secret_key() {
+  name="$1"
+  value="$2"
+  if [ -z "$value" ]; then
+    warn "$name not set; local dev works, but stored credentials may use compatibility mode"
+    return
   fi
-else
-  warn "OPS_SECRET_KEY not set; local dev works, but stored credentials may use compatibility mode"
-fi
+  lower=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *change-me*|*change_me*|*changeme*|*please-change*|*please-generate*|*replace-me*|*replace_me*|*your-secret*|*your_secret*|*yoursecret*|*your-key*|*your_key*|*placeholder*|*do-not-use-in-production*|*dev-fallback*)
+      fail "$name looks like a public example/placeholder value; rotate it (python scripts/rotate_secrets.py --check)"
+      return
+      ;;
+  esac
+  if [ "${#value}" -lt 32 ]; then
+    warn "$name is set but short (${#value}); use at least 32 random chars"
+  else
+    ok "$name configured"
+  fi
+}
+
+check_secret_key "SESSION_SECRET" "${SESSION_SECRET:-}"
+check_secret_key "OPS_SECRET_KEY" "${OPS_SECRET_KEY:-}"
+ok "密钥体检（权威判定）：python scripts/rotate_secrets.py --check"
 
 if [ -f requirements.txt ]; then
   ok "requirements.txt found"

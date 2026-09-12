@@ -10,13 +10,29 @@ from fastapi import Request, HTTPException, Depends
 from app.db import get_db, UserRepository
 from sqlalchemy.orm import Session
 
+from app.core.secrets_policy import enforce_secret_strength, is_production, rotate_hint
+
 logger = logging.getLogger(__name__)
 
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 if not SESSION_SECRET:
-    if os.getenv("ENV") == "production":
+    if is_production():
         raise RuntimeError("SESSION_SECRET is required in production")
+    logger.warning(
+        "SESSION_SECRET 未配置：本次进程使用随机密钥，重启后既有会话全部失效（仅限非生产环境）"
+    )
     SESSION_SECRET = secrets.token_hex(32)
+else:
+    # 历史缺陷：占位值（与仓库 .env.example 逐字节相同）会被直接放行，任何人可据此离线
+    # 伪造会话令牌并接管平台。生产环境对占位/弱密钥 fail-closed，非生产环境记录安全告警。
+    info = enforce_secret_strength("SESSION_SECRET", SESSION_SECRET)
+    if info["status"] != "ok":
+        logger.error(
+            "当前 SESSION_SECRET 不安全（%s，指纹 %s）；更换后请重启服务：%s",
+            info["reason"],
+            info["fingerprint"],
+            rotate_hint(),
+        )
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
 
 

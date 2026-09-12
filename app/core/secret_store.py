@@ -6,8 +6,11 @@ import logging
 import os
 from typing import Optional
 
+from app.core.secrets_policy import STATUS_OK, classify_secret, is_production, rotate_hint
+
 _PREFIX = "fernet:"
 logger = logging.getLogger(__name__)
+_insecure_key_warned = False
 
 
 def is_encrypted(value: Optional[str]) -> bool:
@@ -15,7 +18,7 @@ def is_encrypted(value: Optional[str]) -> bool:
 
 
 def _is_production() -> bool:
-    return os.getenv("ENV", os.getenv("APP_ENV", "development")).lower() in {"prod", "production"}
+    return is_production()
 
 
 def _normalize_fernet_key(raw_key: str) -> bytes:
@@ -38,9 +41,21 @@ def _normalize_fernet_key(raw_key: str) -> bytes:
 
 
 def _get_fernet():
+    global _insecure_key_warned
     key = os.getenv("OPS_SECRET_KEY")
     if not key:
         return None
+    if not _insecure_key_warned:
+        _insecure_key_warned = True
+        info = classify_secret(key, name="OPS_SECRET_KEY")
+        if info["status"] != STATUS_OK:
+            logger.error(
+                "OPS_SECRET_KEY 不安全（%s，指纹 %s）：库内凭据加密不具备实际保护能力，"
+                "请轮换后重启（scripts/rotate_secrets.py）。生成命令：%s",
+                info["reason"],
+                info["fingerprint"],
+                rotate_hint(),
+            )
     from cryptography.fernet import Fernet
     return Fernet(_normalize_fernet_key(key))
 

@@ -27,6 +27,19 @@ FRONTEND = ROOT / "frontend"
 DIST = FRONTEND / "dist"
 APP_DATA_DIR = Path(os.getenv("APP_DATA_DIR") or ROOT / "data")
 
+# 直接运行 `python scripts/preflight_start_check.py` 时 sys.path[0] 是 scripts/，
+# 需要显式把仓库根加入 path 才能复用同一套密钥强度判定（app.core.secrets_policy
+# 只依赖标准库，因此本脚本仍然是"无第三方依赖"的）。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.core.secrets_policy import (  # noqa: E402  (路径修正后再导入)
+    classify_secret,
+    is_production,
+    resolve_secret,
+    rotate_hint,
+)
+
 
 @dataclass
 class Check:
@@ -145,28 +158,18 @@ def _approval_signing_key_check(environ: Mapping[str, str] | None = None) -> Che
     if not key:
         source = "QCLAW_APPROVAL_SIGNING_KEY"
         key = str(env.get(source) or "").strip()
-    insecure_values = {
-        "changeme",
-        "change-me",
-        "default",
-        "dev-fallback-key-do-not-use-in-production",
-        "password",
-        "secret",
-        "test",
-    }
-    secure = (
-        len(key) >= 32
-        and key.lower() not in insecure_values
-        and len(set(key)) >= 8
-    )
-    if not secure:
+    # 判定标准统一走 app.core.secrets_policy（与 qclaw_routing / diagnostics 同源），
+    # 避免同一项目出现多套黑名单而漏掉 "change-me-to-a-…" 这类占位值。
+    info = classify_secret(key, name="APPROVAL_SIGNING_KEY")
+    if info["status"] != "ok":
         return _check(
             "approval_signing_key",
             "error",
-            "审批签名密钥缺失或强度不足；请配置至少 32 位的 APPROVAL_SIGNING_KEY",
+            f"审批签名密钥缺失或强度不足（{info['reason']}）；请配置至少 32 位的 APPROVAL_SIGNING_KEY",
             configured=bool(key),
             source=source if key else "",
             minimum_length=32,
+            reason=info["reason"],
         )
     return _check(
         "approval_signing_key",
@@ -176,6 +179,52 @@ def _approval_signing_key_check(environ: Mapping[str, str] | None = None) -> Che
         source=source,
         minimum_length=32,
     )
+
+
+def _secret_strength_check(environ: Mapping[str, str] | None = None) -> Check:
+    """会话签名密钥与凭据加密密钥的强度检查。
+
+    历史缺陷：`.env` 中这两个密钥是仓库 `.env.example` 里逐字节相同的占位值，
+    而对它们唯一的生产校验是"缺失才报错"，占位值可正常启动；启动自检也只覆盖
+    APPROVAL_SIGNING_KEY，于是"可伪造会话令牌 / 可解密库内凭据"的实例一路绿灯。
+    """
+    env = dict(os.environ) if environ is None else dict(environ)
+    tracked = ("SESSION_SECRET", "OPS_SECRET_KEY")
+    report = {name: classify_secret(resolve_secret(name, env), name=name) for name in tracked}
+    details = {
+        "keys": {
+            name: {
+                "status": info["status"],
+                "reason": info["reason"],
+                "length": info["length"],
+                "fingerprint": info["fingerprint"],
+                "documented_example": info["documented_example"],
+            }
+            for name, info in report.items()
+        },
+        "rotate_hint": rotate_hint(),
+    }
+    insecure = [name for name in tracked if report[name]["status"] == "insecure"]
+    weak = [name for name in tracked if report[name]["status"] == "weak"]
+    missing = [name for name in tracked if report[name]["status"] == "missing"]
+    # 生产模式必须 fail-closed（拒绝启动）；非生产只告警，避免"因历史占位密钥而无法重启"
+    # 造成新的可用性事故。UI 侧 diagnostics/system_health 始终按 error 呈现，不会被忽略。
+    production = is_production(env)
+    if insecure:
+        detail = "；".join(f"{name}：{report[name]['reason']}" for name in insecure)
+        message = f"会话/加密密钥不安全（{detail}）；更换命令：{rotate_hint()}"
+        return _check("secret_strength", "error" if production else "warn", message, **details)
+    if weak:
+        detail = "；".join(f"{name}：{report[name]['reason']}" for name in weak)
+        return _check("secret_strength", "warn", f"会话/加密密钥强度不足（{detail}）", **details)
+    if missing:
+        return _check(
+            "secret_strength",
+            "warn",
+            f"未配置 {'、'.join(missing)}；非生产环境会使用随机会话密钥，且库内凭据不会被加密",
+            **details,
+        )
+    return _check("secret_strength", "ok", "会话/加密密钥强度合格", **details)
 
 
 def _writable_dir(path: Path) -> tuple[bool, str]:
@@ -257,6 +306,7 @@ def run_checks(host: str, port: int, require_dist: bool, deep_scan: bool = False
         _node_check(),
         _package_files_check(),
         _approval_signing_key_check(),
+        _secret_strength_check(),
         _frontend_dist_check(require_dist=require_dist, deep_scan=deep_scan),
         _runtime_dirs_check(),
         _sqlite_check(),

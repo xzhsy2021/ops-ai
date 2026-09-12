@@ -1,5 +1,6 @@
 import copy
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from app.core.secret_store import decrypt_secret, encrypt_secret, is_encrypted
@@ -9,7 +10,46 @@ logger = logging.getLogger(__name__)
 # Server and jump-host inventory is stored in dedicated database tables.
 
 _SECRET_FIELDS = ("password", "key_content")
-_REDACTED = "********"
+
+#: 脱敏占位符：GET 接口用它替换真实密钥，前端表单会把它回填到输入框后原样提交。
+#: 任何**写入**路径都必须把它当作"未提供"，否则会把 8 个星号当成真实密钥入库。
+REDACTED_SECRET = "********"
+_REDACTED = REDACTED_SECRET
+_REDACTED_RE = re.compile(r"\*{3,}")
+
+
+def is_redacted_secret(value: Any) -> bool:
+    """判断是否为脱敏占位值（而非真实密钥）。
+
+    HTTP 层用 ``"********"``；MCP 工具层曾用 ``"***"``。真实口令/私钥不可能是
+    "纯星号"字符串，因此统一按"3 个及以上星号"识别，避免各层掩码不一致时把
+    占位符当真实密钥写库。
+    """
+    return isinstance(value, str) and bool(_REDACTED_RE.fullmatch(value.strip()))
+
+
+def is_blank_or_redacted_secret(value: Any) -> bool:
+    """空值或脱敏占位值 —— 写入时都表示"本次不修改该密钥"。"""
+    return value is None or value == "" or is_redacted_secret(value)
+
+
+def blank_redacted_secrets(server: Dict[str, Any]) -> Dict[str, Any]:
+    """把 payload 中回填的脱敏占位密钥置为 None（含内联跳板机配置）。
+
+    创建路径必须调用：客户端（克隆/复制、脚本或 Agent 回填 GET 返回值）一旦提交
+    ``key_content="********"``，旧实现会把占位符当真实私钥存库，该服务器从此无法用
+    密钥登录且原私钥无从恢复。置 None 后认证校验会给出明确报错。
+    """
+    result = copy.deepcopy(server or {})
+    for key in _SECRET_FIELDS:
+        if is_redacted_secret(result.get(key)):
+            result[key] = None
+    jump_host = result.get("jump_host")
+    if isinstance(jump_host, dict):
+        for key in _SECRET_FIELDS:
+            if is_redacted_secret(jump_host.get(key)):
+                jump_host[key] = None
+    return result
 
 
 # ─── Secret transform helpers (operate on dict; ORM encryption goes via repo) ──

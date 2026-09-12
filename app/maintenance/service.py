@@ -9,12 +9,21 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.core.secret_store import decrypt_secret, encrypt_secret
+from app.config.servers import is_redacted_secret
 from app.db.models import CleanupJob, CleanupJobBatch, CleanupJobEvent, DatabaseConnection
 from app.maintenance.executor import MAX_BATCH_SIZE, TARGET_DB_WRITE_NOTICE, MySQLExecutor, PostgreSQLExecutor, calculate_risk_level
 
 logger = logging.getLogger(__name__)
 
 _utcnow = lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _new_secret(value: Any) -> Optional[str]:
+    """新建连接时的密钥取值：空值与脱敏占位符（"***"/"********"）一律视为"未提供"。"""
+    if not value or is_redacted_secret(value):
+        return None
+    return value
+
 
 VALID_STATUSES = {
     "draft", "dry_running", "ready", "pending_approval", "approved", "running",
@@ -592,7 +601,7 @@ class CleanupService:
             host=data["host"],
             port=data.get("port", 3306),
             username=data["username"],
-            password_encrypted=encrypt_secret(data.get("password") or data.get("password_encrypted")),
+            password_encrypted=encrypt_secret(_new_secret(data.get("password") or data.get("password_encrypted"))),
             database_name=data.get("database_name"),
             description=data.get("description"),
             use_ssh_tunnel=bool(data.get("use_ssh_tunnel")),
@@ -602,18 +611,18 @@ class CleanupService:
             ssh_host=data.get("ssh_host"),
             ssh_port=int(data.get("ssh_port") or 22),
             ssh_username=data.get("ssh_username"),
-            ssh_password_encrypted=encrypt_secret(data.get("ssh_password")) if data.get("ssh_password") else None,
+            ssh_password_encrypted=encrypt_secret(_new_secret(data.get("ssh_password"))),
             ssh_key_path=data.get("ssh_key_path"),
-            ssh_key_passphrase_encrypted=encrypt_secret(data.get("ssh_key_passphrase")) if data.get("ssh_key_passphrase") else None,
-            ssh_key_content_encrypted=encrypt_secret(data.get("ssh_key_content")) if data.get("ssh_key_content") else None,
+            ssh_key_passphrase_encrypted=encrypt_secret(_new_secret(data.get("ssh_key_passphrase"))),
+            ssh_key_content_encrypted=encrypt_secret(_new_secret(data.get("ssh_key_content"))),
             ssh_remote_bind_host=data.get("ssh_remote_bind_host"),
             ssh_target_server_name=data.get("ssh_target_server_name"),
             ssh_target_host=data.get("ssh_target_host"),
             ssh_target_port=int(data.get("ssh_target_port") or 22),
             ssh_target_username=data.get("ssh_target_username"),
-            ssh_target_password_encrypted=encrypt_secret(data.get("ssh_target_password")) if data.get("ssh_target_password") else None,
+            ssh_target_password_encrypted=encrypt_secret(_new_secret(data.get("ssh_target_password"))),
             ssh_target_key_path=data.get("ssh_target_key_path"),
-            ssh_target_key_passphrase_encrypted=encrypt_secret(data.get("ssh_target_key_passphrase")) if data.get("ssh_target_key_passphrase") else None,
+            ssh_target_key_passphrase_encrypted=encrypt_secret(_new_secret(data.get("ssh_target_key_passphrase"))),
             allow_dml=bool(data.get("allow_dml", False)),
             allowed_dml_types=data.get("allowed_dml_types") or [],
             allowed_tables=data.get("allowed_tables") or [],
@@ -636,7 +645,32 @@ class CleanupService:
     def get_connection(self, connection_id: str) -> Optional[DatabaseConnection]:
         return self.db.query(DatabaseConnection).filter(DatabaseConnection.id == connection_id).first()
 
+    #: 密钥类字段 → 列名。语义（见 update_connection 注释）：
+    #: 非空值 = 覆盖；空串/掩码 = 保持原值；显式 None = 清空；字段缺省 = 保持原值。
+    _SECRET_FIELD_COLUMNS: tuple = (
+        ("password", "password_encrypted"),
+        ("ssh_password", "ssh_password_encrypted"),
+        ("ssh_key_passphrase", "ssh_key_passphrase_encrypted"),
+        ("ssh_key_content", "ssh_key_content_encrypted"),
+        ("ssh_target_password", "ssh_target_password_encrypted"),
+        ("ssh_target_key_passphrase", "ssh_target_key_passphrase_encrypted"),
+    )
+
     def update_connection(self, connection_id: str, data: Dict[str, Any]) -> DatabaseConnection:
+        """更新连接（部分更新语义）。
+
+        密钥字段刻意区分三态，避免"编辑连接"顺手把凭据抹掉：
+
+        * 字段缺省（调用方用 ``model_dump(exclude_unset=True)``）→ 保持原值；
+        * 空串 ``""`` → 保持原值（前端 ConnectionsTab 把 ssh_password /
+          ssh_key_passphrase 等初始化成 ``''`` 并随表单提交，而 GET 详情从不返回这些值，
+          旧实现"字段在就覆盖"会让每次保存都清空已上传的私钥/口令，SSH 隧道与 SQL
+          查询随即失效）；
+        * 显式 ``None``（JSON null）→ 清空；
+        * 非空字符串 → 加密覆盖。
+
+        清空已上传的 SSH 私钥内容也可以走 ``DELETE /connections/{id}/ssh-key``。
+        """
         conn = self.get_connection(connection_id)
         if not conn:
             raise ValueError("Connection not found")
@@ -652,21 +686,15 @@ class CleanupService:
         for field in plain_fields:
             if field in data:
                 setattr(conn, field, data.get(field))
-        if "password" in data and data.get("password"):
-            conn.password_encrypted = encrypt_secret(data.get("password"))
-        if "ssh_password" in data:
-            conn.ssh_password_encrypted = encrypt_secret(data.get("ssh_password")) if data.get("ssh_password") else None
-        if "ssh_key_passphrase" in data:
-            conn.ssh_key_passphrase_encrypted = encrypt_secret(data.get("ssh_key_passphrase")) if data.get("ssh_key_passphrase") else None
-        if "ssh_target_password" in data:
-            conn.ssh_target_password_encrypted = encrypt_secret(data.get("ssh_target_password")) if data.get("ssh_target_password") else None
-        if "ssh_target_key_passphrase" in data:
-            conn.ssh_target_key_passphrase_encrypted = encrypt_secret(data.get("ssh_target_key_passphrase")) if data.get("ssh_target_key_passphrase") else None
-        if "ssh_key_content" in data:
-            if data.get("ssh_key_content"):
-                conn.ssh_key_content_encrypted = encrypt_secret(data.get("ssh_key_content"))
-            else:
-                conn.ssh_key_content_encrypted = None
+        for payload_field, column in self._SECRET_FIELD_COLUMNS:
+            if payload_field not in data:
+                continue
+            value = data.get(payload_field)
+            if value and not is_redacted_secret(value):
+                setattr(conn, column, encrypt_secret(value))
+            elif value is None:
+                setattr(conn, column, None)
+            # 空串或脱敏占位符：保持原值（见方法注释）
         self.db.commit()
         self.db.refresh(conn)
         return conn

@@ -180,3 +180,92 @@
 - `_audit_param_contract2.py`：前端声明的查询参数 vs 后端路由实际接收参数（进程内路由表）；
 - `_audit_fe_be_params.py` / `_audit_param_contract.py`：上述脚本的早期版本（含解析伪影，仅存证）；
 - 迁移与体检：`scripts/fix_audit_timezone.py --check`（只读）。
+
+## 第 3 轮（2026-09-12）
+
+> 主题：**凭据写入安全** —— 排查"空值/脱敏占位符被当成真实密钥写库"这一类会**破坏真实数据**
+> 的缺陷（改描述顺手清空私钥 / 把 `********` 存成私钥）。
+
+### 一、已修复
+
+#### 3.1 【严重】编辑数据库连接会静默清空已保存的 SSH 凭据
+- **现象**：`PUT /api/v2/maintenance/connections/{id}` 保存任意改动（哪怕只改描述）后，该连接
+  已上传的 SSH 私钥内容、SSH 口令/口令短语、二级跳板机口令全部被清空；列表里
+  `ssh_key_has_content` 由真变假，走 SSH 隧道的 DB 巡检与 SQL 查询随即连不上。
+- **根因**（三层叠加）：
+  1. `app/api/maintenance.py::update_connection` 传 `body.model_dump()`（**全量**字典，未用
+     `exclude_unset=True`），把客户端没提交的 `ssh_key_content` 补成 `None`；
+  2. `app/maintenance/service.py::update_connection` 对密钥字段是"字段在 payload 里就覆盖"
+     （`encrypt_secret(v) if v else None`），空值即清空；
+  3. 前端 `useCleanupJobActions.ts:101` 明确 `delete payload.ssh_key_content`（有意不动已上传私钥），
+     却因后端全量补 `None` 而失效；`ConnectionsTab.tsx` 又把 `ssh_password`/`ssh_key_passphrase`/
+     `ssh_target_password` 初始化为 `''` 并随 `...connForm` 提交，而 `GET /connections/{id}`
+     **从不返回**这些值（只返回 `ssh_key_has_content` 布尔位），所以清空后前端无法回填、无从恢复。
+  - 佐证这是遗漏而非设计：同一处 `password` 字段**本来就有**"空值不覆盖"保护
+    （`if "password" in data and data.get("password")`），其余密钥字段没有。
+- **修复**：
+  - `CleanupService.update_connection` 统一密钥字段三态语义：**缺省=保持；空串/掩码=保持；
+    显式 JSON `null`=清空；非空=覆盖**（清空已上传私钥另有 `DELETE /connections/{id}/ssh-key` 专用端点）；
+  - `app/api/maintenance.py` 改用 `body.model_dump(exclude_unset=True)`；
+  - `CleanupService.create_connection` 同样把掩码视为"未提供"。
+- **回归测试**：`tests/test_connection_secret_preservation.py`。修复前两项失败并精确报出
+  `ssh_password_encrypted 被清空（应为保留）`，修复后 11 项全绿。
+
+#### 3.2 【中】服务器"创建"接口会把脱敏占位符当真实密钥入库
+- **现象**：`POST /api/v2/servers` 提交 `key_content="********"`（GET 返回的掩码被脚本/Agent/
+  克隆流程回填）会被当作真实私钥存库，该服务器从此无法用密钥登录，且原私钥无从恢复。
+- **根因**：创建路径只判真值、不识别掩码，而**更新**路径专门处理了
+  （`incoming not in (None, "", "********")`）—— 同一语义两处实现不一致。
+- **修复**：`app/config/servers.py` 新增共享哨兵与工具
+  （`REDACTED_SECRET`、`is_redacted_secret`、`is_blank_or_redacted_secret`、`blank_redacted_secrets`）；
+  创建路径先 `blank_redacted_secrets(data)`（含内联跳板机配置），掩码即"未提供"，由认证校验给出明确 400；
+  更新路径改用同一 helper，消除字面量漂移。
+  掩码识别放宽为"3 个及以上星号"：HTTP 层用 8 星，MCP 工具层用 3 星（`tool_adapters/connection_tools.py:7`
+  `_MASK = "***"`），而真实口令/私钥不可能是"纯星号"字符串。
+- **可达性**：当前前端**无法触发**（`openEdit` 预填掩码后走 update 分支；列表接口不返回
+  `key_content`/`password`，创建表单初始为空）。属**接口级防御**，防止脚本/Agent/后续 UI 改版踩坑。
+- **回归测试**：同文件 `test_server_create_rejects_redacted_*`（掩码不落库、报 400）、
+  `test_server_create_keeps_real_secret`（真实密钥不受影响）、
+  `test_server_update_treats_mask_as_unchanged`（掩码=保持）、
+  `test_blank_redacted_secrets_covers_top_level_and_inline_jump_host`。
+
+#### 3.3 【中】数据库连接的创建/修改/删除与 SSH 私钥上传**完全无审计**
+- **现象**：`audit_records` 中**查不到任何连接相关记录**（`action like '%connection%'` 命中 0 条），
+  而这些连接里保存的正是生产库口令与 SSH 私钥。审计保留窗口仅约 8 天（当前最早记录 2026-09-04），
+  "凭据被谁在何时改动/清空"事后无从追溯 —— 3.1 那类清空事故即便再次发生也无迹可寻。
+- **根因**：`app/api/maintenance.py` 的 `create_connection` / `update_connection` / `delete_connection` /
+  `upload_ssh_key` / `delete_ssh_key` 均无 `audit(...)` 调用，而同文件的 `sql.query.execute`、
+  `sql.saved.*`、`log_retention_execute` 都有；`app/core/security.py` 的全局 HTTP 中间件也不做请求级审计。
+- **修复**：上述 5 个端点补审计（`maintenance.connection.create/update/delete`、
+  `maintenance.connection.ssh_key.upload/delete`）；更新时额外记录**密钥布尔位变化**
+  （`secrets_changed=ssh_key_content_encrypted:1->0`）—— 只记存在性与字节数，绝不记密钥本身。
+- **回归测试**：`test_update_connection_endpoint_preserves_secrets`（审计为 `secrets_changed=none`
+  且详情不含任何密钥明文）、`test_update_connection_explicit_null_clears_and_is_detected_in_audit`
+  （显式清空后审计可见 `ssh_key_content_encrypted:1->0`）。
+
+### 二、已排除的"假问题"（避免误修）
+| 现象 | 结论 |
+| --- | --- |
+| 服务器**更新**路径"掩码=保持原密钥" | 正确行为，非 BUG（本轮补测试锁定） |
+| `PUT /api/v2/servers/batch` 批量改 | 只接受非密钥字段且以 `existing` 为基线逐字段改，部分更新安全 |
+| 内联跳板机配置（`metadata_json.inline_jump_host`）泄漏凭据 | 实测 78 台服务器中 71 台有该配置，字段仅 `name/host/port/username/key`，**0 台**含 `password`/`key_content`；浏览器用的 `list_server_assets()` 只取 `jump_host` **名称列**，不返回内联字典 |
+| 连接详情接口泄漏 DB/SSH 口令 | `GET /connections/{id}` 只返回 `ssh_key_has_content` 布尔位，无 `password`/`key_content` 字段 |
+| 生产库 20 个连接全部 `password_encrypted` 为空 | 19 个是 2026-06-04 01:54:50 批量导入（`updated_at == created_at`，未启隧道）；唯一启用隧道的 `印度-ind` 用 `ssh_mode=server` 从服务器记录取密钥 —— 非 3.1 BUG 造成的历史损坏 |
+| `cleanup_*` 保留策略按本地时间 | 误报：`release_retention._now_naive()`、`sqlite_cleanup` 本来就是 UTC |
+| `security_daily.report_date` 用本地日期 | 有意设计（业务日期同时用于远端日报文件名与 `filter_by(report_date=...)`） |
+| MCP 能力清单里的 `ops.update_connection`（声明"高风险需审批"） | **该工具并未注册**（126 个已注册工具中不存在），且它引用的 `"***"` 掩码与 HTTP 层 `"********"` 不一致：属元数据漂移（见待办），当前不构成可用写入路径 |
+
+### 三、待办（后续轮次）
+- `mcp_capability_service.py` 声明的能力 vs `tool_registry` 实际注册工具的**一致性核对**
+  （如 `ops.update_connection` 只声明未注册；反向也要查"注册了但未声明"）。
+- 批量改 `auth_type` 时不校验新认证方式的凭据（目前会在使用时得到明确 400 提示，是否需前端前置校验待定）。
+- 保留第 2 轮清单：巡检域状态机/时间窗/幂等、MCP 输出脱敏与审批旁路、前端竞态与假交互、
+  部署/执行/维护链路确认闸门与回滚一致性、剩余 `except: pass` 静默失败、
+  遗留功能项（`ENV=local` 关闭生产安全轨、OpenClaw `<thinking>` 原文下发、NAS 自动启动、
+  `pm2 list` 白名单、`bg_log_dir`、密钥轮换待业主决定）。
+
+### 附：第 3 轮可复现的验证脚本
+- `tests/test_connection_secret_preservation.py`：12 项凭据写入安全回归（服务层 + 接口层 + helper 层 + 审计）；
+- `fnos-migration/_verify_credential_write_safety.py`（未入库，只读）：扫描内联跳板机配置是否携带
+  口令/私钥，并列出各连接"已保存密钥"的布尔状态，便于修复前后对比。
+

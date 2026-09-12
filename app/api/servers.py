@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from config_manager import save_server, delete_server
 from app.domain.inventory import inventory
-from app.config.servers import redact_server_secrets
+from app.config.servers import (
+    blank_redacted_secrets,
+    is_blank_or_redacted_secret,
+    redact_server_secrets,
+)
 from app.api.helpers import api_response, audit
 from app.db import get_db
 from app.db.models import Server, Service
@@ -498,6 +502,9 @@ def exec_history_detail(request: Request, log_id: str, db: Session = Depends(get
 async def create_server_v2(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
     data = await request.json()
+    # 回填的脱敏占位符（"********"）不是真实密钥：先置 None，让下面的认证校验
+    # 给出明确报错，而不是把占位符当私钥/口令存库。
+    data = blank_redacted_secrets(data)
     name = (data.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -590,9 +597,10 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
     auth_type = data.get("auth_type") or existing.get("auth_type", "password")
     incoming_password = data.get("password")
     incoming_key_content = data.get("key_content")
-    password = incoming_password if incoming_password not in (None, "", "********") else existing.get("password")
+    # 掩码/空值 = 本次不改动该密钥（前端表单把 GET 返回的掩码回填后原样提交）
+    password = existing.get("password") if is_blank_or_redacted_secret(incoming_password) else incoming_password
     key_file = data.get("key") or data.get("key_file") or existing.get("key")
-    key_content = incoming_key_content if incoming_key_content not in (None, "", "********") else existing.get("key_content")
+    key_content = existing.get("key_content") if is_blank_or_redacted_secret(incoming_key_content) else incoming_key_content
     jump_host = existing.get("jump_host")
     if "jump_host" in data:
         jh = data["jump_host"]

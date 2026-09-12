@@ -107,6 +107,35 @@ def _parse_json_text(value):
     except Exception:
         return None
 
+
+#: 数据库连接的"密钥位"列（只用于审计布尔位变化，绝不读取/记录明文）
+_SECRET_PRESENCE_FIELDS = (
+    "password_encrypted",
+    "ssh_password_encrypted",
+    "ssh_key_passphrase_encrypted",
+    "ssh_key_content_encrypted",
+    "ssh_target_password_encrypted",
+    "ssh_target_key_passphrase_encrypted",
+)
+
+
+def _secret_presence(conn) -> Dict[str, bool]:
+    return {field: bool(getattr(conn, field, None)) for field in _SECRET_PRESENCE_FIELDS}
+
+
+def _secret_presence_detail(before: Optional[Dict[str, bool]], after: Dict[str, bool]) -> str:
+    """生成凭据变更摘要（如 secrets_changed=ssh_key_content_encrypted:1->0）。"""
+    if before is None:
+        present = ",".join(field for field, has in after.items() if has)
+        return f"secrets={present or 'none'}"
+    changes = [
+        f"{field}:{int(bool(before.get(field)))}->{int(bool(after.get(field)))}"
+        for field in _SECRET_PRESENCE_FIELDS
+        if bool(before.get(field)) != bool(after.get(field))
+    ]
+    return "secrets_changed=" + (",".join(changes) if changes else "none")
+
+
 def _get_operator(request: Request) -> str:
     state_username = getattr(getattr(request, "state", None), "username", None)
     if state_username:
@@ -211,6 +240,9 @@ def create_connection(body: ConnectionCreate, request: Request, db: Session = De
     svc = CleanupService(db)
     try:
         conn = svc.create_connection(body.model_dump(), _get_operator(request))
+        audit("maintenance.connection.create", "database_connection", conn.name,
+              f"user={_get_operator(request)} host={conn.host} tunnel={bool(conn.use_ssh_tunnel)} "
+              f"{_secret_presence_detail(None, _secret_presence(conn))}")
         return api_response(data={"id": conn.id, "name": conn.name})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -277,8 +309,17 @@ def test_connection(connection_id: str, request: Request, db: Session = Depends(
 def update_connection(connection_id: str, body: ConnectionCreate, request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
     svc = CleanupService(db)
+    before_conn = svc.get_connection(connection_id)
+    before_secrets = _secret_presence(before_conn) if before_conn else None
     try:
-        conn = svc.update_connection(connection_id, body.model_dump())
+        # exclude_unset=True：只更新请求里**显式给出**的字段。用全量 model_dump() 会把
+        # 客户端没提交的密钥字段补成 None，导致"编辑连接即清空已上传私钥/口令"。
+        conn = svc.update_connection(connection_id, body.model_dump(exclude_unset=True))
+        # 凭据变更留痕：只记布尔位变化（true->false），绝不记录密钥本身。
+        # 若再次出现"改配置顺手清空私钥"，审计里可直接看到 *_encrypted:1->0。
+        audit("maintenance.connection.update", "database_connection", conn.name,
+              f"user={_get_operator(request)} host={conn.host} "
+              f"{_secret_presence_detail(before_secrets, _secret_presence(conn))}")
         return api_response(data={"id": conn.id, "name": conn.name}, message="Connection updated")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -290,8 +331,12 @@ def update_connection(connection_id: str, body: ConnectionCreate, request: Reque
 def delete_connection(connection_id: str, request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
     svc = CleanupService(db)
+    conn = svc.get_connection(connection_id)
     if not svc.delete_connection(connection_id):
         raise HTTPException(status_code=404, detail="Connection not found")
+    audit("maintenance.connection.delete", "database_connection",
+          conn.name if conn else connection_id,
+          f"user={_get_operator(request)} host={getattr(conn, 'host', None)}")
     return api_response(message="Connection deleted")
 
 
@@ -305,6 +350,11 @@ def upload_ssh_key(connection_id: str, body: SshKeyUpload, request: Request, db:
     svc = CleanupService(db)
     try:
         svc.set_ssh_key_content(connection_id, body.key_content)
+        conn = svc.get_connection(connection_id)
+        # 只记事实与长度量级，不记录私钥内容本身
+        audit("maintenance.connection.ssh_key.upload", "database_connection",
+              conn.name if conn else connection_id,
+              f"user={_get_operator(request)} bytes={len(body.key_content or '')}")
         return api_response(message="SSH key uploaded")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -318,6 +368,9 @@ def delete_ssh_key(connection_id: str, request: Request, db: Session = Depends(g
     svc = CleanupService(db)
     try:
         svc.remove_ssh_key_content(connection_id)
+        conn = svc.get_connection(connection_id)
+        audit("maintenance.connection.ssh_key.delete", "database_connection",
+              conn.name if conn else connection_id, f"user={_get_operator(request)}")
         return api_response(message="SSH key deleted")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

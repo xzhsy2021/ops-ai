@@ -45,17 +45,23 @@ def shutdown_audit_writer(timeout: float = 5.0) -> None:
         try:
             _audit_queue.join()
         except Exception:
-            pass
+            logger.exception("Audit queue join failed during shutdown")
         _writer_thread.join(timeout=timeout)
     remaining = _audit_queue.qsize()
     if remaining > 0:
         logger.warning("Audit writer shutdown with %d items remaining, draining synchronously", remaining)
-        while not _audit_queue.empty():
+        while True:
             try:
                 fn = _audit_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 fn()
             except Exception:
-                pass
+                # 静默丢弃审计记录会让故障完全不可见；这里必须留下堆栈
+                logger.exception("审计写入在关停排空阶段失败（该条审计记录已丢失）")
+            finally:
+                _audit_queue.task_done()
     logger.info("Audit writer shutdown complete, queue size: %d", _audit_queue.qsize())
 
 
@@ -67,7 +73,8 @@ def submit_audit_write(fn: Callable[[], None]) -> None:
         try:
             fn()
         except Exception:
-            pass
+            # 队列满已是异常状态，兜底同步写入再失败 = 审计记录丢失，必须记录堆栈
+            logger.exception("审计队列已满且同步兜底写入失败（该条审计记录已丢失）")
 
 
 def record_tool_call_async(
@@ -91,8 +98,9 @@ def record_tool_call_async(
     def _write() -> None:
         from app.db import SessionLocal
         from app.services.tool_audit import record_tool_call
-        db = SessionLocal()
+        db = None
         try:
+            db = SessionLocal()
             record_tool_call(
                 db,
                 audit_id=resolved_audit_id,
@@ -111,9 +119,10 @@ def record_tool_call_async(
                 duration_ms=duration_ms,
             )
         except Exception:
-            logger.exception("Async tool call audit write failed")
+            logger.exception("异步工具调用审计写入失败（审计记录丢失：tool=%s audit_id=%s）", tool_name, resolved_audit_id)
         finally:
-            db.close()
+            if db is not None:
+                db.close()
 
     submit_audit_write(_write)
     return resolved_audit_id
@@ -131,8 +140,9 @@ def record_plan_event_async(
     def _write() -> None:
         from app.db import SessionLocal
         from app.db.models import ToolPlanEvent
-        db = SessionLocal()
+        db = None
         try:
+            db = SessionLocal()
             item = ToolPlanEvent(
                 id=event_id,
                 plan_id=plan_id,
@@ -144,9 +154,10 @@ def record_plan_event_async(
             db.add(item)
             db.commit()
         except Exception:
-            logger.exception("Async tool plan event write failed")
+            logger.exception("异步计划事件写入失败（事件丢失：plan=%s event_id=%s）", plan_id, event_id)
         finally:
-            db.close()
+            if db is not None:
+                db.close()
 
     submit_audit_write(_write)
     return event_id

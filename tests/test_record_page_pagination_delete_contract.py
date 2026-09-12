@@ -261,11 +261,17 @@ def test_dml_and_command_history_clients_expose_pagination_and_batch_delete_cont
 
 def test_audit_log_api_and_client_expose_offset_without_delete_endpoint():
     backend = open("app/api/task_center.py", encoding="utf-8").read()
+    audit_config = open("app/config/audit.py", encoding="utf-8").read()
     api = open("frontend/src/api.ts", encoding="utf-8").read()
     page = open("frontend/src/pages/AuditLogPage.tsx", encoding="utf-8").read()
 
     assert "async def list_audit(request: Request, response: Response, limit: int = 200, offset: int = 0" in backend
-    assert "rows = rows[offset:offset + limit]" in backend
+    # 分页/过滤下推到 SQL（app/config/audit.py::list_audit_records）：旧实现只把最新 5000 条
+    # 读进内存再切页，total 会被截断、更早记录翻页不可达、久远 action 检索静默为空。
+    assert "data = list_audit_records(db, limit=limit, offset=offset, action=action, since_id=since_id)" in backend
+    assert "def list_audit_records(" in audit_config
+    assert ".offset(offset)" in audit_config
+    assert '"total": total' in audit_config
     assert "list: (params?: { limit?: number; offset?: number; action?: string })" in api
     assert "auditLog.list({ limit: pageSize, offset, action: effAction || undefined })" in page
     assert "deleteMany" not in api.split("export const auditLog = {", 1)[1].split("export const capabilityTools", 1)[0]

@@ -52,6 +52,66 @@ def load_audit_logs(limit: int = 1000) -> List[Dict[str, Any]]:
         return []
 
 
+AUDIT_LIST_MAX_LIMIT = 1000
+
+
+def list_audit_records(
+    db,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+    action: str = "",
+    since_id: str = "",
+) -> Dict[str, Any]:
+    """分页查询审计记录：过滤与计数都下推到 SQL，``total`` 是匹配的真实总数。
+
+    历史缺陷（``/api/v2/audit``）：先 ``load_audit_logs(5000)`` 取最新 5000 条，
+    再在内存里过滤 action、切页，并令 ``total = len(rows)``。后果：
+      - 审计记录超过 5000 条后 total 被截断成 5000，更早的记录永远无法翻页到达；
+      - 检索一个较久远才出现的 action 会静默返回空列表（库里明明有匹配记录）；
+      - 导出 CSV 同样只在这 5000 条里过滤，静默丢数据。
+    """
+    from sqlalchemy import func
+
+    from app.db.models import AuditRecord
+
+    limit = max(1, min(200 if limit is None else int(limit), AUDIT_LIST_MAX_LIMIT))
+    offset = max(0, int(offset or 0))
+    query = db.query(AuditRecord)
+    if action:
+        # 与旧内存实现一致：大小写不敏感的子串匹配；转义 LIKE 通配符，避免 % / _ 被当模式
+        needle = action.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.filter(func.lower(AuditRecord.action).like(f"%{needle}%", escape="\\"))
+    if since_id:
+        try:
+            query = query.filter(AuditRecord.id < int(since_id))
+        except (TypeError, ValueError):
+            pass
+    total = int(query.count() or 0)
+    rows = (
+        query.order_by(AuditRecord.created_at.desc(), AuditRecord.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "action": row.action,
+                "target_type": row.target_type,
+                "target_name": row.target_name,
+                "details": row.details,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 def cleanup_audit_logs(max_age_hours: int = 720):
     try:
         from app.db.base import SessionLocal

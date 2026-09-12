@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import traceback
 import uuid
@@ -12,6 +13,8 @@ from app.db.base import SessionLocal
 from app.db.models import OperationJob
 from app.services.tool_context import ToolContext
 from app.domain.runtime import runtime_job_to_dict
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -279,7 +282,7 @@ def _execute_tool_job(job_id: str) -> None:
                 related_job_id=job_id,
             )
         except Exception:
-            pass
+            logger.exception("作业成功审计写入失败（job_id=%s tool=%s）", job_id, tool_name)
         _set_job_status(db, job_id, status="success", progress=100, result={"result": result}, finished=True)
     except Exception as exc:
         error = str(exc) or exc.__class__.__name__
@@ -287,7 +290,8 @@ def _execute_tool_job(job_id: str) -> None:
         try:
             _set_job_status(db, job_id, status="failed", progress=100, error=error, result={"error": error, "traceback": trace}, finished=True)
         except Exception:
-            pass
+            # 这里失败会让作业永远停在 running，必须留下痕迹
+            logger.exception("作业失败状态写回失败（job_id=%s 可能永久停留在 running）", job_id)
         try:
             from app.services.audit_writer import record_tool_call_async
             from app.services.tool_registry import registry
@@ -307,7 +311,7 @@ def _execute_tool_job(job_id: str) -> None:
                 related_job_id=job_id,
             )
         except Exception:
-            pass
+            logger.exception("作业失败审计写入失败（job_id=%s tool=%s）", job_id, tool_name or "unknown")
     finally:
         try:
             db.close()

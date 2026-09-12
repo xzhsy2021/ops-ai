@@ -29,10 +29,29 @@ def apply_cursor_pagination(
     return query
 
 
+def _etag_identity(item: Any) -> str:
+    """取条目身份+时间戳用于 ETag。
+
+    历史缺陷：dict 条目没有 ``id`` 属性，``getattr(item, "id", id(item))`` 退化成
+    CPython 内存地址，同一份数据每次请求算出的 ETag 都不同 → 客户端带
+    If-None-Match 永远命中不了，304 短路实际失效（审计/工具调用/报表/令牌列表
+    传的都是 dict）。
+    """
+    if isinstance(item, dict):
+        ident = item.get("id") or item.get("chain_id") or item.get("key") or item.get("name") or ""
+        stamp = item.get("updated_at") or item.get("created_at") or item.get("finished_at") or item.get("started_at") or ""
+        return f"{ident}:{stamp}"
+    ident = getattr(item, "id", None)
+    if ident is None:
+        ident = getattr(item, "created_at", "")
+    stamp = getattr(item, "updated_at", "") or getattr(item, "created_at", "") or ""
+    return f"{ident}:{stamp}"
+
+
 def compute_list_etag(items: List[Any], prefix: str = "list") -> str:
     raw = f"{prefix}:{len(items)}"
     for item in items:
-        raw += f":{getattr(item, 'id', id(item))}:{getattr(item, 'updated_at', '') or getattr(item, 'created_at', '')}"
+        raw += f":{_etag_identity(item)}"
     return f'W/"{hashlib.md5(raw.encode()).hexdigest()[:12]}"'
 
 

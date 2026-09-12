@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.api.helpers import api_response, audit
 from app.core.auth_v2 import require_auth, require_admin
 from app.db import get_db
-from app.config.audit import load_audit_logs
 from app.core.rbac import explain_operation_risk
 from app.services.audit_chain import build_operation_chain, list_operation_chains
 from app.domain.runtime import count_runtime_jobs, delete_runtime_tasks, list_runtime_jobs, get_runtime_job_detail, reconcile_stale_operation_jobs
@@ -146,38 +145,41 @@ async def get_audit_operation_chain_by_ref(
 @audit_router.get("")
 async def list_audit(request: Request, response: Response, limit: int = 200, offset: int = 0, action: str = "", since_id: str = "", db: Session = Depends(get_db)):
     require_admin(request, db)
-    limit = max(1, min(limit, 1000))
-    offset = max(0, int(offset or 0))
-    rows = load_audit_logs(5000)
-    if action:
-        rows = [r for r in rows if action.lower() in (r.get("action") or "").lower()]
-    if since_id:
-        try:
-            sid = int(since_id)
-            rows = [r for r in rows if int(r.get("id", 0)) < sid]
-        except (ValueError, TypeError):
-            pass
-    total = len(rows)
-    rows = rows[offset:offset + limit]
+    from app.config.audit import list_audit_records
+
+    # 过滤/计数/分页全部下推到 SQL：旧实现只取最新 5000 条再内存过滤，total 会被截断成
+    # 5000，更早的记录翻页不可达，久远的 action 检索静默返回空。
+    data = list_audit_records(db, limit=limit, offset=offset, action=action, since_id=since_id)
     from app.api.helpers import compute_list_etag, check_etag_not_modified
-    etag = compute_list_etag(rows, "audit")
+    etag = compute_list_etag(data["items"], "audit")
     not_modified = check_etag_not_modified(request, etag)
     if not_modified:
         return not_modified
     response.headers["ETag"] = etag
-    return api_response(data={"items": rows, "total": total, "limit": limit, "offset": offset})
+    return api_response(data=data)
 
 
 @audit_router.get("/export")
 async def export_audit_csv(request: Request, limit: int = 1000, action: str = "", db: Session = Depends(get_db)):
     require_admin(request, db)
-    rows = load_audit_logs(max(1, min(limit, 5000)))
-    if action:
-        rows = [r for r in rows if action.lower() in (r.get("action") or "").lower()]
+    from app.config.audit import list_audit_records
+
+    # 保留 5000 行导出上限，但过滤必须在截断之前下推到 SQL（旧实现在最新 5000 条里过滤，
+    # 较久远的匹配记录会被静默丢掉）。
+    data = list_audit_records(db, limit=max(1, min(int(limit or 1000), 5000)), offset=0, action=action)
+    rows = data["items"]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=["id", "created_at", "action", "target_type", "target_name", "details"])
     writer.writeheader()
     for row in rows:
         writer.writerow({k: row.get(k, "") for k in writer.fieldnames})
     buf.seek(0)
-    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=audit_logs.csv"})
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=audit_logs.csv",
+            "X-Total-Count": str(data["total"]),
+            "X-Exported-Count": str(len(rows)),
+        },
+    )

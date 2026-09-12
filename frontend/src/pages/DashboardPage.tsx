@@ -7,6 +7,8 @@ import { EmptyState, Skeleton, StatusBadge, FavoriteButton } from '../components
 import { useFavoriteStore } from '../stores/favoriteStore'
 import { usePreferenceStore } from '../stores/preferenceStore'
 import { parseBackendTime } from '../utils/datetime.js'
+import { deriveDashboardStatus } from '../utils/dashboardStatus.js'
+import type { DashboardStatus } from '../utils/dashboardStatus.js'
 
 type HealthTone = 'ok' | 'warn' | 'danger' | 'neutral'
 
@@ -100,13 +102,6 @@ function fmtRelative(value?: string) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m 前`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`
   return `${Math.floor(diff / 86400)}d 前`
-}
-
-function scoreTone(score: number, backendOnline: boolean): HealthTone {
-  if (!backendOnline) return 'danger'
-  if (score >= 90) return 'ok'
-  if (score >= 70) return 'warn'
-  return 'danger'
 }
 
 function metricTone(value: number, threshold = 1): HealthTone {
@@ -320,14 +315,14 @@ function DeployWidget({ data }: { data: DashboardData | null }) {
 }
 
 function SiteStatusPanel({
-  score,
+  health,
   metrics,
   dashboard,
   backendOnline,
   loading,
   recentDeployments,
 }: {
-  score: number
+  health: DashboardStatus
   metrics: Record<string, number>
   dashboard: DashboardData | null
   backendOnline: boolean
@@ -339,7 +334,7 @@ function SiteStatusPanel({
   const blocked = dashboard?.deployments?.tasks_by_status?.blocked ?? 0
   const riskCount = dashboard?.risks?.length ?? 0
   const highRiskCount = (dashboard?.risks || []).filter((r) => r.level === 'high' || r.level === 'critical').length
-  const tone = scoreTone(score, backendOnline)
+  const tone = health.tone
 
   if (loading) {
     return (
@@ -356,7 +351,7 @@ function SiteStatusPanel({
         <div className="site-status-orb">
           <div className={`site-status-orb-ring site-status-orb-ring--${tone}`} />
           <div className="site-status-orb-inner">
-            <strong>{score}<small>%</small></strong>
+            <strong>{health.scoreText}</strong>
             <span>{backendOnline ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
         </div>
@@ -365,13 +360,14 @@ function SiteStatusPanel({
           <div className="site-status-desc">
             {dashboard?.generated_at
               ? `更新于 ${fmtShortTime(dashboard.generated_at)}`
-              : '暂无数据'}
+              : health.note || '暂无数据'}
           </div>
           <div className="site-status-tags">
             {highRiskCount > 0 && <span className="site-status-tag site-status-tag--danger">{highRiskCount} 个高风险</span>}
             {riskCount > 0 && <span className="site-status-tag site-status-tag--warn">{riskCount} 个待处理</span>}
             {!backendOnline && <span className="site-status-tag site-status-tag--danger">后端离线</span>}
-            {backendOnline && riskCount === 0 && <span className="site-status-tag site-status-tag--ok">一切正常</span>}
+            {health.degraded && <span className="site-status-tag site-status-tag--warn">数据不可用</span>}
+            {backendOnline && !health.degraded && riskCount === 0 && <span className="site-status-tag site-status-tag--ok">一切正常</span>}
           </div>
         </div>
       </div>
@@ -547,11 +543,15 @@ export default function DashboardPage() {
   const metrics = dashboard?.metrics || {}
   const recentDeployments = useMemo(() => dashboard?.deployments?.recent || [], [dashboard])
   const now = useCurrentTime()
-  const score = backendOnline ? (dashboard?.score ?? 92) : 60
+  // 第 9 轮：此前 `dashboard?.score ?? 92` 会在取数失败时显示"92% + 运行正常"的假绿，
+  // 现在统一由 deriveDashboardStatus 判定"是否有真实数据"，无数据时显示 '—' 并告警。
+  const health = useMemo(
+    () => deriveDashboardStatus({ dashboard, backendOnline, error, loading }),
+    [dashboard, backendOnline, error, loading],
+  )
   const hour = now.getHours()
   const greeting = hour < 12 ? '上午好' : hour < 18 ? '下午好' : '晚上好'
-  const statusText = dashboard?.status === 'critical' ? '需要处理' : dashboard?.status === 'attention' ? '需要关注' : backendOnline ? '运行正常' : '后端离线'
-  const tone = scoreTone(score, backendOnline)
+  const tone = health.tone
 
   // 拖拽
   const handleDragStart = (id: WidgetId) => setDraggingId(id)
@@ -644,22 +644,28 @@ export default function DashboardPage() {
         <div className="cc-command-side">
           <div
             className={`cc-orb cc-orb--${tone}`}
-            style={{ ['--orb-pct' as any]: score } as React.CSSProperties}
-            aria-label={`系统健康评分 ${score}%`}
+            style={{ ['--orb-pct' as any]: health.orbPct } as React.CSSProperties}
+            aria-label={`系统健康评分 ${health.scoreText}`}
           >
             <div className="cc-orb-ring" />
             <div className="cc-orb-inner">
-              <strong>{score}%</strong>
-              <span>{statusText}</span>
-              <small>更新于 {fmtShortTime(dashboard?.generated_at)}</small>
+              <strong>{health.scoreText}</strong>
+              <span>{health.statusText}</span>
+              <small>{dashboard?.generated_at ? `更新于 ${fmtShortTime(dashboard.generated_at)}` : health.note || '暂无数据'}</small>
             </div>
           </div>
         </div>
       </div>
 
+      {health.degraded && (
+        <div className="alert alert-warn" style={{ marginTop: 12 }}>
+          工作台数据获取失败：{health.note}。下方指标可能不是当前真实状态，请点击右上角"刷新"重试。
+        </div>
+      )}
+
       {/* 站点态势面板 */}
       <SiteStatusPanel
-        score={score}
+        health={health}
         metrics={metrics}
         dashboard={dashboard}
         backendOnline={backendOnline}
@@ -669,7 +675,7 @@ export default function DashboardPage() {
 
       {/* KPI 指标卡条 */}
       <div className="wx-dash-kpi wx-kpi-row" aria-label="运行快照">
-        <div className="wx-kpi"><span className="label">健康评分</span><span className="value">{score}</span></div>
+        <div className="wx-kpi"><span className="label">健康评分</span><span className="value">{health.scoreText}</span></div>
         <div className="wx-kpi"><span className="label">服务器</span><span className="value">{metrics.servers ?? 0}</span></div>
         <div className={`wx-kpi ${(metrics.running_work || 0) > 0 ? 'tone-run' : ''}`}><span className="label">运行中</span><span className="value">{metrics.running_work ?? 0}</span></div>
         <div className={`wx-kpi ${(dashboard?.deployments?.tasks_by_status?.failed || 0) > 0 ? 'tone-fail' : ''}`}><span className="label">失败任务</span><span className="value">{dashboard?.deployments?.tasks_by_status?.failed ?? 0}</span></div>

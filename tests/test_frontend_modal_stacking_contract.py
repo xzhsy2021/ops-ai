@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
+
+FRONTEND_SRC = Path("frontend/src")
 
 
 def _page() -> str:
@@ -73,14 +76,32 @@ def test_overview_tab_reuses_the_parent_modal_instance():
 
 
 def test_unclosed_status_semantics_shared_across_frontend():
-    """未闭环口径在前端集中定义并复用，避免各处手写 'OPEN' 造成数字不一致。"""
+    """未闭环口径在前端集中定义并复用，避免各处手写 'OPEN' 造成数字不一致。
+
+    第 9 轮修订：原先这里还断言 `frontend/src/services/liveStatus.ts` 内有两处
+    `status: 'OPEN,PROCESSING'`。该模块（230 行）已确认是死代码——前端全仓无任何
+    导入（其文档注释声称的 `ProbeDropdown` 组件根本不存在，`SiteStatusPanel` 早已
+    改为在 DashboardPage 内自行取数），因此已删除。相应地，本用例改为断言更强的
+    不变式：未闭环字面量在整个前端只能出现一次（唯一定义处），任何新增的手写副本
+    都会让用例失败。
+    """
     page = _page()
-    live = open("frontend/src/services/liveStatus.ts", encoding="utf-8").read()
 
     assert "const UNCLOSED_STATUS = 'OPEN,PROCESSING'" in page
     assert "useState(UNCLOSED_STATUS)" in page
     assert "value={UNCLOSED_STATUS}" in page
-    assert live.count("status: 'OPEN,PROCESSING'") == 2
+
+    offenders = []
+    for path in sorted(FRONTEND_SRC.rglob("*.ts*")):
+        if path.name == "InspectionCenterPage.tsx":
+            continue  # 唯一定义处
+        text = path.read_text(encoding="utf-8")
+        if "OPEN,PROCESSING" in text:
+            offenders.append(str(path).replace("\\", "/"))
+    assert offenders == [], (
+        "未闭环口径必须集中在 InspectionCenterPage 的 UNCLOSED_STATUS，"
+        f"以下文件又手写了字面量：{offenders}"
+    )
 
 
 def test_issue_mutations_refresh_overview_counts():

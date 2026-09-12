@@ -263,7 +263,6 @@ export default function TaskCenterPage() {
   const { start: startPolling, stop: stopPolling } = useSmartPolling(load, {
     activeMs: 5000,
     hiddenMs: 30000,
-    idleMs: 30000,
     maxBackoffMs: 60000,
   })
 
@@ -279,7 +278,6 @@ export default function TaskCenterPage() {
   const { start: startSelectedPolling, stop: stopSelectedPolling } = useSmartPolling(refreshSelected, {
     activeMs: 3000,
     hiddenMs: 15000,
-    idleMs: 15000,
   })
   useEffect(() => {
     if (selectedLive) startSelectedPolling({ activeMs: 3000, hiddenMs: 15000 })

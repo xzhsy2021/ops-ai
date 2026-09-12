@@ -1,6 +1,8 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { capabilityTools } from '../api'
 import ToolRiskTag from '../components/ToolRiskTag'
+import { useDebouncedValue } from '../hooks/useDebouncedValue'
+import { createRequestGuard } from '../utils/requestGuard.js'
 import { formatTime } from '../utils/datetime.js'
 
 function truncate(str?: string, max = 120) {
@@ -20,29 +22,36 @@ export default function McpAuditPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [filterTool, setFilterTool] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
+  // 第 9 轮：此前输入框每敲一个字符就发一次请求（无防抖），且响应可能乱序——
+  // 慢的旧请求后到会把新结果覆盖掉，表格显示的是上一个关键字的陈旧数据。
+  const debouncedTool = useDebouncedValue(filterTool, 300)
+  const guard = useMemo(() => createRequestGuard(), [])
 
   const load = useCallback(async () => {
+    const seq = guard.begin()
     setLoading(true)
     setError('')
     try {
       const res: any = await capabilityTools.calls({
         limit: pageSize,
         offset: (page - 1) * pageSize,
-        tool: filterTool || undefined,
+        tool: debouncedTool || undefined,
         status: filterStatus || undefined,
       })
+      if (!guard.isCurrent(seq)) return // 已有更新的请求发出，丢弃本次的陈旧响应
       const data = res?.data || res
       const result = data?.items || data?.result || data
       setItems(Array.isArray(result) ? result : [])
       setTotal(Number(data?.total || 0))
     } catch (e: any) {
+      if (!guard.isCurrent(seq)) return
       setError(e?.message || String(e))
       setItems([])
       setTotal(0)
     } finally {
-      setLoading(false)
+      if (guard.isCurrent(seq)) setLoading(false)
     }
-  }, [page, pageSize, filterTool, filterStatus])
+  }, [page, pageSize, debouncedTool, filterStatus, guard])
 
   useEffect(() => { load() }, [load])
 
@@ -75,10 +84,10 @@ export default function McpAuditPage() {
         <input
           value={filterTool}
           onChange={(e) => setFilterTool(e.target.value)}
-          placeholder="工具名称筛选"
+          placeholder="工具名称筛选（输入即筛选）"
           style={{ maxWidth: 220 }}
         />
-        <button className="btn" onClick={() => { setPage(1); load() }}>筛选</button>
+        <button className="btn" onClick={load} disabled={loading}>刷新</button>
       </div>
 
       {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}

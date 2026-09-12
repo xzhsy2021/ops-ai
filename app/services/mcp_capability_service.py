@@ -248,6 +248,23 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
 
     # ── QClaw Message Routing ──
     'ops.routing.resolve_message_target': 'Deterministically route a QClaw channel message to an OPS system/service and issue a routing ticket bound to the full message context. content_sha256 is auto-computed from the message text (UTF-8) when omitted. 中文: 解析消息路由/消息路由目标/路由解析.',
+
+    # ── Security module / daily security report（第 9 轮补齐：原先缺条目，
+    #    AI 只能看到 "OPS capability tool ..." 样板句，无法按意图发现这些能力）──
+    'ops.security_report.collect': 'Collect the daily security report from servers that have the security monitor enabled; parse and store it, write high-risk items into the risk ledger, and archive it to the report center. Requires confirmation. 中文: 采集日报/刷新安全日报/重新收集安全报告.',
+    'ops.security_report.get_daily_report': 'Get the archived daily security report for a report_date, returning report_id plus HTML/Markdown view and download links (optionally the full content). Read-only. 中文: 获取安全日报/查看安全日报/下载安全日报.',
+    'ops.security_report.summarize': 'Aggregate already-collected daily security reports by date/server/risk level into structured risk items (kind, level, login failures, banned IPs, load) for analysis. Read-only. 中文: 每日安全日报/安全巡检汇总/日报风险分析/安全报告.',
+    'ops.security_module.probe': 'Read-only diagnosis of the security monitor module on a target server: daily report script, cron entries, fail2ban/auditd service state. Use before deciding to harden. No install, no writes. 中文: 校验安全模块/检查安全加固/确认是否已安装/安全服务状态.',
+    'ops.security_module.install': 'Mark a target server as "daily security collection enabled" and optionally collect once immediately. Collection runs on the fly over SSH without touching any server-side file. 中文: 启用安全采集/开启日报/启用安全巡检/标记后加入每日日报.',
+    'ops.security_module.setup': 'Remotely run the official deanchou/server_security_monitor installer on a target server: fail2ban, auditd, daily security report script, resource monitor, Telegram alerts, then flag the server as monitored. High risk, long running, auto-queued to the job center (poll with ops.get_job_status or ops.wait_job). 中文: 安装安全监控/一键安装安全模块/安装fail2ban/安全加固.',
+    'ops.inspection.run_security_daily': 'Trigger one daily security inspection: collect per-server security daily reports (aureport logins/failed logins/account changes/fail2ban bans/load), evaluate thresholds, write risks into the ledger, and archive an aggregated daily security report. 中文: 安全日报巡检/每日安全巡检/采集安全日报/登录失败/fail2ban.',
+
+    # ── Job waiting & agent integration（第 9 轮补齐，同上）──
+    'ops.wait_job': 'Wait for a unified job center task to reach a terminal state (success/failed/canceled) and return its final result. Use right after triggering an async tool (e.g. ops.inspection.run_security_daily, ops.security_module.setup) instead of manual polling. Read-only. 中文: 等待任务/等待结果/任务执行完了吗/同步等待.',
+    'ops.integration.get_context_pack': 'Return the authoritative facts an agent needs to onboard to OPS: capability declaration, live config facts (systems/services/rooms from the OPS DB), flow index and lesson library. Supports cached_revision for a lightweight unchanged response. Call once per session. 中文: 获取接入上下文/agent上下文包/接入对齐.',
+    'ops.integration.get_flow_guide': 'Return the machine-readable step-by-step orchestration of a flow: step order, per-step tool and args_hint, instantiable steps_template, hard rules and atomicity claims. Built-in flows: frontend-release, service-restart, package-pull-release. Pass system_name to substitute real service/paths/targets. 中文: 获取流程指南/流程编排/操作流程.',
+    'ops.integration.get_heartbeat_ops': 'Return pending approvals, plans expiring soon or already expired (with plan_id/room_id/remaining minutes) and an inspection anomaly summary, plus reminder instructions for HEARTBEAT.md / cron use. Stay silent when nothing needs reminding. 中文: 审批催办/待审批提醒/超时提醒/巡检摘要.',
+    'ops.integration.save_lesson': 'Write a lesson learned during onboarding/execution into the shared OPS lesson library (pattern = when, guidance = what to do, evidence = plan id or error). Enters a pending queue until confirmed; idempotent by pattern. Call after failures instead of swallowing them. 中文: 回写教训/记录教训/共享经验.',
 }
 
 
@@ -328,10 +345,21 @@ def english_tool_description(
     annotations = tool.get("annotations") or {}
     category = tool.get("category") or annotations.get("x_ops_category") or annotations.get("category") or "ops"
     risk = tool.get("risk") or annotations.get("x_ops_risk") or annotations.get("risk") or "low"
-    description = f"OPS capability tool {original_name}. Category: {category}. Risk: {risk}."
+    # 第 9 轮：无覆盖条目时，此前直接丢弃工具自身描述、只回样板句
+    # （"OPS capability tool X. Category: Y. Risk: Z."），导致未登记覆盖表的工具
+    # 对 AI 客户端几乎不可发现（不知道"做什么/什么时候用"）。现在优先使用工具
+    # 自身描述（工具注册表里通常是带触发场景与中文关键词的完整说明），
+    # 仅在完全没有描述时才退化为样板句。
+    own = mcp_safe_description(tool.get("description"), fallback="")
+    if own:
+        description = own
+    else:
+        description = f"OPS capability tool {original_name}. Category: {category}. Risk: {risk}."
     if alias != original_name:
         description += f" Original HTTP tool: {original_name}."
-    return ascii_only(description, fallback=f"OPS tool {alias}")
+    # 用 mcp_safe_description（保留 Han + 中文关键词）而不是 ascii_only（会把中文全部抹掉），
+    # 与覆盖条目路径保持一致；否则中文描述会退化成 ": / ." 这类残渣。
+    return mcp_safe_description(description, fallback=f"OPS tool {alias}")
 
 
 def mcp_tool_payload(tool: Dict[str, Any], description_overrides: Dict[str, str] | None = None) -> Dict[str, Any]:

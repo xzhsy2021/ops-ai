@@ -860,5 +860,152 @@ VERIFIED 不补 `fixed_at`。风险中心详情弹窗（`IssueDetailModal.tsx` �
 > 运维提示：本轮只改后端，**需重启 OPS 生效**（前端无改动，无需 Ctrl+F5）。
 > 前端批量弹窗的"服务器状态"现在会真正生效；改认证方式请逐台在编辑页填写对应凭据。
 
+## 第 9 轮（2026-09-12）
+
+本轮范围：**前端展示层（React）+ MCP 工具描述层**——前 6 轮都在后端，
+这是第一次系统复核浏览器侧的真实表现与 AI 侧的工具可发现性。
+
+### 一、已修复
+
+#### 9.1 【中危】首页"假绿"：取数失败时显示 92% + ONLINE + 运行正常 + 一切正常
+
+`DashboardPage` 用一行表达健康度：
+
+```ts
+const score = backendOnline ? (dashboard?.score ?? 92) : 60
+const statusText = ... : backendOnline ? '运行正常' : '后端离线'
+```
+
+只要 OPS 进程还在监听（`/health` 通），而 `/dashboard` 接口失败（500、DB 异常、
+权限问题），`dashboard` 就是 null → 兜底成 **92%**，色调由 92 判定为绿色，
+站点态势面板还会显示"一切正常"标签。运维看板给出**全绿假象**，
+比直接报错危险得多；真正的错误只出现在健康检查 widget 里，与顶部结论互相矛盾。
+
+- **修复**：新增纯函数模块 `frontend/src/utils/dashboardStatus.js`
+  （`deriveDashboardStatus` / `toneForScore` / `statusTextFor`），把
+  "有没有真实数据（available）"与"分数是多少"分开表达：
+  - 取数失败 → `score=null`、显示 `—`、色调 `warn`、结论"数据不可用"、
+    标签"工作台数据获取失败"，并在 hero 下方给出**失败原因**横幅；
+  - 后端离线 → `—` + danger + "后端离线"（不再显示编造的 60%）；
+  - 真分数 0 分是**有效的坏分数**，不再被当成"无数据"；
+  - 服务端 `status=critical/attention` 的结论保留展示。
+  `scoreTone()` 的阈值口径收敛到该模块，避免两处各写一套。
+- **红灯对照**（`fnos-migration/_verify_round9_frontend.js`）：
+  修复前 `orb 显示 92%（绿色）、状态"运行正常"、标签 "一切正常"`；
+  修复后 `orb 显示 —、状态"数据不可用"、色调 warn、标签 ["工作台数据获取失败"]`。
+
+#### 9.2 【中危】MCP 工具描述层：12 个已注册工具被替换成"样板句"，AI 无法按意图发现
+
+`english_tool_description()` 在**没有覆盖条目**时会**丢弃工具自身描述**，
+生成一句无信息量的样板文字：
+
+```
+OPS capability tool ops.wait_job. Category: job_read. Risk: low.
+```
+
+而工具注册表里这些工具本来都有完整说明（做什么、什么时候用、中文关键词）。
+受影响的是 12 个真实能力：`ops.security_module.{install,probe,setup}`、
+`ops.security_report.{collect,get_daily_report,summarize}`、
+`ops.inspection.run_security_daily`、`ops.wait_job`、
+`ops.integration.{get_context_pack,get_flow_guide,get_heartbeat_ops,save_lesson}`。
+对 AI 客户端而言，这些能力"存在但不可发现"——用户说"给服务器装安全模块"
+或"等这个任务跑完"，agent 无法把意图匹配到工具上。
+
+- **修复**：
+  1. 回退逻辑改为**优先使用工具自身描述**（`mcp_safe_description`，保留 Han 与
+     `中文:` 关键词），只有工具自身也没有描述时才退化为样板句；
+     同时把该分支的收尾从 `ascii_only`（会把中文全部抹成 `: / .`）改为
+     `mcp_safe_description`，与覆盖条目分支保持一致；
+  2. 按邻居风格补齐 12 条精选双语覆盖描述（英文语义 + `中文: 关键词`）；
+  3. 新增 `tests/test_mcp_tool_descriptions.py`（5 项契约）：任何已注册工具不得落到
+     样板句、无覆盖时必须保留自带描述、无描述才允许样板句、覆盖条目优先、
+     12 条覆盖必须存在且含中文关键词。
+- **红灯证据**：`AssertionError: 以下已注册工具的 MCP 描述退化为样板句，AI 无法按意图发现它们`
+  + `缺少描述覆盖：[...12 个...]`；修复后 5 passed，实测 126 个工具样板句数量为 **0**。
+
+#### 9.3 【中低危】MCP 调用审计列表的请求竞态：逐键发请求 + 陈旧响应覆盖新结果
+
+`McpAuditPage` 的筛选输入框每敲一个字符就发一次请求（无防抖），且没有任何时序
+保证——慢的旧请求后到会把新结果覆盖掉，表格显示的是上一个关键字/上一页的数据，
+且没有任何提示。这正是"前端竞态"类缺陷。
+
+- **修复**：输入走 `useDebouncedValue(300ms)`（复用既有 hook，与 `EntityPicker`/
+  `LogConsole` 一致）；新增可测试的时序守卫 `frontend/src/utils/requestGuard.js`
+  （`createRequestGuard().begin()/isCurrent()`），响应回来先校验 token，
+  陈旧响应直接丢弃（连 `loading` 与错误提示也一并丢弃，避免旧请求把新请求的
+  错误态写进去）；"筛选"按钮语义改为"刷新"，placeholder 标注"输入即筛选"。
+- **红灯对照**：修复前 `表格最终显示关键字 "o"`（应为 ops）；修复后 `"ops"`。
+
+#### 9.4 【低危】删除误导性死模块 `frontend/src/services/liveStatus.ts`（230 行）
+
+`fetchLiveSnapshot` / `runNodeProbe` / `riskFromStatus` / `NODE_ROUTES` 四个导出
+在前端全仓**零导入**（ripgrep 大小写敏感确认；PowerShell 的 `Select-String`
+默认忽略大小写会把 `isLiveStatus` 误判为使用点）。其文档注释声称"供 Dashboard
+SiteStatusPanel 与 Diagnostics ProbeDropdown 复用"，但 `ProbeDropdown` 全仓不存在，
+而 `SiteStatusPanel` 早已改为在 `DashboardPage` 内自行取数与渲染（并且正确区分
+ONLINE/OFFLINE）——这是一次迁移后遗留的孤儿模块。
+
+- **修复**：删除该文件（git 历史可回溯）。
+- **连带修正（重要）**：删除后全量测试出现 1 处失败——
+  `tests/test_frontend_modal_stacking_contract.py::test_unclosed_status_semantics_shared_across_frontend`
+  会打开该文件并断言其中恰好有两处 `status: 'OPEN,PROCESSING'`。
+  即"死模块"曾被一条**源码级契约测试**当作口径一致性的一半证据。
+  这里没有选择回滚删除，而是把用例改为**更强的不变式**：
+  未闭环口径在整个前端只能出现一次（唯一定义处 `UNCLOSED_STATUS`），
+  任何文件再手写字面量都会失败。删除后实测该字面量确实只剩 1 处。
+
+#### 9.5 【低危】`useSmartPolling` 的 `idleMs` 是无效配置（声明、默认值、调用方都传了，但从不生效）
+
+`nextDelay()` 只读 `activeMs`/`hiddenMs`，`idleMs` 从未被使用；而
+`TaskCenterPage` 两处调用都按"空闲时降频"的预期传了 `idleMs: 30000/15000`。
+这类"看起来能配、实际无作用"的选项会把排障引向错误方向。
+
+- **修复**：删除该选项（接口、两处默认值、两处调用点），并在 hook 注释里写明原因。
+  没有选择"顺手实现空闲降频"——回调不返回变更信号、`idleMs` 语义（间隔还是阈值）
+  本身不明确，凭空实现等于发明新行为。
+
+### 二、已排除 / 记录（本轮审计结论，避免误修与误报）
+
+| 审计项 | 结论 |
+| --- | --- |
+| `MCP_TOOL_DESCRIPTION_OVERRIDES` 里 54 个"幽灵条目"（表里有、注册表没有，如 `ops.create_server`、`ops.batch_update_servers`、`ops.db.execute_dml`） | 该表**只做描述查表**（`english_tool_description` 按名取值），工具清单来自 `registry.list_tools()`，幽灵条目永不被读取 → **死配置，不会把不存在的工具暴露给 AI**。记录为待办清理，不在本轮删除（部分名称疑似为规划中的工具预留） |
+| 54 个幽灵条目是否影响能力哈希/缓存 | 只参与 `capability_version` 摘要，无功能影响 |
+| `TaskCenterPage` 轮询是否"自动刷新中却永不刷新" | 未发现：`load`/`refreshSelected` 均由 `useCallback` 包裹且依赖为原始值，effect 不会每次渲染重启；`useSmartPolling` 单飞 + 可见性感知 + 退避逻辑正确 |
+| `SiteStatusPanel`（在用的那个）是否也有假绿 | 没有：`!backendOnline` 时明确返回"后端离线"空态，本轮只补充了 degraded 分支 |
+| `useDebouncedValue` / `useCachedResource` / `useUrlQueryState` / `useRoutePrefetch` 是否死代码 | 都在使用中（`EntityPicker`、`LogConsole`、`ServerListPage`、`AuditLogPage`、`App`），非死代码 |
+| 前端筛选改值是否漏重置分页 | 抽查 `AuditLogPage` / `ReportCenterPage` / `TaskCenterPage` / `McpAuditPage` 均在改筛选时 `setOffset(0)` 或 `setPage(1)`；未发现"第 3 页改筛选后空白"类缺陷 |
+| `McpAuditPage` 其余调用点是否同样有竞态 | `EntityPicker`/`LogConsole` 已有防抖但无时序守卫，风险等级低于本轮的表格页；记录为待办（可复用 `requestGuard`） |
+
+### 三、待办（后续轮次）
+
+- 巡检域 20+ 个 analyzer 的业务判定口径逐个复核（后端）。
+- 部署/执行/维护链路确认闸门与回滚一致性；`except: pass` 静默失败分诊。
+- 清理 `MCP_TOOL_DESCRIPTION_OVERRIDES` 的 54 个幽灵条目（或就地注明"为规划工具预留"）。
+- 给 `EntityPicker` / `LogConsole` 的异步搜索补时序守卫（复用 `requestGuard`）。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨相关项、fnOS/OpenClaw 遗留项。
+
+### 附：第 9 轮可复现的验证脚本
+
+- `frontend/tests/dashboardStatus.test.js`（7 项）、`frontend/tests/requestGuard.test.js`（4 项）：
+  `cd frontend && npm run test:unit`（已并入 `test:unit` 脚本）；
+- `tests/test_mcp_tool_descriptions.py`（5 项，Python 套件内）；
+- `fnos-migration/_verify_round9_frontend.js`（未入库）：修复前/后对照，8 项断言；
+- `fnos-migration/_verify_round9_live.py`（未入库）：对部署后的 OPS 实测 18 项断言；
+- `fnos-migration/_audit_round9_mcp.py`、`_audit_round9_tools.py`（未入库）：描述覆盖表双向一致性审计。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 18108；18 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| MCP `tools/list` | 返回 **126** 个工具，描述为样板句的数量 **0**（修复前 12 个） |
+| 12 个原缺描述工具 | 全部在清单中且描述含英文语义 + `中文:` 关键词（如 `ops.wait_job` → "Wait for a unified job center task to reach a terminal state … 中文: 等待任务/等待结果"） |
+| 前端 bundle | 运行中服务返回的 `DashboardPage` chunk 含"数据不可用"与"工作台数据获取失败"（首页假绿修复已上线） |
+| 单元/契约测试 | 前端 `node --test` 16 passed；Python `pytest tests/ -q` → **1497 passed**（第 8 轮 1492 + 本轮 5） |
+
+> 运维提示：本轮**既改后端也改前端**。后端已重启（PID 18108）生效；
+> 前端产物已用 `npm run build` 重建（`frontend/dist`，单进程模式静态托管），
+> 浏览器请 **Ctrl+F5** 强制刷新，否则可能仍加载旧 chunk。
+
+
 
 

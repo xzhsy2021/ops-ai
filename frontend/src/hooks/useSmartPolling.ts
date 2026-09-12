@@ -5,7 +5,6 @@ type PollingCallback = () => Promise<void> | void
 interface SmartPollingOptions {
   activeMs?: number
   hiddenMs?: number
-  idleMs?: number
   maxBackoffMs?: number
   pauseWhenHidden?: boolean
   runOnVisible?: boolean
@@ -14,12 +13,15 @@ interface SmartPollingOptions {
 interface StartOptions {
   activeMs?: number
   hiddenMs?: number
-  idleMs?: number
 }
 
 /**
  * Small local-team polling helper: one in-flight request at a time, visibility-aware,
  * exponential backoff after failures, and automatic cleanup on unmount.
+ *
+ * 第 9 轮：删除了从未生效的 `idleMs` 选项。它曾被声明、默认为 30000，
+ * 调用方也按"空闲时降频到 idleMs"的预期传值，但 nextDelay() 只读 activeMs/hiddenMs，
+ * 这个配置对行为没有任何影响（典型的"无效配置"误导线）。
  */
 export function useSmartPolling(callback: PollingCallback, options: SmartPollingOptions = {}) {
   const callbackRef = useRef(callback)
@@ -30,7 +32,6 @@ export function useSmartPolling(callback: PollingCallback, options: SmartPolling
   const optionRef = useRef({
     activeMs: options.activeMs ?? 2000,
     hiddenMs: options.hiddenMs ?? 15000,
-    idleMs: options.idleMs ?? 30000,
     maxBackoffMs: options.maxBackoffMs ?? 30000,
     pauseWhenHidden: options.pauseWhenHidden ?? false,
     runOnVisible: options.runOnVisible ?? true,
@@ -41,12 +42,11 @@ export function useSmartPolling(callback: PollingCallback, options: SmartPolling
     optionRef.current = {
       activeMs: options.activeMs ?? 2000,
       hiddenMs: options.hiddenMs ?? 15000,
-      idleMs: options.idleMs ?? 30000,
       maxBackoffMs: options.maxBackoffMs ?? 30000,
       pauseWhenHidden: options.pauseWhenHidden ?? false,
       runOnVisible: options.runOnVisible ?? true,
     }
-  }, [options.activeMs, options.hiddenMs, options.idleMs, options.maxBackoffMs, options.pauseWhenHidden, options.runOnVisible])
+  }, [options.activeMs, options.hiddenMs, options.maxBackoffMs, options.pauseWhenHidden, options.runOnVisible])
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {

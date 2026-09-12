@@ -1,4 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react'
+import { formatTime } from '../../utils/datetime.js'
 
 const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
   draft: { bg: 'var(--border-strong)', color: 'var(--text-secondary)' },
@@ -128,7 +129,7 @@ export default function CleanupJobDetail({
             ['参考风险阈值', jobDetail.max_delete_rows || '未设置'],
             ['需要复核', jobDetail.approval_required ? '是' : '否'],
             ['创建人', jobDetail.created_by],
-            ['创建时间', jobDetail.created_at],
+            ['创建时间', formatTime(jobDetail.created_at)],
           ].map(([label, value]) => (
             <div key={label as string}>
               <span style={{ color: 'var(--text-muted)' }}>{label}: </span>
@@ -302,7 +303,7 @@ export default function CleanupJobDetail({
                       <Badge label={STATUS_LABELS[b.status] || b.status} variant="status" value={b.status} />
                     </td>
                     <td style={{ padding: '8px 10px', color: 'var(--danger)', fontSize: '12px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.error_message || '-'}</td>
-                    <td style={{ padding: '8px 10px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{b.started_at}</td>
+                    <td style={{ padding: '8px 10px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{formatTime(b.started_at)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -329,7 +330,7 @@ export default function CleanupJobDetail({
                     <td style={{ padding: '8px 10px', color: 'var(--text-primary)' }}>{ev.event_type}</td>
                     <td style={{ padding: '8px 10px', color: 'var(--text-secondary)' }}>{ev.operator}</td>
                     <td style={{ padding: '8px 10px', color: 'var(--text-secondary)' }}>{ev.message}</td>
-                    <td style={{ padding: '8px 10px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{ev.created_at}</td>
+                    <td style={{ padding: '8px 10px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{formatTime(ev.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { formatTime } from '../../utils/datetime.js'
 
 function riskLabel(risk?: string) {
   const map: Record<string, string> = {
@@ -100,7 +101,7 @@ export function ToolAuditTimeline({
             )}
             <strong>{entry.tool || '-'}</strong>
             <small>
-              <span>{entry.created_at ? new Date(entry.created_at).toLocaleString() : '-'}</span>
+              <span>{entry.created_at ? formatTime(entry.created_at) : '-'}</span>
               <span>触发者：{entry.caller || '-'}</span>
               <span>来源：{entry.source || '-'}</span>
               <span className={`tag ${entry.risk === 'high' || entry.risk === 'critical' ? 'tag-danger' : entry.risk === 'medium' ? 'tag-warning' : 'tag-success'}`}>

@@ -1,6 +1,7 @@
 import { memo, type ReactNode, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CopyButton } from '../../components/ui'
+import { formatTime } from '../../utils/datetime.js'
 
 type TokenInfo = {
   id?: string
@@ -139,13 +140,6 @@ function hasDangerousScope(text: string): boolean {
 
 function templateTitle(tpl: TokenTemplate): string {
   return [tpl.description, tpl.notes].filter(Boolean).join(' — ')
-}
-
-function formatTime(s?: string): string {
-  if (!s) return '-'
-  const d = new Date(s)
-  if (isNaN(d.getTime())) return s
-  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 function ToolTokenModal({

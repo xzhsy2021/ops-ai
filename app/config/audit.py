@@ -2,12 +2,23 @@
 
 原 audit_logs 原生表已废弃，由 schema migration 081_002 DROP。
 所有读写统一走 ORM AuditRecord 模型。
+
+**时间约定**：所有落库时间戳一律 naive UTC（与 `app.db.models._utcnow` 相同约定，
+系统内 69 处写入都遵循它）。审计记录历史上的写出者用 `datetime.now()`（服务器本地时间，
+本机 UTC+8），导致同一时刻的审计记录比工具调用/任务时间戳"早 8 小时"显示、审计链路
+跨源时间线排序错位、按日期过滤的边界偏移 ±8h；本文件已修正，历史数据由
+`scripts/fix_audit_timezone.py` 一次性迁移。
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
+
+
+def utcnow_naive() -> datetime:
+    """当前 naive UTC（落库约定，勿改成 datetime.now()）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def save_audit_log(action: str, target_type: str = None, target_name: str = None, details: str = None) -> bool:
@@ -20,7 +31,7 @@ def save_audit_log(action: str, target_type: str = None, target_name: str = None
                 target_type=target_type,
                 target_name=target_name,
                 details=details,
-                created_at=datetime.now().isoformat(),
+                created_at=utcnow_naive().isoformat(),
             )
             db.add(record)
             db.commit()
@@ -116,7 +127,8 @@ def cleanup_audit_logs(max_age_hours: int = 720):
     try:
         from app.db.base import SessionLocal
         from app.db.models import AuditRecord
-        cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+        # 必须与写入端同一时基（naive UTC），否则按本地时间算截止点会多删 8 小时的记录
+        cutoff = (utcnow_naive() - timedelta(hours=max_age_hours)).isoformat()
         with SessionLocal() as db:
             db.query(AuditRecord).filter(AuditRecord.created_at < cutoff).delete(synchronize_session=False)
             db.commit()

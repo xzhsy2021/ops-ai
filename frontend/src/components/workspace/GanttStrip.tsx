@@ -1,4 +1,5 @@
 import { toneFromStatus, type FolderTone } from './FolderStage'
+import { parseBackendTime } from '../../utils/datetime.js'
 
 export type GanttItem = {
   id: string
@@ -11,8 +12,8 @@ export type GanttItem = {
 
 function toMs(v?: string) {
   if (!v) return NaN
-  const t = new Date(v).getTime()
-  return Number.isFinite(t) ? t : NaN
+  const d = parseBackendTime(v)
+  return d ? d.getTime() : NaN
 }
 
 /** Bottom timeline for current page tasks — business gantt, not decoration */

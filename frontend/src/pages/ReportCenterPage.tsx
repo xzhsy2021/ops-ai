@@ -3,11 +3,7 @@ import { Link } from 'react-router-dom'
 import { reports } from '../api'
 import { ROUTES } from '../routes'
 import { ConfirmDialog, EmptyState, PageHeader, FavoriteButton } from '../components/ui'
-
-function formatTime(value?: string) {
-  if (!value) return '-'
-  try { return new Date(value).toLocaleString() } catch { return value }
-}
+import { formatTime } from '../utils/datetime.js'
 
 function formatBytes(value?: number) {
   const n = Number(value || 0)

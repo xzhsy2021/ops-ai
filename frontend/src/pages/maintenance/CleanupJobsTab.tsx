@@ -1,4 +1,5 @@
 import CleanupJobForm from './CleanupJobForm'
+import { formatTime } from '../../utils/datetime.js'
 
 const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
   draft: { bg: 'var(--border-strong)', color: 'var(--text-secondary)' },
@@ -160,7 +161,7 @@ export default function CleanupJobsTab(props: CleanupJobsTabProps) {
               </div>
               <div className="cleanup-job-card-foot">
                 {j.risk_level && <Badge label={RISK_LABELS[j.risk_level] || j.risk_level} variant="risk" value={j.risk_level} />}
-                <span>{j.created_by || '-'} · {j.created_at || '-'}</span>
+                <span>{j.created_by || '-'} · {formatTime(j.created_at)}</span>
                 <button className="btn" onClick={e => { e.stopPropagation(); onOpenJob(j) }} style={{ padding: '3px 10px', fontSize: 12, background: 'var(--brand-surface)', color: 'var(--brand-soft)' }}>详情</button>
               </div>
             </article>

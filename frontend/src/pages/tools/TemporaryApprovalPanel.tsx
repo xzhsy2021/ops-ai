@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 
 import { createPortal } from 'react-dom'
 import { useNotificationStore } from '../../store'
 import { temporaryApprovals } from '../../api'
+import { formatTime } from '../../utils/datetime.js'
 
 type GrantInfo = {
   id?: string
@@ -40,13 +41,6 @@ const ACTION_LABELS: Record<string, string> = {
   RELEASE: '发布',
   SERVICE_CONTROL: '服务控制',
   HEALTH_CHECK: '健康检查',
-}
-
-function formatTime(s?: string): string {
-  if (!s) return '-'
-  const d = new Date(s)
-  if (isNaN(d.getTime())) return s
-  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 function shortId(id?: string): string {

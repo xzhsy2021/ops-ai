@@ -1,5 +1,6 @@
 import { OperationDrawer } from '../../components/OperationDrawer'
 import { RiskBadge } from '../../components/ui'
+import { formatTime } from '../../utils/datetime.js'
 import type { ToolInfo } from './ToolCatalogPanel'
 
 function riskLabel(risk?: string) {
@@ -95,7 +96,7 @@ export function ToolDetailDrawer({
                 <div key={i} className="timeline-item">
                   <strong>{call.tool || tool.name}</strong>
                   <small>
-                    <span>{call.created_at ? new Date(call.created_at).toLocaleString() : '-'}</span>
+                    <span>{call.created_at ? formatTime(call.created_at) : '-'}</span>
                     <span className={`tag ${call.status === 'success' ? 'tag-success' : 'tag-danger'}`}>{call.status || '-'}</span>
                     {call.duration_ms != null && <span>{call.duration_ms}ms</span>}
                   </small>

@@ -9,6 +9,7 @@ import { EnhancedDataTable } from '../components/EnhancedDataTable'
 import { ROUTES } from '../routes'
 import type { EnhancedColumn } from '../components/EnhancedDataTable'
 import { useCachedResource } from '../hooks/useCachedResource'
+import { formatTime } from '../utils/datetime.js'
 
 const GROUP_COLORS = [
   { bg: 'var(--brand-surface)', text: 'var(--action-text)' },
@@ -1030,7 +1031,7 @@ const requestEnableMonitor = (s: ServerRow) => {
         const probed = typeof mon.installed === 'boolean'
         const installed = Boolean(mon.installed)
         const checkedTitle = mon.checked_at
-          ? `上次探测: ${new Date(mon.checked_at).toLocaleString()}`
+          ? `上次探测: ${formatTime(mon.checked_at)}`
           : 'SSH 探测实际安装状态'
         // 单按钮：标签=当前建议的主动作，菜单内聚合全部适用动作
         const primaryLabel = probing ? '探测中…' : enabled ? '停用' : installed ? '启用' : probed ? '安装' : '探测'

@@ -99,8 +99,84 @@
 
 ---
 
-### 附：本轮可复现的验证脚本（`fnos-migration/`，未入库）
+### 附：第 1 轮可复现的验证脚本（`fnos-migration/`，未入库）
 - `_audit_tool_risk.py`：MCP 工具风险声明 vs 副作用一致性检查；
 - `_probe_pagination2.py`：逐端点验证 limit 钳制与 total 返回（进程内路由表，docs 已关闭）；
 - `_verify_audit_api.py`：审计列表 total/ETag/304 线上验证；
 - `_verify_chains_api.py`：操作链路 total 与库内逐来源一致性验证。
+
+---
+
+## 第 2 轮（2026-09-12）
+
+套件基线 1327 → 本轮结束 **1336 passed**（新增回归 9 项：后端 5 + 前端契约 4）。
+
+### 一、已修复
+
+#### 批次 5 时间基：审计时间戳写的是服务器本地时间，与全系统 UTC 错位 8 小时
+- **问题**：`app/config/audit.py::save_audit_log` 用 `datetime.now()`（服务器本地时间）
+  写 `audit_records.created_at`，而系统内其余写入（`app/db/models.py::_utcnow` 及 69 处调用）
+  统一是 **naive UTC**。生产机时区为 `China Standard Time`（UTC+8）。
+- **实测取证**（同一时刻）：
+  - 本地 `2026-09-12T21:41:20` / UTC `2026-09-12T13:41:20`，此时新写一条审计记录得到
+    `audit_records.created_at = 2026-09-12T21:41:21`（本地时间）；
+  - 库内 `audit_records` 最新值 `2026-09-12T21:34:30` vs `tool_call_logs` 最新值
+    `2026-09-12 11:40:20` —— 同一时间段两类记录相差 8 小时；
+  - 线上唯一写入路径：`app/api/helpers.py:125` 与 `app/services/runtime_resources.py:483`
+    都是 `from config_manager import save_audit_log`，而 `config_manager` 只是再导出
+    `app.config.audit.save_audit_log`；`app/db/repository.py::save_audit_log`（写法正确、UTC）
+    **无调用者**，属死代码。
+- **影响**：① 审计页时间比工具调用/任务页"晚 8 小时"（同一操作在两个页面显示不同时间）；
+  ② 审计链路把审计记录与工具调用/作业合并按 `created_at` 排序 → 跨源时间线错位 ±8h；
+  ③ 前端按日期过滤的边界偏移（取字符串前 10 位得到的是另一种时基的日期）；
+  ④ `cleanup_audit_logs` 若继续用本地截止点会多删 8 小时的记录。
+- **修复（后端）**：
+  - 新增 `app/config/audit.py::utcnow_naive()`（= `datetime.now(timezone.utc).replace(tzinfo=None)`），
+    写入端与 `cleanup_audit_logs` 的截止点统一走它（两者必须同一时基，否则清理会多删）；
+  - 新增 `scripts/fix_audit_timezone.py`：一次性回迁历史数据（`--check` 只读体检 /
+    `--apply` 先整库备份再迁移 / 同事务回读校验 / 解析失败单独列出，可回滚）。
+- **历史数据迁移（已执行）**：628 行全部可解析 → 统一 -8h，迁移后
+  最小/最大 `2026-09-04T02:08:10` / `2026-09-12T13:41:21`（= UTC）；
+  备份 `data/ops.db.bak-tz-20260912-214321`。
+- **修复（前端）**：浏览器把 naive 串当**本地时间**解析，于是所有展示库内时间戳的页面
+  都少显示 8 小时（相对时间把"刚刚"说成"8 小时前"，甘特条整体错位，日期筛选边界偏移）。
+  新增 `frontend/src/utils/datetime.js` + `datetime.d.ts`（仓库既有 JS+`.d.ts` 约定）：
+  `parseBackendTime`（naive 补 `Z` 后解析；纯 `HH:MM:SS` 或非法串返回 null 由调用方回退原文）、
+  `formatTime` / `formatDateTime` / `formatDay` / `backendTimeValue` / `relativeFromNow`；
+  审计、MCP 审计、任务中心、文件中心、巡检、工具令牌/临时授权、工具时间线/详情、
+  服务器列表/详情、仪表盘、甘特条、维护任务页共 16 个文件改用统一工具。
+- **有意保留（不是 BUG，避免误修）**：
+  - 维护清理窗口 `_is_within_execution_window` 用 `datetime.now()` 是**正确**的：
+    窗口由操作员按本地时间配置 `HH:MM`，单机部署下本地时间即操作员时间；
+  - `sftp.py` 的 `mtime`、备份文件时间用 `datetime.fromtimestamp()` / `time.localtime()`
+    生成，本身就是本地时间，前端保持按本地解析；
+  - `keys.py` 的 `modified`、`ServerListPage` 的 `modified` 是 epoch 秒；
+    `LoginPage` 的 `builtAt` 是带 `Z` 的 `toISOString()` —— 均无需转换；
+  - 系统诊断/状态页显示的原始 ISO 串（`snapshot.generated_at`、`backend.started_at`）
+    保留原样：该页面本身就是"原始诊断信息"视图。
+- **其它写入路径核对**：所有按时间保留/清理的策略**本来就是 UTC**
+  （`sqlite_cleanup.py` 用 `datetime.now(timezone.utc)`、`release_retention._now_naive()`、
+  `cleanup_stale_chain_data.py` 用 `datetime.utcnow()`），本次修复消除了唯一的例外。
+
+### 二、已排除的"假问题"（避免误修）
+| 现象 | 结论 |
+| --- | --- |
+| `listItemConfigs` 前端传 `scopeType`、后端收 `scope_type` | 误报：包装器内部已正确映射 `{ params: { scope_type: scopeType } }` |
+| 参数契约静态审计报出的 37 项 | 绝大多数是解析伪影（`params?: {...}` 内联类型、POST body 字段、同路径多方法互相覆盖）；可静态比对的 GET 包装器中**真问题 0 项** |
+| 前端 `npm run typecheck` | 干净通过（0 错误），无契约不匹配 |
+| 维护清理窗口用本地时间 | 有意设计（见上） |
+
+### 三、待办（后续轮次）
+- **巡检域**：状态机、时间窗、幂等、口径一致性（`inspection_center.py` 5600+ 行）。
+- **MCP 工具层**：输出脱敏与泄漏面（`data_sensitivity` × `output_masking` × 实际返回体）、
+  审批旁路、元数据与实现一致性。
+- **前端**：竞态/请求序号、陈旧 state、假交互（无实际效果的按钮）、剩余时间显示点复检。
+- **部署/执行/维护链路**：确认闸门、回滚一致性、命令注入与白名单。
+- **`except: pass` 剩余点**：142 处中清理类之外的静默失败。
+- **遗留（功能向，非 BUG）**：`ENV=local` 关闭生产安全轨、OpenClaw `<thinking>` 原文下发、
+  NAS 自动启动、`pm2 list` 白名单、`bg_log_dir`、密钥轮换（等业主决定）。
+
+### 附：第 2 轮可复现的验证脚本（`fnos-migration/`，未入库）
+- `_audit_param_contract2.py`：前端声明的查询参数 vs 后端路由实际接收参数（进程内路由表）；
+- `_audit_fe_be_params.py` / `_audit_param_contract.py`：上述脚本的早期版本（含解析伪影，仅存证）；
+- 迁移与体检：`scripts/fix_audit_timezone.py --check`（只读）。

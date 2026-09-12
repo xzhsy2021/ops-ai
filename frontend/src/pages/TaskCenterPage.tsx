@@ -5,6 +5,7 @@ import { ROUTES } from '../routes'
 import { EmptyState, PageHeader, StatusBadge, FavoriteButton, RiskConfirmDialog } from '../components/ui'
 import { RiskBadge } from '../components/agent'
 import { useSmartPolling } from '../hooks/useSmartPolling'
+import { backendTimeValue, formatTime } from '../utils/datetime.js'
 
 type TaskItem = {
   kind: string
@@ -28,11 +29,6 @@ const KIND_LABEL: Record<string, string> = {
   tool: '工具任务',
   mcp: 'MCP',
   file: '文件',
-}
-
-function formatTime(value?: string) {
-  if (!value) return '-'
-  try { return new Date(value).toLocaleString() } catch { return value }
 }
 
 function formatDuration(value?: number) {
@@ -150,7 +146,7 @@ export default function TaskCenterPage() {
       if (['failed', 'error'].includes(s)) return 2
       return 3
     }
-    const timestamp = (item: TaskItem) => new Date(item.started_at || item.finished_at || '').getTime() || 0
+    const timestamp = (item: TaskItem) => backendTimeValue(item.started_at || item.finished_at)
     return [...filteredItems].sort((a, b) => priority(a) - priority(b) || timestamp(b) - timestamp(a))
   }, [filteredItems])
 

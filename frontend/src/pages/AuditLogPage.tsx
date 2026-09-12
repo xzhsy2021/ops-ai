@@ -4,21 +4,7 @@ import { auditLog, deployment, reports } from '../api'
 import { ROUTES } from '../routes'
 import { EmptyState, PageHeader, RiskConfirmDialog, FavoriteButton } from '../components/ui'
 import { useUrlQueryState } from '../hooks/useUrlQueryState'
-
-function formatTime(value?: string) {
-  if (!value) return '-'
-  try { return new Date(value).toLocaleString() } catch { return value }
-}
-
-function formatDay(value?: string) {
-  // sqlite naive 串 "2026-09-04 07:50:06..." 直接取前 10 位——
-  // 禁止走 new Date()/toISOString()（本地时区解析后再转 UTC，
-  // UTC+8 下每天 0-8 点记录会回退一天，日期过滤边界歪 ±8h；
-  // 旧 Safari 上 Invalid Date 还会让 endDate 过滤整段失效）
-  if (!value) return '-'
-  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value).trim())
-  return m ? m[1] : String(value)
-}
+import { formatDay, formatTime } from '../utils/datetime.js'
 
 // ── 快捷过滤：按动作前缀分组（生产审计分布实测 2026-09-04）──
 const QUICK_FILTERS: { label: string; match: string; hint: string }[] = [

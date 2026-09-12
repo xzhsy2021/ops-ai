@@ -2,33 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { files } from '../api'
 import { ConfirmDialog } from '../components/ui'
-
-function formatTime(value?: string | null): string {
-  if (!value) return '-'
-  try {
-    const d = new Date(value)
-    if (isNaN(d.getTime())) return value
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  } catch {
-    return value
-  }
-}
-
-function relativeFromNow(value?: string | null): string {
-  if (!value) return ''
-  const t = new Date(value).getTime()
-  if (isNaN(t)) return ''
-  const diff = Date.now() - t
-  if (diff < 0) return ''
-  const minute = 60_000, hour = 3_600_000, day = 86_400_000
-  if (diff < minute) return '刚刚'
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`
-  if (diff < day * 30) return `${Math.floor(diff / day)} 天前`
-  if (diff < day * 365) return `${Math.floor(diff / (day * 30))} 个月前`
-  return `${Math.floor(diff / (day * 365))} 年前`
-}
+import { formatDateTime, relativeFromNow } from '../utils/datetime.js'
 
 export default function FileCenterPage() {
   const [activeTab, setActiveTab] = useState<'packages' | 'cleanup'>('packages')
@@ -254,7 +228,7 @@ export default function FileCenterPage() {
                   {packages.map((p) => {
                     const protectedReasons = p.retention?.reasons || []
                     const fileName = p.name || p.package_name
-                    const uploadedAt = formatTime(p.uploaded_at)
+                    const uploadedAt = formatDateTime(p.uploaded_at)
                     const uploadedRel = relativeFromNow(p.uploaded_at)
                     const uploader = p.uploaded_by || '-'
                     return (
@@ -274,7 +248,7 @@ export default function FileCenterPage() {
                         </td>
                         <td>
                           <span className="file-meta">{p.used_count || 0} 次</span>
-                          <div className="file-meta">{p.last_used_at ? formatTime(p.last_used_at) : '未使用'}</div>
+                          <div className="file-meta">{p.last_used_at ? formatDateTime(p.last_used_at) : '未使用'}</div>
                         </td>
                         <td>
                           <span className={`cc-chip ${protectedReasons.length ? 'cc-chip--ok' : 'cc-chip--ghost'}`}>

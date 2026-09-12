@@ -4,6 +4,7 @@ import OverviewTab from '../components/server-workbench/OverviewTab'
 import FilesTab from '../components/server-workbench/FilesTab'
 import { serverWorkbench } from '../api'
 import { ConfirmDialog } from '../components/ui'
+import { formatTime } from '../utils/datetime.js'
 
 type Tab = 'overview' | 'terminal' | 'files' | 'history'
 
@@ -106,7 +107,7 @@ function ExecHistoryTab({ name }: { name: string }) {
                 <tr key={e.id} className="exec-history-row">
                   <td><input type="checkbox" checked={selectedLogIds.includes(String(e.id))} onChange={(event) => toggleLogSelection(String(e.id), event.target.checked)} /></td>
                   <td className="exec-history-time">
-                    {e.created_at ? new Date(e.created_at).toLocaleString() : '-'}
+                    {e.created_at ? formatTime(e.created_at) : '-'}
                   </td>
                   <td className="exec-history-user">{e.username}</td>
                   <td className="exec-history-cmd" title={e.command}>

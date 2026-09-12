@@ -1,11 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { capabilityTools } from '../api'
 import ToolRiskTag from '../components/ToolRiskTag'
-
-function formatTime(value?: string) {
-  if (!value) return '-'
-  try { return new Date(value).toLocaleString() } catch { return value }
-}
+import { formatTime } from '../utils/datetime.js'
 
 function truncate(str?: string, max = 120) {
   if (!str) return '-'

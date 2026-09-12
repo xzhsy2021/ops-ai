@@ -1,6 +1,8 @@
+import { formatTime as formatBackendTime } from '../../utils/datetime.js'
+
+/** 后端落库时间戳（naive UTC）→ 本地时间展示；纯 "HH:MM:SS" 之类回退原文 */
 export function formatTime(value?: string | null) {
-  if (!value) return '-'
-  try { return new Date(value).toLocaleString() } catch { return value }
+  return formatBackendTime(value)
 }
 
 export function riskLabel(level?: string) {

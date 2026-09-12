@@ -6,6 +6,7 @@ import { useAuthStore, useBackendStore } from '../store'
 import { EmptyState, Skeleton, StatusBadge, FavoriteButton } from '../components/ui'
 import { useFavoriteStore } from '../stores/favoriteStore'
 import { usePreferenceStore } from '../stores/preferenceStore'
+import { parseBackendTime } from '../utils/datetime.js'
 
 type HealthTone = 'ok' | 'warn' | 'danger' | 'neutral'
 
@@ -86,14 +87,14 @@ function DashboardClock({ now }: { now: Date }) {
 }
 function fmtShortTime(value?: string) {
   if (!value) return '—'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return value.slice(11, 19) || value
+  const d = parseBackendTime(value)
+  if (!d) return value.slice(11, 19) || value
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 function fmtRelative(value?: string) {
   if (!value) return '—'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return value
+  const d = parseBackendTime(value)
+  if (!d) return value
   const diff = (Date.now() - d.getTime()) / 1000
   if (diff < 60) return `${Math.max(1, Math.floor(diff))}s 前`
   if (diff < 3600) return `${Math.floor(diff / 60)}m 前`
@@ -363,7 +364,7 @@ function SiteStatusPanel({
           <div className="site-status-title">站点态势</div>
           <div className="site-status-desc">
             {dashboard?.generated_at
-              ? `更新于 ${new Date(dashboard.generated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+              ? `更新于 ${fmtShortTime(dashboard.generated_at)}`
               : '暂无数据'}
           </div>
           <div className="site-status-tags">

@@ -304,10 +304,14 @@ def prepare_release_from_local_package(args, ctx, db):
     local_inspection: Dict[str, Any] = {}
 
     if args.get("dry_run"):
-        if args.get("local_path"):
+        # dry_run=true 必须"只检查不落盘/不建计划"。content_base64 与 local_path
+        # 两种入参都要能预检；此前只处理 local_path，用 content_base64 调用会静默返回
+        # 一份没有任何预检信息的"dry-run 成功"，调用方会误以为包已通过检查。
+        if args.get("local_path") or args.get("content_base64"):
             upload_result = upload_package({
-                "local_path": args.get("local_path"),
+                "local_path": args.get("local_path") or "",
                 "filename": args.get("filename") or "",
+                "content_base64": args.get("content_base64") or "",
                 "dry_run": True,
                 "calculate_sha256": args.get("calculate_sha256", True),
                 "system": args.get("system") or "",

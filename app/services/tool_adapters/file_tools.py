@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -148,6 +151,44 @@ def get_package_retention_preview(args, ctx, db):
 
 # ─── Utility: upload_package (used by deploy_tools.py, not registered as AI tool) ───
 
+def _inspect_package_content(
+    content: bytes,
+    *,
+    filename: str,
+    db,
+    calculate_sha256: bool = True,
+) -> Dict[str, Any]:
+    """对内存中的包内容做上传前预检，**不写入文件中心**。
+
+    dry_run 语义要求"只检查、不落盘"。这里把内容写进临时目录交给
+    ``inspect_package_file`` 复用同一套保留策略校验（扩展名白名单、体积上限、
+    空包告警、SHA256），检查完立即删除临时文件，因此文件中心与包元数据均无变化。
+    """
+    safe_name = safe_package_name(filename) or "uploaded_package"
+    policy = get_package_retention_policy(db)
+    tmp_dir = tempfile.mkdtemp(prefix="ops_pkg_dryrun_")
+    try:
+        probe = os.path.join(tmp_dir, safe_name)
+        with open(probe, "wb") as handle:
+            handle.write(content)
+        result = inspect_package_file(
+            probe,
+            filename=filename or safe_name,
+            policy=policy,
+            calculate_sha256=calculate_sha256,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    result.update({
+        "dry_run": True,
+        "staged": False,
+        "source": "content_base64",
+        "local_path": "",
+        "summary": "dry-run only: package checked but NOT saved to File Center",
+    })
+    return result
+
+
 @registry.register(
     name="ops.upload_package",
     title="Upload package to OPS File Center",
@@ -182,7 +223,21 @@ def upload_package(args, ctx, db):
     service = args.get("service") or ""
     uploaded_by = ctx.username or ctx.token_owner or "tool"
     overwrite = bool(args.get("overwrite") or False)
+    dry_run = bool(args.get("dry_run"))
     if args.get("content_base64"):
+        if dry_run:
+            # dry_run 必须对 content_base64 同样生效：只预检、不落盘。
+            raw_base64 = args.get("content_base64")
+            try:
+                content = base64.b64decode(raw_base64, validate=True)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 package content: {exc}")
+            return _inspect_package_content(
+                content,
+                filename=args.get("filename") or "uploaded_package",
+                db=db,
+                calculate_sha256=bool(args.get("calculate_sha256", True)),
+            )
         filename = args.get("filename") or os.path.basename(args.get("local_path") or "uploaded_package")
         meta = save_package_base64(
             db,
@@ -203,14 +258,16 @@ def upload_package(args, ctx, db):
         controlled_path = _controlled_local_package_path(local_path)
         if not controlled_path.is_file():
             raise HTTPException(status_code=400, detail="local_path is not readable by OPS backend. Use content_base64 or upload via the OPS page.")
-        if args.get("dry_run"):
+        if dry_run:
             policy = get_package_retention_policy(db)
-            return inspect_package_file(
+            result = inspect_package_file(
                 controlled_path,
                 filename=args.get("filename") or controlled_path.name,
                 policy=policy,
                 calculate_sha256=bool(args.get("calculate_sha256", True)),
             )
+            result.update({"dry_run": True, "staged": False, "source": "local_path"})
+            return result
         with controlled_path.open("rb") as f:
             meta = save_package_fileobj(
                 db,

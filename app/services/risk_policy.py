@@ -211,12 +211,28 @@ def _is_non_destructive_plan_creation(tool_def) -> bool:
     }
 
 
-def _is_dry_run(args: Dict[str, Any]) -> bool:
+def _declares_dry_run(tool_def) -> bool:
+    """工具是否在 input_schema 中真的声明了 ``dry_run`` 参数。"""
+    schema = getattr(tool_def, "input_schema", None)
+    if not isinstance(schema, dict):
+        return False
+    props = schema.get("properties")
+    return bool(isinstance(props, dict) and "dry_run" in props)
+
+
+def _is_dry_run(tool_def, args: Dict[str, Any]) -> bool:
     # Treat omitted dry_run as true only for tools that are explicitly designed
     # as preview-first cleanup APIs. Runtime cleanup already defaults to dry_run.
-    if "dry_run" not in (args or {}):
+    args = args or {}
+    if "dry_run" not in args:
         return False
-    return bool((args or {}).get("dry_run"))
+    if not _declares_dry_run(tool_def):
+        # 未声明 dry_run 的工具：调用方塞进来的 dry_run 不得被当作"承诺不执行"。
+        # 否则任何写工具只要多带一个参数就能让 confirmation_required 变 False，
+        # 等于给全部写操作留了一个统一的跳确认开关（任务中心后台执行路径不经过
+        # 工具 schema 校验，必须在这里兜住）。
+        return False
+    return bool(args.get("dry_run"))
 
 
 def evaluate_risk_policy(tool_def, args: Optional[Dict[str, Any]] = None, *, ctx=None, db=None, settings: Optional[Dict[str, Any]] = None) -> RiskDecision:
@@ -231,7 +247,7 @@ def evaluate_risk_policy(tool_def, args: Optional[Dict[str, Any]] = None, *, ctx
 
     require_confirmation_globally = bool(settings.get("require_confirmation", True))
     plan_creation = _is_non_destructive_plan_creation(tool_def)
-    dry_run = _is_dry_run(args)
+    dry_run = _is_dry_run(tool_def, args)
 
     confirmation_required = bool(
         require_confirmation_globally

@@ -413,3 +413,116 @@
 > 前端无改动，无需强制刷新。`/api/v2/tools/call` 的响应若出现 `private_key: "***"`，
 > 属预期脱敏；若需要辨识"某台服务器用了哪把钥匙"，请使用 `private_key_fingerprint`。
 
+## 第 5 轮（2026-09-12）
+
+本轮范围：**巡检域**（`app/services/inspection_center.py` 6100 行）的时间窗、状态机与任务生命周期。
+
+### 一、已修复
+
+#### 5.1 【中危】未知 `period` 让巡检台账/报表/删除接口直接 500
+
+- **缺陷**：`_period_bounds()` 的最后兜底分支写成
+  `start = now.replace(...); return start, end, "daily"`，但该路径下 `end` **从未赋值**
+  （只在 daily/weekly/monthly 与显式日期分支赋值）→ `UnboundLocalError`。
+  而 API 层 `period: str = "daily"` 是**未校验的字符串**，前端只发 daily/weekly/monthly，
+  所以从 UI 点不到、从接口/AI 客户端一调就炸。
+- **现场复现（修复前）**：
+  `GET /api/v2/inspection/ledger?period=daily` → 200；
+  `GET /api/v2/inspection/ledger?period=quarterly` → **HTTP 500 Internal server error**
+  （函数级：`UnboundLocalError: cannot access local variable 'end' where it is not associated with a value`）。
+  受影响入口：台账 `GET /inspection/ledger`、报表预览 `GET /inspection/reports/periodic-preview`、
+  周期报表 `POST /inspection/reports/periodic`、历史删除 `DELETE/POST /inspection/ledger*`
+  （删除路径在崩溃点之前就中断，未造成误删）。
+- **修复**：兜底分支显式 `return start, now, "daily"`；`period` 归一化时补 `.strip()`
+  （`"DAILY "` 之类也能正确归一）。`"quarterly"`/`"7d"` 等未知值按既有设计意图
+  兜底为"今日"，并在响应 `summary.period` 中回显归一结果，调用方可感知。
+- **回归**：`tests/test_inspection_period_window.py`（23 项）。
+- **红灯证据**：修复前 11 项失败，包含 `inspection_center.py:5059 UnboundLocalError`
+  经 `inspection_ledger` 与 `delete_inspection_history` 两条路径抛出。
+
+#### 5.2 【低-中】带时区偏移的日期入参按 UTC 归一（此前被当成 UTC 直接使用）
+
+- **缺陷**：`_parse_dt()` 对 `2026-09-10T08:00:00+08:00` 这类带偏移的字符串执行
+  `.replace(tzinfo=None)`，**丢掉偏移而不换算**，日期窗整体偏移 8 小时
+  （与全仓"持久化时间统一为 naive UTC"的约定不符；`Z` 结尾的串处理是对的，所以问题只在非 UTC 偏移）。
+- **修复**：`datetime` 对象与字符串两条路径都改为 `astimezone(timezone.utc).replace(tzinfo=None)`。
+- **回归**：同上文件中的 `test_parse_dt_normalizes_offset_to_utc`。
+
+#### 5.3 【中危】巡检任务会永久停在"执行中"（无收尾、无回收）
+
+- **缺陷**：`create_server_inspection_run` / `create_project_inspection_run` 建库时状态**直接就是
+  `RUNNING`**，但执行链路上存在多条"未收尾就退出"的路径，且全仓**没有任何僵尸回收逻辑**：
+
+  | 路径 | 中断原因 | 修复前行为 |
+  | --- | --- | --- |
+  | `execute_server_inspection_run` | `db.query(...)`（读 run 行）、`_load_thresholds(db)` 在 `try` **之外**，SQLite 并发下 `database is locked` 即冒泡 | run 留 RUNNING |
+  | `execute_project_inspection_run` | `_get_project_with_relations(db, pid)` 在 `try` 之外 | run 留 RUNNING |
+  | `execute_server_inspection_runs_batch` | worker 抛错只写进返回值的 `errors` 列表，**不写库** | 调用方看到"失败 N 台"，历史里仍"执行中" |
+  | `_run_one_server_in_new_session` | 批量同步接口 worker 抛错直接冒泡 | run 留 RUNNING |
+  | `api/inspection.py::_run_servers_batch_background` | **完全没有 try/except**；`/servers/batch-start` 预建的一批 RUNNING run 在入口整体失败时全部变僵尸 | N 台全部留 RUNNING |
+  | 后端进程重启/部署 | 执行是进程内 `BackgroundTasks`/线程池，重启即中断 | 无任何机制回收 |
+
+- **影响**：概览页/历史页永久显示"执行中"，`running_runs` 进度条永远挂在那里，
+  运维无法区分"真的在跑"和"残骸"。
+- **修复**（四层）：
+  1. 新增 `mark_run_failed(db, run_id, message)`：**幂等**、只对 RUNNING/PENDING 生效
+     （不覆盖已终结结果），当前会话损坏时自动降级用独立 `SessionLocal()` 写入；
+  2. 两个执行器把 `db.query`/`_load_thresholds`/`_get_project_with_relations` 全部纳入
+     `try`，任一步失败都走 `mark_run_failed`；`_append_progress` 写入失败不再掩盖原始异常；
+  3. 批量 worker（`execute_server_inspection_runs_batch` / `_run_one_server_in_new_session`）
+     失败时按 `run_id` 收尾；API 层三个后台包装函数也补兜底，覆盖"批量入口整体失败"；
+  4. 新增 `reap_stale_inspection_runs()` 自愈回收器，在概览读取（`_running_runs_with_progress`）时
+     先回收僵尸：**同时**满足"自身超过 `INSPECTION_STALE_RUN_SECONDS`（默认 90 分钟）未更新"
+     且"最近 `INSPECTION_ACTIVE_HEARTBEAT_SECONDS`（默认 5 分钟）内整个巡检域没有任何 run 推进"
+     才判定为僵尸——心跳门控保证批量**排队中**的 run 不会被误杀（同批只要还有 run 在推进就不回收）。
+- **回归**：`tests/test_inspection_run_lifecycle.py`（12 项：执行器失败收尾、批量 worker 收尾、
+  `mark_run_failed` 幂等/不覆盖终结态/独立会话兜底、回收器正例与三类不误杀、概览自愈）。
+- **红灯证据**（暂存源码后）：执行器两个用例以 `RuntimeError: simulated ...` 直接冒泡；
+  批量 worker 用例 `AssertionError: assert 'RUNNING' == 'FAILED'`；
+  单机 worker 用例 `AssertionError: ['RUNNING']`。
+
+### 二、已排除的"假问题"（本轮审计结论，避免误修）
+
+| 审计项 | 结论 | 证据 |
+| --- | --- | --- |
+| `_aggregate_risk_counts` 按 `(server, category)` 取最高风险后再计数 | **有意设计**，与 `_compute_score` 的"按机器数平均扣分"公式配套 | 函数 docstring 的 P1-5 说明 + `tests/test_inspection_scoring.py` 20 项通过 |
+| 批量 `start` 预先把整批 run 建成 RUNNING | **有意设计**：让前端立即看到批次；本轮只补"失败必收尾 + 僵尸回收" | `api/inspection.py:377-385` |
+| `overview` 的未闭环问题计数 | 走聚合查询，与列表 `status=OPEN,PROCESSING` 的 total 一致（沿用第 1 轮结论） | `tests/test_inspection_issue_count_contract.py` 4 项通过 |
+| 台账/删除的 5000 行上限 | 有意的保护性上限，`total` 仍用 `count()` 不受列表分页影响 | `inspection_center.py:5135/5139/6080` |
+| `period=''`、大小写、别名（day/week/month） | 归一化正确（本轮补了 `.strip()`） | `test_known_periods_normalize` 8 组参数 |
+| 生产是否存在历史僵尸 | **没有**：修复前实测 4 条 run 全为 SUCCESS，0 条 RUNNING/PENDING | 只读查询 + 现场实测 |
+| `retention`/报告生成链路是否受本轮改动影响 | 未受影响：本轮只改执行收尾与时间窗，报告生成复用 `report_center` | 全量套件 1399 passed |
+
+### 三、待办（后续轮次）
+
+- 巡检域剩余：分析器阈值边界的业务正确性（`_analyze_*` 共 20+ 个，本轮未逐个复核业务口径）、
+  自定义规则执行器的注入面复核（`_sanitize_rule_shell` 已存在，需验证绕过可能）。
+- 前端竞态与假交互；部署/执行/维护链路确认闸门与回滚一致性。
+- 剩余 `except: pass` 静默失败分诊（约 142 处，巡检域已发现 `inspection_periodic_report_payload` 吞掉明细异常）。
+- MCP 工具描述正向漂移批量校准；批量改 `auth_type` 时不校验新认证方式凭据。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨相关项、fnOS/OpenClaw 遗留项。
+
+### 附：第 5 轮可复现的验证脚本
+
+- `tests/test_inspection_period_window.py`：23 项时间窗（未知周期兜底、别名归一、区间边界、UTC 归一）；
+- `tests/test_inspection_run_lifecycle.py`：12 项任务生命周期（收尾幂等 + 僵尸回收不误杀）；
+- `fnos-migration/_verify_round5_fixes.py`（未入库）：对**部署后的 OPS 生产进程**做端到端实测。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 15088；16 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| `GET /api/v2/inspection/ledger?period=quarterly` | **HTTP 200**（修复前 500），`summary.period="daily"` |
+| `GET /api/v2/inspection/reports/periodic-preview?period=7d` | HTTP 200（修复前 500） |
+| `GET /inspection/ledger?date_from=2026-09-10T08:00:00+08:00` | HTTP 200，`summary.date_from="2026-09-10T00:00:00"`（偏移已按 UTC 归一） |
+| `period=daily/weekly/monthly` | 全部 HTTP 200（既有行为未回归） |
+| 插入 3 小时未更新的 RUNNING 探针 run → `GET /api/v2/inspection/overview` | 该 run 被自动标记 **FAILED**，写入 `finished_at`，摘要为"巡检执行中断（后端进程重启或后台任务异常）…"，且不再出现在 `running_runs` |
+| 回收前后历史数据 | run 总数 4 → 4，状态全部保持 `SUCCESS`（未误伤） |
+| 探针清理 | 删除后残留 0 |
+| 全量测试套件 | `pytest tests/ -q` → **1399 passed**（第 4 轮 1364 + 本轮新增 35） |
+
+> 运维提示：本轮同样只改后端，**需重启 OPS 生效**（前端无改动，无需 Ctrl+F5）。
+> 若批量巡检规模很大且把 `run_timeout_seconds` 调得很高，排队中的 run 可能长时间没有自身进度，
+> 此时心跳门控仍能防止误回收（同批有 run 在推进即可）；只有在**执行器进程整体停摆**时才会回收，
+> 可通过 `INSPECTION_STALE_RUN_SECONDS` 调整判定窗口。
+

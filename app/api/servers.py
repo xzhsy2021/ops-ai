@@ -16,7 +16,7 @@ from app.config.servers import (
 )
 from app.api.helpers import api_response, audit
 from app.db import get_db
-from app.db.models import Server, Service
+from app.db.models import Server, ServerGroup, Service
 from app.db.repository import ServerGroupRepository
 from app.core.auth_v2 import require_auth, require_admin
 from app.core.command_security import validate_command, sanitize_command_output
@@ -40,6 +40,92 @@ _SENSITIVE_PATTERNS = [
 ]
 
 import re as _re
+
+# 服务器连接配置的合法枚举值（第 8 轮）：此前 auth_type 完全不校验，生产已存在
+# auth_type="key" 这类非法值，而批量接口可一次把 ≤50 台改成连不通的配置。
+VALID_AUTH_TYPES = ("password", "key_file", "key_content")
+VALID_SERVER_STATUSES = ("online", "disabled", "offline")
+
+# 批量编辑支持字段。前端批量弹窗的字段集必须全部落在这里，否则会出现
+# "接口返回成功、实际没改"的静默空操作（第 8 轮修出的 status 即属此类）。
+BATCH_UPDATABLE_FIELDS = (
+    "description", "tags", "jump_host", "username",
+    "auth_type", "port", "group", "status",
+)
+
+
+def _auth_credential_error(auth_type: str, source: Dict[str, object]) -> str:
+    """目标 auth_type 所需凭据是否具备；不具备时返回错误文案（创建/更新/批量共用）。
+
+    ``source`` 应是"现场提交值 + 既有值"合并后的字典，这样仅切换认证方式、
+    凭据沿用旧值的正常编辑不会被误拦。
+    """
+    auth = str(auth_type or "").strip().lower()
+    if auth == "password":
+        return "" if source.get("password") else "密码认证模式下必须提供密码"
+    if auth == "key_file":
+        return "" if (source.get("key") or source.get("key_file")) else "密钥文件认证模式下必须指定密钥文件路径"
+    if auth == "key_content":
+        return "" if source.get("key_content") else "密钥内容认证模式下必须提供密钥内容"
+    return ""
+
+
+def _validate_auth_type(auth_type: str) -> str:
+    """规范化并校验 auth_type 枚举，非法值直接 400（拒绝写入无法识别的连接模式）。"""
+    auth = str(auth_type or "").strip().lower()
+    if auth not in VALID_AUTH_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported auth_type: {auth or '(empty)'}（可选：{', '.join(VALID_AUTH_TYPES)}）",
+        )
+    return auth
+
+
+def _validate_status(status: str) -> str:
+    """校验服务器状态枚举；此前非法值被静默改写为 online（掩盖了调用方错误）。"""
+    value = str(status or "").strip().lower()
+    if value not in VALID_SERVER_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported status: {value or '(empty)'}（可选：{', '.join(VALID_SERVER_STATUSES)}）",
+        )
+    return value
+
+
+def _validate_port(port: object) -> int:
+    """校验端口：必须是 1..65535 的整数。此前批量路径 int() 失败会整批 500，且越界值照存。"""
+    try:
+        value = int(port)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Invalid port: {port!r}（必须是整数）")
+    if not 1 <= value <= 65535:
+        raise HTTPException(status_code=400, detail=f"Invalid port: {value}（有效范围 1-65535）")
+    return value
+
+
+def _sync_server_group_membership(db: Session, name: str, new_group: str) -> None:
+    """把服务器从其他组的 server_names 中剔除，并加入新组（单机/批量共用）。
+
+    第 8 轮：单机更新一直会同步，批量更新此前不同步——批量改组后分组视图仍是旧的，
+    且旧分组删除时因残留不存在/已迁走的服务器而 409。两条路径共用本函数避免再分叉。
+    """
+    try:
+        for g in db.query(ServerGroup).all():
+            names = list(g.server_names or [])
+            changed = False
+            if name in names and g.name != new_group:
+                names = [x for x in names if x != name]
+                changed = True
+            if new_group and g.name == new_group and name not in names:
+                names.append(name)
+                changed = True
+            if changed:
+                g.server_names = names
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"sync server_groups.server_names for '{name}' failed: {e}")
+
 
 def _mask_sensitive_command(command: str) -> str:
     masked = command
@@ -392,6 +478,28 @@ async def batch_update_servers(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="at least one server name required")
     if len(names) > 50:
         raise HTTPException(status_code=400, detail="batch update limited to 50 servers")
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(status_code=400, detail="updates object is required")
+
+    # 未知字段一律 400：此前未识别字段被静默忽略，接口却返回"成功"，
+    # 前端"服务器状态"批量修改因此长期无效（改前无任何报错）。
+    unknown = sorted(set(updates) - set(BATCH_UPDATABLE_FIELDS))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported batch update fields: {', '.join(unknown)}"
+                f"（支持：{', '.join(BATCH_UPDATABLE_FIELDS)}；密码/密钥请逐台在编辑页修改）"
+            ),
+        )
+
+    # 批量级字段先整体校验，避免"改到一半失败"留下半成品
+    if "auth_type" in updates:
+        updates["auth_type"] = _validate_auth_type(updates["auth_type"])
+    if "status" in updates:
+        updates["status"] = _validate_status(updates["status"])
+    if "port" in updates:
+        updates["port"] = _validate_port(updates["port"])
 
     updated = []
     failed = []
@@ -421,13 +529,26 @@ async def batch_update_servers(request: Request, db: Session = Depends(get_db)):
             updated_server["username"] = updates["username"]
             changed = True
         if "auth_type" in updates and updates["auth_type"]:
-            updated_server["auth_type"] = updates["auth_type"]
+            target_auth = updates["auth_type"]
+            if target_auth != str(existing.get("auth_type") or "").strip().lower():
+                # 切换认证方式时必须确认目标模式所需的凭据存在（可沿用该服务器已有凭据），
+                # 否则会把一批服务器改成永远连不通的配置且没有任何提示。
+                error = _auth_credential_error(target_auth, {**existing, **updates})
+                if error:
+                    failed.append({"name": name, "error": error})
+                    logger.warning(f"Batch update: '{name}' auth_type -> {target_auth} rejected: {error}")
+                    continue
+            updated_server["auth_type"] = target_auth
             changed = True
         if "port" in updates and updates["port"]:
             updated_server["port"] = int(updates["port"])
             changed = True
         if "group" in updates:
             updated_server["group"] = updates["group"]
+            changed = True
+        if "status" in updates and updates["status"]:
+            updated_server["status"] = updates["status"]
+            updated_server["enabled"] = updates["status"] != "disabled"
             changed = True
 
         if not changed:
@@ -439,15 +560,18 @@ async def batch_update_servers(request: Request, db: Session = Depends(get_db)):
             failed.append({"name": name, "error": "save failed"})
             continue
 
+        if "group" in updates:
+            _sync_server_group_membership(db, name, (updates.get("group") or "").strip())
+
         logger.info(f"Batch update: server '{name}' updated by user={request.state.username}")
         updated.append(name)
 
     logger.info(f"Batch update completed: {len(updated)} updated, {len(failed)} failed, user={request.state.username}")
     audit("server.batch_update", "server", ",".join(names),
-          f"user={request.state.username} updated={len(updated)} failed={len(failed)}")
+          f"user={request.state.username} updated={len(updated)} failed={len(failed)} fields={','.join(sorted(updates))}")
 
     return api_response(
-        data={"updated": updated, "failed": failed, "total": len(names)},
+        data={"updated": updated, "failed": failed, "total": len(names), "fields": sorted(updates)},
         message=f"Batch update: {len(updated)} succeeded, {len(failed)} failed"
     )
 
@@ -513,29 +637,24 @@ async def create_server_v2(request: Request, db: Session = Depends(get_db)):
     host = (data.get("host") or "").strip()
     if not host:
         raise HTTPException(status_code=400, detail="host is required")
-    port = int(data.get("port", 22))
+    port = _validate_port(data.get("port", 22))
     username = data.get("username", data.get("user", "root"))
-    auth_type = data.get("auth_type", "password")
+    auth_type = _validate_auth_type(data.get("auth_type", "password"))
     password = data.get("password")
     key_file = data.get("key") or data.get("key_file")
     key_content = data.get("key_content")
     if data.get("key_content") and not isinstance(data.get("key_content"), str):
         raise HTTPException(status_code=400, detail="key_content must be a string")
 
-    if auth_type == "password" and not data.get("password"):
-        raise HTTPException(status_code=400, detail="密码认证模式下必须提供密码")
-    if auth_type == "key_file" and not data.get("key"):
-        raise HTTPException(status_code=400, detail="密钥文件认证模式下必须指定密钥文件路径")
-    if auth_type == "key_content" and not data.get("key_content"):
-        raise HTTPException(status_code=400, detail="密钥内容认证模式下必须提供密钥内容")
+    credential_error = _auth_credential_error(auth_type, data)
+    if credential_error:
+        raise HTTPException(status_code=400, detail=credential_error)
     jump_host = data.get("jump_host")
     description = data.get("description", "")
     tags = data.get("tags", [])
     sftp_allowed_roots = data.get("sftp_allowed_roots") or data.get("allowed_roots") or ["/"]
 
-    status = str(data.get("status") or "online").strip().lower()
-    if status not in {"online", "disabled", "offline"}:
-        status = "online"
+    status = _validate_status(str(data.get("status") or "online").strip().lower())
 
     server = {
         "name": name,
@@ -592,7 +711,7 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     data = await request.json()
     host = (data.get("host") or "").strip() or existing.get("host", "")
-    port = int(data.get("port", existing.get("port", 22)))
+    port = _validate_port(data.get("port", existing.get("port", 22)))
     username = data.get("username") or data.get("user") or existing.get("username", "root")
     auth_type = data.get("auth_type") or existing.get("auth_type", "password")
     incoming_password = data.get("password")
@@ -601,6 +720,22 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
     password = existing.get("password") if is_blank_or_redacted_secret(incoming_password) else incoming_password
     key_file = data.get("key") or data.get("key_file") or existing.get("key")
     key_content = existing.get("key_content") if is_blank_or_redacted_secret(incoming_key_content) else incoming_key_content
+    # 第 8 轮：切换认证方式时必须确认目标模式所需凭据存在（可沿用该服务器已有凭据），
+    # 否则会把服务器改成永远连不通的配置，而接口仍返回"更新成功"。
+    # 既有值（含历史遗留的非法值，如生产中的 auth_type="key"）原样保留，
+    # 避免"仅改描述"也因存量脏数据被拒；只有显式改成新值时才做枚举与凭据校验。
+    current_auth = str(existing.get("auth_type") or "").strip().lower()
+    if "auth_type" in data and data.get("auth_type"):
+        requested_auth = str(data["auth_type"]).strip().lower()
+        if requested_auth != current_auth:
+            auth_type = _validate_auth_type(requested_auth)
+            credential_error = _auth_credential_error(
+                auth_type, {"password": password, "key": key_file, "key_content": key_content}
+            )
+            if credential_error:
+                raise HTTPException(status_code=400, detail=credential_error)
+        else:
+            auth_type = requested_auth
     jump_host = existing.get("jump_host")
     if "jump_host" in data:
         jh = data["jump_host"]
@@ -623,9 +758,8 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
     status = existing.get("status", "online")
     if "status" in data:
         status = data["status"]
-    status = str(status or "online").strip().lower()
-    if status not in {"online", "disabled", "offline"}:
-        status = "online"
+    # 非法状态一律 400：此前被静默改写成 online，调用方的错误被掩盖。
+    status = _validate_status(str(status or "online").strip().lower())
 
     server = {
         "name": name,
@@ -651,23 +785,9 @@ async def update_server_v2(request: Request, name: str, db: Session = Depends(ge
     # 同步 server_groups.server_names：把该服务器从其他组的 server_names 中剔除；
     # 若指定了新分组（非空），把它加入该组的 server_names。避免出现「组里残留已不存在的服务器」导致删除时 409。
     if "group" in data:
-        try:
-            new_group = (data.get("group") or "").strip()
-            for g in db.query(ServerGroup).all():
-                names = list(g.server_names or [])
-                changed = False
-                if name in names and g.name != new_group:
-                    names = [x for x in names if x != name]
-                    changed = True
-                if new_group and g.name == new_group and name not in names:
-                    names.append(name)
-                    changed = True
-                if changed:
-                    g.server_names = names
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.warning(f"sync server_groups.server_names for '{name}' failed: {e}")
+        # 第 8 轮：原实现在此处引用未导入的 ServerGroup → NameError 被 except 吞成 warning，
+        # 分组同步实际上从未生效。现改为调用模块级共用函数（批量路径同样使用）。
+        _sync_server_group_membership(db, name, (data.get("group") or "").strip())
 
     logger.info(f"Server '{name}' updated successfully by user={request.state.username}, host={host}:{port}, auth={auth_type}")
     ac = build_audit_context(server)

@@ -758,4 +758,107 @@ VERIFIED 不补 `fixed_at`。风险中心详情弹窗（`IssueDetailModal.tsx` �
 > 前端风险中心已能设置截止时间（PATCH `deadline_at`）并看到 `overdue` 提示；
 > 老客户端不传该字段时行为不变。
 
+## 第 8 轮（2026-09-12）
+
+本轮范围：**服务器连接配置的批量编辑**（字段覆盖、认证方式校验、端口校验、分组同步）。
+四条缺陷同源：批量路径与单机路径行为不一致，且失败被静默吞掉。
+
+### 一、已修复
+
+#### 8.1 【中危】批量编辑"服务器状态"是静默空操作（界面提示成功，实际零改动）
+
+前端批量弹窗有"服务器状态"下拉（在线/停用/离线，`ServerListPage.tsx:1716`），
+`handleBatchSubmit` 会写入 `updates.status`（L576）；但后端 `PUT /servers/batch`
+的字段分支里**没有 `status`**，`changed` 保持 False → 直接 `updated.append(name)`，
+接口返回 `{"updated":["srv-a"],"failed":[]}`，界面提示"批量编辑完成 N 台成功"。
+
+- **修复**：批量支持 `status`（并同步 `enabled = status != "disabled"`，与单机一致）；
+  同时把"前端表单字段集 ⊆ 后端支持字段集"固化为测试，
+  并让**未知字段一律 400**（`updates={"password": "x"}` 以前返回成功却什么都不做）。
+- **红灯证据**：`AssertionError: assert 'online' == 'disabled'`；
+  `AssertionError: {"success":true,...,"updated":["srv-a"],...}` 配 `assert 200 == 400`。
+
+#### 8.2 【中危】切换 `auth_type` 不校验目标模式的凭据，且枚举值不受约束
+
+单机创建会按 `auth_type` 校验凭据、单机更新会沿用既有凭据，而**批量路径直接把
+`updates["auth_type"]` 写进 50 台以内所有服务器**：`key_file → password` 时若库里没有密码，
+这些服务器从此永远连不通，接口还报成功。`auth_type` 本身也没有枚举校验——
+生产 78 台里就有 1 台 `auth_type="key"`（既非 password/key_file/key_content）。
+
+- **修复**：抽出 `_auth_credential_error()`（创建/单机更新/批量共用，文案统一），
+  切换认证方式时若目标模式所需凭据缺失 → 该台进入 `failed` 并给出明确原因，不写坏配置；
+  `_validate_auth_type()` 校验枚举（创建/批量/单机改新值均生效）。
+  历史脏值处理：**既有非法值原样保留**（避免"只改描述"被存量数据卡住），
+  但显式改成非法新值一律 400。
+- **红灯证据**：`AssertionError: assert ['srv-a', 'srv-b'] == []`（无凭据也照改）；
+  创建接口接受 `"auth_type":"key"` 返回 200。
+
+#### 8.3 【低-中】批量 `port` 不做校验：非数字 → 整批 500，越界照样写库
+
+`int(updates["port"])` 在循环内执行，`"abc"` 直接抛 `ValueError` → 整批 500，
+而此前已保存的服务器无法回滚（部分成功无提示）；`port=0` 因真值判断被静默忽略，
+`port=70000` 则被写入。
+
+- **修复**：`_validate_port()` 统一校验（整数 + 1..65535），批量级参数**在循环前整体校验**
+  （参数非法时不产生任何写入），单机更新同样使用。
+- **红灯证据**：`ValueError: invalid literal for int() with base 10: 'abc'`；
+  越界端口 `assert 200 == 400`。
+
+#### 8.4 【中危】分组同步实际从未生效：未导入 `ServerGroup`，`NameError` 被 `except` 吞掉
+
+单机更新尾部的 `server_groups.server_names` 同步块引用了 `ServerGroup`，
+但模块只导入了 `Server & Service`——运行时 `hasattr(app.api.servers, "ServerGroup") is False`，
+该段抛 `NameError` 后被同块的 `except Exception` 吞成一条 warning，**同步从未成功过**；
+批量路径则完全没有这段逻辑。后果：改分组后分组视图仍是旧成员，
+旧分组删除时因残留名单而 409（这段注释当初想解决的问题一直存在）。
+
+- **修复**：模块级导入 `ServerGroup`，抽出 `_sync_server_group_membership()` 供
+  单机与批量共用（批量每保存一台同步一台），异常不再静默，
+  并在返回值里附带 `fields` 便于核对实际改动字段。
+- **红灯证据**（日志实证）：
+  `WARNING app.api.servers:servers.py:670 sync server_groups.server_names for 'srv-b' failed: name 'ServerGroup' is not defined`；
+  批量改组后 `旧组应剔除 srv-a：{'old-group': ['srv-a', 'srv-b'], 'new-group': []}`。
+
+### 二、已排除 / 记录（本轮审计结论，避免误修）
+
+| 审计项 | 结论 |
+| --- | --- |
+| `ops.batch_update_servers` | 只存在于 `mcp_capability_service.py` 的**能力描述目录**，没有注册实现；批量编辑当前只能由网页管理端发起（管理员 + 高风险确认闸门），本轮据此按"仅前端调用"设计字段白名单 |
+| 创建路径的脱敏占位符 | 第 3 轮已修：`blank_redacted_secrets()` 在创建入口调用；本轮继续复用同一校验器，未回退 |
+| 批量是否支持改密码/密钥 | **有意不支持**：一次给 50 台写同一份凭据风险过高，且脱敏语义复杂；改为明确 400 并在报错里提示"逐台在编辑页修改"，杜绝"提示成功却没改" |
+| 生产 78 台的凭据完整性 | 实测 0 台缺凭据（77 台 key_file 均有 key 路径）；仅 1 台历史 `auth_type="key"`，按 8.2 的兼容策略保留可编辑 |
+| `jump_host` 内联（dict）批量写入 | 正常：`_server_dict_to_metadata` 会保留内联跳板机配置（含加密凭据），本轮未改动 |
+
+### 三、待办（后续轮次）
+
+- 巡检域 20+ 个 analyzer 的业务判定口径逐个复核。
+- 前端竞态与假交互；部署/执行/维护链路确认闸门与回滚一致性。
+- 剩余 `except: pass` 静默失败分诊（本轮 8.4 就是此类：一个 NameError 藏了很久）。
+- MCP 工具描述与 `mcp_capability_service.py` 能力目录一致性巡检（含"目录里有、注册表里没有"的名字）。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨相关项、fnOS/OpenClaw 遗留项。
+
+### 附：第 8 轮可复现的验证脚本
+
+- `tests/test_servers_batch_update_contract.py`（22 项）：批量字段覆盖/未知字段拒绝、
+  auth_type 枚举与凭据校验、port 校验、批量与单机分组同步、历史脏值兼容；
+- `fnos-migration/_verify_round8_servers.py`（未入库）：对**部署后的 OPS 生产进程**做端到端实测，
+  全部操作仅作用于临时探测服务器（用后删除，不触碰 78 台真实服务器）。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 17140；17 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| 创建接口 auth_type 校验 | `auth_type="key"` → **400** `Unsupported auth_type: key（可选：password, key_file, key_content）` |
+| 批量 status | 批量置 `disabled` 后复查该服务器 `status=disabled`（修复前返回成功但仍是 online） |
+| 未知字段 | `updates={"password":"x"}` → **400** 并列出支持字段 |
+| 切换认证方式 | `key_file→password` 且无密码 → `updated=[]`、`failed=[{"error":"密码认证模式下必须提供密码"}]`，认证方式未被改坏 |
+| port 校验 | `"abc"` → 400；`70000` → 400 |
+| 分组同步 | 批量改组后 `server_groups` 立即出现该成员；单机改回空组后成员被剔除（修复前此处是 NameError） |
+| 生产数据复原 | 探测服务器删除后 78→78 台、组『测试』`[]→[]`，无残留 |
+| 全量测试套件 | `pytest tests/ -q` → **1492 passed**（第 7 轮 1470 + 本轮新增 22） |
+
+> 运维提示：本轮只改后端，**需重启 OPS 生效**（前端无改动，无需 Ctrl+F5）。
+> 前端批量弹窗的"服务器状态"现在会真正生效；改认证方式请逐台在编辑页填写对应凭据。
+
+
 

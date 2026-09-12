@@ -15,6 +15,10 @@ def build_rollback_health_commands(topology: Dict[str, Any]) -> List[Tuple[str, 
 
     The commands are intentionally best-effort and read-only.  A failed probe
     should be logged clearly, but should not by itself mutate remote state.
+
+    All probes must **fail (non-zero) when the service is unhealthy** — that is
+    the whole point of the probe. See the process probe below for a pitfall that
+    made it always pass.
     """
     commands: List[Tuple[str, str]] = []
     health_cmd = str(topology.get("health_cmd") or topology.get("health_command") or "").strip()
@@ -29,7 +33,12 @@ def build_rollback_health_commands(topology: Dict[str, Any]) -> List[Tuple[str, 
     process_keyword = str(topology.get("process_keyword") or "").strip()
     if process_keyword:
         quoted = shlex.quote(process_keyword)
-        commands.append(("process", f"pgrep -af {quoted} | head -3 >/dev/null"))
+        # 2026-09-12 复盘第 10 轮：原命令是
+        #   `pgrep -af <kw> | head -3 >/dev/null`
+        # 管道退出码取最后一个命令（head 恒为 0），因此**进程不存在时探针也返回 0**，
+        # 进程存活检查形同虚设（服务已死仍显示"健康检查通过"）。
+        # 这里去掉管道，直接用 pgrep 自身的退出码（无匹配时返回 1）。
+        commands.append(("process", f"pgrep -af {quoted} >/dev/null 2>&1"))
 
     service_dir = str(topology.get("service_dir") or topology.get("deploy_path") or "").strip()
     if service_dir:

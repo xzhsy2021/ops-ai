@@ -1113,28 +1113,63 @@ def _rollback_precheck_for(deployment: Deployment, plan: Dict[str, Any], db: Ses
     }
 
 
-def _log_rollback_health_commands(task_id: str, deployment_id: str, server_name: str, ssh: Any, topology: Dict[str, Any]) -> bool:
-    """Run best-effort post-rollback health checks and write results to deploy logs."""
+async def _log_rollback_health_commands(
+    task_id: str,
+    deployment_id: str,
+    server_name: str,
+    ssh: Any,
+    topology: Dict[str, Any],
+    *,
+    attempts: int = 3,
+    interval: float = 5.0,
+) -> bool:
+    """Run post-rollback health checks and write results to deploy logs.
+
+    Returns True only when every configured probe passed on the final attempt.
+
+    2026-09-12 复盘第 10 轮：
+      * 与正向发布的 HealthCheckStep 对齐——单次探测失败可能只是服务还没起来，
+        因此做有限次重试（默认 3 次 / 间隔 5s），重试后仍失败才算未通过；
+      * 改为 async：ssh.exec 走线程池、等待用 asyncio.sleep，避免阻塞部署 worker
+        的事件循环（此前是同步单次探测，重试只能靠 sleep 阻塞，故一直没有重试）。
+    """
     checks = build_rollback_health_commands(topology)
     if not checks:
         _log_to_db(task_id, "warning", "未配置回滚后健康检查，建议为服务配置 health_url、health_cmd 或 process_keyword", f"rollback-health:{server_name}", deployment_id)
         return True
+
+    attempts = max(1, int(attempts))
+    loop = asyncio.get_running_loop()
     all_ok = True
     for label, command in checks:
-        try:
-            _log_to_db(task_id, "info", f"健康检查({label}) > {command}", f"rollback-health:{server_name}", deployment_id)
-            exit_code, out, err = ssh.exec(command, timeout=30)
-            if exit_code == 0:
-                detail = "Rollback health check passed"
-                if out:
-                    detail += ": " + " | ".join((out or "").splitlines()[:3])
-                _log_to_db(task_id, "info", detail, f"rollback-health:{server_name}", deployment_id)
-            else:
-                all_ok = False
-                _log_to_db(task_id, "warning", f"Rollback health check failed({label}): {err or out or exit_code}", f"rollback-health:{server_name}", deployment_id)
-        except Exception as exc:
+        ok = False
+        last_detail = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                _log_to_db(task_id, "info", f"健康检查({label}) > {command}", f"rollback-health:{server_name}", deployment_id)
+                exit_code, out, err = await loop.run_in_executor(None, lambda: ssh.exec(command, timeout=30))
+                if exit_code == 0:
+                    ok = True
+                    detail = "Rollback health check passed"
+                    if out:
+                        detail += ": " + " | ".join((out or "").splitlines()[:3])
+                    _log_to_db(task_id, "info", detail, f"rollback-health:{server_name}", deployment_id)
+                    break
+                last_detail = str(err or out or f"exit={exit_code}")
+            except Exception as exc:
+                last_detail = str(exc)
+            if attempt < attempts:
+                _log_to_db(
+                    task_id,
+                    "info",
+                    f"健康检查重试 {attempt + 1}/{attempts}（{label} 未通过: {last_detail[:200]}）",
+                    f"rollback-health:{server_name}",
+                    deployment_id,
+                )
+                await asyncio.sleep(interval)
+        if not ok:
             all_ok = False
-            _log_to_db(task_id, "warning", f"Rollback health check error({label}): {exc}", f"rollback-health:{server_name}", deployment_id)
+            _log_to_db(task_id, "warning", f"Rollback health check failed({label}): {last_detail[:500]}", f"rollback-health:{server_name}", deployment_id)
     return all_ok
 
 

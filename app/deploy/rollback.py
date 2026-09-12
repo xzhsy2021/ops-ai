@@ -8,6 +8,7 @@ notification path.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -24,7 +25,9 @@ class RollbackRuntime:
     merge_release_variables: Callable[[Any, Any], Dict[str, Any]]
     rollback_plan_for: Callable[[str, str, str, List[str], Dict[str, Any], Any], Dict[str, Any]]
     service_topology: Callable[[str, str, str, str, Any], Dict[str, Any]]
-    run_health_checks: Callable[[str, str, str, Any, Dict[str, Any]], bool]
+    # 可返回 bool 或 awaitable[bool]：async 实现（app/api/deploy/_shared）会带上重试，
+    # 同步实现仍被兼容（见 run() 里的 inspect.isawaitable 桥接）。
+    run_health_checks: Callable[..., Any]
     send_release_notification: Callable[[str, Any, Optional[Dict[str, Any]], Any], None]
     release_deployment_locks: Callable[[List[str], Any], None]
 
@@ -97,6 +100,8 @@ class RollbackRuntime:
 
             self.log_to_db(task_id, "info", f"回滚方案: {plan.get('mode')} - {plan.get('description')}", "rollback", deployment_id)
             success_all = True
+            health_failed_servers: List[str] = []
+            health_checked_servers: List[str] = []
             for server_name in servers:
                 srv = self.get_server_by_name(server_name)
                 if not srv:
@@ -117,7 +122,24 @@ class RollbackRuntime:
                         self.log_to_db(task_id, "info", "\n".join((out or "").splitlines()[-20:]), f"rollback:{server_name}", deployment_id)
                     if exit_code == 0:
                         self.log_to_db(task_id, "info", f"Rollback success on {server_name}", f"rollback:{server_name}", deployment_id)
-                        self.run_health_checks(task_id, deployment_id, server_name, ssh, topology)
+                        # 第 10 轮：回滚后健康检查结果此前被直接丢弃——命令执行成功但服务
+                        # 没起来（或探测未通过）时，回滚仍被记为 success 并发出 rollback.success
+                        # 通知；而正向发布的 HealthCheckStep 在健康检查失败时是直接让发布失败。
+                        # 现在把探测结果纳入判定：健康检查未通过的服务器会让整次回滚不算成功。
+                        health = self.run_health_checks(task_id, deployment_id, server_name, ssh, topology)
+                        if inspect.isawaitable(health):
+                            health = await health
+                        health_checked_servers.append(server_name)
+                        if health is False:
+                            success_all = False
+                            health_failed_servers.append(server_name)
+                            self.log_to_db(
+                                task_id,
+                                "error",
+                                f"回滚命令已执行，但健康检查未通过: {server_name}（服务可能仍未恢复）",
+                                f"rollback:{server_name}",
+                                deployment_id,
+                            )
                     else:
                         self.log_to_db(task_id, "error", f"Rollback failed({exit_code}): {err or out}", f"rollback:{server_name}", deployment_id)
                         success_all = False
@@ -132,10 +154,21 @@ class RollbackRuntime:
                             pass
 
             final_status = "success" if success_all else "failed"
-            task_repo.update_status(task_id, final_status)
-            deploy_repo.update_status(deployment_id, final_status, "Rollback completed" if success_all else "Rollback failed")
+            if success_all:
+                result_text = "Rollback completed"
+            elif health_failed_servers:
+                result_text = "回滚命令已执行，但健康检查未通过：" + ", ".join(health_failed_servers)
+            else:
+                result_text = "Rollback failed"
+            task_repo.update_status(task_id, final_status, result=result_text)
+            deploy_repo.update_status(deployment_id, final_status, result_text)
             updated = deploy_repo.get_by_id(deployment_id)
-            payload = {"task_id": task_id}
+            payload = {
+                "task_id": task_id,
+                "result": result_text,
+                "health_checked_servers": health_checked_servers,
+                "health_failed_servers": health_failed_servers,
+            }
             payload.update(notification_context or {})
             self.send_release_notification("rollback.success" if success_all else "rollback.failed", updated, payload, db)
             return success_all

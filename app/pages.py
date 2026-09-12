@@ -24,21 +24,23 @@ REACT_DIST_DIR = _frontend_dist_dir()
 REACT_INDEX_HTML = os.path.join(REACT_DIST_DIR, "index.html")
 
 SPA_ROUTES = [
+    # 必须与 frontend/src/routes.ts 的 SPA_PAGE_ROUTES 保持一致（前端 :param → 后端 {param}）。
+    # 2026-09-12 复盘第 10 轮：此前这里少了 /mcp/tools、/mcp/audit 与 4 个配置中心编辑页，
+    # 已登录用户刷新这些深链会拿到 404 {"detail":"Not Found"}（匿名访问是 307 跳 /login，
+    # 所以只测匿名看不出来）；同时删除了 5 条前端并不存在的历史条目
+    # （/deployments、/services、/logs、/config、/groups）。
+    # tests/test_spa_route_whitelist_contract.py 会强制两者一致，防止再次漂移。
     "/",
     "/login",
     "/dashboard",
     "/deploy",
     "/pipelines",
-    "/deployments",
     "/systems",
+    "/systems/create",
     "/system",
     "/system/status",
     "/system/diagnostics",
     "/servers",
-    "/services",
-    "/logs",
-    "/config",
-    "/groups",
     "/maintenance",
     "/files",
     "/sql-query",
@@ -49,6 +51,12 @@ SPA_ROUTES = [
     "/inspection",
     "/database",
     "/tools",
+    "/mcp/tools",
+    "/mcp/audit",
+    # 参数化路由放在字面量路由之后，保证 /systems/create 优先匹配字面量。
+    "/systems/{name}/edit",
+    "/systems/{systemName}/services/create",
+    "/systems/{systemName}/services/{serviceName}/edit",
 ]
 
 

@@ -13,6 +13,7 @@ PUBLIC_PATHS = frozenset({
     "/login",
     "/static",
     "/healthz",
+    "/health",  # 与 /healthz 等价的存活探测（第 10 轮补充，见 main.py）
     "/readyz",
     # Static browser assets must remain public in single-process SPA mode.
     # Otherwise module requests such as /assets/index-*.js are redirected to

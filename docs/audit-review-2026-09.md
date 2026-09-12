@@ -1006,6 +1006,166 @@ ONLINE/OFFLINE）——这是一次迁移后遗留的孤儿模块。
 > 前端产物已用 `npm run build` 重建（`frontend/dist`，单进程模式静态托管），
 > 浏览器请 **Ctrl+F5** 强制刷新，否则可能仍加载旧 chunk。
 
+## 第 10 轮（2026-09-12）
+
+本轮范围：**回滚链路（执行与判定口径）+ SPA 深链分发**。两条线都是"看起来正常、
+实际在骗人"的类型：回滚把"服务没起来"记成成功；SPA 深链只在**已登录**时才 404，
+匿名测试永远正常。
+
+测试基线上轮 1497 → 本轮结束 **1518 passed**（+21：回滚健康 12 项、SPA 白名单契约 9 项）。
+
+### 一、已修复
+
+#### 10.1 【中危】回滚健康检查结果被丢弃：服务没恢复也算"回滚成功"
+
+`app/deploy/rollback.py` 的执行循环里：
+
+```python
+if exit_code == 0:
+    self.log_to_db(..., f"Rollback success on {server_name}", ...)
+    self.run_health_checks(task_id, deployment_id, server_name, ssh, topology)   # ← 返回值被丢弃
+...
+final_status = "success" if success_all else "failed"
+self.send_release_notification("rollback.success" ...)
+```
+
+而 `run_health_checks` 的类型声明是 `Callable[..., bool]`，实现
+`app/api/deploy/_shared.py::_log_rollback_health_commands` 也**确实返回了 `all_ok`**
+（逐条探测，任一失败即 False）。**这个布尔值没有任何调用方读取**：
+
+- 回滚命令成功、但服务没起来（进程没拉起 / HTTP 健康检查 502）时，
+  任务状态 `success`、发布单状态 `success`、并发出 `rollback.success` 通知；
+- 对照：正向发布的 `HealthCheckStep` 在健康检查失败时 `raise RuntimeError("健康检查失败: …")`
+  **直接让发布失败**——同一份"健康检查"，发布链路当门禁、回滚链路当摆设，口径不一致。
+
+对运维的实际危害：回滚后服务仍然不可用，平台却报成功，值班人员会停止排查。
+
+- **修复**：把探测结果纳入判定。任一服务器健康检查未通过 → `success_all = False`，
+  任务/发布单记为 `failed`，结果文案明确区分"命令失败"与"健康检查未通过"：
+  `回滚命令已执行，但健康检查未通过：srv-a, srv-b`；通知 payload 里同时写入
+  `result` / `health_checked_servers` / `health_failed_servers`，让 Matrix/OpenClaw
+  侧看到的也是实情。未配置任何探针时仍返回 True（不影响原有成功口径）。
+
+#### 10.2 【中危】进程健康探针"假通过"：退出码被管道末端的 `head` 吞掉
+
+`app/deploy/rollback_health.py` 生成的进程探针是：
+
+```bash
+pgrep -af <keyword> | head -3 >/dev/null
+```
+
+POSIX shell 里**管道的退出码取最后一个命令**，即 `head`（恒为 0）。也就是说：
+**进程不存在时该探针也返回 0**，"进程存活"这项检查永远不会失败。
+
+- **修复**：去掉管道，直接用 `pgrep` 自身的退出码（无匹配返回 1）：
+  `pgrep -af <keyword> >/dev/null 2>&1`。
+- **行为层证据**（Git Bash 实测）：
+  `false | head -3 >/dev/null` → 退出码 **0**（假通过）；
+  `false >/dev/null` → **1**（失败可传播）；
+  `pgrep -af ops-no-such-process-xyz >/dev/null` → **非 0**（正确判定不健康）。
+- 意义：如果只修 10.1 而不修这里，门禁会被这个"永远通过"的探针绕过（只要 service 配了
+  process_keyword 就恒真）——两者必须一起修。
+
+#### 10.3 【中危】回滚健康检查没有重试（与正向发布不一致）
+
+正向发布 `HealthCheckStep` 默认 **重试 3 次 / 间隔 5s**；回滚侧只有**单次**探测
+（且是同步调用，想重试也只能阻塞事件循环，所以一直没加）。服务启动稍慢就会被判"不健康"，
+这也是此前一直不敢把探测结果纳入判定的原因之一。
+
+- **修复**：`_log_rollback_health_commands` 改为 async，重试默认 3 次 / 间隔 5s，
+  `ssh.exec` 走线程池、等待用 `asyncio.sleep`，**不阻塞部署 worker 的事件循环**；
+  `RollbackRuntime` 用 `inspect.isawaitable()` 兼容同步实现（外部自定义实现不被破坏）。
+
+#### 10.4 【中危】SPA 深链白名单漂移：**已登录**用户刷新 6 个页面会 404
+
+前端**已登录**状态下直接访问（刷新）以下真实页面，返回 `404 {"detail":"Not Found"}`，
+页面完全打不开：
+
+| 页面 | 路径 | 修复前(已登录) |
+| --- | --- | --- |
+| MCP 审计 | `/mcp/audit` | 404 JSON |
+| MCP 工具 | `/mcp/tools` | 404 JSON |
+| 新建项目 | `/systems/create` | 404 JSON |
+| 编辑项目 | `/systems/:name/edit` | 404 JSON |
+| 新建服务 | `/systems/:systemName/services/create` | 404 JSON |
+| 编辑服务 | `/systems/:systemName/services/:serviceName/edit` | 404 JSON |
+
+根因：SPA 分发是**两份硬编码清单**——前端权威清单 `frontend/src/routes.ts::SPA_PAGE_ROUTES`
+与后端 `app/pages.py::SPA_ROUTES`。后端那份少了上述 6 条，并多出 5 条前端根本不存在的
+历史条目（`/deployments`、`/services`、`/logs`、`/config`、`/groups`）。
+请求先过会话中间件：未登录 → 307 跳 `/login`（浏览器跟随登录页，**200 HTML**）；
+已登录 → 进入路由匹配，白名单里没有就 404 JSON。
+
+**为什么长期没被发现**：所有"随手一测"都是匿名访问，看到的是登录页 200——假正常。
+这正是本轮实测暴露它的方式（对比 `anon` / `auth` 两列才看出来）。
+
+- **修复**：`SPA_ROUTES` 与前端权威清单**逐条对齐**（补齐 6 条，参数路由改用 FastAPI
+  的 `{param}` 语法并排在字面量之后），删除 5 条历史残留；
+  新增契约测试 `tests/test_spa_route_whitelist_contract.py`（9 项）解析
+  `frontend/src/routes.ts` 强制两份清单双向一致——**再漂移就会红**。
+
+#### 10.5 【低危】`/health` 不存在却"永远 200"：假就绪信号
+
+`main.py` 只注册了 `/healthz`。而 `docs/runbooks/EVENT_LOOP_BLOCKING_FIXES.md` 明确
+把 `GET /health` 当存活探测记录下来（"`GET /health` → 200"），实际那个 200 是
+**SPA/登录页的 HTML**（未登录 307 跳登录页后 200），与后端是否健康无关；
+已登录访问则是 404 JSON。
+
+- **修复**：把 `/health` 注册为与 `/healthz` 等价的 JSON 存活探测（并加入
+  `PUBLIC_PATHS`，探测不需要登录）；同时更正 runbook 里那条错误结论，
+  说明历史现象与推荐用法（继续用 `/healthz`，`/readyz` 带 DB 检查）。
+- 实测（修复后）：`/health` 与 `/healthz` 都返回 `{"status":"ok","service":"ops-platform"}`，
+  `/readyz` 返回 `{"status":"ready","checks":{"database":"ok"}}`。
+
+### 二、已排除 / 记录（本轮审计结论）
+
+| 审计项 | 结论 |
+| --- | --- |
+| 回滚锁是否泄漏 | 未发现：`run()` 的 `finally` 中释放 `lock_keys` 并关库；异常路径（无安全方案直接 `return False`）同样走 finally（测试断言 `released_locks == [["deploy:crypto-trader"]]`） |
+| 回滚"无安全方案"分支 | 正确：记 `blockers` 场景下直接 `return False`，任务与发布单都置 failed，不发成功通知 |
+| `app/deploy/rollback.py` 是否被浏览器与 MCP 两条链路复用 | 是同一实现：`_run_rollback_task`（Capability Server / MCP）与浏览器都构造 `RollbackRuntime`，修一处两条链路同时生效 |
+| `pgrep -- <kw>` 是否也匹配到探针自己 | 探针命令里含关键字本身，`pgrep -f` 可能匹配到 `bash -c "pgrep -af kw …"` 自身（假阳性的经典坑）。本次**未改**匹配语义（改动会放大行为变化），但已记录：若要把进程探针当强门禁，应改用 `pgrep -f` 排除自身或 `systemctl is-active` 之类的确定性检查 |
+| `scripts/ci_local.sh` 聚焦清单里 3 个不存在的测试文件 | `test_deploy_refactor_contract.py`、`test_release_switch_and_rollback.py` 在本包不存在（脚本按存在性过滤并打印 `skip:`，属"精简包"设计）；本轮补齐了清单里一直缺失的 `tests/test_rollback_health.py`，并新增 `test_spa_route_whitelist_contract.py` 入清单 |
+| `app/` 内 157 处 `except …: pass` | 本轮只做了分布盘点（部署/维护/工具适配器/终端会话为主），逐点分诊留待后续轮次；本次修掉的静默失败属于"返回值被丢弃"型（见 10.1），比 `except: pass` 更隐蔽 |
+| 前端 `routes.ts` 中 `ROUTES.mcpTools`/`mcpAudit` 是否有入口 | 有：`ToolAccessPage` 侧栏可跳转，`SPA_PAGE_ROUTES` 也早已正确声明——问题只在后端副本没跟上 |
+
+### 三、待办（后续轮次）
+
+- 巡检域 20+ 个 analyzer 的业务判定口径逐个复核（后端）。
+- 部署/执行/维护链路确认闸门与回滚一致性（本轮已修"回滚健康门禁"这一条）。
+- `except …: pass` 157 处静默失败分诊（优先部署/维护/凭据相关）。
+- 进程探针自身的 `pgrep -f` 自匹配问题（见上表记录）。
+- 清理 `MCP_TOOL_DESCRIPTION_OVERRIDES` 的 54 个幽灵条目。
+- 给 `EntityPicker` / `LogConsole` 的异步搜索补时序守卫（复用 `requestGuard`）。
+- `period` API 参数校验；`update_issue` 无 `deadline_at` 到期提醒。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨相关项、fnOS/OpenClaw 遗留项。
+
+### 附：第 10 轮可复现的验证脚本
+
+- `tests/test_rollback_health.py`（12 项，已加入 `scripts/ci_local.sh` 聚焦清单）：
+  探针命令形状 + 管道语义行为证据（Git Bash）+ `RollbackRuntime` 门禁（成功/失败/重试/awaitable）。
+- `tests/test_spa_route_whitelist_contract.py`（9 项）：后端白名单与
+  `frontend/src/routes.ts::SPA_PAGE_ROUTES` 双向一致 + 路由真实注册 + 5 条深链行为断言。
+- `fnos-migration/_verify_round10_live.py`（未入库）：对部署后的 OPS 实测 16 项断言。
+- `fnos-migration/_probe_round10_spa.py`（未入库）：SPA 深链匿名/已登录对照探测（暴露 10.4 的工具）。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 30008；16 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| 回滚预检探针（运行中进程产出） | `process=pgrep -af crypto-trader-web >/dev/null 2>&1`、`path=test -d /data/web`——**无管道**（修复前为 `pgrep … \| head -3 >/dev/null`） |
+| 6 条原失效深链（已登录） | `/mcp/audit`、`/mcp/tools`、`/systems/create`、`/systems/:name/edit`、`/systems/:systemName/services/create`、`…/:serviceName/edit` 全部 **200 + SPA HTML**（修复前 404 JSON） |
+| 对照深链 | `/servers` 仍 200 HTML（无回归） |
+| 存活探测 | `/health`、`/healthz` → 200 JSON；`/readyz` → `ready`（DB ok） |
+| 测试 | 全量 `pytest tests/ -q` → **1518 passed**（1497 + 21）；红灯对照：回滚门禁 `assert True is False`、SPA 契约 `缺少 6 条 / 多出 5 条`、行为断言 5 条 404 |
+
+> 运维提示：本轮**只改后端**（无前端源码改动，无需 `npm run build`、也无需 Ctrl+F5）。
+> 后端已重启（PID 30008）生效。
+> 另外：本轮**刻意没有**触发真实回滚来验证 10.1 的门禁语义——那会 SSH 真实服务器
+> 并向发版房间发通知。该语义由 12 项单元测试（假 runtime + 假 ssh）覆盖，
+> 线上只做只读的预检接口验证。
+
+
 
 
 

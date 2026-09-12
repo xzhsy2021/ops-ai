@@ -268,7 +268,16 @@ register_exception_handlers(app)
 
 
 @app.get("/healthz", include_in_schema=False)
+@app.get("/health", include_in_schema=False)
 def healthz():
+    """存活性探测。
+
+    2026-09-12 复盘第 10 轮：以前只有 `/healthz` 是真实端点，而
+    docs/runbooks/EVENT_LOOP_BLOCKING_FIXES.md 把 `GET /health` 当作存活探测，
+    运维也习惯用 /health。`/health` 未注册时命中 SPA 落盘路由（登录页/html），
+    **无论后端是否健康都返回 200 HTML**——典型的"假就绪"信号。
+    这里把 /health 注册为同一处理函数（JSON、无需鉴权），消除该歧义。
+    """
     return {"status": "ok", "service": "ops-platform"}
 
 

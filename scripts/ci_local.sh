@@ -38,6 +38,7 @@ FOCUSED_TESTS=(
   tests/test_sql_query_protection.py
   tests/test_cleanup_start_plan.py
   tests/test_rollback_health.py
+  tests/test_spa_route_whitelist_contract.py
   tests/test_release_switch_and_rollback.py
   tests/test_mcp_contract_sync.py
   tests/test_tool_token_templates_contract.py

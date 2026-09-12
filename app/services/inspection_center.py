@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -4842,7 +4842,13 @@ def list_issues(db: Session, *, scope_type: str = "", risk_level: str = "", stat
     if risk_level:
         q = q.filter(InspectionIssue.risk_level == risk_level.upper())
     if status:
-        q = q.filter(InspectionIssue.status == status.upper())
+        # 支持逗号分隔的多状态（例如 status=OPEN,PROCESSING 表示"未闭环"），
+        # 与 /inspection/overview 的 open_issue_count 口径保持一致。
+        wanted = [s.strip().upper() for s in str(status).split(",") if s.strip()]
+        if len(wanted) == 1:
+            q = q.filter(InspectionIssue.status == wanted[0])
+        elif wanted:
+            q = q.filter(InspectionIssue.status.in_(wanted))
     if server_id:
         q = q.filter(InspectionIssue.server_id == server_id)
     if project_id:
@@ -4967,7 +4973,25 @@ def _running_runs_with_progress(db: Session) -> List[Dict[str, Any]]:
 
 def overview(db: Session) -> Dict[str, Any]:
     recent = db.query(InspectionRun).order_by(InspectionRun.created_at.desc()).limit(50).all()
-    issues = db.query(InspectionIssue).filter(InspectionIssue.status.in_(["OPEN", "PROCESSING"])).order_by(InspectionIssue.created_at.desc()).limit(200).all()
+    # 未闭环 = OPEN + PROCESSING。计数一律走聚合查询（不受列表 limit 影响），
+    # 且与 GET /inspection/issues?status=OPEN,PROCESSING 的 total 完全一致。
+    unclosed = InspectionIssue.status.in_(["OPEN", "PROCESSING"])
+    status_counts = {
+        str(state): int(count or 0)
+        for state, count in db.query(InspectionIssue.status, func.count(InspectionIssue.id))
+        .filter(unclosed).group_by(InspectionIssue.status).all()
+    }
+    level_counts = {
+        str(level): int(count or 0)
+        for level, count in db.query(InspectionIssue.risk_level, func.count(InspectionIssue.id))
+        .filter(unclosed).group_by(InspectionIssue.risk_level).all()
+    }
+    recent_issues = (
+        db.query(InspectionIssue).filter(unclosed)
+        .order_by(InspectionIssue.created_at.desc()).limit(10).all()
+    )
+    pending_count = status_counts.get("OPEN", 0)
+    processing_count = status_counts.get("PROCESSING", 0)
     server_runs = [r for r in recent if r.scope_type == SERVER_SCOPE]
     project_runs = [r for r in recent if r.scope_type == PROJECT_SCOPE]
     return {
@@ -4979,13 +5003,16 @@ def overview(db: Session) -> Dict[str, Any]:
         "recent_run_count": len(recent),
         "latest_server_run": _run_to_dict(server_runs[0]) if server_runs else None,
         "latest_project_run": _run_to_dict(project_runs[0]) if project_runs else None,
-        "open_issue_count": len(issues),
-        "high_issue_count": sum(1 for i in issues if i.risk_level == "HIGH"),
-        "medium_issue_count": sum(1 for i in issues if i.risk_level == "MEDIUM"),
-        "low_issue_count": sum(1 for i in issues if i.risk_level == "LOW"),
+        # 未闭环口径（= 列表 status=OPEN,PROCESSING），保留旧字段名兼容既有调用方
+        "open_issue_count": pending_count + processing_count,
+        "pending_issue_count": pending_count,
+        "processing_issue_count": processing_count,
+        "high_issue_count": level_counts.get("HIGH", 0),
+        "medium_issue_count": level_counts.get("MEDIUM", 0),
+        "low_issue_count": level_counts.get("LOW", 0),
         "running_runs": _running_runs_with_progress(db),
         "recent_runs": [_run_to_dict(r) for r in recent[:10]],
-        "recent_issues": [_issue_to_dict(i) for i in issues[:10]],
+        "recent_issues": [_issue_to_dict(i) for i in recent_issues],
     }
 
 

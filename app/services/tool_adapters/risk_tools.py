@@ -29,10 +29,18 @@ def _issue_to_dict(row: InspectionIssue) -> Dict[str, Any]:
     }
 
 
+def _statuses(value: Any) -> List[str]:
+    """把 status 参数解析成状态列表：支持 "OPEN" 与 "OPEN,PROCESSING"（未闭环）。"""
+    return [s.strip().upper() for s in str(value or "").split(",") if s.strip()]
+
+
 def _query(db, args: Dict[str, Any]):
     q = db.query(InspectionIssue)
-    if args.get("status"):
-        q = q.filter(InspectionIssue.status == args.get("status"))
+    requested = _statuses(args.get("status"))
+    if len(requested) == 1:
+        q = q.filter(InspectionIssue.status == requested[0])
+    elif requested:
+        q = q.filter(InspectionIssue.status.in_(requested))
     if args.get("risk_level"):
         q = q.filter(InspectionIssue.risk_level == args.get("risk_level"))
     if args.get("scope_type"):
@@ -47,7 +55,10 @@ def _query(db, args: Dict[str, Any]):
 @registry.register(
     name="ops.risk.list",
     title="查询风险问题",
-    description="查询来自巡检/诊断/状态等模块的风险问题。当前优先承接巡检风险。",
+    description=(
+        "查询来自巡检/诊断/状态等模块的风险问题。当前优先承接巡检风险。"
+        "未闭环 = status 传 \"OPEN,PROCESSING\"（与巡检总览的未闭环数一致）。"
+    ),
     scopes=["ops:read"],
     risk="low",
     category="risk",
@@ -60,9 +71,12 @@ def _query(db, args: Dict[str, Any]):
     input_schema={
         "type": "object",
         "properties": {
-            "status": {"type": "string"},
-            "risk_level": {"type": "string"},
-            "scope_type": {"type": "string"},
+            "status": {
+                "type": "string",
+                "description": "状态过滤：OPEN / PROCESSING / FIXED / VERIFIED / IGNORED，多个用英文逗号分隔（未闭环=OPEN,PROCESSING）",
+            },
+            "risk_level": {"type": "string", "description": "风险等级：HIGH / MEDIUM / LOW"},
+            "scope_type": {"type": "string", "description": "巡检范围：SERVER / PROJECT"},
             "server_id": {"type": "string"},
             "project_id": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200},
@@ -72,8 +86,15 @@ def _query(db, args: Dict[str, Any]):
 )
 def list_risks(args: Dict[str, Any], ctx, db):
     limit = max(1, min(int(args.get("limit") or 50), 200))
-    rows = _query(db, args).order_by(InspectionIssue.created_at.desc()).limit(limit).all()
-    return {"items": [_issue_to_dict(r) for r in rows], "total": len(rows), "source": "inspection_issues"}
+    query = _query(db, args)
+    total = query.count()
+    rows = query.order_by(InspectionIssue.created_at.desc()).limit(limit).all()
+    return {
+        "items": [_issue_to_dict(r) for r in rows],
+        "total": total,          # 满足过滤条件的总数（不受 limit 截断）
+        "returned": len(rows),
+        "source": "inspection_issues",
+    }
 
 
 @registry.register(

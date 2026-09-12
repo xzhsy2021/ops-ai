@@ -53,7 +53,7 @@ export function OverviewTab({ overview, servers, projects, onRefresh }: Overview
             </div>
             <div className="cc-stat-card cc-stat-card--danger">
               <div className="cc-stat-icon">!</div>
-              <div className="cc-stat-body"><span>待处理风险</span><strong>{overview.open_issue_count || 0}</strong></div>
+              <div className="cc-stat-body" title={`未闭环 = 待处理 ${overview.pending_issue_count ?? overview.open_issue_count ?? 0} + 处理中 ${overview.processing_issue_count ?? 0}；与「风险问题」列表默认口径一致`}><span>未闭环风险</span><strong>{overview.open_issue_count || 0}</strong></div>
             </div>
             <div className="cc-stat-card cc-stat-card--warn">
               <div className="cc-stat-icon">▲</div>

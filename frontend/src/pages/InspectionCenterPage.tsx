@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { inspection, reports, taskCenter } from '../api'
 import { ROUTES } from '../routes'
 import { EmptyState, FavoriteButton, RiskBadge, RiskConfirmDialog, StatusBadge } from '../components/ui'
@@ -21,6 +21,11 @@ import DiagnosisCard from '../components/v10/DiagnosisCard'
 
 type TabKey = 'overview' | 'server' | 'project' | 'combined' | 'runs' | 'ledger' | 'issues' | 'rules' | 'security'
 
+const TAB_KEYS: TabKey[] = ['overview', 'server', 'project', 'combined', 'runs', 'ledger', 'issues', 'rules', 'security']
+
+/** 未闭环口径：与后端 /inspection/overview 的 open_issue_count 一致（OPEN + PROCESSING） */
+const UNCLOSED_STATUS = 'OPEN,PROCESSING'
+
 function fmtLoadAvg(v: any): string {
   if (!v || typeof v !== 'object') return v == null ? '-' : String(v)
   const parts = [v.min1, v.min5, v.min15].map((x: any) => (x == null ? '-' : x))
@@ -28,7 +33,11 @@ function fmtLoadAvg(v: any): string {
 }
 
 export default function InspectionCenterPage() {
-  const [tab, setTab] = useState<TabKey>('overview')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [tab, setTab] = useState<TabKey>(() => {
+    const wanted = searchParams.get('tab') || ''
+    return (TAB_KEYS as string[]).includes(wanted) ? (wanted as TabKey) : 'overview'
+  })
   const [overview, setOverview] = useState<any>({})
   const [categories, setCategories] = useState<any>({ server: [], project: [] })
   const [itemConfigs, setItemConfigs] = useState<any>({ server: [], project: [] })
@@ -77,13 +86,13 @@ export default function InspectionCenterPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [runFilter, setRunFilter] = useState('')
-  const [issueFilter, setIssueFilter] = useState('OPEN')
+  const [issueFilter, setIssueFilter] = useState(UNCLOSED_STATUS)
   const [activeRunIds, setActiveRunIds] = useState<string[]>([])
   const [selectedRunIds, setSelectedRunIds] = useState<string[]>([])
   const [selectedLedgerRunIds, setSelectedLedgerRunIds] = useState<string[]>([])
   const [selectedReportIds, setSelectedReportIds] = useState<string[]>([])
   const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>([])
-  const [issueDetailId, setIssueDetailId] = useState('')
+  const [issueDetailId, setIssueDetailId] = useState(() => searchParams.get('issue') || '')
   const [projectRelations, setProjectRelations] = useState<any[]>([])
   const [projectPathEditor, setProjectPathEditor] = useState<{ open: boolean; form: any }>({ open: false, form: {} })
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
@@ -738,6 +747,28 @@ export default function InspectionCenterPage() {
   }, [secDailyJob?.id])
 
   useEffect(() => { loadBase() }, [])
+
+  // URL 参数 ↔ 页面状态：支持 /inspection?tab=issues 与 /inspection?issue=<id> 直达，
+  // 同时修复"诊断卡 / 收藏夹链接点击后仍停在总览页"的问题。
+  const urlTabParam = searchParams.get('tab') || ''
+  const urlIssueParam = searchParams.get('issue') || ''
+  useEffect(() => {
+    if (urlTabParam && (TAB_KEYS as string[]).includes(urlTabParam) && urlTabParam !== tab) setTab(urlTabParam as TabKey)
+    if (urlIssueParam && urlIssueParam !== issueDetailId) setIssueDetailId(urlIssueParam)
+  }, [urlTabParam, urlIssueParam])
+  useEffect(() => {
+    if ((searchParams.get('tab') || '') === tab) return
+    const params = new URLSearchParams(searchParams)
+    params.set('tab', tab)
+    setSearchParams(params, { replace: true })
+  }, [tab])
+  useEffect(() => {
+    if ((searchParams.get('issue') || '') === issueDetailId) return
+    const params = new URLSearchParams(searchParams)
+    if (issueDetailId) params.set('issue', issueDetailId)
+    else params.delete('issue')
+    setSearchParams(params, { replace: true })
+  }, [issueDetailId])
   useEffect(() => { reloadIssues().catch(() => undefined) }, [issueFilter, issueOffset, issuePageSize])
   useEffect(() => { reloadRules().catch(() => undefined) }, [ruleFilter, ruleScopeFilter, ruleRiskFilter, ruleOffset, rulePageSize])
   useEffect(() => { reloadRuns().catch(() => undefined) }, [runFilter, runOffset, runPageSize])
@@ -850,8 +881,8 @@ export default function InspectionCenterPage() {
           <div className="cc-hero-stat cc-hero-stat--info">
             <strong>{overview.project_count || projects.length || 0}</strong><span>项目</span>
           </div>
-          <div className="cc-hero-stat cc-hero-stat--risk">
-            <strong>{overview.open_issue_count || 0}</strong><span>待处理</span>
+          <div className="cc-hero-stat cc-hero-stat--risk" title={`未闭环 = 待处理 ${overview.pending_issue_count ?? overview.open_issue_count ?? 0} + 处理中 ${overview.processing_issue_count ?? 0}；与「风险问题」列表默认口径一致`}>
+            <strong>{overview.open_issue_count || 0}</strong><span>未闭环</span>
           </div>
         </div>
         <div className="cc-server-detail-actions" style={{ position: 'absolute', top: 22, right: 30, display: 'flex', gap: 8 }}>
@@ -890,14 +921,14 @@ export default function InspectionCenterPage() {
             } catch (_e) { /* 概览刷新失败不阻断弹窗 */ }
           }}
         />
-        {(overview.open_issue_count > 0 || overview.high_risk_count > 0) && (
+        {(overview.open_issue_count > 0 || overview.high_issue_count > 0) && (
           <DiagnosisCard
             title="巡检风险诊断"
-            explain={`当前有 ${overview.open_issue_count || 0} 个待处理问题${overview.high_risk_count ? `，其中 ${overview.high_risk_count} 个高风险` : ''}。建议优先处理高风险项，避免影响系统稳定性。`}
+            explain={`当前有 ${overview.open_issue_count || 0} 个未闭环问题（待处理 ${overview.pending_issue_count ?? overview.open_issue_count ?? 0} · 处理中 ${overview.processing_issue_count ?? 0}）${overview.high_issue_count ? `，其中 ${overview.high_issue_count} 个高风险` : ''}。建议优先处理高风险项，避免影响系统稳定性。`}
             recommend="点击下方按钮进入风险问题页，按优先级逐项处理。高风险项应在 24 小时内响应。"
             actionLabel="查看风险问题"
             actionTo={`${ROUTES.inspection}?tab=issues`}
-            level={overview.high_risk_count > 0 ? 'danger' : 'warn'}
+            level={overview.high_issue_count > 0 ? 'danger' : 'warn'}
           />
         )}
         </>
@@ -1169,7 +1200,7 @@ export default function InspectionCenterPage() {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
             <h2>风险问题</h2>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <label>状态 <select value={issueFilter} onChange={(e) => { setIssueFilter(e.target.value); setIssueOffset(0) }}><option value="">全部</option><option value="OPEN">待处理</option><option value="PROCESSING">处理中</option><option value="FIXED">已修复</option><option value="VERIFIED">已验证</option><option value="IGNORED">已忽略</option></select></label>
+              <label>状态 <select value={issueFilter} onChange={(e) => { setIssueFilter(e.target.value); setIssueOffset(0) }}><option value="">全部</option><option value={UNCLOSED_STATUS}>未闭环（待处理+处理中）</option><option value="OPEN">待处理</option><option value="PROCESSING">处理中</option><option value="FIXED">已修复</option><option value="VERIFIED">已验证</option><option value="IGNORED">已忽略</option></select></label>
               <button className="btn btn-danger" disabled={selectedIssueIds.length === 0} onClick={() => deleteIssues(selectedIssueIds)}>删除选中（{selectedIssueIds.length}）</button>
               <button className="btn btn-subtle" disabled={selectedIssueIds.length === 0} onClick={() => setSelectedIssueIds([])}>清空选择</button>
             </div>

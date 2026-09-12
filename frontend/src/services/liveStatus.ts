@@ -77,7 +77,7 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
       systemHealth.dashboard(),
       taskCenter.list({ limit: 20, offset: 0 }),
       capabilityTools.list({ limit: 50, include_schema: false }),
-      inspection.issues({ status: 'OPEN', limit: 20, offset: 0 }),
+      inspection.issues({ status: 'OPEN,PROCESSING', limit: 20, offset: 0 }),
     ])
 
     const latencyMs = Math.round(performance.now() - t0)
@@ -160,7 +160,7 @@ export async function runNodeProbe(nodeId: string): Promise<NodeActionResult> {
         }
       }
       case 'inspect.run': {
-        const res: any = await inspection.issues({ status: 'OPEN', limit: 5, offset: 0 })
+        const res: any = await inspection.issues({ status: 'OPEN,PROCESSING', limit: 5, offset: 0 })
         const d = res?.data ?? res
         const n = Number(d?.total ?? d?.items?.length ?? 0)
         return {

@@ -170,7 +170,7 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.inspection.get_run_raw_output': '【路径 A 主】Get raw output data from an inspection run. 中文: 查看巡检原始输出/巡检原始数据.',
     'ops.inspection.delete_runs': '【路径 A 主】Delete inspection run records. High risk; requires confirmation. 中文: 删除巡检记录/清理巡检历史.',
     'ops.inspection.delete_issue': '【路径 A 主】Delete an inspection issue. Medium risk; requires confirmation. 中文: 删除巡检问题/清理巡检问题.',
-    'ops.risk.list': "List open risk issues with filters. Use when user asks 'what risks exist' or 'list open risks'. 中文: 查看风险列表/风险问题.",
+    'ops.risk.list': "List risk issues with filters (status supports comma-separated values; unclosed = OPEN,PROCESSING). Use when user asks 'what risks exist' or 'list open risks'. 中文: 查看风险列表/风险问题/未闭环风险.",
     'ops.risk.get': 'Get one risk issue detail by risk_id. 中文: 查看风险详情/风险问题详情.',
     'ops.risk.triage': 'Triage open risks by severity and urgency. Read-only. 中文: 风险分流/风险优先级排序.',
     'ops.risk.generate_fix_plan': 'Generate a remediation plan for a risk issue. Read-only. 中文: 生成风险整改计划/修复方案.',

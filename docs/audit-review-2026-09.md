@@ -661,3 +661,101 @@
 > 规则编辑器可读取 `command_policy.readonly_allowed` 提前给出"该规则执行时会被跳过"的提示；
 > 该字段缺失时（老客户端）行为不变，规则照旧在执行时被拦截。
 
+## 第 7 轮（2026-09-12）
+
+本轮范围：**风险问题闭环生命周期**（状态机时间戳、截止时间写入路径、未闭环口径）。
+
+### 一、已修复
+
+#### 7.1 【中危】闭环时间戳与状态不自洽（详情页"闭环时间线"直接说谎）
+
+`update_issue` 只在"进入 FIXED/VERIFIED"时写时间戳，**离开这些状态时不清空**，且直接
+VERIFIED 不补 `fixed_at`。风险中心详情弹窗（`IssueDetailModal.tsx` 的"闭环时间线"）
+直接展示这两列，因此出现四类矛盾数据：
+
+| 操作序列 | 修复前 | 修复后 |
+| --- | --- | --- |
+| FIXED → 重开（OPEN/PROCESSING） | 状态"处理中"但**仍显示修复时间**，看起来已修好 | 两个时间戳清空 |
+| 直接 VERIFIED（跳过 FIXED） | **有验证时间、无修复时间** | 自动补 `fixed_at`，两者成对 |
+| FIXED → IGNORED | 仍保留修复时间 | 清空 |
+| 重复提交同一状态 | `fixed_at`/`verified_at` 被**刷新**（改写闭环时长） | 保留首次发生时间 |
+
+- **修复**：状态流转时按"时间戳只存在于 FIXED/VERIFIED"的不变量统一维护；
+  重复提交同状态幂等（保留首次时间），FIXED↔VERIFIED 回退时按新状态重写。
+- **红灯证据**：`AssertionError: 重开后不应保留修复时间 / assert ('2026-09-12T15:53:17.497869' is None)`、
+  `验证时间存在时修复时间不得为空`、`重复 FIXED 不应刷新修复时间`。
+- **部署后实测**：探针问题 FIXED（写入修复时间）→ 重复 FIXED（时间不变）→ VERIFIED（两者齐全）
+  → 重开 PROCESSING（两者清空）全部符合预期。
+
+#### 7.2 【中危】`deadline_at` 没有任何写入路径（"截止时间"永远是空）
+
+排查确认：`deadline_at` 只有三处出现——模型列、序列化字段（`_issue_to_dict`）、前端展示列，
+**全仓不存在任何写入点**。后果：详情页"截止时间"永远为 `-`；`ops.risk.triage` 描述里承诺的
+"超期"维度永远无法触发（无数据可判）。
+
+- **修复**：`UpdateIssuePayload` 增加 `deadline_at`（ISO8601，支持 `Z`/`+08:00`），
+  服务层 `_parse_deadline_at` 解析：带时区统一转 **naive UTC**（与全平台持久化口径一致），
+  空串表示清除，非法格式返回 400（不再静默忽略）。
+- **红灯证据**：`assert None == '2026-10-01T12:00:00'`（写不进去）、
+  `Failed: DID NOT RAISE`（非法值原本无从校验）。
+- **部署后实测**：`2026-10-01T20:00:00+08:00` → 存为 `2026-10-01T12:00:00`；
+  `2026/10/01` → HTTP 400；空串 → 清除为 `null`。
+
+#### 7.3 【中危】`ops.risk.triage` 漏掉"处理中（PROCESSING）"风险，与全平台未闭环口径不一致
+
+平台口径在四处明确写死为 **未闭环 = OPEN + PROCESSING**：
+`overview.open_issue_count`（L5159-5161）、issue 列表 `status=OPEN,PROCESSING`（L5025-5026）、
+看板/报表合计（L5189-5190、L5307）。但面向 AI/Agent 的 `ops.risk.triage`
+（其自身描述也写着"未闭环 = status 传 OPEN,PROCESSING"）实际调用
+`list_risks({"status": "OPEN"})` → **在办风险被排除在优先级建议之外**，
+高危处理清单与总览数字不一致。
+
+- **修复**：口径改为 `OPEN,PROCESSING`；同时兑现工具描述里承诺的**超期维度**
+  （同等级内超期优先、条目新增 `overdue`/`status`/`deadline_at` 字段、摘要追加超期数量），
+  并把描述中并未实现的"生产/重复"字样改为与实现一致的表述（避免描述正向漂移）。
+- **红灯证据**：`AssertionError: PROCESSING（在办）风险必须进入分流清单`、
+  `超期的高危应排在同级最前：['A 未超期', 'B 已超期', ...]`。
+- **部署后实测**：生产未闭环 = 列表 `OPEN,PROCESSING` total **12** = `overview.open_issue_count` **12**
+  （只算 OPEN 是 11，即修复前 triage 会报 11）；triage 摘要报"未闭环风险 12 个"，
+  清单 12 条，状态集合 `['OPEN','PROCESSING']`，条目带 `overdue` 字段。
+
+### 二、已排除 / 记录（本轮审计结论，避免误修）
+
+| 审计项 | 结论 |
+| --- | --- |
+| `_aggregate_risk_counts` 的 `normal` 按行计数、而高/中/低按 `(server, category)` 去重 | **不是 BUG**：`tests/test_inspection_scoring.py::test_aggregate_normal_count` 明确锁定"normal = PASS 且 risk_level=NONE 的行数"语义（`normal_count` 展示的是正常项数，参与评分的只有高中低），本轮不改；仅作为口径说明记录 |
+| AI/MCP 是否能改风险状态 | **不能**：`ops.risk.update_status`/`ops.risk.verify`/`ops.risk.ignore` 均为审批占位（恒返回 `requires_human_approval=true`），唯一写入路径是网页 PATCH → `update_issue`，本轮修复即覆盖全部消费者 |
+| 风险问题自动建档 | 正常：`_save_result` 对 `risk_level∈{HIGH,MEDIUM,LOW}` 且 `status∈{RISK,WARNING,ERROR}` 建档；生产 20 条 item_result → 12 条风险项 → 12 条问题，逐条对得上 |
+| `triage` 的"重复风险"维度 | 未实现（需标题相似度聚类），已从描述中移除，列为后续增强，非本轮缺陷 |
+| `deadline_at` 的到期提醒/通知 | 无调度消费方（仅展示），本轮只补齐写入路径，不做通知 |
+
+### 三、待办（后续轮次）
+
+- 巡检域 20+ 个 analyzer 的业务判定口径逐个复核。
+- 前端竞态与假交互；部署/执行/维护链路确认闸门与回滚一致性；批量改 `auth_type` 不校验新凭据。
+- 剩余 `except: pass` 静默失败分诊；`period` 等 API 参数校验。
+- MCP 工具描述与 `mcp_capability_service.py` 能力目录的一致性巡检（两处描述来源易漂移）。
+- 保留清单：密钥轮换（待业主决定）、`ENV=local` 关闭生产安全轨相关项、fnOS/OpenClaw 遗留项。
+
+### 附：第 7 轮可复现的验证脚本
+
+- `tests/test_inspection_issue_lifecycle.py`（14 项）：状态机时间戳不变量、截止时间写入/清除/校验、
+  triage 未闭环口径与超期排序；
+- `fnos-migration/_verify_round7_issues.py`（未入库）：对**部署后的 OPS 生产进程**做端到端实测。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 37260；20 项断言全部 OK）
+
+| 实测项 | 结果 |
+| --- | --- |
+| 未闭环口径一致性 | 列表 `status=OPEN,PROCESSING` total = **12** = `overview.open_issue_count` **12**（只算 OPEN 为 11） |
+| `ops.risk.triage` | 摘要"当前未闭环风险 **12** 个，建议优先处理 8 个高危风险。"，清单 12 条，状态集合 `['OPEN','PROCESSING']`，条目含 `overdue` |
+| 探针问题状态机 | FIXED → 修复时间写入；重复 FIXED 时间不变；VERIFIED → 修复+验证齐全；重开 PROCESSING → 两者清空 |
+| 截止时间 | `+08:00` 归一为 UTC `2026-10-01T12:00:00`；`2026/10/01` → **400**；空串 → `null` |
+| 生产数据复原 | 探针问题删除后问题总数 12→12、总览未闭环 12→12、无残留 |
+| 全量测试套件 | `pytest tests/ -q` → **1470 passed**（第 6 轮 1456 + 本轮新增 14） |
+
+> 运维提示：本轮只改后端，**需重启 OPS 生效**（前端无改动，无需 Ctrl+F5）。
+> 前端风险中心已能设置截止时间（PATCH `deadline_at`）并看到 `overdue` 提示；
+> 老客户端不传该字段时行为不变。
+
+

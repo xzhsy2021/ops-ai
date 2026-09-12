@@ -5048,19 +5048,57 @@ def update_issue(db: Session, issue_id: str, payload: Dict[str, Any]) -> Dict[st
         status = str(payload["status"]).upper()
         if status not in ISSUE_STATUSES:
             raise HTTPException(status_code=400, detail=f"Unsupported status: {status}")
+        prev = str(row.status or "OPEN").upper()
+        now = _now()
         row.status = status
+        # 闭环时间戳必须与状态自洽：风险中心详情页的"闭环时间线"直接展示这两个字段。
+        # 修复前只有"进入 FIXED/VERIFIED 时写入"，导致三类矛盾数据：
+        #   1. 重开（FIXED/VERIFIED → OPEN/PROCESSING）后仍显示修复时间，看起来已修好；
+        #   2. 跳过 FIXED 直接 VERIFIED 时"有验证时间但无修复时间"；
+        #   3. 标记 IGNORED 后仍保留修复/验证时间。
+        # 另外 FIXED→FIXED / VERIFIED→VERIFIED 的重复提交不再把时间往后推，
+        # 保留首次发生时间，避免"修复耗时/闭环时长"统计被重复点击改写。
         if status == "FIXED":
-            row.fixed_at = _now()
-        if status == "VERIFIED":
-            row.verified_at = _now()
+            if prev != "FIXED" or row.fixed_at is None:
+                row.fixed_at = now
+            row.verified_at = None
+        elif status == "VERIFIED":
+            if row.fixed_at is None:
+                row.fixed_at = now
+            if prev != "VERIFIED" or row.verified_at is None:
+                row.verified_at = now
+        else:
+            row.fixed_at = None
+            row.verified_at = None
     if "owner_id" in payload:
         row.owner_id = str(payload.get("owner_id") or "")[:128]
     if "suggestion" in payload:
         row.suggestion = str(payload.get("suggestion") or "")[:4000]
+    if "deadline_at" in payload:
+        # 截止时间此前没有任何写入路径（列/序列化/前端"截止时间"都在，但永远为空），
+        # 导致超期风险无法被标注与统计。空串 = 清除截止时间。
+        row.deadline_at = _parse_deadline_at(payload.get("deadline_at"))
     row.updated_at = _now()
     db.commit()
     db.refresh(row)
     return _issue_to_dict(row)
+
+
+def _parse_deadline_at(value: Any) -> Optional[datetime]:
+    """解析问题截止时间：接受 ISO8601（含时区/Z）或空值清除；非法值 → 400。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    raw = text.replace("Z", "+00:00") if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid deadline_at (expect ISO8601): {text}")
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _running_runs_with_progress(db: Session) -> List[Dict[str, Any]]:

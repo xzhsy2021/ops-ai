@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from fastapi import HTTPException
 
 from app.db.models import InspectionIssue
 from app.services.tool_registry import registry
+
+
+def _utcnow() -> datetime:
+    """与 DB 持久化口径一致：naive UTC（见 app/db/models.py _utcnow）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _parse_iso(value: Any):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    raw = text.replace("Z", "+00:00") if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _issue_to_dict(row: InspectionIssue) -> Dict[str, Any]:
@@ -121,7 +143,10 @@ def get_risk(args: Dict[str, Any], ctx, db):
 @registry.register(
     name="ops.risk.triage",
     title="未闭环风险分流",
-    description="对未闭环风险按生产/高危/超期/重复等维度生成处理优先级建议，不改变风险状态。",
+    description=(
+        "对未闭环风险按高危、超期优先排序，生成处理优先级建议，不改变风险状态。"
+        "未闭环 = OPEN + PROCESSING（与巡检总览 open_issue_count 口径一致）。"
+    ),
     scopes=["ops:read"],
     risk="low",
     category="risk",
@@ -134,22 +159,49 @@ def get_risk(args: Dict[str, Any], ctx, db):
     input_schema={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "additionalProperties": False},
 )
 def triage_risks(args: Dict[str, Any], ctx, db):
-    data = list_risks({"status": "OPEN", "limit": args.get("limit") or 100}, ctx, db)
+    # 未闭环口径必须是 OPEN + PROCESSING：只取 OPEN 会把"处理中"的在办风险漏掉，
+    # 与 /inspection/overview 的 open_issue_count、ops.risk.list 的默认口径都不一致。
+    data = list_risks({"status": "OPEN,PROCESSING", "limit": args.get("limit") or 100}, ctx, db)
     items = data.get("items") or []
     rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-    sorted_items = sorted(items, key=lambda x: (rank.get(str(x.get("risk_level") or "LOW"), 9), str(x.get("created_at") or "")))
+    now = _utcnow()
+
+    def _overdue(item: Dict[str, Any]) -> bool:
+        deadline = _parse_iso(item.get("deadline_at"))
+        return bool(deadline and deadline < now)
+
+    # 高危优先；同等级内超期优先（工具描述承诺的"超期"维度），再按创建时间升序。
+    sorted_items = sorted(
+        items,
+        key=lambda x: (rank.get(str(x.get("risk_level") or "LOW"), 9), not _overdue(x), str(x.get("created_at") or "")),
+    )
     priorities = []
     for idx, item in enumerate(sorted_items[:20], start=1):
         level = item.get("risk_level") or "LOW"
+        overdue = _overdue(item)
+        if overdue:
+            reason = "已超过截止时间，需立即处理并说明原因"
+        elif level == "HIGH":
+            reason = "高危优先处理"
+        else:
+            reason = "中低危按影响范围和整改期限处理"
         priorities.append({
             "risk_id": item.get("id"),
             "priority": "P0" if level == "HIGH" else "P1" if level == "MEDIUM" else "P2",
             "title": item.get("title"),
             "risk_level": level,
-            "reason": "高危优先处理" if level == "HIGH" else "中低危按影响范围和整改期限处理",
+            "status": item.get("status"),
+            "deadline_at": item.get("deadline_at"),
+            "overdue": overdue,
+            "reason": reason,
             "suggestion": item.get("suggestion") or "请指定负责人处理并复查。",
         })
-    return {"summary": f"当前未闭环风险 {len(items)} 个，建议优先处理 {len([x for x in items if x.get('risk_level') == 'HIGH'])} 个高危风险。", "priorities": priorities, "recommendations": priorities}
+    high_count = len([x for x in items if x.get("risk_level") == "HIGH"])
+    overdue_count = len([x for x in items if _overdue(x)])
+    summary = f"当前未闭环风险 {len(items)} 个，建议优先处理 {high_count} 个高危风险"
+    if overdue_count:
+        summary += f"；其中 {overdue_count} 个已超期"
+    return {"summary": summary + "。", "priorities": priorities, "recommendations": priorities}
 
 
 @registry.register(

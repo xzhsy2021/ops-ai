@@ -41,6 +41,9 @@ class UpdateIssuePayload(BaseModel):
     status: Optional[str] = None
     owner_id: Optional[str] = None
     suggestion: Optional[str] = None
+    # 截止时间：ISO8601（支持带时区/Z），空串表示清除。此前该字段没有任何写入路径，
+    # 导致详情页"截止时间"永远为空、超期风险无法标注。
+    deadline_at: Optional[str] = None
 
 
 class UpdateRulePayload(BaseModel):

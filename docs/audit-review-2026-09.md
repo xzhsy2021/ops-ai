@@ -266,6 +266,24 @@
 
 ### 附：第 3 轮可复现的验证脚本
 - `tests/test_connection_secret_preservation.py`：12 项凭据写入安全回归（服务层 + 接口层 + helper 层 + 审计）；
+- `fnos-migration/_verify_connection_secret_fix.py`（未入库）：对**部署后的 OPS 生产进程**做端到端实测
+  （建临时连接 → 前端形状更新 → 显式清空 → 删除），18 项断言全部 OK；
 - `fnos-migration/_verify_credential_write_safety.py`（未入库，只读）：扫描内联跳板机配置是否携带
   口令/私钥，并列出各连接"已保存密钥"的布尔状态，便于修复前后对比。
+
+#### 部署后实测证据（2026-09-12，OPS 重启后 PID 36876）
+| 实测项 | 结果 |
+| --- | --- |
+| 建临时连接（含 DB 口令/SSH 口令/私钥内容）后 `GET` 详情 | `ssh_key_has_content=true`；详情**不含** `password`/`ssh_key_content` 字段 |
+| 按前端真实形状 `PUT`（`ssh_password=''`、无 `ssh_key_content`，只改描述） | HTTP 200；DB 中 6 个 `*_encrypted` 列**全部保留**，`description` 已更新 |
+| 再 `GET` 详情 | `ssh_key_has_content` **仍为 true**（修复前会变 false） |
+| `PUT` 显式 `ssh_key_content=null` | 私钥按预期清空，其它密钥不受影响（"有意清空"能力未被堵死） |
+| 审计 `maintenance.connection.*` | 产生记录且只含布尔位：`secrets_changed=none`、`secrets_changed=ssh_key_content_encrypted:1->0`，**无任何密钥明文** |
+| 服务器掩码创建 | `key_content="********"` → 400「密钥内容认证模式下必须提供密钥内容」，库中 **0 条**；`password="********"` → 400 |
+| 服务器真实密钥创建 | HTTP 200，响应回显已脱敏为 `********`（`has_key_content=true`），已清理删除 |
+| 临时数据 | 临时连接/服务器均已删除，库内残留 **0** |
+
+> 运维提示：`PUT /api/v2/maintenance/connections/{id}` 接收的是**全量** `ConnectionCreate`
+> （缺少 name/environment/host/username 会 422），因此"有意清空某密钥"需提交完整对象并把该字段置 `null`；
+> 前端表单只提交自己管理的字段 + 空串，语义为"保持原值"。
 

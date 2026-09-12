@@ -1145,7 +1145,8 @@ def test_pipeline_deployment_is_failed_when_lock_acquire_raises(monkeypatch, sql
     monkeypatch.setattr(exec_mod, "_merge_release_variables", lambda req, db: {})
     monkeypatch.setattr(exec_mod, "_assert_environment_server_consistency", lambda env, servers: None)
     monkeypatch.setattr(exec_mod, "_build_confirmation", lambda req, db, user: {"blockers": [], "risk_level": "medium"})
-    monkeypatch.setattr(exec_mod, "_assert_strict_deploy_confirmation", lambda req, data, confirmation: None)
+    # 2026-09-11：_assert_strict_deploy_confirmation 增补 db 参数（第 4 层要读设置）
+    monkeypatch.setattr(exec_mod, "_assert_strict_deploy_confirmation", lambda *args, **kwargs: None)
     monkeypatch.setattr(exec_mod, "_db_pipeline_steps", lambda db, pipeline_id: [])
     monkeypatch.setattr(exec_mod, "_default_release_steps", lambda req, db: [])
     monkeypatch.setattr(exec_mod, "acquire_deployment_locks", lambda *args, **kwargs: (_ for _ in ()).throw(HTTPException(status_code=409, detail="lock conflict")))

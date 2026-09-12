@@ -88,6 +88,7 @@ export function useDeployActions(args: UseDeployActionsArgs) {
   const [rollbackSubmitting, setRollbackSubmitting] = useState(false)
   const [releaseRiskDialogOpen, setReleaseRiskDialogOpen] = useState(false)
   const [releaseConfirmText, setReleaseConfirmText] = useState('')
+  const [releaseClauseText, setReleaseClauseText] = useState('')
   const [releaseReason, setReleaseReason] = useState('')
   const [pendingReleaseConfirmation, setPendingReleaseConfirmation] = useState<any>(null)
   const [cancelRiskDialogOpen, setCancelRiskDialogOpen] = useState(false)
@@ -184,7 +185,7 @@ export function useDeployActions(args: UseDeployActionsArgs) {
     return ['prod', 'production', 'prd', 'online', 'live', 'release', '线上', '生产', '生产环境'].includes(value)
   }, [environment])
 
-  const doDeploy = useCallback(async (extra?: { confirm_text?: string; reason?: string; confirm_production?: boolean }) => {
+  const doDeploy = useCallback(async (extra?: { confirm_text?: string; reason?: string; confirm_production?: boolean; prod_confirm_text?: string }) => {
     setLoading(true)
     try {
       const res: any = await deploy.execute({ ...buildDeployPayload(), ...(extra || {}) })
@@ -238,12 +239,14 @@ export function useDeployActions(args: UseDeployActionsArgs) {
       if (isProdRelease() || confirmation.requires_confirmation || precheck.requires_confirmation) {
         setPendingReleaseConfirmation({ ...confirmation, precheck, required_confirmation: requiredConfirmText })
         setReleaseConfirmText('')
+        setReleaseClauseText('')
         setReleaseReason('')
         setReleaseRiskDialogOpen(true)
         return
       }
       setPendingReleaseConfirmation({ ...confirmation, precheck, required_confirmation: requiredConfirmText, risk_level: confirmation.risk_level || 'medium' })
       setReleaseConfirmText('')
+      setReleaseClauseText('')
       setReleaseReason('')
       setReleaseRiskDialogOpen(true)
       return
@@ -260,20 +263,35 @@ export function useDeployActions(args: UseDeployActionsArgs) {
     setReleaseRiskDialogOpen(false)
     setPendingReleaseConfirmation(null)
     setReleaseConfirmText('')
+    setReleaseClauseText('')
     setReleaseReason('')
   }, [])
 
   const confirmRiskRelease = useCallback(() => {
     const required = pendingReleaseConfirmation?.required_confirmation || ''
-    const effectiveConfirmText = (releaseConfirmText.trim() || required).trim()
+    // 第 4 层（strict_prod_confirmation）：生产环境不再用"空输入回落正确短语"糊过去，
+    // 也不再用 confirm_production 旁路——必须逐字输入短语，并额外输入确认从句。
+    const requiresProdConfirm = Boolean(pendingReleaseConfirmation?.requires_prod_confirm)
+    const prodClause = String(pendingReleaseConfirmation?.prod_confirm_text || '')
+    const typed = releaseConfirmText.trim()
+    if (requiresProdConfirm && typed !== required) {
+      notify(`请输入完整确认短语：${required}`, 'error')
+      return
+    }
+    if (requiresProdConfirm && prodClause && releaseClauseText.trim() !== prodClause) {
+      notify(`请输入生产环境确认从句：${prodClause}`, 'error')
+      return
+    }
+    const effectiveConfirmText = (typed || (requiresProdConfirm ? '' : required)).trim()
     setReleaseRiskDialogOpen(false)
     resetRunState('running')
     doDeploy({
       confirm_text: effectiveConfirmText,
       reason: releaseReason.trim(),
-      confirm_production: isProdRelease(),
+      ...(requiresProdConfirm && prodClause ? { prod_confirm_text: prodClause } : {}),
+      ...(requiresProdConfirm ? {} : { confirm_production: isProdRelease() }),
     })
-  }, [pendingReleaseConfirmation, releaseConfirmText, releaseReason, isProdRelease, resetRunState, doDeploy, notify])
+  }, [pendingReleaseConfirmation, releaseConfirmText, releaseClauseText, releaseReason, isProdRelease, resetRunState, doDeploy, notify])
 
   const handlePrecheck = useCallback(async () => {
     if (!system) { notify('请先选择系统', 'error'); return }
@@ -425,10 +443,12 @@ export function useDeployActions(args: UseDeployActionsArgs) {
     timelineSteps,
     releaseRiskDialogOpen,
     releaseConfirmText,
+    releaseClauseText,
     releaseReason,
     pendingReleaseConfirmation,
     cancelRiskDialogOpen,
     setReleaseConfirmText,
+    setReleaseClauseText,
     setReleaseReason,
     cancelReleaseRiskDialog,
     confirmRiskRelease,

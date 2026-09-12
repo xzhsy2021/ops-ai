@@ -743,6 +743,22 @@ def _deploy_confirm_text(req: DeployRequest) -> str:
     return f"确认发布 {req.system}/{service_part} 到 {env_part}"
 
 
+def _requires_prod_confirm(db: Optional[Session], environment: str) -> bool:
+    """第 4 层是否对本环境生效（读设置失败时对生产 fail-closed）。"""
+    if _env_alias(environment) != "prod":
+        return False
+    from app.services.tool_policy import strict_prod_confirmation_required
+
+    return strict_prod_confirmation_required(db, environment)
+
+
+def _prod_confirm_clause(db: Optional[Session]) -> str:
+    """回传给前端的确认从句文本（开关关闭或非生产时为空串）。"""
+    from app.services.approval_phrase import PROD_CONFIRM_CLAUSE
+
+    return PROD_CONFIRM_CLAUSE
+
+
 def _extract_change_reason(payload: Dict[str, Any] | None) -> str:
     payload = payload or {}
     variables = payload.get("variables") if isinstance(payload.get("variables"), dict) else {}
@@ -867,14 +883,54 @@ def _build_operator_checklist(confirmation: Dict[str, Any]) -> List[Dict[str, An
     return checklist
 
 
-def _assert_strict_deploy_confirmation(req: DeployRequest, payload: Dict[str, Any], confirmation: Dict[str, Any]) -> None:
+def _assert_strict_deploy_confirmation(
+    req: DeployRequest,
+    payload: Dict[str, Any],
+    confirmation: Dict[str, Any],
+    db: Optional[Session] = None,
+) -> None:
+    """生产发布的确认校验。
+
+    第 4 层（strict_prod_confirmation，2026-09-11 生产发版审计补齐）：开启时，
+    生产发布必须**逐字**给出确认短语，并且额外给出确认从句「我确认生产操作」。
+
+    这里刻意收紧了两条历史旁路——它们与前端 `useDeployActions.confirmRiskRelease`
+    自动发送的 `confirm_production: true` 组合后，会让 Web 端"生产严格确认"完全
+    形同虚设（点一下就能推生产）：
+      * `confirm_production: true`
+      * `confirm_text == "CONFIRM"`
+    非生产或开关关闭时保持原有兼容行为（legacy），避免影响既有客户端。
+    """
     if _env_alias(req.environment) != "prod":
         return
     expected = confirmation.get("required_confirmation") or confirmation.get("confirm_text") or _deploy_confirm_text(req)
     supplied = str(payload.get("confirm_text") or payload.get("confirmation") or "").strip()
-    legacy_confirmed = bool(payload.get("confirm_production")) or supplied.upper() == "CONFIRM"
-    if supplied != expected and not legacy_confirmed:
-        raise HTTPException(status_code=400, detail=f"生产环境发布需要输入确认短语：{expected}")
+
+    from app.services.approval_phrase import PROD_CONFIRM_CLAUSE, split_prod_confirmation
+    from app.services.tool_policy import strict_prod_confirmation_required
+
+    strict = strict_prod_confirmation_required(db, req.environment) if db is not None else False
+    if strict:
+        clause = str(payload.get("prod_confirm_text") or "").strip()
+        # 概率容忍：审批人可能把从句直接接在短语后面，剥离后再逐字比对短语
+        base, clause_ok = split_prod_confirmation(supplied, clause)
+        if not clause_ok:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"生产环境发布需要额外确认从句「{PROD_CONFIRM_CLAUSE}」："
+                    "确认短语与该从句缺一不可（可另传 prod_confirm_text，或写在确认短语之后）"
+                ),
+            )
+        if base.strip() != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"生产环境发布需要逐字输入确认短语：{expected}",
+            )
+    else:
+        legacy_confirmed = bool(payload.get("confirm_production")) or supplied.upper() == "CONFIRM"
+        if supplied != expected and not legacy_confirmed:
+            raise HTTPException(status_code=400, detail=f"生产环境发布需要输入确认短语：{expected}")
     reason = _extract_change_reason(payload)
     if not reason:
         raise HTTPException(status_code=400, detail="生产环境发布必须填写 reason 或 change_reason")
@@ -931,6 +987,10 @@ def _build_confirmation(req: DeployRequest, db: Session, user: Optional[Dict[str
         "requires_confirmation": requires_confirmation,
         "required_confirmation": confirm_text if requires_confirmation else "",
         "confirm_text": confirm_text if requires_confirmation else "",
+        # 第 4 层：生产环境且开关开启时，前端必须渲染确认从句输入框并随请求回传
+        # prod_confirm_text（否则后端会 400）。字段始终存在，便于前端统一读取。
+        "prod_confirm_text": _prod_confirm_clause(db) if _env_alias(req.environment) == "prod" else "",
+        "requires_prod_confirm": _requires_prod_confirm(db, req.environment),
         "summary": {
             "system": req.system,
             "service": req.service,

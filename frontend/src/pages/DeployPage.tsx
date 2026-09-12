@@ -159,10 +159,12 @@ export default function DeployPage() {
     rollbackSubmitting,
     releaseRiskDialogOpen,
     releaseConfirmText,
+    releaseClauseText,
     releaseReason,
     pendingReleaseConfirmation,
     cancelRiskDialogOpen,
     setReleaseConfirmText,
+    setReleaseClauseText,
     setReleaseReason,
     cancelReleaseRiskDialog,
     confirmRiskRelease,
@@ -526,6 +528,9 @@ export default function DeployPage() {
         confirmText={pendingReleaseConfirmation?.required_confirmation || ''}
         value={releaseConfirmText}
         onValueChange={setReleaseConfirmText}
+        clauseText={pendingReleaseConfirmation?.prod_confirm_text || ''}
+        clauseValue={releaseClauseText}
+        onClauseValueChange={setReleaseClauseText}
         reason={releaseReason}
         onReasonChange={setReleaseReason}
         reasonRequired={false}
@@ -539,7 +544,7 @@ export default function DeployPage() {
         ]}
         onCancel={cancelReleaseRiskDialog}
         onConfirm={confirmRiskRelease}
-        confirmMode="one-click"
+        confirmMode={pendingReleaseConfirmation?.requires_prod_confirm ? 'type' : 'one-click'}
       />
 
 

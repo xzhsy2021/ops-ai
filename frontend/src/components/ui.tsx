@@ -135,6 +135,10 @@ export function RiskConfirmDialog({
   confirmDisabled = false,
   confirmMode = 'type',
   showConfirmTextInOneClick = true,
+  clauseText = '',
+  clauseValue = '',
+  onClauseValueChange,
+  clauseLabel = '生产环境额外确认从句',
   result,
 }: {
   open: boolean
@@ -156,12 +160,22 @@ export function RiskConfirmDialog({
   confirmDisabled?: boolean
   confirmMode?: 'type' | 'one-click'
   showConfirmTextInOneClick?: boolean
+  /** 第 4 层：需要额外输入的确认从句（生产环境），提供时强制逐字输入 */
+  clauseText?: string
+  clauseValue?: string
+  onClauseValueChange?: (value: string) => void
+  clauseLabel?: string
   result?: RiskActionResult | null
 }) {
   if (!open) return null
 
   const reasonReady = !reasonRequired || Boolean((reason || '').trim())
-  const matched = confirmMode === 'one-click' ? reasonReady : value.trim() === confirmText && reasonReady
+  const clauseRequired = Boolean(clauseText)
+  const clauseReady = !clauseRequired || clauseValue.trim() === clauseText
+  const phraseReady = confirmMode === 'one-click' && !clauseRequired
+    ? true
+    : value.trim() === confirmText
+  const matched = phraseReady && clauseReady && reasonReady
   const showResult = Boolean(result)
 
   // 关键：用 createPortal 把 dialog 渲染到 body，避免被父级（表格行/card）stacking context 影响导致子元素错位
@@ -189,7 +203,7 @@ export function RiskConfirmDialog({
                 <textarea value={reason || ''} onChange={(e) => onReasonChange(e.target.value)} placeholder="例如：恢复前验证失败 / 清理过期备份 / 常规发布" />
               </label>
             )}
-            {confirmMode === 'type' ? (
+            {confirmMode === 'type' || clauseRequired ? (
               <label className="risk-confirm-label">
                 输入 <code>{confirmText}</code> 确认执行
                 <input autoFocus value={value} onChange={(e) => onValueChange(e.target.value)} placeholder={confirmText} />
@@ -200,6 +214,16 @@ export function RiskConfirmDialog({
                 <span>请核对影响对象和风险信息。当前页面采用快捷确认，无需手动输入确认短语。</span>
                 {showConfirmTextInOneClick && confirmText && <code>{confirmText}</code>}
               </div>
+            )}
+            {clauseRequired && (
+              <label className="risk-confirm-label">
+                {clauseLabel}（生产环境必填）
+                <input
+                  value={clauseValue}
+                  onChange={(e) => onClauseValueChange?.(e.target.value)}
+                  placeholder={clauseText}
+                />
+              </label>
             )}
             <div className="risk-confirm-actions">
               <button className="btn btn-subtle" onClick={onCancel}>取消</button>

@@ -84,7 +84,7 @@ async def queue_deploy_v2(user: Dict[str, Any], data: Dict[str, Any], db: Sessio
     confirmation = _build_confirmation(req, db, user)
     if confirmation.get("blockers"):
         raise HTTPException(status_code=400, detail="发布前校验未通过：" + "；".join(confirmation.get("blockers", [])))
-    _assert_strict_deploy_confirmation(req, data, confirmation)
+    _assert_strict_deploy_confirmation(req, data, confirmation, db)
 
     effective_pipeline_id = req.pipeline_id or (confirmation.get("pipeline_id") or "")
     steps = data.get("steps") or _db_pipeline_steps(db, effective_pipeline_id) or _default_release_steps(req, db)

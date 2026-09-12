@@ -211,18 +211,30 @@ def _run_server_background(run_id: str, server_id: str, categories: Optional[Lis
     db = SessionLocal()
     try:
         svc.execute_server_inspection_run(db, run_id=run_id, server_id=server_id, categories=categories, command_timeout_seconds=command_timeout_seconds or svc.DEFAULT_COMMAND_TIMEOUT_SECONDS, run_timeout_seconds=run_timeout_seconds or svc.DEFAULT_RUN_TIMEOUT_SECONDS)
+    except Exception as exc:
+        # 后台任务异常不能让 run 永久停在 RUNNING（服务层通常已收尾，这里是最后一道兜底）。
+        svc.mark_run_failed(None, run_id, f"服务器巡检执行失败：{exc}")
     finally:
         db.close()
 
 
 def _run_servers_batch_background(run_specs: List[Dict[str, Any]], concurrency: int | None = None, batch_size: int | None = None, command_timeout_seconds: int | None = None, run_timeout_seconds: int | None = None):
-    svc.execute_server_inspection_runs_batch(run_specs, concurrency=concurrency or svc.DEFAULT_BATCH_CONCURRENCY, batch_size=batch_size or svc.DEFAULT_BATCH_SIZE, command_timeout_seconds=command_timeout_seconds or svc.DEFAULT_COMMAND_TIMEOUT_SECONDS, run_timeout_seconds=run_timeout_seconds or svc.DEFAULT_RUN_TIMEOUT_SECONDS)
+    try:
+        svc.execute_server_inspection_runs_batch(run_specs, concurrency=concurrency or svc.DEFAULT_BATCH_CONCURRENCY, batch_size=batch_size or svc.DEFAULT_BATCH_SIZE, command_timeout_seconds=command_timeout_seconds or svc.DEFAULT_COMMAND_TIMEOUT_SECONDS, run_timeout_seconds=run_timeout_seconds or svc.DEFAULT_RUN_TIMEOUT_SECONDS)
+    except Exception as exc:
+        # 批量入口整体失败（此时逐个 worker 的收尾逻辑根本没跑到）：把预建的 run 全部收尾。
+        for spec in run_specs or []:
+            spec_run_id = str((spec or {}).get("run_id") or "")
+            if spec_run_id:
+                svc.mark_run_failed(None, spec_run_id, f"批量巡检未执行：{exc}")
 
 
 def _run_project_background(run_id: str, project_id: str, categories: Optional[List[str]] = None, include_server_summary: bool = True):
     db = SessionLocal()
     try:
         svc.execute_project_inspection_run(db, run_id=run_id, project_id=project_id, categories=categories, include_server_summary=include_server_summary)
+    except Exception as exc:
+        svc.mark_run_failed(None, run_id, f"项目巡检执行失败：{exc}")
     finally:
         db.close()
 

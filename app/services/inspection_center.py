@@ -113,6 +113,12 @@ MAX_BATCH_CONCURRENCY = int(os.getenv("INSPECTION_MAX_BATCH_CONCURRENCY", "71") 
 MAX_BATCH_SIZE = int(os.getenv("INSPECTION_MAX_BATCH_SIZE", "71") or "71")
 MAX_COMMAND_TIMEOUT_SECONDS = int(os.getenv("INSPECTION_MAX_COMMAND_TIMEOUT_SECONDS", "120") or "120")
 MAX_RUN_TIMEOUT_SECONDS = int(os.getenv("INSPECTION_MAX_RUN_TIMEOUT_SECONDS", "1800") or "1800")
+# 僵尸巡检回收：run 建库时即为 RUNNING，进程重启（部署）或后台任务异常会把它永久留在
+# "执行中"。判定分两步：自身超过 INSPECTION_STALE_RUN_SECONDS 无更新，
+# 且最近 INSPECTION_ACTIVE_HEARTBEAT_SECONDS 内没有任何 run 在推进（执行器已不在跑）。
+INSPECTION_STALE_RUN_SECONDS = int(os.getenv("INSPECTION_STALE_RUN_SECONDS", str(2 * MAX_RUN_TIMEOUT_SECONDS + 1800)) or "5400")
+INSPECTION_ACTIVE_HEARTBEAT_SECONDS = int(os.getenv("INSPECTION_ACTIVE_HEARTBEAT_SECONDS", "300") or "300")
+NON_TERMINAL_RUN_STATUSES = ("RUNNING", "PENDING")
 ACTIVE_SERVER_STATUSES = {"", "online", "enabled", "active", "ready", "up", "running"}
 DISABLED_SERVER_STATUSES = {"disabled", "disable", "stopped", "stop", "offline", "inactive", "decommissioned", "停用", "离线"}
 
@@ -4391,6 +4397,105 @@ def create_server_inspection_run(db: Session, *, server_id: str, categories: Opt
     return run
 
 
+def mark_run_failed(db: Optional[Session], run_id: str, message: str) -> bool:
+    """把巡检任务收尾为 FAILED（幂等，只对 RUNNING/PENDING 生效）。
+
+    存在的意义：run 建库时状态就是 RUNNING，若执行器在收尾逻辑之外抛错（例如读取
+    run 行本身遇到 SQLite 锁、阈值加载失败、后台任务被进程重启打断），该 run 会永久
+    停在"执行中"，而全仓没有其它回收逻辑。这里用"当前会话 → 独立新会话"两级兜底，
+    保证即使当前会话已损坏也能落库。返回是否真的写入。
+    """
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        return False
+    attempt_sessions: List[Optional[Session]] = [db, None]
+    for candidate in attempt_sessions:
+        session = candidate
+        owns_session = False
+        try:
+            if session is None:
+                from app.db.base import SessionLocal
+
+                session = SessionLocal()
+                owns_session = True
+            row = session.query(InspectionRun).filter(InspectionRun.id == normalized).first()
+            if row is None:
+                return False
+            if str(row.status or "").upper() not in NON_TERMINAL_RUN_STATUSES:
+                # 已终结（SUCCESS/PARTIAL_SUCCESS/FAILED）的任务不覆盖，避免抹掉真实结果。
+                return False
+            now = _now()
+            row.status = "FAILED"
+            row.summary = str(message or "巡检执行失败")[:500]
+            row.finished_at = now
+            row.updated_at = now
+            session.commit()
+            return True
+        except Exception:
+            if session is not None:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+            continue
+        finally:
+            if owns_session and session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+    return False
+
+
+def reap_stale_inspection_runs(db: Session, *, stale_after_seconds: Optional[int] = None, heartbeat_seconds: Optional[int] = None) -> List[str]:
+    """回收"执行器已死"的僵尸巡检，返回被标记为 FAILED 的 run_id 列表。
+
+    判定需要**同时**满足：
+      1. run 自身超过 ``stale_after_seconds``（默认 INSPECTION_STALE_RUN_SECONDS）没有更新；
+      2. 最近 ``heartbeat_seconds``（默认 INSPECTION_ACTIVE_HEARTBEAT_SECONDS）内，
+         巡检域内没有任何 RUNNING/PENDING run 被更新过（说明执行器进程已不在推进）。
+
+    条件 2 是关键：批量巡检会把整批 run 预先建好再排队执行，排队中的 run 自身不会更新；
+    只要同批还有 run 在推进（每个检查项都会刷新 updated_at），就不判定为僵尸，
+    因此不会误杀"排队等待中"的任务。
+    """
+    threshold = int(stale_after_seconds if stale_after_seconds is not None else INSPECTION_STALE_RUN_SECONDS)
+    heartbeat = int(heartbeat_seconds if heartbeat_seconds is not None else INSPECTION_ACTIVE_HEARTBEAT_SECONDS)
+    now = _now()
+    cutoff = now - timedelta(seconds=max(60, threshold))
+    heart_cutoff = now - timedelta(seconds=max(30, heartbeat))
+
+    active = (
+        db.query(InspectionRun.id)
+        .filter(
+            InspectionRun.status.in_(list(NON_TERMINAL_RUN_STATUSES)),
+            InspectionRun.updated_at >= heart_cutoff,
+        )
+        .first()
+    )
+    if active is not None:
+        return []
+
+    stale = (
+        db.query(InspectionRun)
+        .filter(
+            InspectionRun.status.in_(list(NON_TERMINAL_RUN_STATUSES)),
+            InspectionRun.updated_at < cutoff,
+        )
+        .all()
+    )
+    reaped: List[str] = []
+    for run in stale:
+        run.status = "FAILED"
+        run.summary = "巡检执行中断（后端进程重启或后台任务异常），已自动标记为失败；如需结果请重新发起巡检。"
+        run.finished_at = now
+        run.updated_at = now
+        reaped.append(run.id)
+    if reaped:
+        db.commit()
+    return reaped
+
+
 def execute_server_inspection_run(
     db: Session,
     *,
@@ -4400,7 +4505,12 @@ def execute_server_inspection_run(
     command_timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     run_timeout_seconds: int = DEFAULT_RUN_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
-    run = db.query(InspectionRun).filter(InspectionRun.id == run_id).first()
+    try:
+        run = db.query(InspectionRun).filter(InspectionRun.id == run_id).first()
+    except Exception as exc:
+        # 连任务行都读不出来（例如 SQLite 锁）也必须收尾，否则永久 RUNNING。
+        mark_run_failed(None, run_id, f"服务器巡检执行失败：无法读取巡检任务（{exc}）")
+        raise
     if not run:
         raise HTTPException(status_code=404, detail="Inspection run not found")
     sid = server_id or run.server_id
@@ -4408,8 +4518,8 @@ def execute_server_inspection_run(
     cmd_timeout = _clamp_int(command_timeout_seconds, DEFAULT_COMMAND_TIMEOUT_SECONDS, 5, MAX_COMMAND_TIMEOUT_SECONDS)
     run_timeout = _clamp_int(run_timeout_seconds, DEFAULT_RUN_TIMEOUT_SECONDS, 30, MAX_RUN_TIMEOUT_SECONDS)
     started_monotonic = time.monotonic()
-    thresholds = _load_thresholds(db)
     try:
+        thresholds = _load_thresholds(db)
         run.status = "RUNNING"
         run.summary = f"巡检执行中：开始服务器基础检查。命令超时 {cmd_timeout}s，单服务器总超时 {run_timeout}s。"
         run.updated_at = _now()
@@ -4433,12 +4543,12 @@ def execute_server_inspection_run(
             _finish_progress_item(db, run, step, result)
         run = _finalize_run(db, run)
     except Exception as exc:
-        _append_progress(db, run, CheckResult("SYSTEM", "SERVER_INSPECTION_UNHANDLED_ERROR", "服务器巡检执行异常", "ERROR", "MEDIUM", f"巡检执行异常：{exc}", "检查服务器连接、后端日志和命令兼容性。", str(exc), source_type="ERROR"))
-        run.status = "FAILED"
-        run.summary = f"巡检执行失败：{exc}"
-        run.finished_at = _now()
-        run.updated_at = _now()
-        db.commit()
+        try:
+            _append_progress(db, run, CheckResult("SYSTEM", "SERVER_INSPECTION_UNHANDLED_ERROR", "服务器巡检执行异常", "ERROR", "MEDIUM", f"巡检执行异常：{exc}", "检查服务器连接、后端日志和命令兼容性。", str(exc), source_type="ERROR"))
+        except Exception:
+            # 进度写入失败不能掩盖原始异常，更不能让 run 停在 RUNNING。
+            pass
+        mark_run_failed(db, run_id, f"服务器巡检执行失败：{exc}")
     return inspection_run_detail(db, run_id)
 
 
@@ -4460,14 +4570,24 @@ def run_server_inspection(
 def _run_one_server_in_new_session(*, server_id: str, categories: Optional[List[str]], trigger_type: str, created_by: str, generate_report: bool, command_timeout_seconds: int, run_timeout_seconds: int) -> Dict[str, Any]:
     from app.db.base import SessionLocal
     db2 = SessionLocal()
+    run_id = ""
     try:
-        result = run_server_inspection(db2, server_id=server_id, categories=categories, trigger_type=trigger_type, created_by=created_by, command_timeout_seconds=command_timeout_seconds, run_timeout_seconds=run_timeout_seconds)
+        assert_server_inspectable(server_id)
+        run = create_server_inspection_run(db2, server_id=server_id, categories=categories, trigger_type=trigger_type, created_by=created_by)
+        run_id = run.id
+        result = execute_server_inspection_run(db2, run_id=run_id, server_id=server_id, categories=categories, command_timeout_seconds=command_timeout_seconds, run_timeout_seconds=run_timeout_seconds)
         if generate_report:
             try:
                 result["report"] = generate_report_for_run(db2, result.get("run", {}).get("id", ""), fmt="md", created_by=created_by or "system").get("report")
             except Exception as exc:
                 result["report_error"] = str(exc)
         return result
+    except Exception as exc:
+        # 批量执行里 worker 抛错时调用方只会记录 errors；若不在这里收尾，
+        # 这个 run 会永久停在 RUNNING（概览一直显示"执行中"）。
+        if run_id:
+            mark_run_failed(None, run_id, f"服务器巡检执行失败：{exc}")
+        raise
     finally:
         db2.close()
 
@@ -4508,7 +4628,11 @@ def execute_server_inspection_runs_batch(
                 try:
                     results.append(future.result())
                 except Exception as exc:
-                    errors.append({"server_id": spec.get("server_id"), "run_id": spec.get("run_id"), "error": str(exc)})
+                    spec_run_id = str(spec.get("run_id") or "")
+                    errors.append({"server_id": spec.get("server_id"), "run_id": spec_run_id, "error": str(exc)})
+                    if spec_run_id:
+                        # 只要 worker 失败，对应 run 就必须收尾，否则永久 RUNNING。
+                        mark_run_failed(None, spec_run_id, f"服务器巡检执行失败：{exc}")
     return {"success": len(results), "failed": len(errors), "results": results, "errors": errors}
 
 
@@ -4671,14 +4795,18 @@ def create_project_inspection_run(db: Session, *, project_id: str, categories: O
 
 
 def execute_project_inspection_run(db: Session, *, run_id: str, project_id: Optional[str] = None, categories: Optional[List[str]] = None, include_server_summary: bool = True) -> Dict[str, Any]:
-    run = db.query(InspectionRun).filter(InspectionRun.id == run_id).first()
+    try:
+        run = db.query(InspectionRun).filter(InspectionRun.id == run_id).first()
+    except Exception as exc:
+        mark_run_failed(None, run_id, f"项目巡检执行失败：无法读取巡检任务（{exc}）")
+        raise
     if not run:
         raise HTTPException(status_code=404, detail="Inspection run not found")
-    pid = project_id or run.project_id
-    project = _get_project_with_relations(db, pid)
-    cats = categories or run.categories or [c["code"] for c in PROJECT_CATEGORIES]
-    selected = set(cats)
     try:
+        pid = project_id or run.project_id
+        project = _get_project_with_relations(db, pid)
+        cats = categories or run.categories or [c["code"] for c in PROJECT_CATEGORIES]
+        selected = set(cats)
         run.status = "RUNNING"
         run.summary = "项目巡检执行中：开始配置、文件、日志、备份检查。"
         run.updated_at = _now()
@@ -4702,12 +4830,11 @@ def execute_project_inspection_run(db: Session, *, run_id: str, project_id: Opti
                 _append_progress_counts_only(db, run)
         run = _finalize_run(db, run)
     except Exception as exc:
-        _append_progress(db, run, CheckResult("SYSTEM", "PROJECT_INSPECTION_UNHANDLED_ERROR", "项目巡检执行异常", "ERROR", "MEDIUM", f"巡检执行异常：{exc}", "检查项目配置、部署路径、服务器连接与后端日志。", str(exc), source_type="ERROR"))
-        run.status = "FAILED"
-        run.summary = f"项目巡检执行失败：{exc}"
-        run.finished_at = _now()
-        run.updated_at = _now()
-        db.commit()
+        try:
+            _append_progress(db, run, CheckResult("SYSTEM", "PROJECT_INSPECTION_UNHANDLED_ERROR", "项目巡检执行异常", "ERROR", "MEDIUM", f"巡检执行异常：{exc}", "检查项目配置、部署路径、服务器连接与后端日志。", str(exc), source_type="ERROR"))
+        except Exception:
+            pass
+        mark_run_failed(db, run_id, f"项目巡检执行失败：{exc}")
     return inspection_run_detail(db, run_id)
 
 
@@ -4890,6 +5017,9 @@ def _running_runs_with_progress(db: Session) -> List[Dict[str, Any]]:
     - items_total：按启用检查项配置估算的预期检查项数
     - progress_percent：按 items_done/items_total 估算的进度（RUNNING 封顶 99%）
     """
+    # 先回收僵尸（进程重启/后台任务异常留下的永久 RUNNING），保证下面列出的
+    # "执行中"任务确实还在推进，而不是永远挂着的历史残骸。
+    reap_stale_inspection_runs(db)
     running = (db.query(InspectionRun)
                .filter(InspectionRun.status.in_(["RUNNING", "PENDING"]))
                .order_by(InspectionRun.created_at.desc())
@@ -5019,13 +5149,21 @@ def overview(db: Session) -> Dict[str, Any]:
 
 def _parse_dt(value: Any, fallback: Optional[datetime] = None) -> datetime:
     if isinstance(value, datetime):
-        return value
+        parsed = value
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     if value:
         text_value = str(value).strip()
         try:
             if len(text_value) == 10:
                 return datetime.fromisoformat(text_value + "T00:00:00")
-            return datetime.fromisoformat(text_value.replace("Z", "+00:00")).replace(tzinfo=None)
+            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+            # 全仓持久化时间统一为 naive UTC：带偏移的入参必须换算到 UTC，
+            # 不能直接丢掉 tzinfo（否则 +08:00 会被当成 UTC，日期窗整体偏移 8 小时）。
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed
         except Exception:
             pass
     return fallback or _now()
@@ -5033,7 +5171,7 @@ def _parse_dt(value: Any, fallback: Optional[datetime] = None) -> datetime:
 
 def _period_bounds(period: str = "daily", date_from: str = "", date_to: str = "") -> tuple[datetime, datetime, str]:
     now = _now()
-    p = str(period or "daily").lower()
+    p = str(period or "daily").strip().lower()
     if date_from or date_to:
         start = _parse_dt(date_from, now.replace(hour=0, minute=0, second=0, microsecond=0))
         if date_to:
@@ -5055,8 +5193,11 @@ def _period_bounds(period: str = "daily", date_from: str = "", date_to: str = ""
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         end = now
         return start, end, "monthly"
+    # 未知周期兜底为"今日"。这里必须显式给 end 赋值：此前该分支直接返回未绑定的 end，
+    # 任何非 daily/weekly/monthly 的 period（如 "quarterly"、"7d"）都会抛
+    # UnboundLocalError，台账/报表/删除接口一律 500。
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, end, "daily"
+    return start, now, "daily"
 
 
 def _issue_status_counts(issues: List[Dict[str, Any]]) -> Dict[str, int]:

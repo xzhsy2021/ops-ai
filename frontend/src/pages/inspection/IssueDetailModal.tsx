@@ -8,8 +8,8 @@ export type IssueDetailModalProps = {
   onClose: () => void
   /** 状态变更/删除后刷新外部列表 */
   onChanged?: () => void | Promise<void>
-  /** 跳转到该风险问题所属的巡检详情 */
-  onOpenRun?: (runId: string) => void
+  /** 跳转到该风险问题所属的巡检详情；返回 Promise 时按钮会显示加载态，失败信息留在本弹窗内 */
+  onOpenRun?: (runId: string) => unknown | Promise<unknown>
   /** 由外部提供删除动作（复用列表页的确认与刷新逻辑）；返回 false 表示未删除（例如用户取消确认） */
   onDelete?: (issueId: string) => unknown | Promise<unknown>
 }
@@ -100,6 +100,20 @@ export function IssueDetailModal({ issueId, onClose, onChanged, onOpenRun, onDel
     }
   }
 
+  async function openRun(runId: string) {
+    if (!onOpenRun) return
+    setBusy('run')
+    setError('')
+    try {
+      // 由外部在成功打开巡检详情弹窗后关闭本弹窗（两个弹窗同为 fixed 遮罩，叠加会互相遮挡）
+      await onOpenRun(runId)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
   const objectLabel = issue ? (issue.server_id || issue.project_id || '-') : '-'
 
   return (
@@ -164,7 +178,7 @@ export function IssueDetailModal({ issueId, onClose, onChanged, onOpenRun, onDel
 
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 {issue.run_id
-                  ? <button className="btn btn-subtle" onClick={() => onOpenRun?.(issue.run_id)} disabled={!onOpenRun}>查看所属巡检详情</button>
+                  ? <button className="btn btn-subtle" onClick={() => openRun(issue.run_id)} disabled={!onOpenRun || !!busy}>{busy === 'run' ? '加载巡检详情…' : '查看所属巡检详情'}</button>
                   : <span className="muted">未关联巡检记录</span>}
                 <small className="muted">
                   巡检记录 {issue.run_id || '-'} · 巡检项 {issue.item_result_id || '-'} · 证据 {issue.evidence_id || '-'}

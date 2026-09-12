@@ -194,6 +194,20 @@ export default function InspectionCenterPage() {
     setIssuesTotal(Number(res.data?.total || 0))
   }
 
+  /** 刷新总览统计（未闭环数等），保证卡片数字与列表口径同步 */
+  async function reloadOverview() {
+    try {
+      const res: any = await inspection.overview()
+      setOverview(res.data || {})
+    } catch (_e) { /* 概览刷新失败不影响列表操作 */ }
+  }
+
+  /** 风险问题被修改后：列表 + 总览一起刷新 */
+  async function reloadIssuesAndOverview() {
+    await reloadIssues()
+    await reloadOverview()
+  }
+
   async function reloadRules(nextOffset = ruleOffset) {
     const res: any = await inspection.rules({ keyword: ruleFilter || undefined, scope_type: ruleScopeFilter || undefined, risk_level: ruleRiskFilter || undefined, limit: rulePageSize, offset: nextOffset })
     setRules(res.data?.items || [])
@@ -633,6 +647,7 @@ export default function InspectionCenterPage() {
       setMessage('风险问题已删除')
       setSelectedIssueIds((prev: string[]) => prev.filter((x: string) => x !== issueId))
       await reloadIssues()
+      await reloadOverview()
       return true
     } catch (e: any) { setError(e?.message || String(e)); return false }
   }
@@ -649,7 +664,7 @@ export default function InspectionCenterPage() {
       }
       setMessage(`已删除 ${ok}/${normalized.length} 条风险问题`)
       setSelectedIssueIds([])
-      await reloadIssues()
+      await reloadIssuesAndOverview()
     } catch (e: any) { setError(e?.message || String(e)) }
   }
 
@@ -686,7 +701,7 @@ export default function InspectionCenterPage() {
     try {
       await inspection.updateIssue(issueId, { status })
       setMessage('问题状态已更新')
-      await reloadIssues()
+      await reloadIssuesAndOverview()
     } catch (e: any) { setError(e?.message || String(e)) }
   }
 
@@ -914,12 +929,7 @@ export default function InspectionCenterPage() {
           overview={overview}
           servers={servers}
           projects={projects}
-          onRefresh={async () => {
-            try {
-              const ov: any = await inspection.overview()
-              setOverview(ov.data || {})
-            } catch (_e) { /* 概览刷新失败不阻断弹窗 */ }
-          }}
+          onOpenIssue={(issueId: string) => setIssueDetailId(issueId)}
         />
         {(overview.open_issue_count > 0 || overview.high_issue_count > 0) && (
           <DiagnosisCard
@@ -1599,26 +1609,32 @@ export default function InspectionCenterPage() {
         />
       )}
 
+      {/* 风险问题详情弹窗（巡检中心风险问题列表 / 概览最近风险共用）
+          注意：必须渲染在 RunDetailModal 之前 —— 两个弹窗同为 position:fixed + z-index:1000，
+          DOM 靠后的那个绘制在上层，否则"查看所属巡检详情"会被本弹窗盖住。 */}
+      {issueDetailId && (
+        <IssueDetailModal
+          issueId={issueDetailId}
+          onClose={() => setIssueDetailId('')}
+          onChanged={reloadIssuesAndOverview}
+          onOpenRun={async (runId: string) => {
+            // 先取到巡检详情再切换弹窗：成功即关闭风险问题详情（避免两个遮罩叠加互相遮挡），
+            // 失败则本弹窗保持打开并在弹窗内提示错误。
+            const res: any = await inspection.runDetail(runId)
+            setCurrentResult(res?.data || null)
+            setRunDetailOpen(true)
+            setIssueDetailId('')
+            setTab('runs')
+          }}
+          onDelete={deleteIssue}
+        />
+      )}
+
       {/* 巡检详情与执行过程弹窗 */}
       {runDetailOpen && currentResult && (
         <RunDetailModal
           result={currentResult}
           onClose={() => setRunDetailOpen(false)}
-        />
-      )}
-
-      {/* 风险问题详情弹窗（巡检中心风险问题列表 / 概览最近风险共用） */}
-      {issueDetailId && (
-        <IssueDetailModal
-          issueId={issueDetailId}
-          onClose={() => setIssueDetailId('')}
-          onChanged={reloadIssues}
-          onOpenRun={(runId) => {
-            inspection.runDetail(runId)
-              .then((res: any) => { setCurrentResult(res.data); setRunDetailOpen(true); setTab('runs') })
-              .catch((e: any) => setError(e?.message || String(e)))
-          }}
-          onDelete={deleteIssue}
         />
       )}
 

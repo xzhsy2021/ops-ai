@@ -2,14 +2,16 @@ import { useEffect, useState } from 'react'
 import { EmptyState, RiskBadge, StatusBadge } from '../../components/ui'
 import { inspection } from '../../api'
 import { formatTime, riskLabel } from './inspectionHelpers'
-import { IssueDetailModal } from './IssueDetailModal'
 
 export type OverviewTabProps = {
   overview: any
   servers: any[]
   projects: any[]
-  /** 风险问题状态变更后刷新概览（可选） */
-  onRefresh?: () => void | Promise<void>
+  /**
+   * 打开风险问题详情。统一由父级（巡检中心）持有弹窗实例：
+   * 这样"查看所属巡检详情"等跨弹窗跳转只有一个遮罩，不会出现互相遮挡。
+   */
+  onOpenIssue?: (issueId: string) => void
 }
 
 function runningRunLabel(r: any): string {
@@ -19,9 +21,8 @@ function runningRunLabel(r: any): string {
   return `服务器 ${r.server_id || '-'}`
 }
 
-export function OverviewTab({ overview, servers, projects, onRefresh }: OverviewTabProps) {
+export function OverviewTab({ overview, servers, projects, onOpenIssue }: OverviewTabProps) {
   const [runningRuns, setRunningRuns] = useState<any[]>(overview?.running_runs || [])
-  const [issueDetailId, setIssueDetailId] = useState('')
 
   useEffect(() => {
     let disposed = false
@@ -110,19 +111,10 @@ export function OverviewTab({ overview, servers, projects, onRefresh }: Overview
             <section className="panel-card">
               <h2>最近风险</h2>
               {(overview.recent_issues || []).length === 0 ? <EmptyState title="暂无待处理风险" description="执行一次服务器巡检或项目巡检后会在这里展示风险。" /> : (
-                <div className="table-scroll"><table className="data-table"><thead><tr><th>等级</th><th>标题</th><th>对象</th><th>状态</th><th style={{ width: 80 }}>操作</th></tr></thead><tbody>{overview.recent_issues.map((i: any) => <tr key={i.id} style={{ cursor: 'pointer' }} onClick={() => setIssueDetailId(i.id)}><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.title}</td><td>{i.project_id || i.server_id || '-'}</td><td><StatusBadge value={i.status} /></td><td><button className="btn btn-subtle" onClick={(e) => { e.stopPropagation(); setIssueDetailId(i.id) }}>详情</button></td></tr>)}</tbody></table></div>
+                <div className="table-scroll"><table className="data-table"><thead><tr><th>等级</th><th>标题</th><th>对象</th><th>状态</th><th style={{ width: 80 }}>操作</th></tr></thead><tbody>{overview.recent_issues.map((i: any) => <tr key={i.id} style={{ cursor: 'pointer' }} onClick={() => onOpenIssue?.(i.id)}><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.title}</td><td>{i.project_id || i.server_id || '-'}</td><td><StatusBadge value={i.status} /></td><td><button className="btn btn-subtle" onClick={(e) => { e.stopPropagation(); onOpenIssue?.(i.id) }}>详情</button></td></tr>)}</tbody></table></div>
               )}
             </section>
           </div>
-
-          {/* 风险问题详情弹窗 */}
-          {issueDetailId && (
-            <IssueDetailModal
-              issueId={issueDetailId}
-              onClose={() => setIssueDetailId('')}
-              onChanged={onRefresh}
-            />
-          )}
         </>
   )
 }

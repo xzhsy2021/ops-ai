@@ -639,6 +639,8 @@ export const inspection = {
   updateRelation: (relationId: string, data: any) => api.patch(`/inspection/project-server-relations/${encodeURIComponent(relationId)}`, data),
   issues: (params?: { scope_type?: string; risk_level?: string; status?: string; server_id?: string; project_id?: string; limit?: number; offset?: number }) => api.get('/inspection/issues', { params }),
   updateIssue: (issueId: string, data: { status?: string; owner_id?: string; suggestion?: string }) => api.patch(`/inspection/issues/${encodeURIComponent(issueId)}`, data),
+  issueDetail: (issueId: string) => api.get(`/inspection/issues/${encodeURIComponent(issueId)}`),
+  evidenceDetail: (evidenceId: string) => api.get(`/inspection/evidence/${encodeURIComponent(evidenceId)}`),
   // 巡检项目配置管理（可选/可编辑/可调整）
   listItemConfigs: (scopeType: string = 'SERVER') => api.get('/inspection/item-configs', { params: { scope_type: scopeType } }),
   getItemConfig: (itemId: string) => api.get(`/inspection/item-configs/${encodeURIComponent(itemId)}`),

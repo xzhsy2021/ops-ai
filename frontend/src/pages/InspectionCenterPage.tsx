@@ -6,6 +6,7 @@ import { EmptyState, FavoriteButton, RiskBadge, RiskConfirmDialog, StatusBadge }
 import { DEFAULT_PAGE_SIZE, PaginationControls } from './inspection/PaginationControls'
 import { RunDetailRawModal } from './inspection/RunDetailRawModal'
 import { RunDetailModal } from './inspection/RunDetailModal'
+import { IssueDetailModal } from './inspection/IssueDetailModal'
 import { ItemConfigEditorModal } from './inspection/ItemConfigEditorModal'
 import { CategoryOptions } from './inspection/CategoryOptions'
 import { formatTime, isServerInspectable, normalizeServerStatus, riskLabel, scoreTone, serverStatusText } from './inspection/inspectionHelpers'
@@ -82,6 +83,7 @@ export default function InspectionCenterPage() {
   const [selectedLedgerRunIds, setSelectedLedgerRunIds] = useState<string[]>([])
   const [selectedReportIds, setSelectedReportIds] = useState<string[]>([])
   const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>([])
+  const [issueDetailId, setIssueDetailId] = useState('')
   const [projectRelations, setProjectRelations] = useState<any[]>([])
   const [projectPathEditor, setProjectPathEditor] = useState<{ open: boolean; form: any }>({ open: false, form: {} })
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
@@ -614,15 +616,16 @@ export default function InspectionCenterPage() {
     } catch (e: any) { setError(e?.message || String(e)) }
   }
 
-  async function deleteIssue(issueId: string) {
-    if (!window.confirm('确认删除这条风险问题？删除后不可恢复。')) return
+  async function deleteIssue(issueId: string): Promise<boolean> {
+    if (!window.confirm('确认删除这条风险问题？删除后不可恢复。')) return false
     setError(''); setMessage('')
     try {
       await inspection.deleteIssue(issueId)
       setMessage('风险问题已删除')
       setSelectedIssueIds((prev: string[]) => prev.filter((x: string) => x !== issueId))
       await reloadIssues()
-    } catch (e: any) { setError(e?.message || String(e)) }
+      return true
+    } catch (e: any) { setError(e?.message || String(e)); return false }
   }
 
   async function deleteIssues(issueIds: string[]) {
@@ -876,7 +879,17 @@ export default function InspectionCenterPage() {
 
       {tab === 'overview' && (
         <>
-        <OverviewTab overview={overview} servers={servers} projects={projects} />
+        <OverviewTab
+          overview={overview}
+          servers={servers}
+          projects={projects}
+          onRefresh={async () => {
+            try {
+              const ov: any = await inspection.overview()
+              setOverview(ov.data || {})
+            } catch (_e) { /* 概览刷新失败不阻断弹窗 */ }
+          }}
+        />
         {(overview.open_issue_count > 0 || overview.high_risk_count > 0) && (
           <DiagnosisCard
             title="巡检风险诊断"
@@ -1161,7 +1174,7 @@ export default function InspectionCenterPage() {
               <button className="btn btn-subtle" disabled={selectedIssueIds.length === 0} onClick={() => setSelectedIssueIds([])}>清空选择</button>
             </div>
           </div>
-          {issues.length === 0 ? <EmptyState title="暂无风险问题" description="巡检发现的高/中/低风险会进入这里进行闭环。" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={issues.length > 0 && issues.every((i) => selectedIssueIds.includes(i.id))} onChange={(e) => setSelectedIssueIds(e.target.checked ? issues.map((i) => i.id) : [])} /></th><th>等级</th><th>标题</th><th>对象</th><th>描述</th><th>状态</th><th>操作</th></tr></thead><tbody>{issues.map((i) => <tr key={i.id}><td><input type="checkbox" checked={selectedIssueIds.includes(i.id)} onChange={(e) => setSelectedIssueIds((prev) => e.target.checked ? Array.from(new Set([...prev, i.id])) : prev.filter((x) => x !== i.id))} /></td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td>{i.title}</td><td>{i.project_id || i.server_id || '-'}</td><td>{i.description}</td><td><StatusBadge value={i.status} /></td><td><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'PROCESSING')}>处理中</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'FIXED')}>已修复</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'VERIFIED')}>已验证</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'IGNORED')}>忽略</button><button className="btn btn-danger" onClick={() => deleteIssue(i.id)}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={issuesTotal} limit={issuePageSize} offset={issueOffset} onChange={setIssueOffset} onPageSizeChange={(next) => { setIssuePageSize(next); setIssueOffset(0) }} /></>}
+          {issues.length === 0 ? <EmptyState title="暂无风险问题" description="巡检发现的高/中/低风险会进入这里进行闭环。" /> : <><div className="table-scroll"><table className="data-table"><thead><tr><th><input type="checkbox" checked={issues.length > 0 && issues.every((i) => selectedIssueIds.includes(i.id))} onChange={(e) => setSelectedIssueIds(e.target.checked ? issues.map((i) => i.id) : [])} /></th><th>等级</th><th>标题</th><th>对象</th><th>描述</th><th>状态</th><th>操作</th></tr></thead><tbody>{issues.map((i) => <tr key={i.id}><td><input type="checkbox" checked={selectedIssueIds.includes(i.id)} onChange={(e) => setSelectedIssueIds((prev) => e.target.checked ? Array.from(new Set([...prev, i.id])) : prev.filter((x) => x !== i.id))} /></td><td><RiskBadge level={i.risk_level} label={riskLabel(i.risk_level)} /></td><td><button className="btn btn-link" style={{ padding: 0, background: 'none', border: 'none', color: 'var(--accent, #3182ce)', cursor: 'pointer', textAlign: 'left' }} onClick={() => setIssueDetailId(i.id)} title="查看风险问题详情">{i.title}</button></td><td>{i.project_id || i.server_id || '-'}</td><td>{i.description}</td><td><StatusBadge value={i.status} /></td><td><button className="btn btn-subtle" onClick={() => setIssueDetailId(i.id)}>详情</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'PROCESSING')}>处理中</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'FIXED')}>已修复</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'VERIFIED')}>已验证</button><button className="btn btn-subtle" onClick={() => updateIssue(i.id, 'IGNORED')}>忽略</button><button className="btn btn-danger" onClick={() => deleteIssue(i.id)}>删除</button></td></tr>)}</tbody></table></div><PaginationControls total={issuesTotal} limit={issuePageSize} offset={issueOffset} onChange={setIssueOffset} onPageSizeChange={(next) => { setIssuePageSize(next); setIssueOffset(0) }} /></>}
         </section>
       )}
 
@@ -1560,6 +1573,21 @@ export default function InspectionCenterPage() {
         <RunDetailModal
           result={currentResult}
           onClose={() => setRunDetailOpen(false)}
+        />
+      )}
+
+      {/* 风险问题详情弹窗（巡检中心风险问题列表 / 概览最近风险共用） */}
+      {issueDetailId && (
+        <IssueDetailModal
+          issueId={issueDetailId}
+          onClose={() => setIssueDetailId('')}
+          onChanged={reloadIssues}
+          onOpenRun={(runId) => {
+            inspection.runDetail(runId)
+              .then((res: any) => { setCurrentResult(res.data); setRunDetailOpen(true); setTab('runs') })
+              .catch((e: any) => setError(e?.message || String(e)))
+          }}
+          onDelete={deleteIssue}
         />
       )}
 

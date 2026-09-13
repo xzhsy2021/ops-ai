@@ -82,14 +82,10 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.export_diagnostics_report': 'Generate a JSON diagnostics report with overview, health, build info, recent errors, MCP self-check, and recommendations. 中文: 导出诊断报告/生成诊断报告.',
     'ops.list_backups': 'List local OPS SQLite database backups with file names, sizes, timestamps, types, and confirmation phrases. 中文: 查看备份列表/有哪些备份.',
     'ops.verify_backup': 'Verify one local SQLite database backup using sqlite quick_check and optional SHA256 checksum. Read-only. 中文: 校验备份/验证备份完整性.',
-    'ops.create_backup': 'Create and verify a local OPS SQLite database backup. Medium risk; write permission and confirmation policy required. 中文: 创建备份/备份数据库.',
-    'ops.restore_backup': 'Restore the OPS SQLite database from a backup. Critical risk; requires confirm_text RESTORE <file> and creates a safety backup first. 中文: 恢复备份/还原数据库.',
-    'ops.delete_backup': 'Delete one local database backup. High risk; requires confirm_text DELETE <file>. 中文: 删除备份/清理备份.',
     'ops.list_jobs': 'List unified operation jobs for high-risk MCP/tool executions. Read-only. 中文: 查看任务列表/查看后台任务.',
     'ops.get_job_status': 'Get one unified operation job by id. Read-only. 中文: 查看任务状态/任务进度.',
     'ops.list_systems': "List OPS systems that can be queried or used for release planning. Use when user asks 'what systems are available' or 'list systems'. 中文: 查看系统列表/有哪些系统.",
     'ops.list_services': "List services under a system, including display names and release metadata. Use when user asks 'what services under system X' or 'list services'. 中文: 查看服务列表/系统下有哪些服务.",
-    'ops.get_service_config': 'Get release configuration for a service, including directories, scripts, environments, and server mappings. 中文: 查看服务配置/服务详情.',
     'ops.list_environments': 'List release environments or custom scenes for a system. 中文: 查看环境列表/有哪些发布环境.',
     'ops.list_servers': "List server assets that match filters such as group, name, or keyword. Use when user asks 'list servers' or 'what servers are configured'. 中文: 查看服务器列表/已配置的服务器/有哪些服务器.",
     'ops.list_packages': 'List local release packages managed by OPS File Center. 中文: 查看发布包列表/有哪些发布包.',
@@ -99,8 +95,6 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.inspect_local_package': 'Inspect a local deploy package path before uploading it into OPS File Center. local_path must be readable by the OPS backend host; remote clients can use the OPS page upload. 中文: 检查本地发布包/查看本地包信息.',
     'ops.prepare_release_from_local_package': 'Inspect and upload a local package, then create a release plan and run precheck. This never executes deployment. 中文: 从本地包准备发布/打包发布.',
     'ops.get_package_retention_preview': 'Preview package cleanup candidates without deleting files. Protects running, failed, rollback, and latest successful packages. 中文: 预览包清理/查看可清理的发布包.',
-    'ops.cleanup_packages': 'Clean local deploy packages according to retention policy. High risk; requires write permission and confirmation. Defaults to dry run. 中文: 清理发布包/清理旧包.',
-    'ops.protect_package': 'Manually protect or unprotect a deploy package from cleanup. 中文: 保护发布包/标记保护.',
     'ops.matrix.scan_media_events': 'Scan a Matrix room for media events (m.file/m.image/m.video/m.audio) from a sender within a time window, without downloading. Returns event ids, filenames, mxc urls and encryption status. 中文: 查看Matrix房间媒体/扫描房间附件/房间发了什么包.',
     'ops.matrix.pull_attachment': 'Pull the latest media attachment from a Matrix room (by sender, within N minutes, optional filename match) into the OPS File Center: download mxc media, compute SHA256, write DeployPackage metadata and return package_name for later deployment. E2EE encrypted rooms are decrypted automatically when Matrix E2EE is configured (matrix-nio[e2e] + persistent crypto store); failures return an explicit reason. 中文: 从Matrix拉附件/拉取Matrix部署包/Matrix附件入库.',
     'ops.matrix.deploy_from_matrix': 'Full Matrix deploy chain: pull the latest media attachment from a Matrix room, save it into the File Center (SHA256), then queue the existing deploy flow (checksum/artifact store/server selection/release/audit). Production requires admin or allow_prod token plus confirm_text. 中文: Matrix发布/从Matrix发版/拉取Matrix附件并发布.',
@@ -121,8 +115,6 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.get_rollback_readiness': 'Check rollback readiness for a deployment including backup existence and rollback plan availability. 中文: 检查回滚就绪/回滚准备状态.',
     'ops.create_rollback_plan': 'Create a rollback plan from an existing deployment. This does not execute rollback. 中文: 创建回滚计划/制定回滚方案.',
     'ops.execute_rollback_plan': 'Execute an approved rollback plan through the OPS worker. High risk; requires confirmation and policy approval. 中文: 执行回滚/回滚操作.',
-    'ops.create_config_change_plan': 'Create a configuration change plan with diff. This does not apply changes. 中文: 创建配置变更计划/配置变更方案.',
-    'ops.apply_config_change_plan': 'Apply an approved configuration change plan. Requires confirmation and policy approval. 中文: 应用配置变更/修改配置.',
     'ops.check_disk': '【路径 B 补充】Check disk usage on allowed servers through OPS server tools. 中文: 检查磁盘/磁盘使用率/磁盘空间. — 单点探针，不替代系统巡检。',
     'ops.check_process': '【路径 B 补充】Check whether a service process is running on allowed servers. 中文: 检查进程/服务是否运行/进程状态. — 单点探针，不替代系统巡检。',
     'ops.list_service_directory': '【路径 B 补充】List files in an allowed service directory. Does not modify files. 中文: 查看服务目录/列出文件.',
@@ -139,37 +131,17 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.list_reports': 'List reports in the OPS Report Center including diagnostics, deployment, backup, and operation chain reports. 中文: 查看报告列表/报告中心.',
     'ops.get_report': 'Get report metadata and download URL by report_id. 中文: 查看报告详情/下载报告.',
     'ops.get_report_summary': 'View report center summary including counts by type and total size. 中文: 查看报告概览/报告统计.',
-    'ops.list_report_types': 'List available report types that can be generated. 中文: 查看可生成报告类型.',
-    'ops.generate_report': 'Generate a report artifact (diagnostics, operation chain, operation-chain index, deployment, or inspection). Low risk. 中文: 生成报告/创建报告.',
-    'ops.connection_status': 'Check whether the local MCP bridge can reach the OPS API using the configured base URL and token. 中文: 连接状态/MCP连通性检查.',
+    'ops.list_report_types': 'List the report center types with target, formats, and whether each can be generated on demand: diagnostics, operation_chain, operation_chains_index, deployment, inspection, db_query_export, security_daily. 中文: 查看可生成报告类型/报告类型列表.',
     'ops.db.list_tables': "List OPS local database tables OR tables from a configured remote database connection. Use this when the user asks 'what tables are in database X' or 'list tables'. Do NOT write standalone Python scripts to list tables - use this OPS tool instead. 中文: 查看数据库表列表/有哪些表/列出表.",
     'ops.db.describe_table': "Describe database table columns, types, and sensitive-field flags. Use when the user asks 'what columns does table X have' or 'show table structure'. Do NOT write standalone Python scripts to query information_schema - use this OPS tool instead. 中文: 查看表结构/表字段/有哪些字段.",
     'ops.db.query_readonly': "Execute a guarded SELECT/WITH read-only database query with row limits and sensitive-field masking. Use when the user asks 'query data from table X' or 'select records'. Supports PostgreSQL and MySQL via configured connections. Do NOT write standalone Python database scripts - use this OPS tool instead. 中文: 查询数据/SELECT查询/查数据.",
     'ops.db.export_query_result': "Export a guarded read-only query result to CSV, JSON, XLSX, Markdown, or SQL query artifact and save to the report center. Use when the user asks 'export table X as CSV' or 'download data as Excel'. Do NOT write standalone Python export scripts - use this OPS tool instead. 中文: 导出数据为CSV/导出Excel/下载查询结果.",
-    'ops.db.preview_execute_sql': 'Preview a controlled UPDATE/DELETE/INSERT operation before execution. Supports fast/standard/full preview levels. Shows estimated affected rows, risk level, and WHERE summary. 中文: 预检SQL操作/预检查写入/预览DML.',
-    'ops.db.execute_sql': 'Execute a controlled UPDATE/DELETE/INSERT operation after preview and confirmation. Returns summary, next_actions and verification_sql. 中文: 执行SQL写入/执行DML.',
-    'ops.db.preview_dml': 'Recommended two-step DML first phase. Preview INSERT/UPDATE/DELETE with risk, target table, estimated rows and verification_sql. This is the preferred approach for write operations. 中文: DML预检/数据库写入预检.',
-    'ops.db.execute_dml': 'Recommended two-step DML second phase. Execute after user confirmation and return execution_id, summary and next_actions. 中文: 执行DML/确认写入.',
     'ops.db.list_exports': 'List generated database query export artifacts in the report center. 中文: 查看导出历史/导出文件列表.',
     'ops.db.get_export': 'Get metadata and download URL for one database query export artifact. 中文: 查看导出详情/下载导出文件.',
-    'ops.db.list_dml_history': 'List controlled DML execution history with operator, connection, target table, affected rows and status. 中文: 查看DML执行历史/写入操作记录.',
-    'ops.db.get_dml_execution': 'Get one DML execution detail by execution_id including before-sample rows and audit fields. 中文: 查看DML执行详情.',
     'ops.inspection.list_runs': "【路径 A 主】List inspection run records for servers or projects. Use when user asks 'recent inspections' or 'inspection history'. 中文: 查看巡检记录/巡检历史.",
-    'ops.inspection.get_run': '【路径 A 主】Get detailed inspection run results by run_id. 中文: 查看巡检详情/巡检结果.',
-    'ops.inspection.list_issues': "【路径 A 主】List inspection issues/risks with filters. Use when user asks 'what issues were found' or 'list risks'. 中文: 查看巡检问题/风险列表.",
-    'ops.inspection.get_issue': '【路径 A 主】Get one inspection issue detail by issue_id. 中文: 查看巡检问题详情/风险详情.',
-    'ops.inspection.summarize_run': '【路径 A 主】Summarize an inspection run in FIRE structure (Findings, Impact, Recommendations, Evidence). 中文: 巡检摘要/巡检总结.',
     'ops.inspection.run_server': '【路径 A 主】PRIMARY PATH A. Run an inspection on a single server. High risk; requires confirmation. 中文: 执行服务器巡检/巡检服务器. — 用户提到「巡检」时默认选我。',
-    'ops.inspection.run_project': '【路径 A 主】PRIMARY PATH A. Run an inspection for a project. High risk; requires confirmation. 中文: 执行项目巡检/巡检项目.',
-    'ops.inspection.run_combined': '【路径 A 主】PRIMARY PATH A. Run a combined project inspection. High risk; requires confirmation. 中文: 执行综合巡检/项目综合巡检.',
     'ops.inspection.list_item_configs': '【路径 A 主】List inspection item configurations. 中文: 查看巡检项配置/巡检配置列表.',
-    'ops.inspection.get_item_config': '【路径 A 主】Get one inspection item configuration detail. 中文: 查看巡检项配置详情.',
-    'ops.inspection.update_item_config': '【路径 A 主】Update an inspection item configuration. Medium risk. 中文: 更新巡检项配置/修改巡检配置.',
-    'ops.inspection.toggle_item_config': '【路径 A 主】Enable or disable an inspection item. Medium risk; requires confirmation. 中文: 启用禁用巡检项/切换巡检项.',
-    'ops.inspection.update_item_rules': '【路径 A 主】Update rules associated with an inspection item. Medium risk. 中文: 更新巡检规则/修改巡检规则.',
     'ops.inspection.get_run_raw_output': '【路径 A 主】Get raw output data from an inspection run. 中文: 查看巡检原始输出/巡检原始数据.',
-    'ops.inspection.delete_runs': '【路径 A 主】Delete inspection run records. High risk; requires confirmation. 中文: 删除巡检记录/清理巡检历史.',
-    'ops.inspection.delete_issue': '【路径 A 主】Delete an inspection issue. Medium risk; requires confirmation. 中文: 删除巡检问题/清理巡检问题.',
     'ops.risk.list': "List risk issues with filters (status supports comma-separated values; unclosed = OPEN,PROCESSING). Use when user asks 'what risks exist' or 'list open risks'. 中文: 查看风险列表/风险问题/未闭环风险.",
     'ops.risk.get': 'Get one risk issue detail by risk_id. 中文: 查看风险详情/风险问题详情.',
     'ops.risk.triage': 'Triage open risks by severity and urgency. Read-only. 中文: 风险分流/风险优先级排序.',
@@ -184,38 +156,12 @@ MCP_TOOL_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     'ops.log.get_recent_exceptions': 'Get recent exception summaries from OPS application logs. Medium risk. 中文: 查看近期异常/异常摘要.',
     'ops.list_connections': 'List database connections with optional keyword and environment filters. 中文: 查看数据库连接列表/连接列表.',
     'ops.get_connection': 'Get database connection detail by ID. Password fields are masked. 中文: 查看数据库连接详情/连接详情.',
-    'ops.create_connection': 'Create a new database connection. High risk; requires human approval. 中文: 创建数据库连接/新增连接.',
-    'ops.update_connection': 'Update a database connection configuration. High risk; requires human approval. 中文: 更新数据库连接/修改连接.',
-    'ops.delete_connection': 'Delete a database connection. High risk; requires human approval and confirm_text. 中文: 删除数据库连接/移除连接.',
     'ops.test_connection': 'Test database connection connectivity. Medium risk. 中文: 测试数据库连接/连接测试.',
     'ops.get_server': 'Get single server detail by name. 中文: 查看服务器详情/服务器配置.',
-    'ops.create_server': 'Create a new server configuration. High risk; requires human approval. 中文: 创建服务器/新增服务器.',
-    'ops.update_server': 'Update server configuration. High risk; requires human approval. 中文: 更新服务器/修改服务器配置.',
-    'ops.delete_server': 'Delete a server configuration. Critical risk; requires human approval and confirm_text. 中文: 删除服务器/移除服务器.',
-    'ops.batch_update_servers': 'Batch update server attributes. High risk; requires human approval. 中文: 批量更新服务器/批量修改.',
-    'ops.create_system': 'Create a new system/project. High risk; requires human approval. 中文: 创建系统/新增项目.',
-    'ops.update_system': 'Update system/project configuration. High risk; requires human approval. 中文: 更新系统/修改项目.',
-    'ops.delete_system': 'Delete a system/project. Critical risk; requires human approval and confirm_text. 中文: 删除系统/移除项目.',
-    'ops.create_service': 'Create a new service under a system. High risk; requires human approval. 中文: 创建服务/新增服务.',
-    'ops.update_service': 'Update service configuration. High risk; requires human approval. 中文: 更新服务/修改服务.',
-    'ops.delete_service': 'Delete a service. Critical risk; requires human approval and confirm_text. 中文: 删除服务/移除服务.',
-    'ops.create_environment': 'Create a new environment under a system. High risk; requires human approval. 中文: 创建环境/新增环境.',
-    'ops.update_environment': 'Update environment configuration. High risk; requires human approval. 中文: 更新环境/修改环境.',
-    'ops.delete_environment': 'Delete an environment. Critical risk; requires human approval and confirm_text. 中文: 删除环境/移除环境.',
-    'ops.create_server_group': 'Create a server group. Medium risk; requires confirmation. 中文: 创建服务器分组/新增分组.',
-    'ops.assign_server_group': 'Assign servers to a group. Medium risk; requires confirmation. 中文: 分配服务器到分组/分组分配.',
-    'ops.rename_server_group': 'Rename a server group. Medium risk; requires confirmation. 中文: 重命名服务器分组/分组重命名.',
-    'ops.delete_server_group': 'Delete a server group. High risk; requires human approval and confirm_text. 中文: 删除服务器分组/移除分组.',
     'ops.list_ssh_keys': 'List registered SSH keys. 中文: 查看SSH密钥列表/密钥列表.',
     'ops.get_ssh_key': 'Get SSH key metadata (no private key content). 中文: 查看SSH密钥详情/密钥信息.',
-    'ops.create_ssh_key': 'Register a new SSH key. High risk; requires human approval. 中文: 创建SSH密钥/新增密钥.',
-    'ops.update_ssh_key': 'Update an SSH key. High risk; requires human approval. 中文: 更新SSH密钥/修改密钥.',
-    'ops.delete_ssh_key': 'Delete an SSH key. High risk; requires human approval and confirm_text. 中文: 删除SSH密钥/移除密钥.',
     'ops.list_pipelines': 'List deployment pipeline configurations. 中文: 查看Pipeline列表/流程列表.',
     'ops.get_pipeline': 'Get single pipeline detail by ID. 中文: 查看Pipeline详情/流程详情.',
-    'ops.create_pipeline': 'Create a new deployment pipeline. High risk; requires human approval. 中文: 创建Pipeline/新增流程.',
-    'ops.update_pipeline': 'Update pipeline configuration. High risk; requires human approval. 中文: 更新Pipeline/修改流程.',
-    'ops.delete_pipeline': 'Delete a pipeline. Critical risk; requires human approval and confirm_text. 中文: 删除Pipeline/移除流程.',
 
     # ── Approval Workflow ──
     'ops.approval.prepare_plan': "Create an immutable execution plan for an entire Element message flow and return a one-time descriptive confirm phrase, e.g. 批准发布+健康检查 crypto-trader@test A3F9C2D1 (verbs = plan actions, target = system@env, suffix = content fingerprint). After the approver approves once, all steps run in order automatically. Step types include MATRIX_PULL (pull latest Matrix room attachment into File Center; its result package_name auto-feeds a dependent RELEASE step) plus SERVICE_CONTROL / FILE_UPLOAD / HEALTH_CHECK / RELEASE / ROLLBACK / DML / PACKAGE_CLEANUP — so pull+release needs only ONE approval. Same plan content (plan_digest) reuses the pending plan idempotently. 中文: 准备执行计划/发起审批/部署审批/计划审批.",
@@ -642,7 +588,10 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "- show table structure -> ops.db.describe_table\n"
             "- query data / SELECT -> ops.db.query_readonly\n"
             "- export as CSV/Excel -> ops.db.export_query_result\n"
-            "- modify data / UPDATE/DELETE -> ops.db.preview_dml then ops.db.execute_dml\n\n"
+            # 第 13 轮：ops.db.preview_dml / ops.db.execute_dml 从未注册（DML 只通过页面/HTTP 执行，
+            # 由预览 + 确认闸门保护）。继续这样引导会让 AI 调用不存在的工具。
+            "- modify data / UPDATE/DELETE -> not available over MCP; tell the user to use the OPS "
+            "Data Tools page, which enforces preview and confirmation.\n\n"
             "Workflow: tables -> describe -> query -> export. Never skip steps when table/field names are uncertain.\n"
             "User request=" + str(args.get("request") or "")
         )
@@ -667,8 +616,11 @@ def mcp_prompt_get(params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         )
     elif name == "ops_backup_workflow":
         text = (
-            "Help user manage OPS database backups safely. Use ops.list_backups, ops.verify_backup, ops.create_backup, "
-            "ops.restore_backup, and ops.delete_backup. Always verify before restore and create a safety backup first. "
+            # 第 13 轮：create_backup / restore_backup / delete_backup 未注册为 MCP 工具
+            # （备份创建/恢复/删除只在 OPS 页面与 HTTP API 上，受各自确认闸门保护）。
+            "Help user manage OPS database backups safely. Over MCP use ops.list_backups and ops.verify_backup. "
+            "Creating, restoring, or deleting a backup is not exposed over MCP: tell the user to use the OPS "
+            "Backup page, which enforces the confirmation phrase and creates a safety backup before restore. "
             "User request=" + str(args.get("request") or "")
         )
     else:

@@ -8,7 +8,7 @@
 - MCP / HTTP Tool 只暴露白名单能力。
 - `ops.upload_package` 可将发布包上传到 OPS 文件中心。
 - `ops.get_package_retention_preview` 只预览清理候选，不删除文件。
-- `ops.cleanup_packages` 是高风险写操作，默认不开放，默认 dry-run。
+- 发布包清理是高风险写操作，默认不开放：MCP 侧**没有**注册清理/保护工具（第 13 轮按注册表核对，`ops.cleanup_packages` / `ops.protect_package` 无注册定义）。真正执行清理要走 OPS 页面（文件中心 → 清理策略）/ HTTP 接口，或 `ops.approval.prepare_plan` 的 `PACKAGE_CLEANUP` 步骤。
 - 清理只处理 OPS 本地文件中心包；不自动清理远程服务器包。
 
 ## 2. 上传本地包（HTTP-only）
@@ -52,7 +52,7 @@ ops.prepare_release_from_local_package
 → 查询服务配置（使用 ops.list_services）
 → 预检/确认发布计划
 → 等待用户确认
-→ 兼容发布路径：ops.approval.prepare_release → ops.approval.execute
+→ 兼容发布路径：ops.approval.prepare_plan（RELEASE 步骤）→ ops.approval.execute_plan
 → 查询发布状态/报告
 ```
 
@@ -107,14 +107,18 @@ POST /api/v2/files/packages/{package_name}/protect
 POST /api/v2/tools/packages/upload
 ```
 
-## 7. 新增 MCP / HTTP Tools
+## 7. 相关 MCP / HTTP Tools
 
 ```text
 ops.upload_package
 ops.get_package_retention_preview
-ops.cleanup_packages
-ops.protect_package
+ops.prepare_release_from_local_package
+ops.approval.prepare_plan        # RELEASE / PACKAGE_CLEANUP 步骤
+ops.approval.execute_plan
 ```
+
+> 第 13 轮更正：本节此前列出 `ops.cleanup_packages` / `ops.protect_package`，
+> 但这两个名字从未注册（清理/保护的执行面只有页面与 HTTP 接口）。
 
 需要开启能力开关：
 

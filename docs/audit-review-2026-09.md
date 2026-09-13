@@ -1486,9 +1486,122 @@ PUBLIC_PREFIXES = ("/assets/", "/docs/", "/api/v2/auth", "/api/v2/tools", "/api/
 > 实测中"白名单内 `/data`"一项会在目标服务器上执行一次**只读** `ls`（与发布页浏览目录同语义），
 > 除此之外本轮探针不含任何写操作：不触发发布/回滚、不发送任何 Matrix 消息、不删除任何数据。
 
-## 复盘总览（第 1–12 轮 · 收尾总结）
+## 第 13 轮（2026-09-12）· MCP 工具名漂移治理
 
-### 一、12 轮范围、主题与测试基线
+主题：**MCP 工具面收窄后遗留的"幽灵工具名"** —— 工具被移除/改名之后，引用它们的描述、建议、
+提示词与文档没有同步清理。这类引用不会报错，只会静默失效，或者把 AI 引向一个不存在的工具。
+
+背景证据：`git log -S` 显示 `ops.inspection.get_run`、`ops.inspection.summarize_run`、
+`ops.generate_report`、`ops.cleanup_packages` 等名字出现在 `705f15f`（"slim default MCP tool
+catalog"，用工作流工具替换细粒度巡检工具）等历史提交里；当前注册表共 126 个工具，而这些名字
+**没有任何注册定义**（全仓 `name="ops.…"` 搜索为空）。
+
+### 13.1 描述覆盖表 54 条幽灵条目（180 → 126）
+
+- 事实：`MCP_TOOL_DESCRIPTION_OVERRIDES` 有 180 条，注册工具 126 个，其中 **54 条（30%）**
+  指向不存在的工具；反向缺失 0（真实工具都有覆盖）。
+- 影响：覆盖表是判断"描述完备性"的依据，30% 死数据会让这类审计得出错误结论；更实际的风险是
+  一旦同名工具将来重新注册，它会**静默继承一条陈旧描述**（例如过期的确认短语或风险级别）。
+- 处置：删除 54 条幽灵条目（表内全部为单行条目，用 AST 定位行区间后逐行删除并复验语法），
+  覆盖表回到 **126 == 126** 精确对齐。
+
+### 13.2 契约锁在死数据上（测试有效性问题）
+
+`tests/test_ai_analysis_retirement.py` 有一条契约断言
+`MCP_TOOL_DESCRIPTION_OVERRIDES["ops.generate_report"]` 里不得出现已退役的 "ai analysis"，
+但 `ops.generate_report` 是幽灵条目 —— **契约实际锁在一条永远不会被 AI 看到的死数据上**
+（测试通过并不代表真实描述合规）。同理，`tests/test_mcp_contract_sync.py` 断言能力矩阵文档
+**必须**包含 `ops.inspection.toggle_item_config`（同样没有注册定义），于是文档里约 30 个
+幽灵工具名被测试锁住。
+
+处置：两条契约都改为指向真实工具、并与真实数据源动态对齐
+（`ops.list_report_types` ↔ `report_center.REPORT_TYPES`；能力矩阵 ↔ 注册表）。
+`ops.list_report_types` 的覆盖描述同时补齐了报告中心 7 个真实类型。
+
+### 13.3 AI 可见面把 AI 引向不存在的工具
+
+| 位置 | 修前 | 修后 |
+| --- | --- | --- |
+| 巡检工具 `next_actions`（`_inspection_followup`） | 3 条建议里 2 条不存在（`ops.inspection.get_run`、`ops.inspection.summarize_run`） | `ops.inspection.get_run_raw_output`、`ops.inspection.generate_report` |
+| 8 处 `related_tools`（工具定义字段，进入工具目录供 AI 参考） | 含 `get_run` / `summarize_run` / `list_issues` / `toggle_item_config` / `update_item_config` | 全部替换为注册工具 |
+| MCP prompt `ops_db_export_request` | `UPDATE/DELETE -> ops.db.preview_dml then ops.db.execute_dml` | 明确"MCP 不可用，请走 OPS 数据工具页面" |
+| MCP prompt `ops_backup_workflow` | 建议 `create_backup` / `restore_backup` / `delete_backup` | 只建议 `ops.list_backups` / `ops.verify_backup`，创建/恢复/删除说明走页面 |
+| `app/agent/prompts/inspection_workflow.md` | 6 处旧工具名 + 无效的 `ops.write` | 全部改为注册工具名 |
+| `GET /api/v2/mcp/tools/recommend?scenario=inspection` | 返回列表含 `get_run` / `summarize_run` | 8 个工具全部真实 |
+| `job_tools` 的 `source_tool` schema 示例 | 举例 `ops.delete_backup` | 改为 `ops.execute_deploy_plan` |
+
+### 13.4 风险策略兼容清单显式登记
+
+`app/services/risk_policy.py` 中针对 `ops.create_backup` / `ops.restore_backup` /
+`ops.delete_backup` / `ops.cleanup_packages` / `ops.protect_package` /
+`ops.create_config_change_plan` 的确认短语与"非破坏性计划创建"分支**保留**（一旦这些工具重新
+注册，闸门会立刻生效），但新增 `UNREGISTERED_TOOL_COMPATIBILITY` 显式登记这 6 个名字；
+守卫测试要求"源码里引用的未注册工具名必须已登记，已注册的名字必须从清单中移除"。
+（同类问题在 `app/services/tool_policy.py` 已由前序轮次于 2026-09-11 修复，本轮未重复改动。）
+
+### 13.5 文档对齐
+
+- `docs/runbooks/mcp-capability-matrix.md`：删除 22 行指向未注册工具的矩阵行；
+  `ops.tier.*` / `ops.notif_route.*` / `ops.cascade.*` / `ops.agent.*` 明确标注为
+  "仅页面 / HTTP，不是 MCP 工具"；巡检工作流步骤与"推荐后续工具"列改指真实工具。
+- `docs/runbooks/MCP_PACKAGE_UPLOAD_AND_RETENTION.md`：发布包清理/保护改为
+  "OPS 页面 / HTTP 接口，或 `ops.approval.prepare_plan` 的 `PACKAGE_CLEANUP` 步骤"。
+- `docs/agent-system-prompt.md`：单动作发布/回滚改为
+  `ops.approval.prepare_plan`（RELEASE / ROLLBACK 步骤）→ `ops.approval.execute_plan`。
+
+### 13.6 新增守卫（防再漂移）
+
+`tests/test_mcp_tool_description_registry_consistency.py`（8 条）：
+
+1. 注册工具名形状（小写点分名）；
+2. 覆盖表不存在孤儿条目；
+3. 每个注册工具都有描述覆盖；
+4. 所有 `related_tools` 指向注册工具；
+5. 工具适配器与 MCP 能力层源码里的工具名引用必须注册（AST 取字符串常量，规避注释误报）；
+6. MCP prompts 渲染文本里的工具名必须注册；
+7. `app/agent/prompts/*.md` 里的工具名必须注册；
+8. `risk_policy` 的未注册引用必须显式登记，且清单不得过期。
+
+### 13.7 红灯证明
+
+暂存实现改动后运行新增/修改的测试：**9 failed / 24 passed**。代表性断言信息：
+
+- `以下描述覆盖条目指向未注册的工具（永远不会被 AI 看到，属死数据）`
+- `inspection_workflow.md → ops.inspection.get_run`（agent prompt 扫描）
+- `risk_policy 缺少 UNREGISTERED_TOOL_COMPATIBILITY 兼容清单`
+- `assert 'ops.inspection.get_run' == 'ops.inspection.get_run_raw_output'`（next_actions）
+- `能力矩阵引用了未注册的工具名：[23 个]`
+- `报告类型描述缺少以下真实类型：[7 个]`
+
+### 13.8 全量套件与线上验证
+
+- 全量套件：**1599 passed**（552.68 s；上一轮 1591，新增 8 条守卫测试）。
+- 线上只读验证 **10/10**：健康检查；`tools/recommend?scenario=inspection` 返回的 8 个工具全部
+  已注册；MCP `tools/list` 126 == 126 且无样板句描述；`ops.list_report_types` 描述覆盖 7 个真实
+  报告类型；`prompts/list` 可用；3 个 MCP prompt 的渲染文本零未注册引用。
+- 实现改动已重启后端（PID 25756）后验证；**未发送任何 Matrix 消息，未触发任何写操作**。
+
+### 13.9 已排除（核实后判定为良性）
+
+| 项 | 结论 |
+| --- | --- |
+| `risk_policy.py` 的 6 个未注册工具分支 | 刻意保留的兼容闸门，本轮改为显式登记而非删除 |
+| `tool_policy.py` 的 `APPROVAL_TOOL_MAP` | 前序轮次（2026-09-11）已修为 `ops.approval.prepare_plan`，注释已说明历史 |
+| `annotations["ops.originalToolName"]` | MCP 注解命名空间键，不是工具名引用（守卫按名字形状排除） |
+| `docs/plans/2026-*.md` 中的历史工具名 | 带日期的历史设计记录，不作为现行指引，未改 |
+| 测试内的 `ops.demo.*` / `ops.test*` / `ops.contract.*` | 测试自建夹具工具，运行期注册，属正常 |
+| `/api/v2/tools` 列出的描述与 MCP 覆盖描述不同 | HTTP 工具页展示工具自带描述、MCP 面展示精选覆盖描述，两条面各自有意为之 |
+
+### 13.10 待办（本轮未做）
+
+- `tests/test_custom_rule_engine_standalone.py` 规则引擎副本漂移；
+- 前端 `EntityPicker` / `LogConsole` 请求守卫；
+- 剩余约 180 处 `except …: pass` 分诊；
+- `SESSION_SECRET` 轮换仍等业主决策（保持告警与 UI 提示）。
+
+## 复盘总览（第 1–13 轮）
+
+### 一、13 轮范围、主题与测试基线
 
 | 轮次 | 主题 | 结束基线 | 代表性问题（均为真实缺陷） |
 | --- | --- | --- | --- |
@@ -1503,9 +1616,10 @@ PUBLIC_PREFIXES = ("/assets/", "/docs/", "/api/v2/auth", "/api/v2/tools", "/api/
 | 9 | 前端展示层 + MCP 描述层 | 1497 | 首页假绿、列表请求竞态、MCP 工具描述退化成样板句 |
 | 10 | 回滚链路 + SPA 深链 | 1518 | 回滚把"服务没起来"记成成功；`/health` 未注册；SPA 白名单漂移导致已登录用户 404 |
 | 11 | 巡检判定口径 | 1579 | 比较符写错静默换判定口径（假绿 PASS）、配置零校验、周期静默兜底、swap 死代码 |
-| 12 | 安全边界加固 | **1591** | 文件浏览接口命令注入 + 无授权 + 无目录白名单；遗留 MCP 网关匿名可达且内存无界 |
+| 12 | 安全边界加固 | 1591 | 文件浏览接口命令注入 + 无授权 + 无目录白名单；遗留 MCP 网关匿名可达且内存无界 |
+| 13 | MCP 工具名漂移治理 | **1599** | 54 条描述覆盖指向未注册工具；巡检 next_actions / MCP prompts / 能力矩阵把 AI 引向不存在的工具；两条契约锁在死数据上 |
 
-合计：套件基线 **1281 → 1591（+310 项回归测试）**；15 个提交（其中 4 个为纯文档补充）。
+合计：套件基线 **1281 → 1599（+318 项回归测试）**；16 个提交（其中 4 个为纯文档补充）。
 每一轮的修复都走同一条链路：**红灯证明 → 实现 → 全量套件 → 部署后只读实测 → 报告与待办**。
 
 ### 二、缺陷类型分布（12 轮归纳）
@@ -1517,6 +1631,10 @@ PUBLIC_PREFIXES = ("/assets/", "/docs/", "/api/v2/auth", "/api/v2/tools", "/api/
    命令注入 + 越权浏览（12.1）、匿名资源耗尽（12.2）。
 3. **数据一致性型**：审计时间戳时区错位（第 2 轮）、风险闭环时间戳与截止时间（第 7 轮）。
 4. **可用性/可观测型**：SPA 深链 404、`/health` 未注册、MCP 描述退化、死代码分支（11.4）。
+5. **"契约锁在死数据上"型（第 13 轮新归纳）**：被测对象本身已经不存在（幽灵工具名），
+   但测试仍以它为契约 —— 断言全部通过，真实行为却无人守护（例如"报告描述不得提及已退役的
+   AI 分析"实际约束的是一条永不生效的描述）。这类缺陷只有把"引用是否指向活对象"也变成
+   断言才能发现。
 
 ### 三、方法论与不变量（后续维护者可直接沿用）
 
@@ -1538,16 +1656,16 @@ PUBLIC_PREFIXES = ("/assets/", "/docs/", "/api/v2/auth", "/api/v2/tools", "/api/
 | `SESSION_SECRET` 为占位值（服务启动仍告警） | 业主已决定"本地运行暂无风险"，**保留告警与 UI 提示**，不自动轮换 |
 | `ENV=local` 会关闭生产安全轨 | 既有设计，未改；上生产前需确认环境变量 |
 | 规则引擎测试副本（`tests/test_custom_rule_engine_standalone.py`） | 待改为从实现导入，消除语义漂移风险 |
-| `MCP_TOOL_DESCRIPTION_OVERRIDES` 54 个幽灵条目 | 待清理（不影响功能，影响可发现性统计） |
+| `MCP_TOOL_DESCRIPTION_OVERRIDES` 54 个幽灵条目 | ✅ 第 13 轮已清理（180 → 126，与注册表精确对齐），并新增 8 条一致性守卫 |
 | 前端 `EntityPicker` / `LogConsole` 搜索竞态、巡检页排序/批量操作 | 待接入请求守卫 |
 | 剩余约 180 处 `except …: pass` | 待按域（Matrix / OpenClaw / fnOS）继续分诊 |
 | `pgrep -f` 进程探针自匹配、`update_issue` 到期提醒 | 低危，待排期 |
 
 ### 五、结论
 
-12 轮复盘覆盖了平台的六条主链路：**发布/回滚、审批与执行、巡检（判定口径 + 台账报表）、
+13 轮复盘覆盖了平台的六条主链路：**发布/回滚、审批与执行、巡检（判定口径 + 台账报表）、
 MCP/工具层、凭据与安全边界、前端展示层**。每一轮都以"能复现的证据 + 能回归的测试"收尾，
-累计新增 310 项回归测试，全量套件稳定在 **1591 passed**（零 flaky 记录，第 11 轮修掉了
+累计新增 318 项回归测试，全量套件稳定在 **1599 passed**（零 flaky 记录，第 11 轮修掉了
 唯一的挂钟竞态用例）。当前仓库中**没有已知的、可复现的严重缺陷**；剩余事项均为
 低危加固项或需要业主决策的运维策略项，已在上表列明。
 

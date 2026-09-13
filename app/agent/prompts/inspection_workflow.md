@@ -9,7 +9,7 @@ Recommended MCP/AI token for inspection:
 - `allow_write=true`
 - `allow_prod=false`
 
-Do not use `ops.write` without `allow_write=true`. For inspection execution, the default token is enough.
+Do not use write tools without `allow_write=true`. For inspection execution, the default token is enough.
 
 ## Path priority
 
@@ -17,7 +17,7 @@ Path A is the default for any "巡检" / "inspect" / "检查服务器" / "健康
 
 | Path | Use |
 |---|---|
-| **A1 - custom inspection** | `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.run_project`, `ops.inspection.list_runs`, `ops.inspection.get_run`, `ops.inspection.list_issues`, `ops.inspection.generate_report`, `ops.inspection.generate_report_for_runs`, `ops.inspection.summarize_run` |
+| **A1 - custom inspection** | `ops.inspection.preview_servers_batch`, `ops.inspection.run_servers_batch`, `ops.inspection.run_server`, `ops.inspection.list_runs`, `ops.inspection.get_run_raw_output`, `ops.inspection.list_item_configs`, `ops.inspection.generate_report`, `ops.inspection.generate_report_for_runs` |
 | **A2 - profile inspection** | `ops.inspection.profile.list`, `ops.inspection.profile.preview`, `ops.inspection.profile.run`, `ops.inspection.profile.retry_issues` |
 | **B - fallback probes** | `ops.check_disk`, `ops.check_process`, `ops.list_service_directory`, `ops.tail_service_log`, `ops.run_health_check` |
 
@@ -34,10 +34,10 @@ Path A is the default for any "巡检" / "inspect" / "检查服务器" / "健康
 2. Show the user the target count, skipped count, batch plan, and the exact short phrase.
 3. Wait for the exact confirmation phrase: `确认巡检 <fingerprint>`.
 4. Call `ops.inspection.run_servers_batch(..., confirm_text=preview.confirmation.confirm_text)`.
-5. Fetch the run with `ops.inspection.get_run(...)` and issues with `ops.inspection.list_issues(...)`.
+5. Fetch the run detail with `ops.inspection.get_run_raw_output(...)` and the run list with `ops.inspection.list_runs(...)`.
 6. For a single run use `ops.inspection.generate_report(...)`.
 7. For grouped or multi-run inspection use `ops.inspection.generate_report_for_runs(...)`.
-8. Summarize findings with `ops.inspection.summarize_run(...)`.
+8. Summarize findings yourself from the raw output plus the generated report (there is no separate summarize tool).
 
 ## A2 flow
 

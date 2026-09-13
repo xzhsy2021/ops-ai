@@ -28,6 +28,21 @@ JOB_REQUIRED_FROM = "high"
 PROFILE_CONFIRMATION_TOOLS = {"ops.inspection.profile.run", "ops.inspection.profile.retry_issues"}
 BATCH_INSPECTION_CONFIRMATION_TOOLS = {"ops.inspection.run_servers_batch"}
 
+# 第 13 轮登记表：以下工具当前**未注册**为 MCP 工具（备份创建/恢复/删除、发布包清理与保护、
+# 配置变更计划都只通过页面 / HTTP API 提供），但本模块仍然保留它们的确认短语与
+# “非破坏性计划创建”判定 —— 一旦这些工具重新注册，闸门会立刻生效，无需再改这里。
+# 该清单同时作为守卫测试的登记表：
+# tests/test_mcp_tool_description_registry_consistency.py 会检查本模块引用的未注册工具名
+# 都已在此登记，避免再次出现“无人知道为什么这里写着一个不存在的工具名”的情况。
+UNREGISTERED_TOOL_COMPATIBILITY = frozenset({
+    "ops.create_backup",
+    "ops.restore_backup",
+    "ops.delete_backup",
+    "ops.cleanup_packages",
+    "ops.protect_package",
+    "ops.create_config_change_plan",
+})
+
 
 @dataclass(frozen=True)
 class RiskDecision:

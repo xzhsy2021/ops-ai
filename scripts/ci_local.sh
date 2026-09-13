@@ -43,6 +43,7 @@ FOCUSED_TESTS=(
   tests/test_round12_security_hardening_contract.py
   tests/test_release_switch_and_rollback.py
   tests/test_mcp_contract_sync.py
+  tests/test_mcp_tool_description_registry_consistency.py
   tests/test_tool_token_templates_contract.py
   tests/test_frontend_tooling_contract.py
 )

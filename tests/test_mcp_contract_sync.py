@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -110,8 +111,10 @@ def test_inspection_path_a_run_tools_return_followup_metadata(monkeypatch):
 
     assert single["run_id"] == "run-server-1"
     assert single["status"] == "COMPLETED"
-    assert single["next_actions"][0]["tool"] == "ops.inspection.get_run"
-    assert single["next_actions"][1]["tool"] == "ops.inspection.get_run_raw_output"
+    # 第 13 轮：followup 里此前第一条建议是 ops.inspection.get_run（从未注册的幽灵名）。
+    # 现在两条建议都必须指向真实注册工具。
+    assert single["next_actions"][0]["tool"] == "ops.inspection.get_run_raw_output"
+    assert single["next_actions"][1]["tool"] == "ops.inspection.generate_report"
 
     assert batch["run_ids"] == ["run-a", "run-b"]
     assert batch["preview"]["confirmation"]["confirm_text"].startswith("确认巡检 ")
@@ -144,19 +147,54 @@ def test_inspection_resolver_accepts_inventory_uuid_alias(monkeypatch):
     assert resolved["eligible"][0]["asset_id"] == server_uuid
 
 
-def test_mcp_runbook_uses_current_tool_names_and_covers_tier_tools():
+def test_mcp_runbook_only_lists_registered_tool_names():
+    """能力矩阵只允许列出真实注册的工具名。
+
+    第 13 轮：此前这条测试断言 `ops.inspection.toggle_item_config` **必须**出现在文档里，
+    而该工具从来没有注册定义 —— 于是文档里约 30 个幽灵工具名被测试锁住。现在改为
+    按注册表动态校验：文档里出现的具体工具名必须真实存在。
+    """
+    from app.services.tool_registry import register_builtin_tools, registry
+
+    register_builtin_tools()
+    known = set(registry._tools)
+
     text = open("docs/runbooks/mcp-capability-matrix.md", encoding="utf-8").read()
 
+    # 文档必须仍然覆盖当前工具面（防止清理时误删有效内容）。
     assert "ops.inspection.get_run_raw_output" in text
-    assert "ops.inspection.toggle_item_config" in text
-    assert "ops.inspection.reorder_items" not in text
-    assert "ops.inspection.get_raw_output" not in text
     assert "ops.inspection.run_servers_batch" in text
-    assert "ops.notif_route.upsert" in text
-    assert "ops.cascade.upsert" in text
+    assert "ops.inspection.profile.retry_issues" in text
     assert "AI agents must keep using" in text
     assert "confirmation.confirm_text" in text
     assert "UI one-click confirmation" in text
+
+    # 允许出现但不代表"注册工具"的名字：
+    #  - 通配写法（`ops.inspection.run_*`）在正则里只会匹配到前缀部分；
+    #  - 审批提示名是 tool_policy 的映射键，文档已明确说明它们不是注册入口。
+    allowed_non_tool = {
+        "ops.inspection.run_",
+        "ops.inspection.profile",
+        "ops.approval.prepare_",
+        "ops.approval.prepare_release",
+        "ops.approval.prepare_rollback",
+        "ops.approval.prepare_dml",
+        "ops.approval.prepare_package_cleanup",
+        "ops.tier",
+        "ops.notif_route",
+        "ops.cascade",
+        "ops.agent",
+    }
+    ghosts = sorted(
+        {
+            match.group(0)
+            for match in re.finditer(r"\bops(?:\.[a-z0-9_]+)+", text)
+            if match.group(0) not in known
+            and match.group(0) not in allowed_non_tool
+            and not match.group(0).endswith((".py", ".md", ".json"))
+        }
+    )
+    assert ghosts == [], f"能力矩阵引用了未注册的工具名：{ghosts}"
 
 
 def test_runtime_source_of_truth_matches_current_system_service_routes():

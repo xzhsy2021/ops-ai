@@ -19,7 +19,7 @@ from app.services.tool_registry import registry
         "type": "object",
         "properties": {
             "status": {"type": "string", "description": "可选状态：queued/running/success/failed"},
-            "source_tool": {"type": "string", "description": "可选工具名，例如 ops.delete_backup"},
+            "source_tool": {"type": "string", "description": "可选工具名，例如 ops.execute_deploy_plan"},
             "limit": {"type": "integer", "description": "返回数量，默认 50"},
         },
         "additionalProperties": False,

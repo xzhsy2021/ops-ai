@@ -208,11 +208,19 @@ def test_smoke_check_does_not_probe_retired_ai_diagnostics_route():
     assert "/api/v2/system/ai-diagnostics" not in source
 
 
-def test_generate_report_description_lists_only_supported_report_types():
-    from app.services.mcp_capability_service import MCP_TOOL_DESCRIPTION_OVERRIDES
+def test_report_types_description_lists_every_supported_report_type():
+    """报告类型描述必须覆盖报告中心真实支持的类型，且不得再提已退役的 AI 分析。
 
-    description = MCP_TOOL_DESCRIPTION_OVERRIDES["ops.generate_report"].lower()
+    第 13 轮修正：此前这里断言的是 `MCP_TOOL_DESCRIPTION_OVERRIDES["ops.generate_report"]`，
+    但该工具从未注册（描述覆盖表里的幽灵条目），契约实际锁在一条永远不会被 AI 看到的
+    死数据上。现在改为断言真实存在的 `ops.list_report_types`，并与 `REPORT_TYPES`
+    动态对齐 —— 报告中心新增类型时这条测试会立刻提醒补充描述。
+    """
+    from app.services.mcp_capability_service import MCP_TOOL_DESCRIPTION_OVERRIDES
+    from app.services.report_center import REPORT_TYPES
+
+    description = MCP_TOOL_DESCRIPTION_OVERRIDES["ops.list_report_types"].lower()
 
     assert "ai analysis" not in description
-    for report_type in {"diagnostics", "operation chain", "deployment", "inspection"}:
-        assert report_type in description
+    missing = sorted(report_type for report_type in REPORT_TYPES if report_type not in description)
+    assert missing == [], f"报告类型描述缺少以下真实类型：{missing}"

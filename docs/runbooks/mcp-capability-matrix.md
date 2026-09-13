@@ -1,8 +1,8 @@
 # MCP Capability Matrix
 
-Updated: 2026-08-20
+Updated: 2026-09-12（第 13 轮：按注册表逐行核对，删除未注册工具的矩阵行）
 
-This matrix is the current OPS MCP/HTTP tool capability map for local small-team operations.
+This matrix is the current OPS MCP/HTTP tool capability map for local small-team operations. Every tool name listed below is verified against the live tool registry; capabilities that only exist in the OPS web UI / HTTP API are labelled as such instead of being listed as tools.
 
 > For risk disposition of high-risk / write tools, see [HIGH_RISK_CAPABILITY_ASSESSMENT.md](./HIGH_RISK_CAPABILITY_ASSESSMENT.md). For the message-level execution plan (`ops.approval.prepare_plan` / `ops.approval.execute_plan`) and its step types, see [2026-08-06-message-execution-plan-design.md](../plans/2026-08-06-message-execution-plan-design.md). For the channel-neutral qclaw approval integration (Matrix / WeChat / Telegram), temporary self-approval, and the normalized `message_context` contract, see [qclaw-channel-approval-integration.md](../qclaw-channel-approval-integration.md).
 
@@ -29,7 +29,7 @@ The default capability profile is no longer "read-only only".
 - Low-risk read tools are auto-callable when token scopes allow them.
 - Path A inspection execution (`ops.inspection.run_*`) is enabled for AI/MCP tool tokens only when `confirm_text` matches the backend confirmation phrase. For ad-hoc batch inspection, call `ops.inspection.preview_servers_batch` first and use its short Chinese phrase (`确认巡检 <fingerprint>`). High-risk calls are still taskized/audited.
 - Inspection profile execution (`ops.inspection.profile.run` and `ops.inspection.profile.retry_issues`) is preview-first and requires the returned `RUN <profile> <count> <fingerprint>` confirmation phrase.
-- Agent runtime tools (`ops.agent.*`) stay hidden unless `agent_runtime_enabled=true`.
+- Agent runtime capabilities (page/API only, no registered MCP tool) stay hidden unless `agent_runtime_enabled=true`.
 - Deploy execution, rollback, config write, server write, package cleanup, runtime cleanup, DB write/DML, and destructive deletes remain behind explicit capability gates, scopes, and confirmation.
 - `ops.inspection.run_servers_batch` is the preferred inspection entry for AI agents. It works with `ops.inspection.preview_servers_batch` for preview-first confirmation. All inspection execution is audited through `inspection_runs`, issues, reports, operation jobs, tool-call logs, and audit logs.
 
@@ -37,7 +37,6 @@ The default capability profile is no longer "read-only only".
 
 | HTTP tool | MCP alias | Type | Scope(s) | Needs backend | stdio offline | Risk | Recommended before | Recommended after |
 |---|---|---:|---|---:|---:|---|---|---|
-| `ops.connection_status` | `ops_connection_status` | read | none | no | yes | low | - | start backend / pass token if offline |
 | `ops.inspect_local_package` | `ops_inspect_local_package` | read | `ops:read` | no for stdio, yes for HTTP | yes | low | - | `ops.upload_package` |
 | `ops.upload_package` | `ops_upload_package` | write | `package:write` | yes | dry-run only | high | `ops.inspect_local_package` | `ops.get_package_checksum`, `ops.create_deploy_plan` |
 | `ops.prepare_release_from_local_package` | `ops_prepare_release_from_local_package` | write / plan | `package:write`, `deploy:plan`, `deploy:precheck` | yes | dry-run inspect only | high | `ops.inspect_local_package` | `ops.execute_deploy_plan` after explicit confirmation |
@@ -69,28 +68,16 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 |---|---|---:|---|---:|---:|---|---|---|
 | `ops.list_servers` | `ops_list_servers` | read | `ops:read`, `server:read` | yes | no | low | - | `ops.list_server_groups`, `ops.inspection.run_servers_batch` |
 | `ops.list_server_groups` | `ops_list_server_groups` | read | `ops:read`, `server:read` | yes | no | low | - | filter by `group` in `ops.list_servers` |
-| `ops.inspection.overview` | `ops_inspection_overview` | read | `ops:read` | yes | no | low | - | choose inspection target |
-| `ops.inspection.categories` | `ops_inspection_categories` | read | `ops:read` | yes | no | low | - | select category codes |
 | `ops.inspection.profile.list` | `ops_inspection_profile_list` | read | `ops:read` | yes | no | low | - | `ops.inspection.profile.preview` |
 | `ops.inspection.profile.preview` | `ops_inspection_profile_preview` | read | `ops:read` | yes | no | low | profile id | `ops.inspection.profile.run` |
-| `ops.inspection.profile.run` | `ops_inspection_profile_run` | execute | `ops:read`, `ops:write` | yes | no | high | preview result, exact `RUN <profile> <count> <fingerprint>` | `ops.inspection.get_run`, `ops.inspection.generate_report` |
-| `ops.inspection.profile.retry_issues` | `ops_inspection_profile_retry_issues` | execute | `ops:read`, `ops:write` | yes | no | high | open inspection issues, preview result, exact `RUN <profile> <count> <fingerprint>` | `ops.inspection.get_run`, `ops.inspection.list_issues` |
-| `ops.inspection.list_item_configs` | `ops_inspection_list_item_configs` | read | `ops:read` | yes | no | low | - | `ops.inspection.toggle_item_config`, `ops.inspection.update_item_config` |
-| `ops.inspection.update_item_config` | `ops_inspection_update_item_config` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.list_item_configs` | `ops.inspection.run_servers_batch` |
-| `ops.inspection.toggle_item_config` | `ops_inspection_toggle_item_config` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.list_item_configs` | `ops.inspection.run_servers_batch` |
-| `ops.inspection.update_item_rules` | `ops_inspection_update_item_rules` | write | `ops:read`, `ops:write` | yes | no | medium | `ops.inspection.get_item_config` | `ops.inspection.run_servers_batch` |
-| `ops.inspection.run_server` | `ops_inspection_run_server` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.list_servers`, exact `confirm_text` | `ops.inspection.get_run` |
+| `ops.inspection.profile.run` | `ops_inspection_profile_run` | execute | `ops:read`, `ops:write` | yes | no | high | preview result, exact `RUN <profile> <count> <fingerprint>` | `ops.inspection.get_run_raw_output`, `ops.inspection.generate_report` |
+| `ops.inspection.profile.retry_issues` | `ops_inspection_profile_retry_issues` | execute | `ops:read`, `ops:write` | yes | no | high | open inspection issues, preview result, exact `RUN <profile> <count> <fingerprint>` | `ops.inspection.get_run_raw_output`, `ops.inspection.list_runs` |
+| `ops.inspection.list_item_configs` | `ops_inspection_list_item_configs` | read | `ops:read` | yes | no | low | - | `ops.inspection.list_runs` (item configs are edited in the OPS web inspection page, not over MCP) |
+| `ops.inspection.run_server` | `ops_inspection_run_server` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.list_servers`, exact `confirm_text` | `ops.inspection.get_run_raw_output` |
 | `ops.inspection.preview_servers_batch` | `ops_inspection_preview_servers_batch` | read / preview | `ops:read` | yes | no | low | group/server target | `ops.inspection.run_servers_batch` |
-| `ops.inspection.run_servers_batch` | `ops_inspection_run_servers_batch` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.inspection.preview_servers_batch`, exact `确认巡检 <fingerprint>` | `ops.inspection.get_run` |
-| `ops.inspection.run_project` | `ops_inspection_run_project` | execute | `ops:read`, `ops:write` | yes | no | high | project target, exact `confirm_text` | `ops.inspection.get_run` |
-| `ops.inspection.run_combined` | `ops_inspection_run_combined` | execute | `ops:read`, `ops:write` | yes | no | high | project target, exact `confirm_text` | `ops.inspection.get_run` |
-| `ops.inspection.list_runs` | `ops_inspection_list_runs` | read | `ops:read` | yes | no | low | - | `ops.inspection.get_run` |
-| `ops.inspection.get_run` | `ops_inspection_get_run` | read | `ops:read` | yes | no | low | run id | `ops.inspection.get_run_raw_output` |
+| `ops.inspection.run_servers_batch` | `ops_inspection_run_servers_batch` | execute | `ops:read`, `ops:write` | yes | no | high | `ops.inspection.preview_servers_batch`, exact `确认巡检 <fingerprint>` | `ops.inspection.get_run_raw_output` |
+| `ops.inspection.list_runs` | `ops_inspection_list_runs` | read | `ops:read` | yes | no | low | - | `ops.inspection.get_run_raw_output` |
 | `ops.inspection.get_run_raw_output` | `ops_inspection_get_run_raw_output` | read | `ops:read` | yes | no | low | run id | diagnose risk evidence |
-| `ops.inspection.list_issues` | `ops_inspection_list_issues` | read | `ops:read` | yes | no | low | run id | `ops.inspection.generate_report` |
-| `ops.inspection.update_issue` | `ops_inspection_update_issue` | write | `ops:read`, `ops:write` | yes | no | medium | issue id | `ops.inspection.generate_report` |
-| `ops.inspection.delete_runs` | `ops_inspection_delete_runs` | write | `ops:read`, `ops:write` | yes | no | high | run ids, exact `confirm_text` | cleanup only |
-| `ops.inspection.delete_issue` | `ops_inspection_delete_issue` | write | `ops:read`, `ops:write` | yes | no | medium | issue id, exact `confirm_text` | cleanup only |
 | `ops.inspection.generate_report` | `ops_inspection_generate_report` | write | `ops:read`, `audit:read` | yes | no | low | run id | archive one-run report |
 | `ops.inspection.generate_report_for_runs` | `ops_inspection_generate_report_for_runs` | write | `ops:read`, `audit:read` | yes | no | low | run ids | archive merged batch/group report |
 
@@ -102,8 +89,8 @@ Path B server probes (`ops.check_disk`, `ops.check_process`, `ops.tail_service_l
 3. Ask the user for the returned confirmation phrase, then call `ops.inspection.profile.run` with `confirm_text`.
 4. For ad-hoc target checks, use `ops.list_server_groups`, `ops.list_servers(group="crypto")`, and `ops.inspection.list_item_configs(scope_type="SERVER")`, then call `ops.inspection.preview_servers_batch`.
 5. Ask the user to approve the previewed target count, skipped servers, batch plan, and returned `确认巡检 <fingerprint>` phrase; call `ops.inspection.run_servers_batch` with that exact `confirm_text`.
-6. `ops.inspection.get_run(run_id=...)` until `status` is `SUCCESS`, `PARTIAL_SUCCESS`, or `FAILED`.
-7. `ops.inspection.list_issues(run_id=...)` to triage HIGH / MEDIUM / LOW issues.
+6. `ops.inspection.get_run_raw_output(run_id=...)` until `status` is `SUCCESS`, `PARTIAL_SUCCESS`, or `FAILED`.
+7. `ops.inspection.get_run_raw_output(run_id=...)` to read raw evidence, then `ops.inspection.generate_report(run_id=..., format="md")` to archive findings (inspection issues are triaged in the OPS web inspection page — there is no MCP issue tool).
 8. Use `ops.inspection.generate_report(run_id=..., format="md")` for one run, or `ops.inspection.generate_report_for_runs(run_ids=[...], format="md")` for grouped/batch runs.
 9. After remediation, call `ops.inspection.profile.retry_issues` without `confirm_text` to preview only OPEN / PROCESSING issue servers, then rerun it with the returned `RUN <profile> <count> <fingerprint>` phrase.
 
@@ -135,21 +122,12 @@ Notes:
 2. `ops.security_report.get_daily_report(report_date="YYYY-MM-DD", format="html"|"md")` 获取某期报告的正文内容与下载链接；`format` 缺省返回 html + md 双格式。
 3. 高危项可通过 `ops.risk.list` 查询风险台账。
 
-## 3-Tier Inspection Schedule Tools
+## 3-Tier Inspection Schedules (web UI / HTTP only, no MCP tools)
 
-These tools manage DB-backed DAILY / WEEKLY / MONTHLY inspection schedules. The DB tables are `inspection_tier_schedules`, `inspection_notification_routes`, and `inspection_cascade_policies`; YAML is not the source of truth for these policies.
+DAILY / WEEKLY / MONTHLY inspection schedules, notification routes, and cascade policies are managed in the **OPS web UI and HTTP API**. 第 13 轮按注册表逐行核对：`ops.tier.*` / `ops.notif_route.*` / `ops.cascade.*` 没有任何注册定义，因此不再作为 MCP 能力列出。The DB tables are `inspection_tier_schedules`, `inspection_notification_routes`, and `inspection_cascade_policies`; YAML is not the source of truth for these policies. AI/MCP clients should use the inspection profile tools (`ops.inspection.profile.*`) instead.
 
 | HTTP tool | MCP alias | Type | Scope(s) | Risk | Purpose |
 |---|---|---:|---|---|---|
-| `ops.tier.list` | `ops_tier_list` | read | `ops:read` | low | List DAILY/WEEKLY/MONTHLY schedules with cron, categories, retention, report, and last run status |
-| `ops.tier.upsert` | `ops_tier_upsert` | write | `ops:write`, `ops:admin` | high | Create or update one tier schedule by `name` |
-| `ops.tier.delete` | `ops_tier_delete` | write | `ops:write`, `ops:admin` | high | Soft-delete one tier schedule by setting `enabled=false` |
-| `ops.notif_route.list` | `ops_notif_route_list` | read | `ops:read` | low | List severity/tier notification routes |
-| `ops.notif_route.upsert` | `ops_notif_route_upsert` | write | `ops:write`, `ops:admin` | high | Upsert a notification route by severity and optional tier |
-| `ops.cascade.list` | `ops_cascade_list` | read | `ops:read` | low | List cross-tier cascade policies |
-| `ops.cascade.upsert` | `ops_cascade_upsert` | write | `ops:write`, `ops:admin` | high | Upsert one cascade policy by `name` |
-| `ops.tier.approve` | `ops_tier_approve` | write | `ops:write`, `ops:admin` | high | Approve/unlock a tier that requires approval, usually MONTHLY first run |
-| `ops.tier.history` | `ops_tier_history` | read | `ops:read` | low | Query historical inspection runs for one tier |
 
 ## Matrix Package Tools
 

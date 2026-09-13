@@ -1328,8 +1328,10 @@ def mcp_tool_recommend(request: Request, scenario: str = "", db: Session = Depen
             "ops.inspection.preview_servers_batch",
             "ops.inspection.run_servers_batch",
             "ops.inspection.list_runs",
-            "ops.inspection.get_run",
-            "ops.inspection.summarize_run",
+            # 第 13 轮：此前这里是 ops.inspection.get_run / ops.inspection.summarize_run，
+            # 两个工具早已随 MCP 工具面收窄而移除 → 推荐列表把调用方引向不存在的工具。
+            "ops.inspection.get_run_raw_output",
+            "ops.inspection.list_item_configs",
             "ops.inspection.generate_report",
             "ops.inspection.generate_report_for_runs",
         ],

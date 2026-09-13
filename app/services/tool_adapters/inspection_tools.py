@@ -23,10 +23,12 @@ def _inspection_followup(result: Dict[str, Any]) -> Dict[str, Any]:
     if run_ids:
         payload["run_ids"] = run_ids
         payload.setdefault("status", str(run.get("status") or ("PARTIAL" if payload.get("failed") else "COMPLETED")))
+        # 第 13 轮：这里此前建议调用两个早已随 MCP 工具面收窄而移除的工具
+        # （巡检运行详情 / 巡检摘要，均无任何注册定义）→ AI 按建议调用必然失败。
+        # 现在只给出真实存在的后续工具。
         payload["next_actions"] = [
-            {"tool": "ops.inspection.get_run", "arguments": {"run_id": run_ids[0]}, "description": "Fetch normalized inspection detail."},
-            {"tool": "ops.inspection.get_run_raw_output", "arguments": {"run_id": run_ids[0]}, "description": "Fetch raw command output and evidence for the run."},
-            {"tool": "ops.inspection.summarize_run", "arguments": {"run_id": run_ids[0]}, "description": "Build an AI-friendly evidence summary."},
+            {"tool": "ops.inspection.get_run_raw_output", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the run detail with raw command output and evidence."},
+            {"tool": "ops.inspection.generate_report", "arguments": {"run_id": run_ids[0]}, "description": "Generate an inspection report artifact for this run."},
         ]
     return payload
 
@@ -174,7 +176,7 @@ def _validate_batch_confirmation(args: Dict[str, Any]) -> Dict[str, Any]:
     output_masking=True,
     recommended_use_cases=["巡检摘要", "项目健康分析", "风险分析"],
     example_prompts=["项目 A 最近一次巡检有什么问题？", "列出最近 10 条巡检记录"],
-    related_tools=["ops.inspection.get_run", "ops.inspection.list_issues"],
+    related_tools=["ops.inspection.get_run_raw_output", "ops.inspection.generate_report"],
     input_schema={
         "type": "object",
         "properties": {
@@ -307,7 +309,7 @@ def profile_preview(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="sensitive",
     output_masking=True,
-    related_tools=["ops.inspection.profile.preview", "ops.inspection.get_run", "ops.inspection.generate_report"],
+    related_tools=["ops.inspection.profile.preview", "ops.inspection.get_run_raw_output", "ops.inspection.generate_report"],
     input_schema={
         "type": "object",
         "properties": {
@@ -346,8 +348,8 @@ def profile_run(args: Dict[str, Any], ctx, db):
     run_ids = result.get("run_ids") or []
     if run_ids:
         result["next_actions"] = [
-            {"tool": "ops.inspection.get_run", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the first inspection run detail."},
-            {"tool": "ops.inspection.list_issues", "arguments": {"limit": 100}, "description": "Review generated inspection issues."},
+            {"tool": "ops.inspection.get_run_raw_output", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the first inspection run detail with raw output."},
+            {"tool": "ops.inspection.generate_report", "arguments": {"run_id": run_ids[0]}, "description": "Generate an inspection report artifact for this run."},
         ]
     return result
 
@@ -366,7 +368,7 @@ def profile_run(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="sensitive",
     output_masking=True,
-    related_tools=["ops.inspection.profile.preview", "ops.inspection.get_run", "ops.inspection.generate_report"],
+    related_tools=["ops.inspection.profile.preview", "ops.inspection.get_run_raw_output", "ops.inspection.generate_report"],
     input_schema={
         "type": "object",
         "properties": {
@@ -420,8 +422,8 @@ def profile_retry_issues(args: Dict[str, Any], ctx, db):
     run_ids = result.get("run_ids") or []
     if run_ids:
         result["next_actions"] = [
-            {"tool": "ops.inspection.get_run", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the first inspection run detail."},
-            {"tool": "ops.inspection.list_issues", "arguments": {"limit": 100}, "description": "Review generated inspection issues."},
+            {"tool": "ops.inspection.get_run_raw_output", "arguments": {"run_id": run_ids[0]}, "description": "Fetch the first inspection run detail with raw output."},
+            {"tool": "ops.inspection.generate_report", "arguments": {"run_id": run_ids[0]}, "description": "Generate an inspection report artifact for this run."},
         ]
     return result
 
@@ -439,7 +441,7 @@ def profile_retry_issues(args: Dict[str, Any], ctx, db):
     data_sensitivity="internal",
     output_masking=True,
     recommended_use_cases=["巡检项管理", "AI 调整巡检范围"],
-    related_tools=["ops.inspection.update_item_config", "ops.inspection.toggle_item_config"],
+    related_tools=["ops.inspection.profile.preview", "ops.inspection.run_server"],
     input_schema={
         "type": "object",
         "properties": {
@@ -472,7 +474,7 @@ def list_item_configs(args: Dict[str, Any], ctx, db):
     data_sensitivity="sensitive",
     output_masking=True,
     recommended_use_cases=["巡检深度分析", "巡检证据回溯"],
-    related_tools=["ops.inspection.get_run", "ops.inspection.summarize_run"],
+    related_tools=["ops.inspection.list_runs", "ops.inspection.generate_report"],
     input_schema={"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"], "additionalProperties": False},
 )
 def get_run_raw_output(args: Dict[str, Any], ctx, db):
@@ -493,7 +495,7 @@ def get_run_raw_output(args: Dict[str, Any], ctx, db):
     ai_auto_callable=False,
     data_sensitivity="internal",
     output_masking=True,
-    related_tools=["ops.inspection.run_servers_batch", "ops.inspection.get_run", "ops.inspection.list_issues"],
+    related_tools=["ops.inspection.run_servers_batch", "ops.inspection.get_run_raw_output", "ops.inspection.list_runs"],
     input_schema={
         "type": "object",
         "properties": {
